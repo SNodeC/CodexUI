@@ -9,6 +9,7 @@
 #include <QScrollBar>
 #include <QTimer>
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -72,20 +73,14 @@ struct Fixture {
   }
 };
 
-middle::ConversationCard *firstPaintedCard(middle::ConversationView &view) {
-  middle::ConversationCard *result = nullptr;
-  int best = std::numeric_limits<int>::max();
-  for (middle::ConversationCard *card :
-       view.findChildren<middle::ConversationCard *>()) {
-    const QPoint top = card->mapTo(view.viewport(), QPoint{});
-    if (top.y() + card->height() <= 0 || top.y() >= view.viewport()->height())
-      continue;
-    if (top.y() < best) {
-      best = top.y();
-      result = card;
-    }
+QModelIndex firstPaintedIndex(middle::ConversationView &view) {
+  for (int y = 0; y < view.viewport()->height(); ++y) {
+    const QModelIndex index =
+        view.indexAt(QPoint(view.viewport()->width() / 2, y));
+    if (index.isValid())
+      return index;
   }
-  return result;
+  return {};
 }
 
 bool oldUiConsumesAdapterSnapshotsAtomically() {
@@ -100,15 +95,14 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
   QApplication::processEvents();
 
   const auto initial =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!require(initial.has_value(), "initial adapter read failed") ||
       !require(view.reconcile(*initial), "initial UI reconciliation was empty"))
     return false;
   QApplication::processEvents();
 
-  const auto cards = view.findChildren<middle::ConversationCard *>();
-  if (!require(cards.size() == 48,
-               "selected history was not materialized in one reconciliation") ||
+  if (!require(view.conversationModel()->rowCount() == 48,
+               "selected history was not indexed in one reconciliation") ||
       !require(view.findChildren<QWidget *>(
                        QStringLiteral("conversationCardPlaceholder"))
                        .empty(),
@@ -119,21 +113,24 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
     return false;
 
   int owners = 0;
-  for (middle::ConversationCard *card : cards)
-    if (card->property("turnContainer").toBool())
+  for (int row = 0; row < view.conversationModel()->rowCount(); ++row)
+    if (view.conversationModel()
+            ->index(row)
+            .data(middle::ConversationItemModel::TurnRootRole)
+            .toBool())
       ++owners;
   if (!require(owners == 24, "not every turn has exactly one owning card"))
     return false;
 
   fixture.appendTurn("new following answer");
   const auto appended =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!require(appended.has_value(), "appended adapter read failed") ||
       !require(view.reconcile(*appended), "new cards were not presented"))
     return false;
   QApplication::processEvents();
-  return require(view.findChildren<middle::ConversationCard *>().size() == 50,
-                 "new cards failed to appear immediately") &&
+  return require(view.conversationModel()->rowCount() == 50,
+                 "new cards failed to enter the item view immediately") &&
          require(view.verticalScrollBar()->value() ==
                      view.verticalScrollBar()->maximum(),
                  "following update did not settle at its final bottom");
@@ -148,7 +145,7 @@ bool pausedViewportKeepsItsPaintedAnchor() {
   view.resize(760, 520);
   view.show();
   const auto initial =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!initial || !view.reconcile(*initial))
     return false;
   QApplication::processEvents();
@@ -156,28 +153,25 @@ bool pausedViewportKeepsItsPaintedAnchor() {
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   QApplication::processEvents();
-  middle::ConversationCard *anchor = firstPaintedCard(view);
-  if (!require(anchor != nullptr, "paused viewport has no painted anchor"))
+  const QModelIndex anchor = firstPaintedIndex(view);
+  if (!require(anchor.isValid(), "paused viewport has no painted anchor"))
     return false;
   const std::string key =
-      anchor->property("conversationAnchorKey").toString().toStdString();
-  const int y = anchor->mapTo(view.viewport(), QPoint{}).y();
+      anchor.data(middle::ConversationItemModel::StableKeyRole)
+          .toString()
+          .toStdString();
+  const int y = view.visualRect(anchor).top();
 
   fixture.appendTurn("offscreen tail");
   const auto appended =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!appended || !view.reconcile(*appended))
     return false;
   QApplication::processEvents();
 
-  for (middle::ConversationCard *card :
-       view.findChildren<middle::ConversationCard *>()) {
-    if (card->property("conversationAnchorKey").toString().toStdString() != key)
-      continue;
-    return require(card->mapTo(view.viewport(), QPoint{}).y() == y,
-                   "paused incoming tail moved the painted anchor");
-  }
-  return require(false, "paused incoming tail replaced the anchor widget");
+  const QModelIndex retained = view.conversationModel()->indexForStableKey(key);
+  return require(retained.isValid() && view.visualRect(retained).top() == y,
+                 "paused incoming tail moved the painted anchor");
 }
 
 bool promptMorphPreservesExactTargetAndWidget() {
@@ -214,7 +208,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
         acknowledged = std::move(target);
         return true;
       });
-  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  auto snapshot = adapter.conversation(thread, 80);
   if (!snapshot || !view.reconcile(*snapshot))
     return false;
   QApplication::processEvents();
@@ -239,8 +233,10 @@ bool promptMorphPreservesExactTargetAndWidget() {
     write.relate(turn, nodegraph::RelationKind::TurnRootItem, authoritative);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
-  if (!snapshot || !view.reconcile(*snapshot))
+  const auto materialized =
+      adapter.promptMaterialization(thread, authoritative);
+  if (!materialized ||
+      !view.applyPromptMaterialization(*materialized).has_value())
     return false;
   QApplication::processEvents();
   const auto after = view.findChildren<middle::ConversationCard *>();
@@ -251,8 +247,11 @@ bool promptMorphPreservesExactTargetAndWidget() {
       !require(acknowledged == prompt,
                "prompt morph discarded its exact NodeRef target"))
     return false;
+  if (!require(after.front()->data().target == authoritative,
+               "prompt morph did not adopt its authoritative NodeRef"))
+    return false;
 
-  static_cast<void>(view.reconcile(*snapshot));
+  static_cast<void>(view.applyPromptMaterialization(*materialized));
   if (!require(acknowledgements == 1,
                "unchanged prompt projection acknowledged twice"))
     return false;
@@ -263,7 +262,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
     write.remove(prompt);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!require(snapshot.has_value(),
                "local retirement did not project the authoritative card"))
     return false;
@@ -329,7 +328,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     ++acknowledgements;
     return target == steering;
   });
-  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  auto snapshot = adapter.conversation(thread, 80);
   if (!snapshot || !view.reconcile(*snapshot))
     return false;
   QApplication::processEvents();
@@ -343,12 +342,13 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
   };
   middle::ConversationCard *stable =
       findCard(middle::stableKey(middle::LocalPromptKey{72}));
-  middle::ConversationCard *progressCard = findCard(middle::stableKey(
-      middle::AuthoritativeItemKey{"thread-steering", "turn-steering",
-                                   "later-progress"}));
-  if (!require(stable && progressCard &&
+  const QModelIndex progressIndex =
+      view.conversationModel()->indexForStableKey(middle::stableKey(
+          middle::AuthoritativeItemKey{"thread-steering", "turn-steering",
+                                       "later-progress"}));
+  if (!require(stable && progressIndex.isValid() &&
                    stable->mapTo(view.viewport(), QPoint{}).y() <
-                       progressCard->mapTo(view.viewport(), QPoint{}).y(),
+                       view.visualRect(progressIndex).top(),
                "steering did not begin ahead of its later activity"))
     return false;
 
@@ -358,10 +358,10 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     write.setField(steering, "showPendingAnimation", false);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
-  if (!snapshot)
+  const auto acknowledgedPrompt = adapter.card(thread, steering);
+  if (!acknowledgedPrompt)
     return false;
-  static_cast<void>(view.reconcile(*snapshot));
+  static_cast<void>(view.applyCardPresentation(*acknowledgedPrompt));
   QApplication::processEvents();
   QTimer *animation = stable->findChild<QTimer *>(
       QStringLiteral("pendingAnimationTimer"));
@@ -386,16 +386,17 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
         turn, std::array<NodeRef, 4>{root, steering, authoritative, progress});
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
-  if (!snapshot)
+  const auto materialized =
+      adapter.promptMaterialization(thread, authoritative);
+  if (!materialized)
     return false;
-  static_cast<void>(view.reconcile(*snapshot));
+  static_cast<void>(view.applyPromptMaterialization(*materialized));
   QApplication::processEvents();
   const int promotedTop = stable->mapTo(view.viewport(), QPoint{}).y();
   if (!require(stable->data().kind == middle::CardKind::UserMessage &&
                    animation && !animation->isActive() &&
                    acknowledgements == 1 && promotedTop <
-                       progressCard->mapTo(view.viewport(), QPoint{}).y(),
+                       view.visualRect(progressIndex).top(),
                "authoritative steering materialization did not stop its "
                "animation in the original submitted slot"))
     return false;
@@ -405,7 +406,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     write.remove(steering);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!snapshot)
     return false;
   static_cast<void>(view.reconcile(*snapshot));
@@ -414,7 +415,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
       findCard(middle::stableKey(middle::LocalPromptKey{72})) == stable &&
           stable->data().target == authoritative &&
           stable->mapTo(view.viewport(), QPoint{}).y() == promotedTop &&
-          promotedTop < progressCard->mapTo(view.viewport(), QPoint{}).y() &&
+          promotedTop < view.visualRect(progressIndex).top() &&
           acknowledgements == 1,
       "steering retirement recreated, moved, or reordered its stable card");
 }
@@ -435,7 +436,11 @@ bool fileChangesUseCanonicalWorkspace() {
     changesState.fields.emplace(
         "changes",
         nodegraph::Value::Array{nodegraph::Value(nodegraph::Value::Object{
-            {"path", "src/file.cpp"}, {"kind", "update"}})});
+            {"path", "src/file.cpp"},
+            {"kind", "update"},
+            {"additions", std::int64_t{7}},
+            {"deletions", std::int64_t{3}},
+            {"diff", "+different fallback\n"}})});
     changes = write.upsert({NodeKind::Item, "files"},
                            std::move(changesState));
     write.setParent(thread, turn);
@@ -444,15 +449,19 @@ bool fileChangesUseCanonicalWorkspace() {
   }
 
   ui::NodeGraphUiAdapter adapter(graph);
-  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  auto snapshot = adapter.conversation(thread, 80);
   if (!require(snapshot && snapshot->sections.size() == 1 &&
                    snapshot->sections.front().cards.size() == 1,
                "file changes were not projected from the owning thread"))
     return false;
   const auto *inherited = std::get_if<middle::FileChangesData>(
       &snapshot->sections.front().cards.front().payload);
-  if (!require(inherited && inherited->cwd == "/workspace/thread",
-               "relative file changes did not inherit the thread workspace"))
+  if (!require(inherited && inherited->cwd == "/workspace/thread" &&
+                   inherited->changes.size() == 1 &&
+                   inherited->changes.front().additions == 7 &&
+                   inherited->changes.front().deletions == 3,
+               "relative file changes did not inherit the thread workspace "
+               "and canonical diff counts"))
     return false;
 
   {
@@ -460,7 +469,7 @@ bool fileChangesUseCanonicalWorkspace() {
     write.setField(changes, "cwd", "/workspace/item");
     static_cast<void>(write.finish());
   }
-  auto projected = adapter.card(thread, changes, {true, true});
+  auto projected = adapter.card(thread, changes);
   const auto *specific =
       projected
           ? std::get_if<middle::FileChangesData>(&projected->payload)

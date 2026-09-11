@@ -171,6 +171,13 @@ Conversation paging pins each represented turn's complete-history root prompt
 as structural context outside the activity budget; steering prompts never
 become turn roots.
 
+Thread selection clears only the conversation message surface immediately.
+Hydration and React preparation remain identified by the latest selected
+thread; superseded results cannot reveal content. Loads finishing within 500 ms
+show no spinner. Longer loads show the same centered 30 px neutral-gray ring
+and 3 px stroke as the native UI, and remove both the ring and its CSS animation
+when the complete selected-thread frame is revealed.
+
 The responsive shell keeps Threads, Conversation, and Inspector visible above
 1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes
 Inspector as an accessible overlay drawer; at 760 px and below Conversation is

@@ -21,6 +21,7 @@ import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+export const ThreadLoadingSpinnerDelayMilliseconds = 500;
 
 export type ResponsiveMode = "desktop" | "tablet" | "mobile";
 
@@ -118,12 +119,16 @@ function storedConversationPresentation(): ConversationPresentationOptions {
     };
 }
 
-export function lastActivityText(timestamp: number, now = new Date()): string {
+function threadTimestampText(timestamp: number, now = new Date()): string {
     const activity = new Date(timestamp * 1000);
     const sameDate = activity.getFullYear() === now.getFullYear()
         && activity.getMonth() === now.getMonth() && activity.getDate() === now.getDate();
     const time = activity.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    return `Last activity: ${sameDate ? time : `${activity.toLocaleDateString()} ${time}`}`;
+    return sameDate ? time : `${activity.toLocaleDateString()} ${time}`;
+}
+
+export function lastActivityText(timestamp: number, now = new Date()): string {
+    return `Last activity: ${threadTimestampText(timestamp, now)}`;
 }
 
 function persistConversationPresentation(options: ConversationPresentationOptions): void {
@@ -142,7 +147,7 @@ function effectivePlanStepStatus(stepStatus: string, turnStatus: string, threadS
     return outcome === "completed" ? "completed" : outcome === "failed" ? "failed" : outcome === "interrupted" ? "interrupted" : stepStatus;
 }
 
-function ThreadPane({session, revision, onRequestNewThread, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number; onRequestNewThread: () => void} & DrawerPaneProps) {
+function ThreadPane({session, revision, onRequestNewThread, onRequestForkWithOptions, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number; onRequestNewThread: () => void; onRequestForkWithOptions: (threadId: string) => void} & DrawerPaneProps) {
     void revision;
     const snapshot = session.getSnapshot();
     const selected = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
@@ -150,6 +155,10 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
     const [sortCriterion, setSortCriterion] = useState<ThreadSortCriterion>("recent");
     const [contextMenu, setContextMenu] = useState<{threadId: string; x: number; y: number; trigger: HTMLElement} | null>(null);
     const contextMenuRef = useRef<HTMLDivElement>(null);
+    const requestMoreNearEnd = (list: HTMLDivElement) => {
+        if (list.scrollHeight - list.scrollTop - list.clientHeight <= Math.max(48, list.clientHeight / 2))
+            session.loadMoreThreads();
+    };
     useEffect(() => {
         if (!contextMenu) return;
         const menu = contextMenuRef.current;
@@ -198,14 +207,20 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
         if (!thread && !optimistic) return null;
         const status = classifyStatus(thread?.status ?? "");
         const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
-        const optimisticClass = optimistic ? ` optimistic-${optimistic.state}` : "";
-        const title = thread?.title || optimistic?.title || id;
+        const promptAnimating = session.threadPromptAnimating(id);
+        const optimisticClass = optimistic?.state === "failed" ? " optimistic-failed"
+            : promptAnimating ? " prompt-awaiting"
+                : optimistic ? ` optimistic-${optimistic.state}` : "";
+        const title = optimistic?.title || thread?.title || id;
         const detail = optimistic ? optimistic.state === "failed" ? "not created" : optimistic.state === "confirmed" ? "created" : "creating" : thread?.cwd || thread?.preview || id;
         const statusText = optimistic ? detail : displayStatus(thread?.status ?? "");
         const parentId = session.model.childOwnership(id)?.parentThreadId;
+        const recentAt = session.threadRecentAt(id);
         const hoverDetails = [title, `Workspace: ${thread?.cwd || optimistic?.cwd || "Unknown"}`,
             `Status: ${statusText}`,
-            `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : lastActivityText(thread.lastActivityAt).replace(/^Last activity: /u, "")}`,
+            `Recent turn: ${recentAt === undefined ? "Unknown" : threadTimestampText(recentAt)}`,
+            `Created: ${thread?.createdAt === undefined ? "Unknown" : threadTimestampText(thread.createdAt)}`,
+            `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : threadTimestampText(thread.lastActivityAt)}`,
             ...(parentId ? [`Parent: ${session.model.thread(parentId)?.title || parentId}`] : [])];
         const accessibleDetails = hoverDetails.join(", ");
         return <div key={session.threadVisualKey(id)} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
@@ -231,32 +246,34 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
                 {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
         <label className="thread-sort"><span>Sort</span><select aria-label="Thread sort order" value={sortCriterion}
             onChange={event => setSortCriterion(event.target.value as ThreadSortCriterion)}>
-            <option value="recent">Recent</option><option value="created">Created</option>
-            <option value="updated">Last changed</option><option value="alphanumeric">Alphanumeric</option>
+            <option value="alphanumeric">Alphanumeric</option>
+            <option value="created">Created</option>
+            <option value="recent">Recent</option>
         </select></label>
-        <div className="thread-list" role="tree" aria-label="Threads">
+        <div className="thread-list" role="tree" aria-label="Threads"
+            onScroll={event => requestMoreNearEnd(event.currentTarget)}>
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
             {session.threadOrder(sortCriterion).filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
         </div>
-        <button className="refresh-button" disabled={session.operationPending("threads.refresh")} onClick={() => session.requestThreads()}>↻ Refresh threads</button>
         {contextThread && contextMenu && <div ref={contextMenuRef} className="thread-context-menu" role="menu" aria-label={`Actions for ${contextThread.title || contextThread.id}`} onKeyDown={navigateContextMenu}>
             <button role="menuitem" disabled={!providerReady} onClick={() => invokeContextAction(() => session.reloadThread(contextThread.id))}>Reload</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.rename", contextThread.id)} onClick={() => invokeContextAction(() => { const name = window.prompt("Thread name", contextThread.title); if (name?.trim()) session.renameThread(contextThread.id, name.trim()); })}>Rename</button>
-            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id))}>Fork</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id))}>Quick fork</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id)} onClick={() => invokeContextAction(() => onRequestForkWithOptions(contextThread.id))}>Fork with options…</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.archive", contextThread.id)} onClick={() => invokeContextAction(() => session.archiveThread(contextThread.id, contextThread.archived))}>{contextThread.archived ? "Unarchive" : "Archive"}</button>
             <button role="menuitem" className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", contextThread.id)} onClick={() => invokeContextAction(() => { if (window.confirm(`Delete “${contextThread.title || contextThread.id}”?`)) session.deleteThread(contextThread.id); })}>Delete</button>
         </div>}
     </aside>;
 }
 
-export function NewThreadDialog({initialWorkspace, onCancel, onContinue}: {initialWorkspace: string; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
+export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "create", onCancel, onContinue}: {initialWorkspace: string; initialDraft?: NewThreadDraft; purpose?: "create" | "fork"; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
     const dialog = useRef<HTMLElement>(null);
     const workspaceInput = useRef<HTMLInputElement>(null);
-    const [workspace, setWorkspace] = useState(initialWorkspace);
-    const [name, setName] = useState("");
-    const [baseInstructions, setBaseInstructions] = useState("");
-    const [developerInstructions, setDeveloperInstructions] = useState("");
-    const [ephemeral, setEphemeral] = useState(false);
+    const [workspace, setWorkspace] = useState(initialDraft?.workspace ?? initialWorkspace);
+    const [name, setName] = useState(initialDraft?.name ?? "");
+    const [baseInstructions, setBaseInstructions] = useState(initialDraft?.baseInstructions ?? "");
+    const [developerInstructions, setDeveloperInstructions] = useState(initialDraft?.developerInstructions ?? "");
+    const [ephemeral, setEphemeral] = useState(initialDraft?.ephemeral ?? false);
     const [error, setError] = useState("");
     useBrowserLayoutEffect(() => {
         const previous = typeof document === "undefined" ? null : document.activeElement as HTMLElement | null;
@@ -278,8 +295,9 @@ export function NewThreadDialog({initialWorkspace, onCancel, onContinue}: {initi
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     };
-    return <div className="modal-backdrop"><section ref={dialog} className="new-thread-dialog" role="dialog" aria-modal="true" aria-labelledby="new-thread-title" onKeyDown={keyDown}>
-        <header><h2 id="new-thread-title">New thread</h2><p>Set thread context. Upcoming-turn controls retain model, reasoning, access, and style.</p></header>
+    const title = purpose === "fork" ? "Fork with options" : "New thread";
+    return <div className="modal-backdrop"><section ref={dialog} className="new-thread-dialog" role="dialog" aria-modal="true" aria-labelledby="thread-options-title" onKeyDown={keyDown}>
+        <header><h2 id="thread-options-title">{title}</h2><p>{purpose === "fork" ? "Adjust the copied thread context." : "Set thread context."} Upcoming-turn controls retain model, reasoning, access, and style.</p></header>
         <form onSubmit={submit}>
             <label><span>Workspace</span><input ref={workspaceInput} value={workspace} onChange={event => { setWorkspace(event.target.value); setError(""); }} placeholder="Absolute app-server workspace path" /></label>
             <label><span>Name</span><input value={name} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>
@@ -305,6 +323,25 @@ function SafeMarkdown({text}: {text: string}) {
         },
         img({src, alt}) { return <span className="markdown-image-reference">{alt || "Image"}{src ? ` (${src})` : ""}</span>; },
     }}>{text}</Markdown></div>;
+}
+
+export function userMessageMarkdownText(text: string): string {
+    const lines = text.split("\n");
+    const structuralMarkdown = lines.some(rawLine => {
+        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+        const indentation = line.match(/^ */u)?.[0].length ?? 0;
+        const content = line.slice(indentation);
+        return indentation >= 4 || /^(?:#{1,6}(?:\s|$)|>|```|~~~|[-*+]\s|\d+[.)]\s|\[)/u.test(content)
+            || content.includes("|");
+    });
+    if (structuralMarkdown) return text;
+    return lines.map((rawLine, index) => {
+        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+        const blankMarker = line.trim() === "" ? "\u200B" : "";
+        if (index === lines.length - 1) return `${line}${blankMarker}`;
+        const hardBreak = line.endsWith("\\") || line.endsWith("  ") ? "" : "  ";
+        return `${line}${blankMarker}${hardBreak}`;
+    }).join("\n");
 }
 
 export interface CardCopyContent {text: string; markdown: boolean}
@@ -446,7 +483,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     let phaseLabel = "";
     if (card.kind === "userMessage") {
         const data = card.payload as UserMessageData; title = "You"; phaseLabel = nestedCard ? "steering" : "";
-        body = <><SafeMarkdown text={data.text} /><ImageRibbon paths={data.imagePaths} /></>;
+        body = <><SafeMarkdown text={userMessageMarkdownText(data.text)} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
         body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
@@ -527,6 +564,13 @@ function restoreConversationAnchor(container: HTMLElement, anchor: ConversationV
     container.scrollTop = anchoredScrollTop(cardContentTop, anchor.pixelOffset, container.scrollHeight - container.clientHeight);
 }
 
+export function ThreadLoadingSurface({spinning}: {spinning: boolean}) {
+    return <div className="conversation-loading-surface" role="status" aria-live="polite">
+        {spinning && <span className="thread-loading-spinner" aria-hidden="true" />}
+        <span className="visually-hidden">Loading conversation</span>
+    </div>;
+}
+
 function Conversation({session, revision, paneControls}: {session: BrowserFrontendSession; revision: number; paneControls?: ReactNode}) {
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
@@ -544,6 +588,38 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const pendingGeometry = useRef<PendingConversationGeometry>();
     const folding = useRef(new Map<string, boolean>());
     const [cardStateRevision, forceCardState] = useState(0);
+    const displayedProjection = useRef(projectionId);
+    const transitionGeneration = useRef(0);
+    const [spinnerProjection, setSpinnerProjection] = useState("");
+    const threadTransitionActive = snapshot.selectedThreadId !== ""
+        && (snapshot.selectedThreadLoading || displayedProjection.current !== projectionId);
+    useEffect(() => {
+        const generation = ++transitionGeneration.current;
+        if (!threadTransitionActive) {
+            displayedProjection.current = projectionId;
+            setSpinnerProjection("");
+            return;
+        }
+        let spinnerTimer: ReturnType<typeof setTimeout> | undefined;
+        let revealFrame: number | undefined;
+        if (snapshot.selectedThreadLoading) {
+            setSpinnerProjection(current => current === projectionId ? current : "");
+            spinnerTimer = setTimeout(() => {
+                if (transitionGeneration.current === generation) setSpinnerProjection(projectionId);
+            }, ThreadLoadingSpinnerDelayMilliseconds);
+        } else {
+            revealFrame = requestAnimationFrame(() => {
+                if (transitionGeneration.current !== generation) return;
+                displayedProjection.current = projectionId;
+                setSpinnerProjection("");
+                forceCardState(value => value + 1);
+            });
+        }
+        return () => {
+            if (spinnerTimer !== undefined) clearTimeout(spinnerTimer);
+            if (revealFrame !== undefined) cancelAnimationFrame(revealFrame);
+        };
+    }, [projectionId, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const drafts = useRef(new Map<string, string>());
     const draftRevision = useRef(snapshot.newThreadDraftRevision);
@@ -672,21 +748,24 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
                 </div>
             </div>
         </div>
-        <div className="conversation-scroll" ref={scroll} onScroll={event => {
+        <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
+            aria-busy={threadTransitionActive || undefined} onScroll={event => {
             const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
             viewport.updateScroll(projectionId, element.scrollTop, following, conversationAnchor(element));
         }}>
-            {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
-            {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
-            {visibleSections.map(section => {
-                const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
-                const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
-                const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
-                const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card, undefined, false, true)) : undefined;
-                return <section key={section.key} className="turn-section">
-                    {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
-                </section>;
-            })}
+            {threadTransitionActive
+                ? <ThreadLoadingSurface spinning={spinnerProjection === projectionId} />
+                : <>{conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
+                    {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
+                    {visibleSections.map(section => {
+                        const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
+                        const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
+                        const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
+                        const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card, undefined, false, true)) : undefined;
+                        return <section key={section.key} className="turn-section">
+                            {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
+                        </section>;
+                    })}</>}
         </div>
         <div ref={composerDock} className="composer-dock">
             <SettingsPanel key={`settings:${projectionId}`} session={session} draft={settingsDraft} onChange={(field, value) => {
@@ -928,6 +1007,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const responsiveMode = useResponsiveMode();
     const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
     const [newThreadDialog, setNewThreadDialog] = useState(false);
+    const [forkWithOptionsThreadId, setForkWithOptionsThreadId] = useState<string | null>(null);
     const shell = useRef<HTMLDivElement>(null);
     const threadTrigger = useRef<HTMLButtonElement>(null);
     const inspectorTrigger = useRef<HTMLButtonElement>(null);
@@ -937,11 +1017,16 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const threadsOverlay = responsiveMode === "mobile";
     const inspectorOverlay = responsiveMode !== "desktop";
     const activeDrawer = drawer === "threads" && threadsOverlay || drawer === "inspector" && inspectorOverlay ? drawer : null;
-    const modalOpen = Boolean(activeDrawer || newThreadDialog);
+    const modalOpen = Boolean(activeDrawer || newThreadDialog || forkWithOptionsThreadId);
     const closeDrawer = () => setDrawer(null);
     const requestNewThread = () => { closeDrawer(); setNewThreadDialog(true); };
+    const requestForkWithOptions = (threadId: string) => { closeDrawer(); setForkWithOptionsThreadId(threadId); };
     const createNewThreadDraft = (draft: NewThreadDraft) => {
         session.beginNewThread(draft); setNewThreadDialog(false); closeDrawer();
+    };
+    const forkThreadWithOptions = (draft: NewThreadDraft) => {
+        if (forkWithOptionsThreadId) session.forkThread(forkWithOptionsThreadId, draft);
+        setForkWithOptionsThreadId(null); closeDrawer();
     };
     useEffect(() => setDrawer(null), [responsiveMode]);
     useBrowserLayoutEffect(() => {
@@ -992,7 +1077,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
         </header>
         {snapshot.notice && <div className="notice-banner" data-modal-background role="alert" aria-hidden={modalOpen || undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
         <div className="workspace-grid" data-modal-background aria-hidden={modalOpen || undefined}>
-            {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} />}
+            {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} />}
             <Conversation session={session} revision={snapshot.revision} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
             {!inspectorOverlay && <Inspector session={session} revision={snapshot.revision} />}
         </div>
@@ -1001,8 +1086,9 @@ export function App({session}: {session: BrowserFrontendSession}) {
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
         {activeDrawer && <button type="button" className="drawer-backdrop" tabIndex={-1} onClick={closeDrawer} aria-label={`Close ${activeDrawer === "threads" ? "Threads" : "Inspector"} drawer`} />}
-        {activeDrawer === "threads" && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "threads" && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
         {activeDrawer === "inspector" && <Inspector session={session} revision={snapshot.revision} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
         {newThreadDialog && <NewThreadDialog initialWorkspace={session.model.thread(snapshot.selectedThreadId)?.cwd ?? ""} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
+        {forkWithOptionsThreadId && <NewThreadDialog purpose="fork" initialWorkspace={session.model.thread(forkWithOptionsThreadId)?.cwd ?? ""} initialDraft={session.forkDraft(forkWithOptionsThreadId)} onCancel={() => setForkWithOptionsThreadId(null)} onContinue={forkThreadWithOptions} />}
     </div>;
 }

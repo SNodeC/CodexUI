@@ -68,30 +68,47 @@ bottom or is owned by the user.
   meaningful thread-scoped protocol traffic in either direction advances it
   immediately. Selection-driven `thread/read` and `thread/resume` hydration,
   global connection traffic, and catalog traffic do not count as activity.
-  Live traffic does not alter thread ordering. Only local prompt admission
-  advances the thread node's local effective activity fields used by the
-  `Recent` and `Last changed` comparators; these values are not persisted by
-  CodexUI.
+  Live traffic does not alter thread ordering. A local prompt that starts a
+  turn owns a separate client-local turn-order value; it is not persisted by
+  CodexUI and never rewrites provider `updatedAt` or `recencyAt`.
 - The visible sidebar order contains confirmed root threads only. Minimal
   thread placeholders created by scoped protocol traffic remain retained but
   invisible until an explicit list, read, resume, create, or fork admits them
   as roots. A valued `parentThreadId` immediately assigns structural child
   ownership, so child threads never flash in the root list while later agent
   correlation is pending.
-- The sidebar sorts all visible rows by a user-selected criterion. `Recent` is
-  the default and uses the app-server's provider-defined `recencyAt` value,
-  newest first. `Created` uses `createdAt` newest first, and `Last changed`
-  uses `updatedAt` newest first. `Alphanumeric` sorts displayed titles
-  case-insensitively with natural number ordering, so 2 precedes 10 and titles
-  beginning with numbers precede other titles. Timestamp values that are not
-  available sort after timestamped threads. The directions are fixed; the UI
-  does not provide a separate ascending/descending control.
-- Admitting a prompt immediately advances its root thread group's effective
-  `updatedAt` and `recencyAt`, so the ordinary timestamp comparator moves it to
-  the first position under `Recent` and `Last changed`. Rapid prompts receive
-  strictly increasing timestamp ticks. Stale provider timestamps cannot move
-  a locally newer thread backwards; newer provider timestamps reconcile
-  naturally. `Created` and `Alphanumeric` remain unaffected.
+- The sidebar sort control exposes exactly `Alphanumeric`, `Created`, and
+  `Recent`; `Recent` is the default. `Alphanumeric` compares displayed titles
+  case-insensitively with natural-number ordering (2 before 10) and places
+  number-leading titles first. `Created` uses app-server `createdAt`, newest
+  first. `Recent` orders root thread groups by the start/admission of their
+  newest turn, newest first. Missing timestamps sort last and canonical IDs
+  break exact ties. The directions are fixed; there is no separate direction
+  control.
+- `createdAt` and `recencyAt` first become available to CodexUI when an
+  app-server thread descriptor from `thread/list`, `thread/read`,
+  `thread/start`, `thread/fork`, or a thread notification contains them. The
+  app server advances `recencyAt` when a turn starts. `updatedAt` instead
+  describes stored thread changes; it is still retained for activity display
+  but deliberately has no `Last changed` sort option.
+- Thread discovery explicitly asks for `recency_at`, descending, with a
+  bounded page size. Startup first requests one DB-only page and paints it
+  immediately. CodexUI then requests the same first page with app-server file
+  reconciliation enabled in the background; that scan repairs missing or
+  stale database metadata and replaces the authoritative paging cursor without
+  blocking initial presentation. There is no manual Repair action. Near the
+  end of the visible list, each scroll threshold follows one repaired
+  `nextCursor` page at a time. Thus the catalog becomes complete on demand
+  without making every startup wait for every persisted thread file.
+- Admitting a prompt that starts a turn immediately assigns a monotonic local
+  turn-order value, re-sorts `Recent`, and promotes its root thread group. The `turn/start`
+  response does not carry a refreshed thread `recencyAt`, so successful
+  acknowledgement re-evaluates the list and confirms that local value without
+  a visible jump. Definitive rejection removes it and restores the previous
+  order. `Created` and `Alphanumeric` re-sort only when their own keys change.
+  Steering an already active turn does not change turn order. Stale provider
+  timestamps cannot undo a confirmed local turn order, and unrelated traffic
+  never changes it.
 - The Plan inspector preserves app-server step states while the owning turn is
   active. If a stale step still reports `inProgress` after its owning turn or
   thread becomes terminal, the display reconciles that step to `completed`,
@@ -100,8 +117,9 @@ bottom or is owned by the user.
 - Each visible thread is presented as a compact card. Its status indicator is
   part of that card, and hover and selection strengthen the same card surface
   instead of introducing a separate row treatment. The Sort and Transport
-  controls use the same centered chevron and compact text-to-indicator spacing
-  as the prompt settings.
+  controls share the compact centered-chevron treatment. Hover details expose
+  the effective `Recent turn`, provider `Created`, and synthetic `Last
+  activity` times; missing provider values are reported as Unknown.
 - A left click selects a thread and changes the displayed conversation. A
   right click opens actions for the pointed-to card without changing the
   selected thread or displayed conversation. That card retains its hover
@@ -114,11 +132,33 @@ bottom or is owned by the user.
   captures the workspace, optional name, instructions, and ephemeral state.
   In the browser, the workspace is an app-server-local path entered as text;
   browser file pickers cannot truthfully select an arbitrary server directory.
+- `thread/start` does not accept the chosen display name, so creation retains
+  that name as a local overlay while the draft ID is replaced by the
+  authoritative thread ID, then sends `thread/name/set`. Blank, stale, or
+  mismatched provider payloads never expose the ID as the title. The overlay
+  retires only when the matching name acknowledgement arrives.
+- The thread menu exposes `Quick fork` and `Fork with options…`. Quick fork
+  inherits the source context. Fork with options opens the same workspace,
+  name, base-instructions, developer-instructions, and temporary-thread fields
+  as New thread; the generated name is editable.
+- Automatic fork names preserve lineage and choose the first unused direct
+  child number. Repeated forks of `Original` become `Original (fork 1)`,
+  `Original (fork 2)`, and so on. Forking `Original (fork 1)` produces
+  `Original (fork 1.1)`; further nesting appends another component.
+- `thread/fork` accepts the context overrides but no name. After it returns,
+  CodexUI applies the chosen fork name as a local overlay before the new row is
+  presented and sends that name through `thread/name/set`. Mismatched or stale
+  provider names cannot replace the chosen display name; the matching name
+  acknowledgement retires the overlay.
 - Background thread activity, list refreshes, reconnects, and creation by
   another frontend never change the user's selected thread. Completion of a
   locally started creation likewise selects the returned thread only while
   its optimistic draft remains visibly selected; later navigation is
   preserved while the draft's queued prompts continue independently.
+- A successful `thread/fork` result is already a loaded, event-subscribed
+  thread. CodexUI selects it without inserting a redundant `thread/read` or
+  `thread/resume` gate, so its first prompt can proceed directly to
+  `turn/start`.
 - Selecting a thread hydrates it once per bridge connection even when the
   discovery result already contains an active turn. The full read is merged
   into the thread's current graph nodes, so live Plan and Agents state
@@ -135,9 +175,10 @@ events and Enter used to confirm an active input-method composition never
 submit a prompt. Auto-repeat is consumed instead of inserting an accidental
 newline. Send and Steer are enabled only when admission is available and the
 draft contains non-whitespace text. Focus uses the canonical blue composer
-border without changing its geometry. The legacy submission contract trims
-leading and trailing whitespace once; whitespace and blank lines inside the
-trimmed prompt remain unchanged.
+border without changing its geometry. Submission retains the editor's exact
+logical text, including leading and trailing whitespace and every internal
+blank line; whitespace-only drafts remain inadmissible. Platform-native CRLF
+or CR editor input is represented canonically as LF logical line breaks.
 
 Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card begins with the calm blue
@@ -154,10 +195,15 @@ Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the
 user switches threads and returns. Successful correlated request
 acknowledgement or definitive failure stops delayed feedback immediately. The
-retained widget's fixed one-second admission deadline is the sole animation
+stable prompt row's fixed one-second admission deadline is the sole animation
 start trigger; the correlated `turn/start` or `turn/steer` result is the
 successful stop trigger. Unrelated worker updates cannot start, stop, or restart
 the sweep.
+The destination thread card uses that same pending-prompt lifecycle: it begins
+the same blue sweep at the same one-second deadline and stops on the same exact
+`turn/start` or `turn/steer` result. Multiple pending prompts keep the thread
+card active until none is awaiting acknowledgement. Unrelated thread or
+catalog traffic cannot start or stop it.
 The timer controls only whether pending feedback is visible; it never
 acknowledges or promotes the prompt. If the authoritative app-server item
 arrives before or after the result, it inherits the pending card's stable visual
@@ -173,10 +219,10 @@ A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
 through `turn/steer` appears immediately inside the active turn as a calm teal
 `You` card with a right-aligned `steering` specialization. It uses the same
 one-second delayed-feedback rule as the outer card. After
-acknowledgment, the same widget becomes a soft-teal inset steering card with
+acknowledgment, the same stable row becomes a soft-teal inset steering card with
 the canonical teal border and title treatment.
-No optimistic card is exchanged for a second widget, and the turn grows around
-it without changing existing nested card identity.
+No optimistic card is exchanged for a second identity, and the turn grows
+around it without changing existing nested card or local interaction state.
 
 At acknowledgment, the retained outer You card immediately uses the stronger
 static blue running border. That border belongs to the card across its local-
@@ -234,8 +280,12 @@ flight remain attached to that draft. When creation succeeds, all pending
 prompts move to the returned stable thread ID and are dispatched in order.
 
 Authoritative user-message text is rendered as Markdown through the same safe
-`MarkdownNoHTML` path as agent messages. The locally admitted prompt remains a
-plain-text transitional card until its authoritative item arrives.
+`MarkdownNoHTML` path as agent messages. Every authored logical newline remains
+a visible line break in both a normal and steering You card, including the
+empty visual row created by two consecutive newlines. Paragraph structure,
+fenced code, and the exact retained Markdown source remain unchanged. The
+locally admitted transitional card uses the same line-preserving projection,
+so acknowledgement does not change its line layout.
 
 Generated-image items show the app-server-saved image as a bounded thumbnail.
 Selecting it opens the shared non-modal image viewer; encoded image data is
@@ -286,7 +336,9 @@ growth rules.
 
 Every card with copyable content places a backgroundless copy icon at the right
 of its header, immediately before the disclosure chevron with the canonical
-compact 4 px action gap. Both icons share one vertical center; tooltip and
+compact 4 px action gap. A preceding phase or lifecycle label uses the same
+narrow zero-layout-gap relationship to Copy in every card family. Both icons
+share one vertical center; tooltip and
 accessible text provide the action label. Copy remains available while that
 card is collapsed; contentless cards omit it. Markdown cards copy their exact
 retained source as both plain clipboard text and `text/markdown`, never
@@ -490,6 +542,13 @@ region and never scrolls the conversation behind it. Command text and output
 retain a gesture that started while they could scroll; only a fresh gesture
 begun at their current boundary is handed to the conversation.
 
+Horizontal splitter drags keep all three pane boundaries live. The conversation
+resizes materialized card widths immediately, coalesces width-dependent rich
+text and passive-card height measurement to at most one pass per display
+interval, and leaves off-screen row heights lazy during the gesture. Releasing
+the handle performs one exact height-index reconciliation while preserving the
+paused visible-card pixel anchor or, in Following mode, the current bottom.
+
 ## Composer geometry
 
 The upcoming-turn controls are anchored to the bottom of the center pane. The
@@ -530,8 +589,12 @@ The card's visible label is **Command execution**.
 Command execution output boxes are created only when output contains printable,
 non-whitespace text after terminal control sequences are ignored; empty,
 whitespace-only, and ANSI/control-only output has no output surface. A shown box
-has no non-content minimum height, grows from zero to a maximum of 220 pixels,
-and exposes a styled vertical scrollbar only when content exceeds that limit.
+has no non-content minimum height and grows as an integer number of terminal
+line heights plus a symmetric 4-pixel vertical inset. Its maximum is the
+greatest such height within 220 pixels, and it exposes a styled vertical
+scrollbar only when content exceeds that limit. The pixel-scrolled viewport
+ends at the final populated row, so initial output, streaming overflow,
+follow-tail, and completion never expose a synthetic empty row below it.
 The command surface uses the same content-height behavior with its existing
 90-pixel maximum. Trailing empty lines are omitted from both displayed texts.
 Executed command text opens at its beginning and never follows its bottom;
@@ -543,7 +606,9 @@ Streaming output, completion status, and metadata update the retained outer
 Command execution card in place; they do not replace it. Output follows its
 bottom while already at the bottom. A manual upward scroll pauses following
 until the user returns to the bottom. Each output card retains its own
-follow/pause position across in-place output updates.
+follow/pause position across in-place output updates. Follow-tail is reapplied
+after text, viewport geometry, or completion-state settlement, so a late layout
+pass cannot leave a following surface above its final populated row.
 When retained stream text exceeds its canonical byte budget, the card shows an
 explicit omitted-byte notice followed by the newest retained tail. The same
 notice is included when copying the card, so bounded history is never presented

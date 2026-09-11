@@ -8,6 +8,7 @@ export interface PromptSubmission {
     attachments: AttachmentDraft[]; turnOptions: Record<string, unknown>; state: PromptState;
     admittedAtMilliseconds: number; error: string; admissionAnchor?: AuthoritativeItemKey;
     admissionAtStart: boolean; startsTurn: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
+    sortActivityAt?: number;
 }
 export interface PromptDispatch {
     id: number; threadId: string; clientUserMessageId: string; prompt: string; attachments: AttachmentDraft[];
@@ -95,13 +96,15 @@ export class PromptCoordinator {
     private nextAdmissionOrdinal = 1;
 
     admit(threadId: string, prompt: string, attachments: AttachmentDraft[], turnOptions: Record<string, unknown>,
-        authoritativeThread: ThreadPresentation | undefined, activeTurnId: string | undefined, now: number): number {
+        authoritativeThread: ThreadPresentation | undefined, activeTurnId: string | undefined, now: number,
+        sortActivityAt?: number): number {
         const submission: PromptSubmission = {
             id: this.nextSubmissionId++, admissionOrdinal: this.nextAdmissionOrdinal++, threadId,
             clientUserMessageId: `codexui-${now}-${this.nextSubmissionId - 1}`, prompt, attachments: structuredClone(attachments),
             turnOptions: structuredClone(turnOptions), state: "queued", admittedAtMilliseconds: now, error: "",
             admissionAtStart: false, startsTurn: activeTurnId === undefined,
         };
+        if (activeTurnId === undefined && sortActivityAt !== undefined) submission.sortActivityAt = sortActivityAt;
         if (activeTurnId !== undefined) submission.expectedTurnId = activeTurnId;
         if (authoritativeThread) {
             const items = indexAuthoritativeItems(threadId, authoritativeThread);
@@ -122,7 +125,8 @@ export class PromptCoordinator {
         next.admissionAtStart = next.admissionAnchor === undefined;
         next.state = "inFlight";
         next.startsTurn = activeTurnId === undefined;
-        if (activeTurnId === undefined) delete next.expectedTurnId; else next.expectedTurnId = activeTurnId;
+        if (activeTurnId === undefined) delete next.expectedTurnId;
+        else { next.expectedTurnId = activeTurnId; delete next.sortActivityAt; }
         const dispatch: PromptDispatch = {
             id: next.id, threadId: next.threadId, clientUserMessageId: next.clientUserMessageId,
             prompt: next.prompt, attachments: structuredClone(next.attachments), turnOptions: structuredClone(next.turnOptions),

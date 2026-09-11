@@ -49,6 +49,9 @@ public:
   // a wheel/touchpad event was consumed by the conversation.
   bool routeScrollEvent(QObject *watched, QEvent *event);
 
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
   void applyConversationPresentationOptions();
   void alignThreadHeadingBaselines();

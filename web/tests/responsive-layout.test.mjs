@@ -64,13 +64,14 @@ test("responsive shell exposes only the panes that fit and accessible drawer tri
 test("thread hierarchy exposes selected tree-item semantics", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
     session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [{
-        id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"}, updatedAt: 10,
+        id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"},
+        createdAt: 5, updatedAt: 10, recencyAt: 9,
     }]}, "replace"));
     session.selectThread("thread-1");
     const markup = renderToStaticMarkup(createElement(App, {session}));
     assert.match(markup, /class="thread-list" role="tree" aria-label="Threads"/u);
     assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
-    assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, Workspace: \/workspace, Status: completed, Last activity: /u);
+    assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, Workspace: \/workspace, Status: completed, Recent turn: [^,]+, Created: [^,]+, Last activity: /u);
     assert.match(markup, /<strong>Accessible thread<\/strong><\/button>/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
     assert.match(markup, /Last activity:[\s\S]*<strong class="success">completed<\/strong>/u);
@@ -80,6 +81,8 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
 test("responsive CSS keeps the desktop grid and removes the old document-width floor", async () => {
     const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
     assert.match(css, /grid-template-columns:\s*260px minmax\(420px, 1fr\) 300px/u);
+    assert.match(css, /pre\.command-output\s*\{[^}]*max-height:\s*212px;[^}]*padding:\s*4px 12px;[^}]*line-height:\s*17px;/u,
+        "command output uses complete text rows and symmetric vertical padding");
     assert.match(css, /grid-template-areas:\s*"top" "workspace" "status"/u);
     assert.match(css, /\.notice-banner\s*\{[^}]*grid-area:\s*workspace[^}]*align-self:\s*start[^}]*z-index:\s*8[^}]*border-radius:\s*8px/u);
     assert.doesNotMatch(css, /\.app-shell\s*\{[^}]*min-width:\s*980px/u);
@@ -109,6 +112,8 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.doesNotMatch(css, /font-variant-caps/u);
     assert.match(css, /\.card-phase\.status\.active\s*\{[^}]*color:\s*#285fca/u);
     assert.match(css, /\.card-phase\.status\.success\s*\{[^}]*color:\s*#176b45/u);
+    assert.match(css, /\.conversation-card > header \.card-phase\s*\{[^}]*margin-right:\s*0/u);
+    assert.match(css, /\.conversation-card\.userMessage \.safe-markdown\s*\{[^}]*white-space:\s*pre-wrap/u);
     assert.match(css, /\.card-copy-button \.copy-glyph, \.card-copy-button \.check-glyph\s*\{[^}]*transition:\s*opacity 160ms ease, transform 160ms ease/u);
     assert.match(css, /\.card-copy-button\.copied \.copy-glyph\s*\{[^}]*opacity:\s*0[^}]*transform:\s*scale\(\.72\)/u);
     assert.match(css, /\.card-copy-button\.copied \.check-glyph\s*\{[^}]*opacity:\s*1[^}]*transform:\s*scale\(1\)/u);
@@ -122,6 +127,8 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.composer-dock::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*8px[^}]*background:\s*#f2f5f9/u);
     assert.match(css, /\.composer-dock::after\s*\{[^}]*top:\s*-1px[^}]*height:\s*1px[^}]*background:\s*#d7dee8/u);
     assert.match(css, /\.conversation-scroll::-webkit-scrollbar-track\s*\{[^}]*margin-block-end:\s*calc\(var\(--composer-overlay-height\) \+ 8px\)/u);
+    assert.match(css, /\.conversation-loading-surface\s*\{[^}]*inset:\s*0 0 var\(--composer-overlay-height\)[^}]*place-items:\s*center[^}]*background:\s*#f2f5f9/u);
+    assert.match(css, /\.thread-loading-spinner\s*\{[^}]*width:\s*30px[^}]*height:\s*30px[^}]*border:\s*3px solid #d7dee8[^}]*border-top-color:\s*#667085/u);
     assert.match(css, /\.composer textarea\s*\{[^}]*overscroll-behavior:\s*contain[^}]*background:\s*#fff/u);
     assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding-bottom:\s*8px/u);
 });

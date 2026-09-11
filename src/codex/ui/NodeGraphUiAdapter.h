@@ -18,11 +18,6 @@ namespace codexui::codex::ui {
 // values, and releases the graph before any QWidget code runs.
 class NodeGraphUiAdapter final {
 public:
-  struct ConversationOptions {
-    bool showReasoning = true;
-    bool showCodexUpdates = true;
-  };
-
   struct ConversationInfo {
     std::size_t authoritativeItemCount = 0;
     bool readyForDisplay = false;
@@ -30,18 +25,63 @@ public:
     bool providerHasMore = false;
   };
 
+  struct ConversationRowProjection {
+    bool graphBusy = false;
+    std::optional<middle::ConversationRowChange> change;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+      return change.has_value();
+    }
+    [[nodiscard]] middle::ConversationRowChange &operator*() noexcept {
+      return *change;
+    }
+    [[nodiscard]] const middle::ConversationRowChange &
+    operator*() const noexcept {
+      return *change;
+    }
+    [[nodiscard]] middle::ConversationRowChange *operator->() noexcept {
+      return &*change;
+    }
+    [[nodiscard]] const middle::ConversationRowChange *
+    operator->() const noexcept {
+      return &*change;
+    }
+  };
+
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
-  conversation(const nodegraph::NodeRef &thread, std::size_t itemLimit,
-               ConversationOptions options) const;
+  conversation(const nodegraph::NodeRef &thread,
+               std::size_t itemLimit) const;
 
   [[nodiscard]] std::optional<ConversationInfo>
   conversationInfo(const nodegraph::NodeRef &thread) const;
 
   [[nodiscard]] std::optional<middle::VisibleCardData>
-  card(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,
-       ConversationOptions options) const;
+  card(const nodegraph::NodeRef &thread,
+       const nodegraph::NodeRef &item) const;
+
+  // Projects an authoritative user item only when it exactly materializes a
+  // still-current local prompt. The returned card retains the LocalPromptKey
+  // and authoritative Item identity; the separate prompt identity is used
+  // only to acknowledge that one stable row transition.
+  [[nodiscard]] std::optional<middle::PromptMaterialization>
+  promptMaterialization(const nodegraph::NodeRef &thread,
+                        const nodegraph::NodeRef &item) const;
+
+  // Projects one live Item together with its immediate canonical row
+  // neighbors. This is the bounded structural adapter for non-tail insertion
+  // and actual movement; it never returns a complete conversation snapshot.
+  [[nodiscard]] ConversationRowProjection
+  rowChange(const nodegraph::NodeRef &thread,
+            const nodegraph::NodeRef &item) const;
+
+  // Projects only a canonical last item of the selected thread. It is the
+  // bounded structural fast path for ordinary append; any non-tail or prompt
+  // alias case returns nullopt and proceeds through exact neighbor placement.
+  [[nodiscard]] std::optional<middle::ConversationTailCard>
+  tailCard(const nodegraph::NodeRef &thread,
+           const nodegraph::NodeRef &item) const;
 
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread) const;

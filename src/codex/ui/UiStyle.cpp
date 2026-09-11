@@ -247,6 +247,7 @@ QString applicationStyleSheet() {
         QFrame[messageRole="user"] QLabel[kind="title"] { color: #415882; }
         QFrame[messageRole="user"][nestedConversationCard="true"] { background: #eaf8f7; border-color: #9bdcdb; }
         QFrame[messageRole="user"][nestedConversationCard="true"] QLabel[kind="title"] { color: #0d6565; }
+        QFrame[virtualTurnRoot="true"] { background: transparent; border: none; }
         QFrame[messageRole="agent"][messagePhase="final"] { background: #f4f3fd; border: 1px solid #cec7f6; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: #59507f; }
         QFrame[messageRole="agent"][messagePhase="update"] { background: #f9f4ea; border: 1px solid #e1cb9d; border-radius: 8px; }

@@ -23,7 +23,11 @@ struct NewThreadDraft {
 
 class NewThreadDialog final : public QDialog {
 public:
+  enum class Purpose { Create, Fork };
+
   explicit NewThreadDialog(QString initialWorkspace, QWidget *parent = nullptr);
+  NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
+                  QWidget *parent = nullptr);
 
   [[nodiscard]] NewThreadDraft draft() const;
 

@@ -303,6 +303,7 @@ runtimeActionDiagnosticSubject(nodegraph::RuntimeActionKind kind) {
   using enum nodegraph::RuntimeActionKind;
   switch (kind) {
   case RefreshThreads:
+  case LoadMoreThreads:
     return "thread/list";
   case CreateThread:
     return "thread/start";
@@ -814,11 +815,13 @@ struct RequestOutcome final {
   std::string error;
   std::string threadId;
   std::string turnId;
+  std::string nextCursor;
 };
 
 void identifyResultEntities(RequestOutcome &outcome) {
   outcome.threadId = valueString(outcome.payload, "threadId");
   outcome.turnId = valueString(outcome.payload, "turnId");
+  outcome.nextCursor = valueString(outcome.payload, "nextCursor");
   if (const nodegraph::Value *thread = valueMember(outcome.payload, "thread")) {
     if (const nodegraph::Value::Object *object = thread->asObject())
       if (outcome.threadId.empty())
@@ -975,6 +978,12 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   std::unordered_map<nodegraph::NodeRef, nodegraph::PromptCommand>
       promptsWaitingForHydration;
   bool threadListPending = false;
+  bool threadListRepairPending = false;
+  bool threadListLoadMoreRequested = false;
+  std::uint64_t threadListCycle = 0;
+  std::string threadListNextCursor;
+  std::unordered_set<std::string> threadListSeenCursors;
+  nlohmann::json threadListBaseParameters = nlohmann::json::object();
   bool modelListPending = false;
   bool permissionProfilesPending = false;
 
@@ -990,6 +999,12 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     resumedPromptAdmissions.clear();
     promptsWaitingForHydration.clear();
     threadListPending = false;
+    threadListRepairPending = false;
+    threadListLoadMoreRequested = false;
+    ++threadListCycle;
+    threadListNextCursor.clear();
+    threadListSeenCursors.clear();
+    threadListBaseParameters = nlohmann::json::object();
     modelListPending = false;
     permissionProfilesPending = false;
   };
@@ -1615,16 +1630,119 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     return result;
   };
 
-  const auto requestThreadList = [&](nlohmann::json parameters) {
-    if (threadListPending)
-      return;
+  const auto normalizedThreadListParameters = [](nlohmann::json parameters) {
+    parameters.erase("cursor");
+    parameters.erase("useStateDbOnly");
+    parameters["sortKey"] = "recency_at";
+    parameters["sortDirection"] = "desc";
+    parameters["limit"] = 100;
+    return parameters;
+  };
+
+  const auto requestThreadListPage =
+      [&](nlohmann::json parameters,
+          std::function<void(RequestOutcome)> completed) {
     threadListPending = true;
     dispatchRequest<codex::generated::client_requests::ThreadList>(
         sdk, std::move(parameters), workerLogic, {},
-        [&threadListPending, &showNotice](RequestOutcome outcome) {
+        [&, completed = std::move(completed)](RequestOutcome outcome) mutable {
           threadListPending = false;
-          if (!outcome.ok)
+          completed(std::move(outcome));
+        });
+      };
+
+  std::function<void()> requestMoreThreads;
+  requestMoreThreads = [&] {
+    if (threadListPending || threadListRepairPending) {
+      threadListLoadMoreRequested = true;
+      return;
+    }
+    if (threadListNextCursor.empty())
+      return;
+    const std::string cursor = threadListNextCursor;
+    if (!threadListSeenCursors.insert(cursor).second) {
+      threadListNextCursor.clear();
+      threadListLoadMoreRequested = false;
+      return;
+    }
+    const std::uint64_t cycle = threadListCycle;
+    nlohmann::json parameters = threadListBaseParameters;
+    parameters["useStateDbOnly"] = true;
+    parameters["cursor"] = cursor;
+    requestThreadListPage(
+        std::move(parameters), [&, cycle, cursor](RequestOutcome outcome) {
+          if (cycle != threadListCycle)
+            return;
+          if (!outcome.ok) {
+            threadListSeenCursors.erase(cursor);
+            threadListLoadMoreRequested = false;
             showNotice(outcome.error);
+            return;
+          }
+          threadListNextCursor = std::move(outcome.nextCursor);
+          if (threadListLoadMoreRequested) {
+            threadListLoadMoreRequested = false;
+            requestMoreThreads();
+          }
+        });
+  };
+
+  const auto requestThreadListRepair = [&](std::uint64_t cycle) {
+    if (cycle != threadListCycle || threadListPending)
+      return;
+    threadListRepairPending = true;
+    nlohmann::json parameters = threadListBaseParameters;
+    parameters["useStateDbOnly"] = false;
+    requestThreadListPage(
+        std::move(parameters), [&, cycle](RequestOutcome outcome) {
+          if (cycle != threadListCycle)
+            return;
+          threadListRepairPending = false;
+          if (!outcome.ok) {
+            showNotice(outcome.error);
+            if (threadListLoadMoreRequested) {
+              threadListLoadMoreRequested = false;
+              requestMoreThreads();
+            }
+            return;
+          }
+          threadListNextCursor = std::move(outcome.nextCursor);
+          if (threadListLoadMoreRequested) {
+            threadListLoadMoreRequested = false;
+            requestMoreThreads();
+          }
+        });
+  };
+
+  const auto requestThreadList = [&](nlohmann::json parameters) {
+    if (threadListPending)
+      return;
+    const std::uint64_t cycle = ++threadListCycle;
+    threadListRepairPending = true;
+    threadListLoadMoreRequested = false;
+    threadListNextCursor.clear();
+    threadListSeenCursors.clear();
+    threadListBaseParameters =
+        normalizedThreadListParameters(std::move(parameters));
+    nlohmann::json fastParameters = threadListBaseParameters;
+    fastParameters["useStateDbOnly"] = true;
+    requestThreadListPage(
+        std::move(fastParameters), [&, cycle](RequestOutcome outcome) {
+          if (cycle != threadListCycle)
+            return;
+          if (!outcome.ok) {
+            showNotice(outcome.error);
+          } else {
+            threadListNextCursor = std::move(outcome.nextCursor);
+          }
+          const nodegraph::WorkerGenerations expectedGenerations =
+              workerLogic.generations();
+          static_cast<void>(core::timer::Timer::singleshotTimer(
+              [&, cycle, expectedGenerations] {
+                if (workerLogic.generations() == expectedGenerations)
+                  requestThreadListRepair(cycle);
+              },
+              utils::Timeval({0, 50000})));
         });
   };
 
@@ -2224,6 +2342,15 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
           return;
         }
       }
+      std::string requestedForkName;
+      if (action.kind == Fork) {
+        const nodegraph::Value *nameValue =
+            valueMember(action.payload, "requestedName");
+        if (const std::string *name = nameValue ? nameValue->asString()
+                                                : nullptr)
+          requestedForkName = *name;
+        action.payload.erase("requestedName");
+      }
       nlohmann::json parameters = jsonObject(std::move(action.payload));
       parameters["threadId"] = threadId;
       const nodegraph::NodeRef target = std::move(action.target);
@@ -2235,22 +2362,47 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         dispatchRequest<codex::generated::client_requests::ThreadSetName>(
             sdk, std::move(parameters), workerLogic, target, completed);
       else if (action.kind == Fork)
-        dispatchRequest<codex::generated::client_requests::ThreadFork>(
+        dispatchRequestHandled<codex::generated::client_requests::ThreadFork>(
             sdk, std::move(parameters), workerLogic, target,
-            [&](RequestOutcome outcome) {
+            [](const nodegraph::ProtocolRequestId &) {},
+            [&, requestedForkName](RequestOutcome outcome,
+                                   nodegraph::DecodedMessage decoded) {
               if (!outcome.ok) {
+                static_cast<void>(
+                    workerLogic.applyDetailed(std::move(decoded)));
                 showNotice(outcome.error);
                 return;
               }
               std::string forkId = std::move(outcome.threadId);
-              if (forkId.empty())
+              if (forkId.empty()) {
+                static_cast<void>(
+                    workerLogic.applyDetailed(std::move(decoded)));
+                showNotice("Thread fork returned no thread identifier");
                 return;
+              }
+              static_cast<void>(workerLogic.completeFork(
+                  std::move(decoded), forkId, requestedForkName));
               nodegraph::NodeRef fork =
                   currentNode({nodegraph::NodeKind::Thread, forkId});
               if (!fork)
                 return;
+              if (!requestedForkName.empty()) {
+                dispatchRequest<
+                    codex::generated::client_requests::ThreadSetName>(
+                    sdk,
+                    nlohmann::json{{"threadId", forkId},
+                                   {"name", requestedForkName}},
+                    workerLogic, fork,
+                    [&showNotice](RequestOutcome renameOutcome) {
+                      if (!renameOutcome.ok)
+                        showNotice(renameOutcome.error);
+                    });
+              }
+              // thread/fork returns a live, subscribed thread with its copied
+              // history. Treat that result as hydrated: issuing thread/read
+              // followed by thread/resume here can strand the first prompt
+              // behind a redundant resume when provider liveness is stale.
               static_cast<void>(workerLogic.selectThread(fork));
-              hydrateThread(fork);
             });
       else if (action.kind == Archive)
         dispatchRequest<codex::generated::client_requests::ThreadArchive>(
@@ -2504,6 +2656,9 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     switch (action.kind) {
     case RefreshThreads:
       requestThreadList(jsonObject(std::move(action.payload)));
+      return;
+    case LoadMoreThreads:
+      requestMoreThreads();
       return;
     case CreateThread: {
       nodegraph::PromptTransition transition = workerLogic.admitFirstPrompt(

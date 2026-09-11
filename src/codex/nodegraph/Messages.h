@@ -88,6 +88,7 @@ struct NodeAction final {
 
 enum class RuntimeActionKind : std::uint8_t {
   RefreshThreads,
+  LoadMoreThreads,
   CreateThread,
   Connect,
   Disconnect,

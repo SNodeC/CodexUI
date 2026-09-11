@@ -48,14 +48,14 @@ concrete graph-cutover requirement.
 
 | Surface | Established behavior | Current status |
 | --- | --- | --- |
-| `ThreadPane::Actions` | Emits New, Refresh, Hide, Select, Reload, Rename, Fork, Archive toggle, and Remove exactly once using the row's canonical string ID. | Compatible. Shell resolves the visible ID to the exact current `NodeRef` before admission. |
+| `ThreadPane::Actions` | Emits New, Refresh, Hide, Select, Reload, Rename, Quick fork, Fork with options, Archive toggle, and Remove exactly once using the row's canonical string ID. | Compatible. Shell resolves the visible ID to the exact current `NodeRef` before admission. |
 | `ThreadPane::refresh` | Consumes one complete hierarchy snapshot; retains expansion, selection, sort choice, optimistic rows, hover/context state; identical effective rows do no work. | Compatible after restoring provider/controller gating, effective activity time, unreachable-root retention, and ordered child relations. |
 | optimistic thread methods | Begin one draft row, promote it without replacing its visual identity, mark failure, and remove only on confirmation/abandonment. | Compatible. Promotion is correlated to the admitted creation prompt rather than guessed from later payload fields. |
 | `ConversationView::reconcile` | Consumes one complete `ConversationSnapshot`; keys mutate compatible cards in place; one Turn section owns one opening You card and all nested cards; identical snapshots are a no-op. | Compatible after restoring encoded section keys, canonical root pinning, stable prompt aliasing, and the identical-snapshot early return. |
 | initial conversation selection | Never exposes part of an authoritative replacement. The first content frame has complete cards, final parentage, final width/height, and final anchor. When switching populated threads, the outgoing surface stays stable until the incoming final snapshot is ready. | Compatible. Provider fragments are blocked, the outgoing conversation/heading/Inspector remain staged, and readiness replaces them once with the complete bounded window. |
 | conversation history window | Starts at 80 authoritative items. Pinned opening prompts do not consume the budget. Load More adds 80. While paused, new authoritative tail items expand the effective window; following resets it to the requested window. | Compatible after replacing the unbounded adapter request with per-thread requested/effective counters and excluding local prompts from the authoritative count. |
 | card DTO and rendering | Typed payloads preserve the old card kinds, text, metadata, status, images, truncation disclosure, plan, diff counts, and unknown fallback. Presentation options are applied by `ConversationView`, not by protocol logic. | Compatible. Generic detail is a safe bounded rendering string because the graph deliberately does not retain raw payloads for UI convenience. |
-| prompt materialization | An admitted local card keeps its `LocalPromptKey` while the authoritative user item arrives; the same widget changes type in place and preserves owner, anchor, focus, and local fold state. | Compatible through a narrow additive callback carrying the exact prompt `NodeRef`; widgets do not inspect graph state. |
+| prompt materialization | An admitted local card keeps its `LocalPromptKey` while the authoritative user item arrives; the same widget changes type in place and preserves owner, anchor, focus, and local fold state. | Compatible through the exact adapter projection and one targeted model `dataChanged`; acknowledgement carries the related prompt `NodeRef` and performs no complete conversation reconciliation. |
 | prompt recovery | A definite/uncertain failed prompt remains visible and restores text/attachments only by explicit user action, without overwriting an existing draft. | Compatible through a narrow additive recovery callback carrying the exact prompt `NodeRef`. |
 | `setEmptyMessage` | Changes only the empty-state text and preserves the current anchor/follow behavior. It does not authorize clearing an existing conversation. | Compatible. Hydration staging decides whether an empty snapshot may be reconciled. |
 | presentation options | Reasoning/Codex-update visibility and initial command/image/file-change folding remain local UI preferences; changing them reuses current card widgets and state. | Compatible. The adapter does not reinterpret these preferences. |
@@ -108,18 +108,30 @@ always means “no coherent value was available now”, never “render empty”
   needed before a potentially larger projection: authoritative item count,
   display readiness, hydration failure, and provider continuation. Local
   prompts never contribute to the authoritative count.
-- `conversation(thread, itemLimit, options)` returns one complete retained
+- `conversation(thread, itemLimit)` returns one complete retained
   `ConversationSnapshot` for a validated thread. `itemLimit` is the effective
   per-thread history window, never an instruction to mutate graph state.
-  `options` mirrors the existing presentation preferences; visibility remains
-  the widget's responsibility so toggling it can reuse widgets and local fold
-  state.
-- `card(thread, item, options)` projects one validated item only when the item
+- Presentation visibility remains the item model/view's responsibility so
+  toggling it can reuse visible editors and stable local interaction state.
+- `card(thread, item)` projects one validated item only when the item
   is still parented by a Turn owned by the supplied thread. It is reserved for
   a targeted visible-card update and must never reconstruct identity from
   payload fields. A stale/detached item returns `nullopt`.
-- `ConversationOptions` carries only `showReasoning` and
-  `showCodexUpdates`; it owns no filter state.
+- `promptMaterialization(thread, item)` accepts only an authoritative user item
+  related to one current local prompt in `awaitingMaterialization`. It returns
+  the authoritative presentation under that prompt's `LocalPromptKey`, the
+  authoritative Item `NodeRef` for row ownership, and the separate exact
+  prompt `NodeRef` for acknowledgement.
+- `rowChange(thread, item)` projects one live selected-thread Item, its exact
+  section/root/nesting facts, and the immediate canonical card keys on either
+  side. It is the non-snapshot input for an exact middle insertion or move and
+  distinguishes a busy graph read from an authoritative absence; it retains no
+  ordering state after the read guard is released.
+- `tailCard(thread, item)` additionally requires that the exact item
+  be the last child of the last canonical Turn and that it not participate in
+  prompt-materialization aliasing. It returns one `ConversationTailCard` with
+  section/root/nested/activity placement and current history chrome for the
+  bounded structural append path. Any ambiguity returns `nullopt`.
 - `ConversationInfo` is adapter control metadata, not a presentation model or
   widget snapshot.
 
@@ -128,13 +140,16 @@ always means “no coherent value was available now”, never “render empty”
 | constructor | `graph`: long-lived canonical graph; no return | Pre: graph outlives adapter. Post: no read and no allocation is performed. |
 | `threads` | `selectedThread`: optional stable target; returns optional complete DTO | Stale/removed selection is represented as no selected ID, while valid roots still project. Contention returns `nullopt` without side effects. |
 | `conversationInfo` | `thread`: required stable Thread; returns optional control facts | Wrong kind, stale generation, removal, or contention returns `nullopt`. Success does not construct card DTOs. |
-| `conversation` | `thread`, positive effective `itemLimit`, presentation `options`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
-| `card` | exact `thread` and `item`, presentation `options`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
+| `conversation` | `thread`, positive effective `itemLimit`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
+| `card` | exact `thread` and `item`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
+| `promptMaterialization` | exact `thread` and authoritative `item`; returns optional card DTO | Success requires one live related local prompt owned by the thread with a valid submission ID and awaiting-materialization state. No relation inference or payload-ID search is permitted. |
+| `rowChange` | exact `thread` and live `item`; returns `ConversationRowProjection` | `graphBusy` requests one nonzero-delay retry and is never interpreted as removal. A present change requires current Turn ownership by the exact thread; an absent change with `graphBusy == false` is authoritative absence. Immediate neighbor keys reflect canonical graph order with a materializing local prompt suppressed behind its authoritative row. |
+| `tailCard` | exact `thread` and `item`; returns optional tail DTO | Success requires the exact canonical last item of the exact canonical last Turn, usable loaded-count state, and no prompt alias. The DTO is non-authoritative and owns only values needed for one Qt append. |
 
 ### `middle::ThreadPane`
 
 `ThreadPane` owns the sidebar's QWidgets, selected-row rendering, expanded
-thread IDs, current sort criterion, optimistic row animation, context-menu
+thread IDs, current sort criterion, pending-prompt animation, context-menu
 state, and row comparison values.
 
 Thread/ownership contract: Qt-main only; QObject parenting owns every row and
@@ -142,16 +157,16 @@ popup. The pane owns no graph references or provider state. Callbacks may enter
 shell code synchronously, so all caller graph guards must already be released.
 
 - `ThreadPane(parent)` constructs the established sidebar and restores its
-  persisted local sort/expansion behavior.
+  local expansion behavior. The sort control contains exactly Alphanumeric,
+  Created, and Recent, with Recent selected initially.
 - `setActions(Actions)` replaces the callback bundle. Missing callbacks make
   the corresponding gesture a no-op; callbacks execute without graph locks.
 - `refresh(snapshot)` compares a complete DTO with the last effective rendered
   list. It patches/reorders only as required, preserves local expansion and
   context state, and does nothing for an identical effective list. It never
   initiates hydration or provider operations itself.
-- `beginOptimisticThread(id, title, cwd)` inserts one locally animated draft
-  row using the supplied stable provisional ID without changing canonical
-  graph authority.
+- `beginOptimisticThread(id, title, cwd)` inserts one local draft row using the
+  supplied stable provisional ID without changing canonical graph authority.
 - `promoteOptimisticThread(draftId, authoritativeId)` changes the row's action
   identity in place and preserves its selection/animation/position.
 - `confirmOptimisticThread(threadId)` removes only the matching optimistic
@@ -160,46 +175,142 @@ shell code synchronously, so all caller graph guards must already be released.
   failure presentation so recovery/navigation remains possible.
 - `isOptimisticThread(threadId)` is a side-effect-free membership query used
   only by shell correlation logic.
-- `setSortCriterion(criterion)` changes the local ordering rule, persists it,
-  and reconciles the current snapshot once.
+- `setSortCriterion(criterion)` selects one of Alphanumeric, Created, and
+  Recent and reconciles the current snapshot once. Alphanumeric is natural,
+  case-insensitive title order; Created and Recent are newest-first with
+  missing timestamps last.
 - `currentSortCriterion()` returns that local rule without triggering work.
 - `visiblySelectedThreadId()` returns the ID of the row the user currently
   sees as selected. Outbound prompt routing must use this value, not a stale
   shell selection.
-- `Actions::select/reload/rename/fork/toggleArchive/remove` carry exactly the
-  pointed row ID. `Actions::newThread/refresh/hide` carry no inferred target.
+- `Actions::select/reload/rename/fork/forkWithOptions/toggleArchive/remove`
+  carry exactly the pointed row ID. `Actions::newThread/refresh/loadMore/hide`
+  carry no inferred target. `loadMore` is requested only at the bounded
+  near-list-end threshold; runtime single-flight and cursor guards decide
+  whether a provider request is required.
 
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
 | constructor | optional QWidget `parent` | Constructs one empty pane; restores only local settings. Performs no callback. |
 | `setActions` | replacement `Actions` value | Post: later gestures use only this bundle. Does not replay a gesture. |
-| `refresh` | complete `ThreadListSnapshot` by const reference | Snapshot remains valid for the call only. Post: rendered hierarchy/selection equals its effective value plus local expansion/sort/optimistic rows. Identical effective input performs no row work. |
+| `refresh` | complete `ThreadListSnapshot` by const reference | Snapshot remains valid for the call only. Post: rendered hierarchy/selection equals its effective value plus the selected ordering, local expansion, and optimistic rows. Identical effective input performs no row work. |
 | `beginOptimisticThread` | provisional `id`, display `title`, `cwd` | `id` must be nonempty and process-locally unique. Duplicate begin updates no canonical graph state. |
 | `promoteOptimisticThread` | exact `draftId`, exact `authoritativeId` | If draft is absent, no-op. Post: callbacks and visible selection use authoritative ID without replacing unrelated rows. |
 | `confirmOptimisticThread` | current provisional/promoted `threadId` | Removes only the matching overlay; canonical row remains. |
 | `failOptimisticThread` | exact optimistic ID | Marks only that overlay failed and keeps it recoverable/selectable as defined by UI behavior. |
 | `isOptimisticThread` | ID; returns bool | Pure local query. |
-| `setSortCriterion` | enum value | Reorders roots atomically using local snapshot and persists choice. Child order/hierarchy is retained. |
+| `setSortCriterion` | enum value | Reorders root groups atomically from the retained snapshot. Child hierarchy remains intact. |
 | `currentSortCriterion` | no parameters; returns enum | Pure local query. |
 | `visiblySelectedThreadId` | no parameters; returns canonical/provisional string | Empty when no visible row is selected. This is the outbound routing source of truth. |
 
+Thread catalog startup is two-stage. The runtime requests one bounded
+`recency_at` descending page with `useStateDbOnly=true`, publishes it, then
+schedules an automatic first-page request with `useStateDbOnly=false`. The
+second request lets app-server reconcile persisted session files into its
+database without delaying the first usable sidebar. Its `nextCursor` becomes
+the paging authority. `LoadMoreThreads` consumes at most one cursor page per
+near-end request using the repaired database, rejects repeated cursors, and
+merges rows through the same graph-backed list projection so selection,
+hierarchy, optimistic names, pending animation, and current sorting survive.
+A provider-generation change invalidates the timer, cursor, and in-flight
+cycle together. No manual repair command is exposed.
+
+`suggestForkName(sourceTitle, existingTitles)` is toolkit-independent and
+returns the first unused direct descendant of the source's parsed fork
+lineage. `NewThreadDialog` accepts either Create or Fork purpose; Fork reuses
+the complete creation form with a prefilled, editable suggested name. The
+client-only `requestedName` is removed before `thread/fork`, applied as a local
+overlay to the returned thread, and synchronized by a separate
+`thread/name/set` request.
+
+### `middle::ConversationItemModel`
+
+`ConversationItemModel` is the thin `QAbstractListModel` indexing surface for
+the selected conversation. It is owned by `ConversationView` and used only on
+Qt-main. `NodeGraph` remains the sole canonical state and the SNode.C worker
+remains its sole writer. The model neither reads the graph nor retains protocol
+payloads, revisions, a journal, or an independently mutable domain state.
+
+Each row contains the last rendered `VisibleCardData`, its unchanged `NodeRef`
+action token, stable key, canonical Turn section key, root/nested position,
+presentation visibility, and active-Turn emphasis. `VisibleCardData` is
+available to the view/delegate through the typed `card(row)` accessor rather
+than copied through `QVariant`; standard roles expose only small identity,
+structure, visibility, and accessibility values.
+
+- `replaceConversation(snapshot)` is the explicit complete-authority operation
+  for a different thread or genuine rescan and emits `modelReset` only when
+  effective state differs. `prependHistoryPage(snapshot)` accepts only a
+  same-thread ordered superset, inserts its missing ranges, and never resets or
+  moves retained rows.
+- `insertCard(row, placement)`, `removeTarget(ref)`, and
+  `moveTarget(ref, destination, placement)` are the exact structural
+  operations. They reject duplicate/stale/ambiguous targets and emit only the
+  matching insert, remove, move, and affected structural-role changes.
+- `reconcile(snapshot)` preserves the established direct `ConversationView`
+  contract with precise ordered row differences. Production Shell graph
+  routing never uses it as a delta fallback: selection/rescan calls replacement,
+  paging calls ordered-superset insertion, and live changes carry exact refs.
+- `updateCard(card)` resolves the stable key once and returns `Missing`,
+  `Incompatible`, `Unchanged`, or `Changed`. Only `Changed` emits row-local
+  `dataChanged` with the affected roles.
+- `appendTail(tail)` accepts only a unique card in the exact last Turn
+  position, changes the former tail's `LastInTurnRole`, and emits one row
+  insertion. `trimHistoryTo(limit)` retains an owning Turn root where needed
+  and removes only the bounded prefix. Rows live in a conversation-specific
+  order-statistic tree; stable-key and exact-NodeRef maps point to stable row
+  nodes, so insert, remove, move, and surviving identity lookup never rebuild
+  or renumber a loaded-history-sized index.
+- `setHistoryChrome(hidden, providerHasMore)` changes only Load More facts;
+  `setActiveTurn(row, active)` changes only the exact root role.
+- `setVisibility(visibility)` changes only the rows whose presented role
+  changes. It does not delete their stable identities or mutate graph state.
+- `indexForStableKey(key)` resolves view-local identity. `indexForTarget(ref)`
+  additionally compares the pinned node pointer identity so a stale action can
+  never retarget a replacement node with a similar provider ID.
+
+### `middle::ConversationHeightIndex`
+
+`ConversationHeightIndex` is a non-QObject order-statistic extent tree owned by
+the view. It stores only nonnegative row extents plus subtree row counts and
+`qint64` sums. `top`, `bottom`, total height, position-to-row lookup, a changed
+row height, and tail or non-tail insert/remove/move operations touch only
+logarithmic tree paths. `assign` is the explicit complete-sequence operation
+and the only operation counted as a rebuild. Scrollbar conversion remains a
+separate view concern. The index contains no card values or authority.
+
 ### `middle::ConversationView`
 
-`ConversationView` is the sole owner of conversation QWidgets and geometry.
-It retains per-thread follow/pause anchors, collapsed-card state, nested
-command-output scroll state, stable card widgets for the current retained
-window, and presentation options.
+`ConversationView` is the canonical variable-height `QAbstractItemView` for
+the conversation. It owns the thin item model, height index, bounded delegate
+document cache, visible rich cards/editors, Load More and empty controls, and
+genuinely local interaction state. It retains per-thread history windows,
+follow/pause anchors, fold state, text selections, focus/current-row identity,
+nested command-output scroll state, and presentation options by stable row
+key. Shell retains only the selected canonical graph target.
 
-Thread/ownership contract: Qt-main only. The view owns all cards and Turn
-sections through QObject parentage. Snapshot `NodeRef` action tokens may pin
-node lifetime but are opaque; the view never dereferences them. Reconciliation
-may synchronously emit only local Qt signals; graph/action callbacks run after
-the widget transaction and after every graph guard has been released.
+Passive-row hover, cursor, and tooltip hit-testing stay in the delegate and do
+not materialize a card. A press or keyboard current-row transition may create
+the one required editor. When production materialization starts collapsed, the
+real card initially contains only its header/control/status surface; hidden
+Markdown, command output, plan/file/activity detail, image, attachment, and
+other body projection is deferred until expansion and is built from the latest
+row value. Accessible model detail is bounded to 8,192 characters without
+first traversing or converting an unbounded plan or file-change collection.
 
-- `ConversationView(parent)` creates the established scroll surface, Load
-  More control, empty label, and content layout.
+Thread/ownership contract: Qt-main only. Passive historical rows have no
+QWidget or placeholder. QObject parentage owns only the rich cards currently
+inside the viewport plus one viewport of bounded overscan and temporary hidden
+staging cards. Snapshot `NodeRef` action tokens are opaque; the view never
+dereferences them. Graph/action callbacks run only after graph guards have been
+released, and QWidget work never occurs while a graph or channel lock is held.
+
+- `ConversationView(parent)` creates the established scroll surface, its
+  private list model and delegate, height index, Load More control, empty label,
+  and hidden staging host. It creates no historical card widgets.
 - `setLoadMoreAction(callback)` installs the one user gesture for expanding
-  history. The callback decides retained-graph versus provider loading.
+  history after the view has advanced its own requested/effective window. The
+  callback decides whether to project or send the exact provider action.
 - `setPromptMaterializedAction(callback)` is a narrow additive integration
   hook. After a local card has successfully morphed to its authoritative user
   card and after all QWidget work, it returns the exact prompt `NodeRef` for
@@ -207,26 +318,64 @@ the widget transaction and after every graph guard has been released.
   pass; the widget never retries automatically.
 - `setPromptRecoveryAction(callback)` is a narrow additive hook fired only by
   explicit recovery on the exact failed local-prompt token.
+- `setPresentationCommittedAction(callback)` fires once only after a selected
+  thread's staged model, geometry, editors, cover, and spinner have committed.
+  Shell uses that boundary to reveal matching heading and Inspector values.
 - `setEmptyMessage(message)` changes empty text only, preserving anchor and
   follow behavior. It must not clear cards.
 - `setPresentationOptions(options)` updates reasoning/update visibility and
   initial folding preferences using the already retained snapshot. Existing
   card-local fold choices remain authoritative.
 - `presentationOptions()` returns the current local preferences without work.
-- `reconcile(snapshot)` is the single structural/render entry point. It
-  returns `false` and performs zero presentation work for an identical
-  snapshot. Otherwise it validates the full target order, suppresses exposure
-  during the existing synchronous commit, reuses compatible keyed widgets,
-  establishes every Turn/You parent, restores the anchor, and exposes one
-  final state before returning `true`.
-- `reconcileStaged(snapshot)` preserves that same observable contract while
-  allowing multi-card selection and Load 80 construction to yield under the
-  hidden staging owner. A strict one-card tail append bypasses staging: the
-  new card is settled off-hierarchy, then its cached card, nested-Turn,
-  section, and content height deltas are committed without traversing or
-  remeasuring retained cards. Reorder, removal, non-tail insertion, and any
-  coalesced retained-card geometry change continue through full validated
-  reconciliation.
+- `reconcile(snapshot)` applies a complete structural value through the item
+  model's precise signals, updates only bounded materialized editors, rebuilds
+  indexed geometry only when structure genuinely requires it, restores the
+  stable row/pixel anchor, and exposes one completed viewport state.
+- `beginThreadSelection(threadId)` immediately covers the outgoing message
+  viewport with the application background. If the identified selection is
+  still unresolved after 500 ms, the cover paints one centered 30 px neutral
+  gray ring with a 3 px stroke; its 33 ms animation timer exists only while
+  the ring is visible. A superseded thread identity cannot reveal or dismiss
+  the current cover.
+- `reconcileStaged(snapshot)` preserves that final-state contract for explicit
+  selection/rescan replacement. `prependHistoryPageStaged(snapshot)` applies
+  Load 80 as a same-thread ordered superset without reset or retained-row
+  movement. Only rich rows expected in the initial viewport and bounded
+  overscan are constructed and measured one at a time beneath the hidden
+  staging host; passive rows need no construction. The old complete surface or
+  stable loading cover remains visible until one final commit.
+- `applyCardPresentation(card)` is the ordinary exact-row path. An identical
+  value is a no-op. An offscreen update changes model data and cached/indexed
+  facts without constructing, laying out, or painting a QWidget. A visible
+  passive row invalidates only its row rectangle; a visible rich row applies
+  only to that editor and propagates only its genuine height delta.
+- `applyPromptMaterialization(value)` morphs one local-keyed row, transfers its
+  model ownership to the authoritative Item `NodeRef`, and then acknowledges
+  the separate prompt `NodeRef`. Prompt retirement cannot remove the row.
+- `applyRowChange(value)` resolves the projected neighbor keys against the
+  current bounded model and emits only the required insert, move, or structural
+  row update. Stable-key section boundaries and the extent tree are updated
+  only for the affected old/new Turn; later sections are neither shifted nor
+  rebuilt. Coalesced sibling changes are applied in canonical neighbor order.
+- `removeCardTarget(ref)` removes only the row currently indexed by that exact
+  Item `NodeRef`; unrelated and already-transferred prompt removals are no-ops.
+- `appendTailCard(tail)` is the ordinary structural fast
+  path after `NodeGraphUiAdapter::tailCard` validates canonical placement. It
+  emits one insert, performs an optional bounded prefix trim, preserves the
+  stable anchor or existing follow state, and never rebuilds model, section, or
+  height indexes. `false` keeps the exact NodeRef on the canonical-neighbor row
+  path; it does not request a snapshot diff.
+- `historyLimitForThread`, `requestNextHistoryPage`, and
+  `forgetThreadPresentation` own the requested/effective 80-row window and its
+  lifecycle beside that thread's anchor/follow state. Canonical counts are
+  inputs; these methods create no domain authority and issue no provider call.
+- `presentedThreadId()` identifies the complete model frame currently exposed
+  (or covered during replacement), never the merely selected graph target.
+- `conversationModel()` exposes the owned model for Qt selection,
+  accessibility, deterministic instrumentation, and exact action targeting;
+  callers must not treat it as graph authority.
+- `materializedCardCount()` reports the current bounded rich-widget count for
+  qualification; it does not count delegate-painted rows.
 - `setTrailingSpaceHeight(height)` represents only the composer's overlay
   growth below conversation content and preserves current scroll semantics.
 - `prepareForLocalPromptAdmission()` resumes following only when pause was
@@ -246,15 +395,23 @@ the widget transaction and after every graph guard has been released.
 
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
-| constructor | optional QWidget `parent` | Produces an empty following-mode view with one content owner. No cards exist. |
-| `setLoadMoreAction` | replacement `void()` callback | Called once per accepted button gesture; view neither changes history count nor calls provider itself. |
+| constructor | optional QWidget `parent` | Produces an empty following-mode item view. No historical card widgets exist. |
+| `setLoadMoreAction` | replacement `void()` callback | Called once per accepted button gesture after the view advances its local history window; the callback may project retained rows or request the provider. |
 | `setPromptMaterializedAction` | replacement `bool(NodeRef)` callback | Called after a successful local-to-authoritative visual transition. Exact token is moved to callback. False aborts only the remaining callbacks in this reconcile. |
 | `setPromptRecoveryAction` | replacement `void(NodeRef)` callback | Called only from explicit recovery gesture on the current matching card. |
-| `setEmptyMessage` | display `QString` value | Changes only empty-label text; current cards and `snapshot_` remain. Anchor is preserved. |
-| `setPresentationOptions` | complete local options | Reconciles retained `snapshot_` with force=true; no graph query. Existing user fold choices win over initial-fold defaults. |
+| `setPresentationCommittedAction` | replacement `void(threadId)` callback | Called after the exact selected staged frame is complete and visible. Superseded stages never call it. |
+| `setEmptyMessage` | display `QString` value | Changes only empty-label text; model rows remain. Anchor is preserved. |
+| `setPresentationOptions` | complete local options | Updates model presentation roles and visible/materialized rows without a graph query. Existing user fold choices win over initial-fold defaults. |
 | `presentationOptions` | returns value copy | Pure query. |
-| `reconcile` | complete snapshot const reference; returns changed bool | Pre: unique section/card stable keys and correct root keys. Post: complete target exposed atomically, cards parented, scroll policy applied, snapshot retained. False guarantees no presentation pass for identical input. |
-| `reconcileStaged` | owned complete snapshot | Same final-state contract as `reconcile`; multi-card construction remains hidden and sliced. A single append may commit from cached geometry only when it is the last card of the last retained Turn, or the one root of a new last Turn, and no retained card also changed geometry. |
+| `reconcile` | complete snapshot const reference; returns changed bool | Explicit immediate authority replacement used by direct consumers/tests. Pre: unique section/card stable keys and correct root keys. Post: model order, indexed geometry, bounded editors, delegate surface, and scroll policy match one complete target. False means no effective model change. |
+| `beginThreadSelection` | exact selected thread ID | Immediately covers only the message viewport and starts one 500 ms visual-delay timer. Repeating the same pending identity is a no-op; a new identity cancels superseded staging. |
+| `reconcileStaged` | owned complete snapshot | Explicit different-thread or rescan replacement; only initially visible rich editors are prepared beneath the hidden host in bounded event-loop passes before one atomic reveal. |
+| `prependHistoryPageStaged` | owned same-thread ordered superset | Inserts missing history ranges and patches changed retained rows without a model reset or movement, then reveals one complete staged frame. |
+| `applyCardPresentation` | one exact `VisibleCardData`; returns optional local impact | Wrong thread/key/incompatible kind returns `nullopt`; identical data returns `None`; otherwise only the resolved row, its genuine section-edge geometry, and its visible editor/delegate rectangle may change. |
+| `appendTailCard` | one validated `ConversationTailCard`; returns bool | Exact canonical tail updates the view-owned history window, inserts directly, and optionally trims the prefix without retained-history traversal. Wrong thread, duplicate/invalid placement, or active staging returns false so the same NodeRef proceeds through exact neighbor placement. |
+| `historyLimitForThread`, `requestNextHistoryPage` | thread ID plus current canonical history facts | Update only per-thread presentation-window counters and return the effective projection limit/provider-request decision. |
+| `forgetThreadPresentation`, `presentedThreadId` | retired thread ID / pure current-frame query | Releases per-thread window/anchor state or reports the complete frame currently owned by the model. |
+| `conversationModel`, `materializedCardCount` | borrowed model pointer / integer count | Inspection only. The model is non-authoritative and the widget count remains viewport proportional. |
 | `setTrailingSpaceHeight` | nonnegative effective pixels | Post: content extent/anchor reflects composer overlay without changing viewport ownership. Repeated value is a no-op. |
 | `prepareForLocalPromptAdmission` | no parameters | May change pause caused only by composer growth; never overrides explicit user pause. |
 | `forwardWheelEvent` | live `QWheelEvent*`; returns consumed bool | Event is not owned. Nested eligible control must have declined it. |
@@ -264,6 +421,9 @@ the widget transaction and after every graph guard has been released.
 
 Cards remain the established specialized renderers. They do not read the
 graph. Their `VisibleCardData` is the entire canonical presentation input.
+`ConversationPresentation` supplies only pure status, plan, agent-metadata,
+file-change, and generic-activity display values shared with the passive
+delegate. It owns no renderer selection, geometry, interaction, or state.
 
 - `ConversationCard(data, parent, commandInitiallyCollapsed,
   imageInitiallyCollapsed, fileChangesInitiallyCollapsed)` creates exactly
@@ -282,12 +442,12 @@ graph. Their `VisibleCardData` is the entire canonical presentation input.
 - `isCollapsed()` and `setCollapsed(value)` read/write user-owned fold state.
 - `setAuthoritativeTurnActive(value)` changes only the owner card's canonical
   active emphasis and returns whether paint state changed.
-- `setNestedCards(cards)` establishes the owning You card as QObject/layout
-  parent for all represented child cards in canonical order.
 - `setNestedPresentation(value)` applies the established nested visual style
-  when a card is not itself the Turn owner.
-- `setNestedItems(items)` is the generalized form used by the existing nested
-  layout; it does not confer application ownership.
+  when a card is not itself the Turn root. The item view paints the continuous
+  Turn/You surface and positions nested rows independently, so a visible card
+  never owns historical sibling rows.
+- A card never owns nested sibling widgets. The virtualized view owns each
+  visible row directly and paints the continuous Turn surface independently.
 - `setViewportVisible(value)` pauses purely local visual feedback when a card
   cannot paint; it never changes canonical status.
 - `commandOutputScrollState()` and `restoreCommandOutputScrollState(state)`
@@ -306,15 +466,21 @@ internal image dialog, callback registry, or file-opening cache is retained.
 whether effective content/geometry changed. `CommandOutputView` alone owns its
 inner wheel/follow state; restoring it must not move the outer conversation.
 
+`presentation::userMessageMarkdown` is a presentation-only projection. It
+turns soft newlines in authored user text into visible Markdown line breaks
+while leaving blank lines, existing hard breaks, indented code, and fenced code
+intact. `MarkdownTextView::markdownSource()` and card copy continue to expose
+the original canonical source. Normal and steering user messages use this same
+path in both rich widgets and passive delegate documents.
+
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
 | `data` | returns const DTO reference | Reference is valid until next successful apply or destruction; caller must not retain it across reconciliation. |
 | `canApply` | candidate DTO; returns bool | Pure compatibility check; no QWidget mutation. |
 | `apply` | complete candidate DTO; returns visible-change bool | Requires `canApply`; post: `data()` equals candidate and specialized controls show its values. |
 | `applyPresentation` | complete candidate DTO; returns impact enum | Same postcondition as `apply`; impact is local and must not be promoted blindly to pane/window invalidation. |
-| collapse methods | bool setter / bool query | Fold state is user-owned and geometry changes remain inside owning Turn section. |
+| collapse methods | bool setter / bool query | Fold state is user-owned; the view updates only the affected indexed row/section range and restores the exact anchor. |
 | `setAuthoritativeTurnActive` | bool; returns paint-change bool | Valid primarily for the root You card. No geometry change for border-only state. |
-| nested-parent methods | ordered child QWidget/card pointers | Pointers must be live Qt-main objects. Post: correct QObject/layout parent and canonical order; no child is temporarily unmanaged when transaction becomes visible. |
 | viewport visibility | bool | Affects only local timers/painting, not data or identity. |
 | command output state methods | optional state / state const reference | Preserve inner scrollbar value/follow mode without modifying outer anchor. |
 
@@ -449,6 +615,10 @@ This class remains the sole geometry and cross-pane event owner.
   restore controls can mirror it.
 - `routeScrollEvent(watched, event)` preserves nested-scroll precedence and
   returns `true` only when the conversation consumed the gesture.
+- Splitter-handle press/release events bracket
+  `ConversationView::beginInteractiveResize()` and
+  `endInteractiveResize()`: live width changes remain immediate, rich-card
+  reflow is frame-coalesced, and release performs one exact settlement.
 
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
@@ -460,6 +630,7 @@ This class remains the sole geometry and cross-pane event owner.
 | pane visibility methods | bool setters / bool getters | Preserve splitter sizes and report effective visibility once through callback. |
 | `setPaneVisibilityAction` | replacement callback | Does not emit until a visibility transition. |
 | `routeScrollEvent` | watched QObject and live QEvent; returns bool | Does not take ownership. Routes only supported wheel gestures and prevents recursion. |
+| splitter interaction | native handle press/release | Brackets one bounded live-resize burst; a lost native release is settled only after the left mouse button is no longer held. |
 
 ### `ShellWidget`
 
@@ -476,9 +647,12 @@ implementation and creates all visible child panes on Qt-main. Destruction
 removes application event filters/notifiers before child teardown. Its
 `eventFilter(QObject*, QEvent*)` returns the middle region's decision for
 eligible wheel events and otherwise preserves Qt's normal dispatch. Graph
-notifications are frame-coalesced only after worker reduction; removals are
-handled synchronously. Shell never waits for graph access and never clears
-user input merely because a wake write failed after queue admission.
+notifications are frame-coalesced only after worker reduction. An ordered
+queue projects at most eight distinct ordinary conversation rows from latest
+NodeGraph state per 16 ms GUI pass; any remainder schedules exactly one later
+nonzero-delay pass, while authoritative structural changes and removals retain
+their exact handling. Shell never waits for graph access and never clears user
+input merely because a wake write failed after queue admission.
 
 ### DTO identity and value types
 
@@ -515,10 +689,12 @@ fields belong in adapter control metadata instead.
 
 Each `ThreadListRow` carries canonical ID, display title fallback, cwd, status,
 created/updated/recency values, effective last activity, pending count,
-archive state, and ordered children. Effective last activity is the maximum of
-provider activity, update/recency, and admitted local prompt activity. The
-widget, not the adapter, owns sorting, expansion, optimistic animation,
-selection visuals, context menus, and row QWidget identity.
+archive state, pending-prompt acknowledgement state/deadline, and ordered
+children. Effective last activity is the maximum of provider activity,
+update/recency, and admitted local prompt activity. The adapter folds confirmed
+and optimistic turn order into effective `recencyAt`; the widget owns the
+Alphanumeric, Created, and Recent comparators, expansion, pending-prompt
+animation, selection visuals, context menus, and row QWidget identity.
 
 ### Conversation
 
@@ -539,14 +715,15 @@ it knows belongs to an unfinished authoritative hydration.
 - `activeTurnId` is canonical active-turn identity. A locally admitted pending
   new Turn is visually active until provider acknowledgement.
 
-All cards for the selected 80-item window (and each explicitly requested next
-80) are created and laid out while updates are suppressed for the shortest
-existing reconciliation transaction. They are then exposed in one final
-frame. Cards are retained while they remain in the selected window; scrolling
-offscreen does not destroy and recreate them. New incoming cards for the
-selected thread are materialized in the same transaction even when the user is
-paused above them, and anchor restoration prevents vertical or horizontal
-movement.
+All stable card identities for the selected 80-item window (and each explicitly
+requested next 80) become rows in the thin Qt model. Passive rows are measured
+and painted by the bounded delegate without QWidget construction. Only rich
+rows in the initial viewport plus overscan are created and laid out beneath the
+hidden staging host before one final frame is exposed. Scrolling may release an
+offscreen rich editor after saving stable-keyed local interaction state; no
+placeholder remains. A new selected-thread row is indexed even while the user
+is paused above it, but offscreen insertion performs no QWidget work and exact
+anchor restoration prevents vertical or horizontal movement.
 
 `VisibleCardData::key` is visual identity. Canonical items use thread/turn/item
 identity; a prompt that began locally keeps its process-wide `LocalPromptKey`
@@ -623,10 +800,14 @@ derived from current graph state; they never become application authority.
 1. Detach removals synchronously.
 2. Route only identities relevant to ThreadPane, selected conversation,
    visible Inspector behavior, and effective chrome.
-3. Union streaming identities for one display frame.
-4. Project the latest current DTO for each affected surface.
-5. Let the old widget compare stable identities and values. Repeating the same
-   DTO must perform zero presentation work.
+3. Union streaming identities in arrival order for one display frame.
+4. Project latest current DTOs for no more than eight distinct ordinary
+   conversation rows in that pass; retain any remainder for one later 16 ms
+   pass and stop scheduling as soon as the queue is empty.
+5. Project each other affected surface only when its explicit dependency was
+   addressed.
+6. Let the receiving view compare stable identities and values. Repeating the
+   same DTO must perform zero presentation work.
 
 ### Load 80 more activities
 
@@ -635,20 +816,24 @@ derived from current graph state; they never become application authority.
    provider call.
 3. Otherwise send one exact `LoadHistory` action only when the provider reports
    more history.
-4. Preserve the old anchor while the expanded complete snapshot is reconciled;
-   never expose reserved empty space followed by delayed cards.
+4. Preserve the stable row and exact pixel anchor while the expanded complete
+   snapshot is reconciled. If the first visible Turn root was pinned solely to
+   own the old bounded suffix, anchor the first retained activity instead,
+   because newly revealed siblings are inserted after that owner.
+5. Never expose reserved empty space followed by delayed cards.
 
 ### Admit and acknowledge a prompt
 
 1. Capture the visibly selected exact thread and active Turn before admission.
 2. Attempt one typed action. On rejection return `false` and retain the draft.
-3. On admission prepare the old view's local-prompt anchor behavior and clear
+3. On admission prepare the item view's local-prompt anchor behavior and clear
    the draft once.
 4. Render the pending normal or steering You card under its canonical owner,
    with pending status and delayed feedback animation.
 5. Unrelated items may arrive without changing that ownership or anchor.
-6. When the authoritative user item arrives, keep the visual key/widget and
-   send one prompt-materialized acknowledgement for the exact prompt node.
+6. When the authoritative user item arrives, keep the stable visual key and
+   local interaction state, update only that row/editor, and send one
+   prompt-materialized acknowledgement for the exact prompt node.
 7. Stop pending feedback on the correlated successful request acknowledgement
    or definitive failure. Keep the settled optimistic card until authoritative
    item materialization; never dual-send or infer acknowledgement from matching
@@ -698,69 +883,40 @@ uncontrolled connection.
 
 No remote or GitHub operation is used to maintain this document.
 
-### Final smoothness qualification (2026-09-05)
+### Qt item-view qualification (2026-09-10)
 
-The final correction was exercised through the complete Debug application on
-Xvfb `:98`, connected to the workspace-isolated bridge and app-server that
-remained alive across the scenarios. The retained proof artifacts are under
-`../../build/codexui-adapter-qualification/capture/final-smoothness/`:
+The final `QAbstractItemView` implementation was exercised through the complete
+Debug application on isolated Xvfb display `:99`, connected to one
+workspace-local `codex-bridge` and app-server that remained alive across every
+scenario. Obsolete retained-widget recordings were removed before replacement.
+Current movies and contact sheets are under
+`../../build/codexui-adapter-qualification/capture/qt-virtualized-final/`.
 
-- `atomic-thread-selection.mp4` switches from a populated control thread to a
-  longer mixed thread. The old surface remains complete, a single stable
-  loading cover is shown while rich cards are staged, and the incoming thread
-  appears in one committed frame. No card-by-card reveal or reserved blank
-  extent is exposed.
-- `sustained-command-streaming.mp4` records normal prompt admission and an
-  1,800-line command with 10 ms output intervals through completion. The exact
-  command card updates in place with its running border. Of 1,680 captured
-  frames, 1,204 contain conversation-region motion. Interior pixel-difference
-  analysis found no visible motion in ThreadPane, Inspector, or shell chrome;
-  their maximum mean luminance deltas were respectively 0.021, 0.005, and
-  0.043.
-- `steering-while-scrolled-up.mp4` records a second 1,800-line command, pauses
-  the outer conversation above the active tail, and admits steering. The
-  steering You card remains under the same Turn and resolves with the final
-  answer below the viewport. Frames sampled before and after steering have the
-  same visible card positions and horizontal coordinates; the full-region
-  normalized pixel difference is approximately `1.0e-5`, attributable to
-  capture encoding rather than displacement.
+The recordings prove atomic selection of a copied 10,023-event thread; exact
+paused anchoring while Load 80 inserts earlier rows, including a Turn owner
+pinned outside the old activity suffix; repeated heterogeneous history sweeps;
+outer and nested scrolling during a 1,200-line command;
+running-to-completed command transition; normal prompt and steering admission;
+authoritative steering acknowledgement below a paused viewport; delegate
+promotion, selection/copy, fold/unfold and visible focus; command approval
+rejection; and Plan-mode user-input Review, selection, submission, and final
+acknowledgement. The temporary copied session, state database, configuration,
+second UI, and paging bridge were deleted after the paging recording, and the
+rejected approval probe created no file.
 
-The deterministic 81-card staging test additionally verifies repeated event
-loop heartbeats during hidden construction, no visible partial card tree, a
-live delta applied without restarting the stage, one final reveal, and an
-unchanged old surface during Load 80. Three consecutive normal offscreen runs
-measured the indivisible final geometry commit at 81, 82, and 82 ms, below the
-existing 100 ms selection/load boundary. This bounded delay applies only to an
-explicit thread selection or Load 80 operation; ordinary card deltas use the
-exact retained-card path and do not traverse the loaded history.
+During an active-only 60-fps interval with continuous outer scrolling, mean
+decoded-frame luminance deltas were 2.211289 in Conversation, 0.000012 in
+ThreadPane, 0.000003 in Inspector, 0 in the shell header, and 0.000689 in the
+settings/composer region. The small non-conversation values are encoding/cursor
+noise; no unrelated pane content moves. Exact identity, anchor, widget-count,
+offscreen, focus, accessibility, and event-loop limits remain asserted by the
+deterministic tests rather than inferred from lossy video.
 
-The later append/completion correction is qualified separately under
-`../../build/codexui-adapter-qualification/capture/scroll-lag-live/`.
-`final-two-pass-all-card-live.mp4` records the complete application at 60 fps
-with the then-current four presentation controls checked. It repeatedly sweeps the outer
-conversation viewport across the Turn/You card, reasoning/update content,
-Agent activity, expanded command output, and final cards while a new command
-arrives, streams, and completes. The exact prompt/command/completion interval
-starts 7.8 seconds into the movie; conversation-crop freeze detection finds no
-static interval of 50 ms or longer during the following 24 seconds.
-
-One arriving card is now constructed under the hidden staging owner, yields
-to the Qt event loop, and only then commits its cached geometry. The focused
-80-card Debug benchmark measures card construction phases at approximately
-0.6--2.8 ms and cached commits at approximately 2.7--6.4 ms for the ordinary
-card kinds exercised by the live turn. The File Changes card's first local
-style/layout settlement remains a separate approximately 10--15 ms commit;
-it performs no retained-history work. The running-to-completed regression
-verifies unchanged card height, scroll range, and paused anchor with zero
-conversation geometry passes, including a command first inserted through the
-cached append path. The recording cannot exclude a shorter single-frame hitch,
-and the user still perceives one occasionally; this residual observation is
-retained rather than reported as proven zero-lag behavior.
-
-The final Debug suite passes 17/17 native tests and the WebUI compatibility
-suite passes 83/83. ASan/UBSan executes every suite without a sanitizer
-diagnostic; 16/17 pass their functional criteria, while the shell suite's same
-strict 100 ms wall-clock assertion measures 163 ms offscreen and 189 ms on
-Xvfb under sanitizer instrumentation. The unsanitized criterion and real-app
-movie pass; the sanitizer-only timing overrun is not used to relax the product
-limit.
+The persistent Debug and integrated ASan/UBSan builds each pass all 19 native
+suites; ASan/UBSan reports no finding. The supported independent NodeGraph,
+typed-queue, and worker TSan boundary passes 5/5 without a race report. WebUI is
+unchanged and its release gate passes 85/85 tests, performance profiling,
+production bundling, Chromium responsive/focus qualification, and relocatable
+artifact verification. Full ownership, delegate/editor decisions, benchmark
+tables, movie names, and remaining limitations are recorded in
+`qt-virtualized-conversation-view.md`.

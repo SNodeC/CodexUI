@@ -276,23 +276,30 @@ and menu state remain authoritative for UX mechanics.
 
 Existing native widgets and styling remain the renderer. Conversation history
 remains in NodeGraph, while the adapter supplies the established view with one
-bounded 80-activity DTO plus any pinned owning prompts. Selection and Load 80
-materialize the complete supplied window during the old view's shortest
-update-suppressed reconciliation and expose only its final parented layout.
-Cards are retained when scrolling offscreen; scrolling performs no destruction
-or late rematerialization. New selected-thread cards are materialized in the
-same atomic reconciliation even while the user is paused above them. Stable
-keys, retained widget-local state, and anchor restoration preserve scroll and
-horizontal position. A strict append to the selected history's last Turn (or
-one new last Turn root) settles only the new card and commits exact cached
-height deltas through its Turn, section, and content extent. It does not ask Qt
-to traverse retained card layouts; all non-tail or otherwise structural cases
-remain on the complete validated reconciliation path. Thread rows follow the
-expanded hierarchy, and Inspector
+bounded 80-activity DTO plus any pinned owning prompts. The native conversation
+is a variable-height `QAbstractItemView` backed by a thin
+`ConversationItemModel` plus presentation-only row-order and variable-height
+order-statistic indexes. Passive rows are delegate
+painted; real `ConversationCard` widgets exist only for rich rows in the
+viewport plus bounded overscan. Selection and Load 80 stage only initially
+visible rich editors beneath a hidden owner and expose one complete final
+frame. Stable keys, row-local interaction records, stable-key Turn boundaries,
+and exact row/pixel anchors
+preserve both scroll axes across eviction and rematerialization. Ordinary graph
+deltas resolve directly to one model index; offscreen changes construct and
+paint no QWidget. An ordinary canonical last-item delta is verified under one
+short graph read and appended with one Qt insert signal; stable row nodes and
+logarithmic extent paths permit a history prefix or middle row to change
+without rebuilding the retained conversation. Non-tail or ambiguous structure uses the
+exact row placement/removal APIs; only authority replacement, paging, and an
+explicit rescan use a complete projection. The view owns per-thread history
+windows and publishes one post-stage completion boundary so Shell reveals
+matching chrome and Inspector data only with the complete conversation frame.
+Thread rows follow the expanded hierarchy, and Inspector
 constructs rows only for the active tab when its effective snapshot changes.
 There is no permanent parallel NodeId-to-widget registry. Focus, animation,
 folding, filters, drafts, editor mechanics, and scroll-following remain
-genuinely local QWidget state.
+genuinely local Qt presentation state.
 
 The Inspector keeps its useful State view and a bounded chronological Protocol
 view. Protocol diagnostics retain direction, sequence/time, semantic
@@ -357,8 +364,12 @@ UTF-8-aligned 192 KiB newest tail after crossing the 256 KiB threshold and
 carry exact omitted-byte metadata that both rendering and copy disclose.
 Deleted threads and provider resets reparent affected local prompts to explicit
 recovery state; reconnection never resends a non-idempotent operation.
-Conversation widgets are materialized for the bounded selected history window
-in one invisible old-view transaction and remain retained while scrolling.
+Conversation row identities remain indexed for the bounded selected history
+window, while QWidget/editor ownership is limited to visible rich interaction
+plus bounded overscan. Qt coalesces ordinary selected-conversation identities
+for a frame and projects at most eight latest row values per 16 ms pass; it
+retains ordered remainder identities without another authority and schedules
+nothing once that queue drains. Structural retirement remains synchronous.
 
 Qualification covers the standalone target/tests, exact source-derived
 inventory, graph atomicity, non-blocking read contention, removal lifetime,
@@ -367,6 +378,15 @@ payloads, worker ownership, scoped identity collisions, realtime append/final
 semantics, and bounded visible-only rendering. It also includes a Qt heartbeat
 while 4,096 distinct inbound items plus 4,096 streaming deltas saturate and
 drain the notification queue.
+The shell integration suite additionally queues 24 distinct current-row
+changes before presentation, proves the eight-row pass ceiling, observes at
+least three GUI passes and exact final values, and verifies that the drained
+queue produces no idle commit loop or ThreadPane/Inspector/chrome work.
+Two different structural transactions queued before one presentation commit
+retain their exact NodeRef union and reach final canonical neighbor order with
+only insert/move/data signals. Same-thread model reconciliation is absent;
+selection/rescan is an explicit replacement and Load 80 is an explicit staged
+ordered-superset insertion.
 
 The direct CodexBridge integration test exercises every supported UI wire
 family rather than only counting method names: hydrate/reload, history paging,
@@ -384,14 +404,13 @@ requested 80-item (or explicitly expanded) conversation window. Continuous
 unrelated graph revisions do not restart selected-pane work, identical DTOs are
 presentation no-ops, and contention retries use a bounded nonzero delay.
 
-Qt smoothness qualification uses the established widgets as one retained,
-virtualized selected-thread surface. Multi-card selection and Load 80 create
-rich cards one at a time under a hidden staging parent, then reparent the
-already-current widgets and commit final geometry once. The final commit does
-not reapply presentation to staged card subtrees. Ordinary graph changes route
-to the exact card, thread row, visible Inspector dependency, or effective
-chrome value; they do not treat a graph or Thread revision as repaint authority.
-The 81-card final commit measured 81--82 ms in three normal Debug runs. A
+The retained-widget qualification at the `f22f652` branch point used one
+selected-thread widget surface. Multi-card selection and Load 80 created cards
+one at a time under a hidden staging parent, then committed final geometry once.
+Ordinary graph changes already routed to the exact card, thread row, visible
+Inspector dependency, or effective chrome value; they did not treat a graph or
+Thread revision as repaint authority. The 81-card retained-widget commit
+measured 81--82 ms in three normal Debug runs. A
 28-second, 60-fps full-application capture of a 1,800-line command showed
 sustained in-place conversation motion while the interiors of ThreadPane,
 Inspector, and shell chrome remained visually unchanged. A separate steering
@@ -439,3 +458,28 @@ loopback listener (`EPERM`), so those two listener-dependent commands cannot be
 re-executed inside this final sandbox. Their most recent complete passing runs
 remain the 17/17 native and full browser/Xvfb evidence recorded above; neither
 listener path nor WebUI source changed in the post-polish commits.
+
+### Qt item-view requalification (2026-09-10)
+
+The retained-card surface has now been replaced without changing the graph,
+worker, bridge, mailbox, eventfd, or two-thread ownership boundaries. The final
+view uses stable `NodeRef`-backed model rows, precise Qt insert/remove/move/data
+signals, a logarithmic variable-height index, passive delegates, and only
+viewport/overscan rich editors. The complete API, behavior matrix, benchmark,
+and recording inventory are in `qt-virtualized-conversation-view.md`.
+
+The current persistent Debug build passes 19/19 native suites. Integrated
+ASan/UBSan also passes 19/19 without a diagnostic, and the supported independent
+NodeGraph/queue/worker TSan boundary passes 5/5 without a race report. WebUI is
+unchanged and its full release gate passes 85/85 tests, the profile, production
+build, Chromium qualification, and artifact verification.
+
+At 320/1,280/10,000 passive rows, the final Debug benchmark retains exactly
+eight descendant QWidgets and zero `ConversationCard` instances. Median initial
+reveal is 11/33/259 ms and the 240-position sweep is 313.8/355.6/448.4 ms. One
+bounded tail append remains 0.45/0.51/0.48 ms with zero model-index or
+section-range rebuilds. The
+isolated full application was recorded through atomic long-thread selection,
+Load 80, manual outer and nested scrolling during long commands, paused
+steering, selection/copy, folds/focus, approval rejection, and Plan-mode input
+submission. No remote operation was performed.

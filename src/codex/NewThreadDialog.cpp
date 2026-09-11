@@ -45,19 +45,33 @@ QWidget *field(QString caption, QWidget *control) {
 } // namespace
 
 NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
+    : NewThreadDialog(
+          NewThreadDraft{std::move(initialWorkspace), {}, {}, {}, false},
+          Purpose::Create, parent) {}
+
+NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
+                                 QWidget *parent)
     : QDialog(parent) {
   setModal(true);
-  setWindowTitle(QStringLiteral("New thread"));
+  const bool forFork = purpose == Purpose::Fork;
+  const QString heading = forFork ? QStringLiteral("Fork with options")
+                                  : QStringLiteral("New thread");
+  setWindowTitle(heading);
   setMinimumSize(540, 480);
 
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(24, 22, 24, 20);
   root->setSpacing(14);
-  root->addWidget(label(QStringLiteral("New thread"), "heading"));
-  root->addWidget(
-      label(QStringLiteral("Set the thread context. Model, access, reasoning, "
-                           "and style remain in the upcoming-turn controls."),
-            "muted"));
+  root->addWidget(label(heading, "heading"));
+  root->addWidget(label(
+      forFork
+          ? QStringLiteral("Adjust the copied thread context. Model, access, "
+                           "reasoning, and style remain in the upcoming-turn "
+                           "controls.")
+          : QStringLiteral(
+                "Set the thread context. Model, access, reasoning, and "
+                "style remain in the upcoming-turn controls."),
+      "muted"));
 
   auto *scroll = new QScrollArea;
   scroll->setWidgetResizable(true);
@@ -68,7 +82,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
   form->setContentsMargins(0, 2, 8, 2);
   form->setSpacing(16);
 
-  workspace = new QLineEdit(std::move(initialWorkspace));
+  workspace = new QLineEdit(std::move(initialDraft.workspace));
   workspace->setPlaceholderText(QDir::homePath());
   auto *workspaceRow = new QWidget;
   auto *workspaceLayout = new QHBoxLayout(workspaceRow);
@@ -82,6 +96,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
 
   name = new QLineEdit;
   name->setPlaceholderText(QStringLiteral("Optional thread name"));
+  name->setText(std::move(initialDraft.name));
   form->addWidget(field(QStringLiteral("Name"), name));
 
   baseInstructions = new QPlainTextEdit;
@@ -89,6 +104,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
       QStringLiteral("Optional base instructions"));
   baseInstructions->setMaximumHeight(110);
   baseInstructions->setProperty("kind", "dialogEditor");
+  baseInstructions->setPlainText(std::move(initialDraft.baseInstructions));
   form->addWidget(field(QStringLiteral("Base instructions"), baseInstructions));
 
   developerInstructions = new QPlainTextEdit;
@@ -96,6 +112,8 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
       QStringLiteral("Optional developer instructions"));
   developerInstructions->setMaximumHeight(110);
   developerInstructions->setProperty("kind", "dialogEditor");
+  developerInstructions->setPlainText(
+      std::move(initialDraft.developerInstructions));
   form->addWidget(
       field(QStringLiteral("Developer instructions"), developerInstructions));
 
@@ -104,6 +122,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
   auto *ephemeralLayout = new QVBoxLayout(ephemeralSurface);
   ephemeralLayout->setContentsMargins(12, 10, 12, 10);
   ephemeral = new QCheckBox(QStringLiteral("Temporary thread"));
+  ephemeral->setChecked(initialDraft.ephemeral);
   ephemeralLayout->addWidget(ephemeral);
   ephemeralLayout->addWidget(
       label(QStringLiteral(

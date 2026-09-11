@@ -14,6 +14,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -162,6 +163,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   root->setSpacing(0);
 
   splitter = new QSplitter(Qt::Horizontal);
+  splitter->setObjectName(QStringLiteral("workspaceSplitter"));
   splitter->setChildrenCollapsible(false);
   splitter->setHandleWidth(8);
 
@@ -339,6 +341,8 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
 
   inspectorPane = new InspectorPane;
   splitter->addWidget(inspectorPane);
+  splitter->handle(1)->installEventFilter(this);
+  splitter->handle(2)->installEventFilter(this);
   splitter->setStretchFactor(0, 0);
   splitter->setStretchFactor(1, 1);
   splitter->setStretchFactor(2, 0);
@@ -399,6 +403,22 @@ InspectorPane &MiddleRegionWidget::inspector() const noexcept {
 
 QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
   return splitter;
+}
+
+bool MiddleRegionWidget::eventFilter(QObject *watched, QEvent *event) {
+  const bool splitterHandle =
+      watched == splitter->handle(1) || watched == splitter->handle(2);
+  if (splitterHandle && event) {
+    if (event->type() == QEvent::MouseButtonPress &&
+        static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
+      conversationView->beginInteractiveResize();
+    } else if (event->type() == QEvent::MouseButtonRelease ||
+               event->type() == QEvent::UngrabMouse ||
+               event->type() == QEvent::Hide) {
+      conversationView->endInteractiveResize();
+    }
+  }
+  return QWidget::eventFilter(watched, event);
 }
 
 void MiddleRegionWidget::setThreadHeading(QString title, QString metadata,
@@ -533,6 +553,11 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor);
             nested && nested != conversationView) {
+          if (auto *outputView = dynamic_cast<CommandOutputView *>(nested)) {
+            if (outputView->retainsWheelGesture(wheel))
+              return false;
+            break;
+          }
           if (auto *commandView =
                   dynamic_cast<ContentSizedTextView *>(nested)) {
             if (commandView->retainsWheelGesture(wheel))
@@ -551,6 +576,11 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor && ancestor != conversationRegion;
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor)) {
+          if (auto *outputView = dynamic_cast<CommandOutputView *>(nested)) {
+            if (outputView->retainsWheelGesture(wheel))
+              return false;
+            break;
+          }
           if (auto *commandView =
                   dynamic_cast<ContentSizedTextView *>(nested)) {
             if (commandView->retainsWheelGesture(wheel))

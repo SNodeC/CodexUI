@@ -15,8 +15,8 @@ namespace codexui::codex::ui {
 
 enum class InspectorProjection { All, Plan, Agents, Changes, Requests, State };
 
-// Toolkit-neutral inputs for the concrete thread-list renderer. Expansion,
-// sorting, and optimistic rows deliberately remain local to that renderer.
+// Toolkit-neutral inputs for the concrete thread-list renderer. Expansion
+// and optimistic rows deliberately remain local to that renderer.
 struct ThreadListRow {
   std::string id;
   std::string title;
@@ -26,7 +26,9 @@ struct ThreadListRow {
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;
   std::optional<std::int64_t> lastActivityAt;
+  std::optional<std::int64_t> pendingPromptAdmittedAtMs;
   std::size_t pending = 0;
+  bool awaitingPromptAcknowledgement = false;
   bool archived = false;
   std::vector<ThreadListRow> children;
 

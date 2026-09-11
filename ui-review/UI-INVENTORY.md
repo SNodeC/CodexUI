@@ -96,6 +96,7 @@ scroll state, splitter sizes, tab selection, focus, and other widget mechanics.
 Pending prompts are graph nodes and per-thread operation ordering belongs to
 worker logic, not to a second Qt model. The shared `NodeGraph` is the sole
 current native store for protocol-derived domains; local interaction values do
-not replace AISuite or app-server domain authority. Materialized rows and cards
-associate through each node's optional opaque Qt attachment rather than a
-permanent NodeId-to-widget registry.
+not replace AISuite or app-server domain authority. Conversation rows carry
+stable opaque `NodeRef` action identity through the thin Qt item model;
+viewport/overscan rich editors are keyed to those rows without a permanent
+NodeId-to-widget registry.

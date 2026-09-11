@@ -1885,6 +1885,7 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
   NodeRef local;
+  NodeRef root;
   NodeRef intervening;
   {
     auto write = graph.write();
@@ -1894,12 +1895,13 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
         scopedTurnNodeId("steering-thread", "steering-turn"));
     write.setField(turn, "protocolId", Value("steering-turn"));
     write.setField(turn, "protocolThreadId", Value("steering-thread"));
-    NodeRef root = write.upsert(
+    root = write.upsert(
         scopedItemNodeId(turn->id(), "opening-prompt"));
     write.setField(root, "protocolId", Value("opening-prompt"));
     write.setField(root, "type", Value("userMessage"));
     local = write.upsert({NodeKind::Item, "local-steering"});
     write.setField(local, "type", Value("localPrompt"));
+    write.setField(local, "local", Value(true));
     write.setField(local, "submissionId", Value(std::uint64_t{77}));
     write.setField(local, "clientUserMessageId", Value("steering-client"));
     write.setField(local, "startsTurn", Value(false));
@@ -1948,6 +1950,90 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
               authoritativePosition < interveningPosition,
           "a correlated steering item retains the submitted local slot and "
           "its stable visual identity ahead of later activity");
+  read.reset();
+
+  Value::Array replacementItems{
+      Value(Value::Object{{"id", Value("opening-prompt")},
+                          {"type", Value("userMessage")}}),
+      Value(Value::Object{{"id", Value("intervening-activity")},
+                          {"type", Value("agentMessage")}}),
+      Value(Value::Object{{"id", Value("replacement-activity")},
+                          {"type", Value("agentMessage")}}),
+      Value(Value::Object{{"id", Value("provider-steering")},
+                          {"type", Value("userMessage")},
+                          {"clientId", Value("steering-client")},
+                          {"text", Value("Steer here")}})};
+  Value::Object replacementTurn{
+      {"id", Value("steering-turn")},
+      {"items", Value(std::move(replacementItems))}};
+  Value::Object replacementThread{
+      {"id", Value("steering-thread")},
+      {"turns", Value(Value::Array{Value(std::move(replacementTurn))})}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read",
+       ProtocolRequestId("steering-replacement"),
+       Value::Object{{"thread", Value(std::move(replacementThread))}}}));
+
+  NodeRef replacementActivity;
+  {
+    read = graph.tryRead();
+    const NodeRef replacementTurn =
+        findTurn(*read, "steering-thread", "steering-turn");
+    replacementActivity =
+        findItem(*read, "steering-thread", "steering-turn",
+                 "replacement-activity");
+    const auto replacementOrder = read->children(replacementTurn);
+    require(replacementOrder ==
+                std::vector<NodeRef>{root, local, authoritative, intervening,
+                                     replacementActivity},
+            "a full provider turn replacement cannot move a steering prompt "
+            "or its authoritative identity behind later activity");
+  }
+  read.reset();
+
+  {
+    auto write = graph.write();
+    write.remove(local);
+    static_cast<void>(write.finish());
+  }
+  Value::Array retiredReplacementItems{
+      Value(Value::Object{{"id", Value("opening-prompt")},
+                          {"type", Value("userMessage")}}),
+      Value(Value::Object{{"id", Value("intervening-activity")},
+                          {"type", Value("agentMessage")}}),
+      Value(Value::Object{{"id", Value("replacement-activity")},
+                          {"type", Value("agentMessage")}}),
+      Value(Value::Object{{"id", Value("post-retirement-activity")},
+                          {"type", Value("agentMessage")}}),
+      Value(Value::Object{{"id", Value("provider-steering")},
+                          {"type", Value("userMessage")},
+                          {"text", Value("Steer here")}})};
+  Value::Object retiredReplacementTurn{
+      {"id", Value("steering-turn")},
+      {"items", Value(std::move(retiredReplacementItems))}};
+  Value::Object retiredReplacementThread{
+      {"id", Value("steering-thread")},
+      {"turns",
+       Value(Value::Array{Value(std::move(retiredReplacementTurn))})}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read",
+       ProtocolRequestId("retired-steering-replacement"),
+       Value::Object{
+           {"thread", Value(std::move(retiredReplacementThread))}}}));
+  {
+    read = graph.tryRead();
+    const NodeRef replacementTurn =
+        findTurn(*read, "steering-thread", "steering-turn");
+    const NodeRef postRetirement =
+        findItem(*read, "steering-thread", "steering-turn",
+                 "post-retirement-activity");
+    const auto replacementOrder = read->children(replacementTurn);
+    require(replacementOrder ==
+                std::vector<NodeRef>{root, authoritative, intervening,
+                                     replacementActivity, postRetirement},
+            "retiring the local prompt cannot release its authoritative You "
+            "card to a later provider-arrival slot");
+  }
 }
 
 void turnRootsAndPagedHistoryStayExplicit() {
@@ -3864,6 +3950,56 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   }
 }
 
+void chosenNameOverlaySurvivesUntilMatchingAcknowledgement() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  {
+    auto write = graph.write();
+    NodeState state;
+    state.fields = {{"name", Value("Chosen name")},
+                    {"localNameOverlay", Value("Chosen name")}};
+    static_cast<void>(
+        write.upsert({NodeKind::Thread, "named-thread"}, std::move(state)));
+    static_cast<void>(write.finish());
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                          {"id", Value("named-thread")},
+                                          {"name", Value("Provider default")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("named-thread")},
+                     {"threadName", Value("Out-of-order name")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "named-thread"});
+    const Value *overlay = field(read->state(thread), "localNameOverlay");
+    require(overlay && overlay->asString() &&
+                *overlay->asString() == "Chosen name",
+            "provider handoff or mismatched notification dropped the chosen "
+            "name overlay");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("named-thread")},
+                     {"threadName", Value("Chosen name")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "named-thread"});
+    const auto state = read->state(thread);
+    const Value *name = field(state, "name");
+    require(field(state, "localNameOverlay") == nullptr && name &&
+                name->asString() && *name->asString() == "Chosen name",
+            "matching app-server acknowledgement did not retire the local "
+            "name overlay cleanly");
+  }
+}
+
 void authoritativeReplacementRetiresItemsAndPreservesLocalTail() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -4114,6 +4250,7 @@ int main() {
   deletionUnlinksWholeGraph();
   largeThreadDeletionIsNearLinear();
   correlatedThreadReadsPreserveOnlyInterveningLiveState();
+  chosenNameOverlaySurvivesUntilMatchingAcknowledgement();
   authoritativeReplacementRetiresItemsAndPreservesLocalTail();
   rollbackAndRevertReplaceAuthoritativeHistory();
 

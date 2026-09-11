@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <ranges>
 #include <unordered_set>
 #include <utility>
@@ -28,6 +29,20 @@ std::uint64_t unsignedField(const NodeState &state, std::string_view name) {
   const Value *value = field(state, name);
   const std::uint64_t *number = value ? value->asUInt64() : nullptr;
   return number ? *number : 0;
+}
+
+std::optional<std::int64_t> integerField(const NodeState &state,
+                                         std::string_view name) {
+  const Value *value = field(state, name);
+  if (!value)
+    return std::nullopt;
+  if (const auto *number = value->asInt64())
+    return *number;
+  if (const auto *number = value->asUInt64();
+      number && *number <= static_cast<std::uint64_t>(
+                               std::numeric_limits<std::int64_t>::max()))
+    return static_cast<std::int64_t>(*number);
+  return std::nullopt;
 }
 
 const Value *objectField(const Value::Object &object, std::string_view name) {
@@ -376,6 +391,28 @@ ChannelSendStatus WorkerLogic::threadHydration(const NodeRef &thread,
     updateThreadHydration(write, thread, std::move(state), std::move(error));
     change = write.finish();
   }
+  return publish(std::move(change));
+}
+
+ChannelSendStatus WorkerLogic::completeFork(DecodedMessage result,
+                                            std::string threadId,
+                                            std::string chosenName) {
+  GraphChange change;
+  {
+    auto write = graph_.write();
+    static_cast<void>(updater_.applyInto(write, result));
+    const NodeRef thread =
+        write.find({NodeKind::Thread, std::move(threadId)});
+    if (thread) {
+      if (!chosenName.empty()) {
+        write.setField(thread, "localNameOverlay", Value(chosenName));
+        write.setField(thread, "name", Value(std::move(chosenName)));
+      }
+      updateThreadHydration(write, thread, "ready", {});
+    }
+    change = write.finish();
+  }
+  forgetRemoved(change);
   return publish(std::move(change));
 }
 
@@ -768,8 +805,12 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
       write.relate(runtime, RelationKind::PendingPrompt, pending.localPrompt);
       write.relate(pending.thread, RelationKind::PendingPrompt,
                    pending.localPrompt);
-      if (activityAt)
-        advancePromptActivity(write, pending.thread, *activityAt);
+      if (activityAt && startsTurn) {
+        const std::int64_t promptActivityAt =
+            advancePromptActivity(write, pending.thread, *activityAt);
+        write.setField(pending.localPrompt, "sortActivityAt",
+                       Value(promptActivityAt));
+      }
       if (!invalidTarget) {
         const NodeRef ownerThread = pending.thread;
         promptQueues_[pending.thread.get()].emplace_back(std::move(pending));
@@ -788,9 +829,10 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
   return {publish(std::move(change)), std::move(command)};
 }
 
-void WorkerLogic::advancePromptActivity(NodeGraph::WriteAccess &write,
-                                        const NodeRef &target,
-                                        std::int64_t proposedActivityAt) {
+std::int64_t
+WorkerLogic::advancePromptActivity(NodeGraph::WriteAccess &write,
+                                   const NodeRef &target,
+                                   std::int64_t proposedActivityAt) {
   std::int64_t activityAt = proposedActivityAt;
   const auto retainMaximum = [&activityAt](const Value *value) {
     if (!value)
@@ -825,6 +867,66 @@ void WorkerLogic::advancePromptActivity(NodeGraph::WriteAccess &write,
     const std::vector<NodeRef> owners =
         write.related(thread, RelationKind::ThreadOwner);
     thread = owners.empty() ? NodeRef{} : owners.front();
+  }
+  return activityAt;
+}
+
+void WorkerLogic::recomputePromptActivity(NodeGraph::WriteAccess &write) {
+  std::unordered_map<const Node *, std::int64_t> activityByThread;
+  std::unordered_map<const Node *, NodeRef> threads;
+  for (const NodeRef &thread : write.orderedNodes()) {
+    if (!thread || thread->id().kind != NodeKind::Thread)
+      continue;
+    threads.emplace(thread.get(), thread);
+    const auto state = write.state(thread);
+    if (const auto confirmed =
+            integerField(*state, "confirmedLocalPromptActivityAt"))
+      activityByThread.insert_or_assign(thread.get(), *confirmed);
+    for (const NodeRef &prompt :
+         write.related(thread, RelationKind::PendingPrompt)) {
+      if (!prompt || prompt->id().kind != NodeKind::Item)
+        continue;
+      const auto promptState = write.state(prompt);
+      if (stringField(*promptState, "type") != "localPrompt")
+        continue;
+      const Value *startsTurn = field(*promptState, "startsTurn");
+      const bool *beginsTurn = startsTurn ? startsTurn->asBool() : nullptr;
+      if (!beginsTurn || !*beginsTurn)
+        continue;
+      const std::string dispatch = stringField(*promptState, "dispatchState");
+      if (dispatch == "failed" || dispatch == "uncertain")
+        continue;
+      const auto activity = integerField(*promptState, "sortActivityAt");
+      if (!activity)
+        continue;
+      auto [found, inserted] =
+          activityByThread.emplace(thread.get(), *activity);
+      if (!inserted && *activity > found->second)
+        found->second = *activity;
+    }
+  }
+
+  for (const auto &[rawThread, activity] :
+       std::vector<std::pair<const Node *, std::int64_t>>(
+           activityByThread.begin(), activityByThread.end())) {
+    NodeRef thread = threads.at(rawThread);
+    std::unordered_set<const Node *> visited;
+    while (thread && visited.insert(thread.get()).second) {
+      auto [found, inserted] = activityByThread.emplace(thread.get(), activity);
+      if (!inserted && activity > found->second)
+        found->second = activity;
+      const std::vector<NodeRef> owners =
+          write.related(thread, RelationKind::ThreadOwner);
+      thread = owners.empty() ? NodeRef{} : owners.front();
+    }
+  }
+
+  for (const auto &[rawThread, thread] : threads) {
+    const auto activity = activityByThread.find(rawThread);
+    if (activity == activityByThread.end())
+      write.eraseField(thread, "localPromptActivityAt");
+    else
+      write.setField(thread, "localPromptActivityAt", Value(activity->second));
   }
 }
 
@@ -876,9 +978,20 @@ WorkerLogic::takeNextPrompt(NodeGraph::WriteAccess &write,
         write.setField(command.localPrompt, "startsTurn", Value(false));
         write.setField(command.localPrompt, "expectedTurnId",
                        Value(command.expectedTurnId));
+        write.eraseField(command.localPrompt, "sortActivityAt");
       } else {
         write.setField(command.localPrompt, "startsTurn", Value(true));
         write.eraseField(command.localPrompt, "expectedTurnId");
+        const auto promptState = write.state(command.localPrompt);
+        if (!integerField(*promptState, "sortActivityAt")) {
+          if (const auto admittedAtMs =
+                  integerField(*promptState, "admittedAtMs")) {
+            const std::int64_t activityAt = advancePromptActivity(
+                write, thread, *admittedAtMs / 1000);
+            write.setField(command.localPrompt, "sortActivityAt",
+                           Value(activityAt));
+          }
+        }
       }
     }
     write.setField(command.localPrompt, "dispatchState", Value("dispatching"));
@@ -968,9 +1081,15 @@ bool WorkerLogic::attachCreatedThread(NodeGraph::WriteAccess &write,
   updateThreadHydration(write, authoritative, "ready", {});
   for (const std::string_view key :
        {std::string_view("localActivityAt"),
-        std::string_view("localPromptActivityAt")}) {
+        std::string_view("localPromptActivityAt"),
+        std::string_view("confirmedLocalPromptActivityAt")}) {
     if (const Value *value = field(*draftState, key))
       write.setField(authoritative, std::string(key), *value);
+  }
+  if (const std::string chosenName = stringField(*draftState, "name");
+      !chosenName.empty()) {
+    write.setField(authoritative, "localNameOverlay", Value(chosenName));
+    write.setField(authoritative, "name", Value(chosenName));
   }
 
   const std::vector<NodeRef> draftChildren = write.children(draft);
@@ -1109,6 +1228,24 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
   const bool startsTurn = startsTurnValue && startsTurnValue->asBool() &&
                           *startsTurnValue->asBool();
 
+  if (accepted && startsTurn) {
+    if (const auto activity = integerField(*promptState, "sortActivityAt")) {
+      NodeRef owner = thread;
+      std::unordered_set<const Node *> visited;
+      while (owner && visited.insert(owner.get()).second) {
+        const auto state = write.state(owner);
+        const auto previous =
+            integerField(*state, "confirmedLocalPromptActivityAt");
+        if (!previous || *activity > *previous)
+          write.setField(owner, "confirmedLocalPromptActivityAt",
+                         Value(*activity));
+        const std::vector<NodeRef> owners =
+            write.related(owner, RelationKind::ThreadOwner);
+        owner = owners.empty() ? NodeRef{} : owners.front();
+      }
+    }
+  }
+
   if (uiMaterialized) {
     NodeRef provisionalTurn = write.parent(localPrompt);
     write.remove(localPrompt);
@@ -1176,8 +1313,8 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
             write.related(turn, RelationKind::TurnRootItem);
         if (roots.empty() ||
             std::ranges::find(roots, localPrompt) != roots.end()) {
-          const std::array<NodeRef, 1> root{
-              materializedItem ? materializedItem : localPrompt};
+          const std::array<NodeRef, 1> root{materializedItem ? materializedItem
+                                                             : localPrompt};
           write.replaceRelated(turn, RelationKind::TurnRootItem, root);
         }
       }
@@ -1224,9 +1361,11 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
       }
     }
   }
+  std::optional<PromptCommand> next;
   if (accepted || !thread->id().canonical.starts_with("local-thread:"))
-    return takeNextPrompt(write, thread);
-  return std::nullopt;
+    next = takeNextPrompt(write, thread);
+  recomputePromptActivity(write);
+  return next;
 }
 
 PromptTransition WorkerLogic::failPrompt(const NodeRef &localPrompt,

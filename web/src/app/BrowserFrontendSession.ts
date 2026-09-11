@@ -52,6 +52,7 @@ const actionMethods: Readonly<Record<string, string>> = {
 export interface BrowserSessionSnapshot {
     readonly revision: number;
     readonly selectedThreadId: string;
+    readonly selectedThreadLoading: boolean;
     readonly newThreadIntent: boolean;
     readonly newThreadDraft?: NewThreadDraft;
     readonly newThreadDraftRevision: number;
@@ -76,11 +77,35 @@ export interface OptimisticThreadSnapshot {
     readonly state: "awaiting" | "failed" | "confirmed";
 }
 
-export type ThreadSortCriterion = "alphanumeric" | "created" | "updated" | "recent";
+export type ThreadSortCriterion = "alphanumeric" | "created" | "recent";
 
 const threadTitleCollator = new Intl.Collator(undefined, {
     numeric: true, sensitivity: "base", ignorePunctuation: true,
 });
+
+function forkNameParts(title: string): {base: string; lineage: number[]} {
+    const match = /^(.*) \(fork ([1-9]\d*(?:\.[1-9]\d*)*)\)$/u.exec(title);
+    if (!match) return {base: title, lineage: []};
+    const lineage = match[2]!.split(".").map(Number);
+    if (lineage.some(component => !Number.isSafeInteger(component)))
+        return {base: title, lineage: []};
+    return {base: match[1]!, lineage};
+}
+
+export function suggestForkName(sourceTitle: string, existingThreadTitles: readonly string[]): string {
+    const source = forkNameParts(sourceTitle);
+    const base = source.base || "Thread";
+    const directChildren = new Set<number>();
+    for (const title of existingThreadTitles) {
+        const candidate = forkNameParts(title);
+        if (candidate.base !== base || candidate.lineage.length !== source.lineage.length + 1) continue;
+        if (source.lineage.every((component, index) => candidate.lineage[index] === component))
+            directChildren.add(candidate.lineage.at(-1)!);
+    }
+    let next = 1;
+    while (directChildren.has(next)) ++next;
+    return `${base} (fork ${[...source.lineage, next].join(".")})`;
+}
 
 type HydrationState = "notHydrated" | "inFlight" | "hydrated" | "failed";
 interface ThreadRuntimeState {
@@ -128,6 +153,14 @@ export class BrowserFrontendSession {
     private reconnectAfterDetach = false;
     private lifecycleEpoch = 0;
     private catalogHydrationKey = "";
+    private threadListInFlight = false;
+    private threadListInFlightEpoch = -1;
+    private threadListRepairPending = false;
+    private threadListLoadMoreRequested = false;
+    private threadListNextCursor = "";
+    private readonly threadListSeenCursors = new Set<string>();
+    private threadListCycle = 0;
+    private threadListRepairTimer: ReturnType<typeof setTimeout> | undefined;
     private bridgeUrl: string;
     private readonly createWebSocket: WebSocketFactory | undefined;
     private snapshot: BrowserSessionSnapshot;
@@ -231,6 +264,8 @@ export class BrowserFrontendSession {
         this.connection.dispose(); this.transport = undefined;
         for (const timer of this.pendingAnimationTimers.values()) clearTimeout(timer);
         this.pendingAnimationTimers.clear();
+        if (this.threadListRepairTimer) clearTimeout(this.threadListRepairTimer);
+        this.threadListRepairTimer = undefined;
         if (this.noticeTimer) clearTimeout(this.noticeTimer);
         this.noticeTimer = undefined;
     }
@@ -258,8 +293,9 @@ export class BrowserFrontendSession {
             this.optimisticThreads = this.optimisticThreads.filter(thread => thread.id !== DraftThreadId);
             this.newThreadDraft = undefined;
         }
-        this.selectedThreadId = threadId; this.newThreadIntent = false; this.publish();
+        this.selectedThreadId = threadId; this.newThreadIntent = false;
         if (threadId !== "") this.ensureThreadHydrated(threadId);
+        this.publish();
     }
     beginNewThread(draft: NewThreadDraft = {
         workspace: "", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false,
@@ -280,12 +316,49 @@ export class BrowserFrontendSession {
         this.publish();
     }
     threadVisualKey(threadId: string): string { return this.threadVisualKeys.get(threadId) ?? threadId; }
+    threadPromptAnimating(threadId: string): boolean {
+        const now = Date.now();
+        return this.prompts.submissions(threadId).some(submission =>
+            (submission.state === "queued" || submission.state === "inFlight")
+            && now - submission.admittedAtMilliseconds >= PendingAnimationDelayMilliseconds);
+    }
+    threadRecentAt(threadId: string): number | undefined {
+        let latest: number | undefined;
+        const visited = new Set<string>();
+        const visit = (id: string) => {
+            if (visited.has(id)) return;
+            visited.add(id);
+            const thread = this.model.thread(id);
+            for (const timestamp of [thread?.recencyAt, thread?.localPromptActivityAt])
+                if (timestamp !== undefined && (latest === undefined || timestamp > latest)) latest = timestamp;
+            for (const submission of this.prompts.submissions(id))
+                if (submission.startsTurn && (submission.state === "queued" || submission.state === "inFlight")
+                    && submission.sortActivityAt !== undefined
+                    && (latest === undefined || submission.sortActivityAt > latest)) latest = submission.sortActivityAt;
+            for (const childId of thread?.childThreadOrder ?? []) visit(childId);
+        };
+        visit(threadId);
+        return latest;
+    }
+    private nextPromptActivityAt(nowMilliseconds: number): number {
+        let activityAt = Math.floor(nowMilliseconds / 1000);
+        for (const id of this.model.threadIds()) {
+            const thread = this.model.thread(id);
+            for (const timestamp of [thread?.recencyAt, thread?.localPromptActivityAt])
+                if (timestamp !== undefined && timestamp >= activityAt) activityAt = timestamp + 1;
+            for (const submission of this.prompts.submissions(id))
+                if ((submission.state === "queued" || submission.state === "inFlight")
+                    && submission.sortActivityAt !== undefined && submission.sortActivityAt >= activityAt)
+                    activityAt = submission.sortActivityAt + 1;
+        }
+        return activityAt;
+    }
     threadOrder(criterion: ThreadSortCriterion = "recent"): readonly string[] {
         const order = this.model.threadOrder().filter(id => this.model.childOwnership(id) === undefined);
         const timestamp = (threadId: string) => {
             const thread = this.model.thread(threadId);
-            return criterion === "created" ? thread?.createdAt
-                : criterion === "updated" ? thread?.updatedAt : thread?.recencyAt;
+            if (criterion === "created") return thread?.createdAt;
+            return this.threadRecentAt(threadId);
         };
         order.sort((leftId, rightId) => {
             const left = this.model.thread(leftId); const right = this.model.thread(rightId);
@@ -320,8 +393,8 @@ export class BrowserFrontendSession {
     loadMore(): void { /* Default parity window is sufficient until viewport pausing is introduced. */ }
 
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {}, threadOptions: JsonObject = {}): Promise<boolean> {
-        const canonicalPrompt = promptWithFileLinks(prompt.trim(), attachments);
-        if (canonicalPrompt === "") return false;
+        if (prompt.trim() === "") return false;
+        const canonicalPrompt = promptWithFileLinks(prompt, attachments);
         if (!this.canSubmit()) {
             this.setNotice("Codex is not ready for a controlled turn. Your message was not sent.");
             return false;
@@ -332,12 +405,13 @@ export class BrowserFrontendSession {
             if (!this.newThreadIntent) { this.setNotice("Select a thread or choose New thread before sending."); return false; }
             destination = DraftThreadId; thread = undefined;
         }
+        const admittedAt = Date.now();
+        const activeTurnId = destination === DraftThreadId ? undefined : this.activeTurnId(destination);
         const submissionId = this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
-            destination === DraftThreadId ? undefined : this.activeTurnId(destination), Date.now());
+            activeTurnId, admittedAt, activeTurnId === undefined ? this.nextPromptActivityAt(admittedAt) : undefined);
         this.schedulePendingAnimation(submissionId);
         if (destination !== DraftThreadId) {
             this.threadRuntime(destination);
-            this.model.notePromptActivity(destination, Math.floor(Date.now() / 1000));
         }
         this.publish();
         if (destination === DraftThreadId) {
@@ -365,7 +439,6 @@ export class BrowserFrontendSession {
             this.optimisticThreads = this.optimisticThreads.map(thread =>
                 thread.id === DraftThreadId ? {
                     ...thread, id,
-                    title: stringMember(createdThread, "name") || thread.title,
                     cwd: stringMember(createdThread, "cwd") || thread.cwd,
                 } : thread);
             const draftStillSelected = this.selectedThreadId === "" && this.newThreadIntent;
@@ -375,7 +448,10 @@ export class BrowserFrontendSession {
             runtime.hydration = "hydrated"; runtime.operationReady = true;
             const requestedName = threadDraft?.name ?? "";
             this.newThreadDraft = undefined;
-            if (requestedName !== "") this.renameThread(id, requestedName);
+            if (requestedName !== "") {
+                this.model.setThreadTitleLocally(id, requestedName);
+                this.renameThread(id, requestedName);
+            }
             this.publish();
         }
         queueMicrotask(() => this.dispatchNextPrompt(destination));
@@ -390,17 +466,58 @@ export class BrowserFrontendSession {
         return this.pendingUserOperations.has(`${action}:${threadId}`);
     }
     requestThreads(): void {
-        void this.performUserOperation("threads.refresh", "threads.list", {}, "Refresh threads", false);
+        const key = "threads.refresh:";
+        if (this.pendingUserOperations.has(key)
+            || (this.threadListInFlight && this.threadListInFlightEpoch === this.lifecycleEpoch)) return;
+        if (!this.providerReady()) {
+            this.setNotice("Refresh threads is unavailable until Codex is ready.");
+            return;
+        }
+        this.pendingUserOperations.add(key);
+        this.publish();
+        void this.requestInitialThreadPage(true).then(response => {
+            this.pendingUserOperations.delete(key);
+            if (!response.ok && !response.stale)
+                this.setNotice(`Refresh threads failed: ${this.errorMessage(response)}`);
+            else this.publish();
+        });
     }
     renameThread(threadId: string, name: string): void {
         void this.performUserOperation("thread.rename", "thread.rename", {threadId, name}, "Rename thread");
     }
     reloadThread(threadId: string): void { this.readThread(threadId, true); }
-    forkThread(threadId: string): void {
-        this.performUserOperation("thread.fork", "thread.fork", {threadId}, "Fork thread")?.then(response => {
+    forkDraft(threadId: string): NewThreadDraft {
+        const source = this.model.thread(threadId);
+        return {
+            workspace: source?.cwd ?? "",
+            name: suggestForkName(source?.title || threadId, this.model.threadTitles()),
+            baseInstructions: stringMember(source?.raw, "baseInstructions"),
+            developerInstructions: stringMember(source?.raw, "developerInstructions"),
+            ephemeral: source?.raw.ephemeral === true,
+        };
+    }
+    forkThread(threadId: string, draft?: NewThreadDraft): void {
+        const suggested = this.forkDraft(threadId);
+        const requestedName = draft?.name.trim() || suggested.name;
+        const parameters: JsonObject = {threadId};
+        if (draft) {
+            if (draft.workspace.trim() !== "") parameters.cwd = draft.workspace.trim();
+            if (draft.baseInstructions.trim() !== "") parameters.baseInstructions = draft.baseInstructions.trim();
+            if (draft.developerInstructions.trim() !== "")
+                parameters.developerInstructions = draft.developerInstructions.trim();
+            parameters.ephemeral = draft.ephemeral;
+        }
+        this.performUserOperation("thread.fork", "thread.fork", parameters, "Fork thread")?.then(response => {
             const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
             const id = stringMember(thread, "id");
-            if (response.ok && id !== "") this.selectThread(id);
+            if (response.ok && id !== "") {
+                this.model.setThreadTitleLocally(id, requestedName);
+                const runtime = this.threadRuntime(id);
+                runtime.hydration = "hydrated";
+                runtime.operationReady = true;
+                this.renameThread(id, requestedName);
+                this.selectThread(id);
+            }
             else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");
         });
     }
@@ -462,6 +579,15 @@ export class BrowserFrontendSession {
     }
     private invalidateProviderWork(): void {
         ++this.lifecycleEpoch;
+        ++this.threadListCycle;
+        if (this.threadListRepairTimer) clearTimeout(this.threadListRepairTimer);
+        this.threadListRepairTimer = undefined;
+        this.threadListInFlight = false;
+        this.threadListInFlightEpoch = -1;
+        this.threadListRepairPending = false;
+        this.threadListLoadMoreRequested = false;
+        this.threadListNextCursor = "";
+        this.threadListSeenCursors.clear();
         this.catalogHydrationKey = "";
         this.resolvingRequests.clear();
         for (const [threadId, runtime] of this.runtimeByThread) {
@@ -488,6 +614,7 @@ export class BrowserFrontendSession {
         if (!forced && runtime.hydration !== "notHydrated") return;
         runtime.hydration = "inFlight";
         runtime.operationReady = false;
+        this.schedulePublish();
         const revision = ++runtime.readRevision;
         const epoch = this.lifecycleEpoch;
         this.requestPromise("thread.read", {threadId, includeTurns: true}, () => epoch === this.lifecycleEpoch
@@ -498,6 +625,7 @@ export class BrowserFrontendSession {
             if (response.ok && this.model.thread(threadId)) {
                 current.hydration = "hydrated";
                 current.operationReady = this.model.thread(threadId)?.status !== "notLoaded";
+                this.publish();
                 queueMicrotask(() => this.dispatchNextPrompt(threadId));
                 return;
             }
@@ -550,7 +678,8 @@ export class BrowserFrontendSession {
         const key = `${connection.generation}:${connection.providerGeneration}`;
         if (this.catalogHydrationKey !== key) {
             this.catalogHydrationKey = key;
-            this.request("threads.list", {}); this.request("models.list", {}); this.request("permission-profiles.list", {});
+            void this.requestInitialThreadPage();
+            this.request("models.list", {}); this.request("permission-profiles.list", {});
         }
         const queued = new Set(this.prompts.queuedThreadIds());
         if (this.selectedThreadId !== "") queued.add(this.selectedThreadId);
@@ -588,6 +717,105 @@ export class BrowserFrontendSession {
             ? {ok: false, stale: true}
             : Object.hasOwn(response, "result") ? {ok: true, data: response.result} : {ok: false, error: response.error}), acceptResult));
     }
+    private threadListParameters(useStateDbOnly: boolean, cursor = ""): JsonObject {
+        return {
+            sortKey: "recency_at", sortDirection: "desc", limit: 100, useStateDbOnly,
+            ...(cursor === "" ? {} : {cursor}),
+        };
+    }
+    private async requestInitialThreadPage(force = false): Promise<OperationResponse> {
+        const epoch = this.lifecycleEpoch;
+        if (this.threadListInFlight && this.threadListInFlightEpoch === epoch) return {ok: true};
+        if (this.threadListRepairPending && !force) return {ok: true};
+        const cycle = ++this.threadListCycle;
+        if (this.threadListRepairTimer) clearTimeout(this.threadListRepairTimer);
+        this.threadListRepairTimer = undefined;
+        this.threadListRepairPending = true;
+        this.threadListLoadMoreRequested = false;
+        this.threadListNextCursor = "";
+        this.threadListSeenCursors.clear();
+        this.threadListInFlight = true;
+        this.threadListInFlightEpoch = epoch;
+        let response: OperationResponse;
+        try {
+            response = await this.requestPromise("threads.list", this.threadListParameters(true),
+                () => epoch === this.lifecycleEpoch && cycle === this.threadListCycle);
+        } finally {
+            if (this.threadListInFlightEpoch === epoch && cycle === this.threadListCycle) {
+                this.threadListInFlight = false;
+                this.threadListInFlightEpoch = -1;
+            }
+        }
+        if (response.stale || epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle)
+            return response;
+        if (response.ok) this.threadListNextCursor = stringMember(response.data, "nextCursor");
+        this.threadListRepairTimer = setTimeout(() => {
+            this.threadListRepairTimer = undefined;
+            void this.repairThreadList(epoch, cycle);
+        }, 16);
+        return response;
+    }
+    private async repairThreadList(epoch: number, cycle: number): Promise<void> {
+        if (this.disposed || epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle)
+            return;
+        this.threadListInFlight = true;
+        this.threadListInFlightEpoch = epoch;
+        const response = await this.requestPromise("threads.list", this.threadListParameters(false),
+            () => epoch === this.lifecycleEpoch && cycle === this.threadListCycle);
+        if (epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle) return;
+        this.threadListInFlight = false;
+        this.threadListInFlightEpoch = -1;
+        this.threadListRepairPending = false;
+        if (!response.ok || response.stale) {
+            if (!response.stale) this.setNotice(`Thread reconciliation failed: ${this.errorMessage(response)}`);
+            if (this.threadListLoadMoreRequested) {
+                this.threadListLoadMoreRequested = false;
+                this.loadMoreThreads();
+            }
+            return;
+        }
+        this.threadListNextCursor = stringMember(response.data, "nextCursor");
+        this.publish();
+        if (this.threadListLoadMoreRequested) {
+            this.threadListLoadMoreRequested = false;
+            this.loadMoreThreads();
+        }
+    }
+    loadMoreThreads(): void {
+        if (!this.providerReady()) return;
+        if (this.threadListInFlight || this.threadListRepairPending) {
+            this.threadListLoadMoreRequested = true;
+            return;
+        }
+        const cursor = this.threadListNextCursor;
+        if (cursor === "" || this.threadListSeenCursors.has(cursor)) {
+            if (this.threadListSeenCursors.has(cursor)) this.threadListNextCursor = "";
+            return;
+        }
+        this.threadListSeenCursors.add(cursor);
+        const epoch = this.lifecycleEpoch;
+        const cycle = this.threadListCycle;
+        this.threadListInFlight = true;
+        this.threadListInFlightEpoch = epoch;
+        void this.requestPromise("threads.list", this.threadListParameters(true, cursor),
+            () => epoch === this.lifecycleEpoch && cycle === this.threadListCycle).then(response => {
+            if (epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle) return;
+            this.threadListInFlight = false;
+            this.threadListInFlightEpoch = -1;
+            if (!response.ok || response.stale) {
+                this.threadListSeenCursors.delete(cursor);
+                this.threadListLoadMoreRequested = false;
+                if (!response.stale) this.setNotice(`Loading more threads failed: ${this.errorMessage(response)}`);
+                return;
+            }
+            this.threadListNextCursor = stringMember(response.data, "nextCursor");
+            this.publish();
+            if (this.threadListLoadMoreRequested) {
+                this.threadListLoadMoreRequested = false;
+                this.loadMoreThreads();
+            }
+        });
+    }
     private performUserOperation(keyAction: string, action: string, parameters: JsonObject,
         failureContext: string, requiresControl = true): Promise<OperationResponse> | undefined {
         const threadId = stringMember(parameters, "threadId");
@@ -604,7 +832,7 @@ export class BrowserFrontendSession {
             this.pendingUserOperations.delete(key);
             if (!response.ok && !response.stale)
                 this.setNotice(`${failureContext} failed: ${this.errorMessage(response)}`);
-            else this.publish();
+            else this.schedulePublish();
         });
         return operation;
     }
@@ -628,6 +856,9 @@ export class BrowserFrontendSession {
         }
         const dispatch = this.prompts.beginNext(threadId, this.activeTurnId(threadId));
         if (!dispatch) return;
+        const submission = this.prompts.submission(threadId, dispatch.id);
+        if (submission?.startsTurn && submission.sortActivityAt === undefined)
+            submission.sortActivityAt = this.nextPromptActivityAt(Date.now());
         this.dispatchPrompt(dispatch);
     }
     private dispatchPrompt(dispatch: PromptDispatch): void {
@@ -651,7 +882,10 @@ export class BrowserFrontendSession {
                 if (runtime) runtime.operationReady = true;
                 const turn = isObject(response.data) ? member(response.data, "turn", {}) : {};
                 const turnId = stringMember(turn, "id") || undefined;
-                const startsTurn = this.prompts.submission(dispatch.threadId, dispatch.id)?.startsTurn === true;
+                const submission = this.prompts.submission(dispatch.threadId, dispatch.id);
+                const startsTurn = submission?.startsTurn === true;
+                if (startsTurn && submission?.sortActivityAt !== undefined)
+                    this.model.notePromptActivity(dispatch.threadId, submission.sortActivityAt);
                 this.prompts.acknowledge(dispatch.threadId, dispatch.id, turnId);
                 if (startsTurn && turnId !== undefined) {
                     if (runtime) runtime.provisionalActiveTurnId = turnId;
@@ -763,7 +997,10 @@ export class BrowserFrontendSession {
         this.optimisticThreads = this.optimisticThreads.filter(thread =>
             thread.state !== "confirmed" || !this.model.thread(thread.id));
         return {
-            revision: this.revision, selectedThreadId: this.selectedThreadId, newThreadIntent: this.newThreadIntent,
+            revision: this.revision, selectedThreadId: this.selectedThreadId,
+            selectedThreadLoading: this.selectedThreadId !== ""
+                && this.runtimeByThread.get(this.selectedThreadId)?.hydration === "inFlight",
+            newThreadIntent: this.newThreadIntent,
             ...(this.newThreadDraft ? {newThreadDraft: this.newThreadDraft} : {}),
             newThreadDraftRevision: this.newThreadDraftRevision,
             optimisticThreads: this.optimisticThreads,

@@ -1118,6 +1118,72 @@ std::vector<NodeRef> replaceAuthoritativeChildren(
     if (write.find(node->id()) == node)
       write.remove(node);
   }
+
+  // A steering prompt occupies the position at which the user submitted it,
+  // even when its provider userMessage arrived after activity caused by that
+  // prompt. ingestItem establishes that position, but a containing
+  // thread/read or turns/list replacement applies provider order after all
+  // items have been ingested. Preserve only the locally submitted rows at
+  // their existing boundary; all other children still follow provider order.
+  if (parent && parent->id().kind == NodeKind::Turn) {
+    const auto retainsSubmittedSlot = [&](const NodeRef &node) {
+      if (!node || node->id().kind != NodeKind::Item ||
+          write.find(node->id()) != node)
+        return false;
+      if (isExplicitLocalOptimistic(write, node) &&
+          canonicalValue(member(write.state(node)->fields, "type")) ==
+              "localPrompt")
+        return true;
+      const Value *submission =
+          member(write.state(node)->fields, "localSubmissionId");
+      return submission && (submission->asUInt64() || submission->asInt64());
+    };
+
+    std::unordered_set<const Node *> finalNodes;
+    finalNodes.reserve(authoritative.size());
+    for (const NodeRef &node : authoritative)
+      if (node && write.find(node->id()) == node)
+        finalNodes.insert(node.get());
+
+    std::unordered_set<const Node *> submittedNodes;
+    submittedNodes.reserve(authoritative.size());
+    for (const NodeRef &node : existing)
+      if (node && finalNodes.contains(node.get()) && retainsSubmittedSlot(node))
+        submittedNodes.insert(node.get());
+
+    if (!submittedNodes.empty()) {
+      std::vector<NodeRef> leading;
+      std::unordered_map<const Node *, std::vector<NodeRef>> after;
+      const Node *preceding = nullptr;
+      for (const NodeRef &node : existing) {
+        if (!node || !finalNodes.contains(node.get()))
+          continue;
+        if (!submittedNodes.contains(node.get())) {
+          preceding = node.get();
+          continue;
+        }
+        if (preceding)
+          after[preceding].push_back(node);
+        else
+          leading.push_back(node);
+      }
+
+      std::vector<NodeRef> ordered;
+      ordered.reserve(authoritative.size());
+      ordered.insert(ordered.end(), leading.begin(), leading.end());
+      for (NodeRef &node : authoritative) {
+        if (!node || submittedNodes.contains(node.get()))
+          continue;
+        const Node *identity = node.get();
+        ordered.emplace_back(std::move(node));
+        if (const auto positioned = after.find(identity);
+            positioned != after.end())
+          ordered.insert(ordered.end(), positioned->second.begin(),
+                         positioned->second.end());
+      }
+      authoritative = std::move(ordered);
+    }
+  }
   return authoritative;
 }
 
@@ -2606,8 +2672,14 @@ void ProtocolUpdater::applyGraphUpdate(
     const std::string id = addressedId(message.payload, NodeKind::Thread);
     if (!id.empty()) {
       NodeRef thread = write.upsert({NodeKind::Thread, id});
-      if (const Value *name = member(message.payload, "threadName"))
+      if (const Value *name = member(message.payload, "threadName")) {
         write.setField(thread, "name", *name);
+        const std::string confirmedName = canonicalValue(name);
+        const std::string localName = canonicalValue(
+            member(write.state(thread)->fields, "localNameOverlay"));
+        if (!confirmedName.empty() && confirmedName == localName)
+          write.eraseField(thread, "localNameOverlay");
+      }
     }
     return;
   }
@@ -3077,6 +3149,13 @@ NodeRef ProtocolUpdater::ingestThread(
            write.fieldChangedRevision(thread, field) <= *preserveChangesAfter;
   };
   mergeObject(write, thread, object, "turns", preserveChangesAfter);
+  if (const Value *providerName = member(object, "name")) {
+    const std::string confirmedName = canonicalValue(providerName);
+    const std::string localName =
+        canonicalValue(member(write.state(thread)->fields, "localNameOverlay"));
+    if (!confirmedName.empty() && confirmedName == localName)
+      write.eraseField(thread, "localNameOverlay");
+  }
 
   if (const Value *projectId = member(object, "projectId");
       projectId && acceptsField("projectId"))
@@ -3172,9 +3251,8 @@ ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
       const std::vector<NodeRef> existing =
           mergeExistingTail(write.children(turn),
                             write.related(turn, RelationKind::TurnRootItem));
-      write.replaceChildren(
-          turn, replaceAuthoritativeChildren(write, turn, std::move(order),
-                                             existing));
+      write.replaceChildren(turn, replaceAuthoritativeChildren(
+                                      write, turn, std::move(order), existing));
     } else if (!order.empty())
       write.replaceChildren(
           turn, mergeExistingTail(std::move(order), write.children(turn)));
@@ -3214,8 +3292,8 @@ ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
     if (!claimsTurnRoot) {
       const std::vector<NodeRef> prompts =
           write.related(item, RelationKind::PromptMaterialization);
-      claimsTurnRoot = std::ranges::any_of(
-          prompts, [&write, &roots](const NodeRef &prompt) {
+      claimsTurnRoot =
+          std::ranges::any_of(prompts, [&write, &roots](const NodeRef &prompt) {
             if (std::ranges::find(roots, prompt) == roots.end())
               return false;
             const Value *dispatch =

@@ -2,6 +2,8 @@
 
 #include "codex/middle/ConversationCards.h"
 
+#include "codex/middle/ConversationPresentation.h"
+
 #include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
 
@@ -11,6 +13,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QImageReader>
@@ -23,14 +26,17 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPixmapCache>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStyle>
+#include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
@@ -45,7 +51,6 @@
 #include <limits>
 #include <string_view>
 #include <type_traits>
-#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -54,12 +59,13 @@ namespace {
 constexpr int MaximumCommandOutputHeight = 220;
 constexpr int MaximumCommandTextHeight = 90;
 constexpr int CommandTextPadding = 7;
+constexpr int CommandOutputHorizontalPadding = 7;
+constexpr int CommandOutputVerticalPadding = 4;
 constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
-constexpr qsizetype MaximumGenericActivityCharacters = 4096;
-constexpr int CardHeaderActionSpacing = 4;
+constexpr int CardHeaderActionSpacing = 0;
 constexpr int CopyMorphDurationMilliseconds = 160;
 constexpr int CopyCheckHoldMilliseconds = 500;
 constexpr int MarkdownBottomPaintGuard = 4;
@@ -79,7 +85,31 @@ QStringList textList(const std::vector<std::string> &values) {
 std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
 
 QString trimmedTrailingLines(const QString &value) {
-  return text(trimTrailingEmptyLines(utf8(value)));
+  qsizetype end = value.size();
+  while (end > 0) {
+    while (end > 0 &&
+           (value.at(end - 1) == QLatin1Char('\n') ||
+            value.at(end - 1) == QLatin1Char('\r')))
+      --end;
+    if (end == 0)
+      break;
+
+    qsizetype lineStart = end;
+    while (lineStart > 0 && value.at(lineStart - 1) != QLatin1Char('\n') &&
+           value.at(lineStart - 1) != QLatin1Char('\r'))
+      --lineStart;
+    bool whitespaceOnly = true;
+    for (qsizetype offset = lineStart; offset < end; ++offset) {
+      if (!value.at(offset).isSpace()) {
+        whitespaceOnly = false;
+        break;
+      }
+    }
+    if (!whitespaceOnly)
+      break;
+    end = lineStart;
+  }
+  return end == value.size() ? value : value.first(end);
 }
 
 bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
@@ -255,10 +285,36 @@ bool openLocalFile(const QString &path) {
       QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
 }
 
+struct ImageFileIdentity {
+  QString absolutePath;
+  qint64 size = -1;
+  qint64 modifiedMilliseconds = -1;
+  qint64 metadataChangedMilliseconds = -1;
+  bool file = false;
+
+  bool operator==(const ImageFileIdentity &) const = default;
+};
+
+ImageFileIdentity imageFileIdentity(const QString &path) {
+  const QFileInfo info(path);
+  return {info.absoluteFilePath(), info.size(),
+          info.lastModified().toMSecsSinceEpoch(),
+          info.metadataChangeTime().toMSecsSinceEpoch(), info.isFile()};
+}
+
+QString thumbnailCacheKey(const ImageFileIdentity &identity) {
+  return QStringLiteral("codexui-thumbnail:%1:%2:%3:%4")
+      .arg(identity.absolutePath)
+      .arg(identity.size)
+      .arg(identity.modifiedMilliseconds)
+      .arg(identity.metadataChangedMilliseconds);
+}
+
 class ImageThumbnail final : public QLabel {
 public:
   ImageThumbnail(QString path, QWidget *parent)
-      : QLabel(parent), path_(std::move(path)) {
+      : QLabel(parent), path_(std::move(path)),
+        identity_(imageFileIdentity(path_)) {
     setObjectName(QStringLiteral("messageImageThumbnail"));
     setProperty("kind", "imageThumbnail");
     setCursor(Qt::PointingHandCursor);
@@ -268,15 +324,30 @@ public:
     setMinimumSize(72, 48);
     setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
 
-    QImageReader reader(path_);
-    reader.setAutoTransform(true);
-    const QSize source = reader.size();
-    if (source.isValid())
-      reader.setScaledSize(source.scaled(ThumbnailMaximumWidth - 8,
-                                         ThumbnailMaximumHeight - 8,
-                                         Qt::KeepAspectRatio));
-    const QImage image = reader.read();
-    if (image.isNull()) {
+    QPixmap pixmap;
+    const bool cacheHit = identity_.file &&
+                          QPixmapCache::find(thumbnailCacheKey(identity_),
+                                             &pixmap);
+    setProperty("imageCacheHit", cacheHit);
+    if (!cacheHit) {
+      QElapsedTimer decodeTimer;
+      decodeTimer.start();
+      QImageReader reader(identity_.absolutePath);
+      reader.setAutoTransform(true);
+      const QSize source = reader.size();
+      if (source.isValid())
+        reader.setScaledSize(source.scaled(ThumbnailMaximumWidth - 8,
+                                           ThumbnailMaximumHeight - 8,
+                                           Qt::KeepAspectRatio));
+      const QImage image = reader.read();
+      setProperty("imageDecodeMicros", decodeTimer.nsecsElapsed() / 1000);
+      setProperty("imageDecodePerformed", true);
+      if (!image.isNull()) {
+        pixmap = QPixmap::fromImage(image);
+        QPixmapCache::insert(thumbnailCacheKey(identity_), pixmap);
+      }
+    }
+    if (pixmap.isNull()) {
       setAccessibleName(QStringLiteral("Image unavailable: %1")
                             .arg(QFileInfo(path_).fileName()));
       setText(QStringLiteral("Image unavailable\n%1")
@@ -290,13 +361,12 @@ public:
         QStringLiteral("Open image: %1").arg(QFileInfo(path_).fileName()));
     setFocusPolicy(Qt::StrongFocus);
     setProperty("imageAvailable", true);
-    setPixmap(QPixmap::fromImage(image));
-    setFixedSize(image.size() + QSize(8, 8));
+    setPixmap(pixmap);
+    setFixedSize(pixmap.size() + QSize(8, 8));
   }
 
   [[nodiscard]] bool represents(const QString &path) const {
-    return path_ == path &&
-           property("imageAvailable").toBool() == QFileInfo(path).isFile();
+    return path_ == path && identity_ == imageFileIdentity(path);
   }
 
 protected:
@@ -342,6 +412,7 @@ private:
   }
 
   QString path_;
+  ImageFileIdentity identity_;
   bool leftPressArmed_ = false;
 };
 
@@ -370,30 +441,42 @@ public:
     hide();
   }
 
-  void setPaths(const QStringList &paths, bool forceRebuild = false) {
-    bool matches = !forceRebuild && layout_->count() == paths.size();
-    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
-      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
-          layout_->itemAt(static_cast<int>(index))->widget());
-      matches = thumbnail && thumbnail->represents(paths.at(index));
+  void setPaths(const QStringList &paths) {
+    bool changed = false;
+    for (qsizetype index = 0; index < paths.size(); ++index) {
+      QLayoutItem *item = layout_->itemAt(static_cast<int>(index));
+      const auto *thumbnail =
+          item ? dynamic_cast<ImageThumbnail *>(item->widget()) : nullptr;
+      if (thumbnail && thumbnail->represents(paths.at(index)))
+        continue;
+      if (item) {
+        item = layout_->takeAt(static_cast<int>(index));
+        delete item->widget();
+        delete item;
+      }
+      layout_->insertWidget(static_cast<int>(index),
+                            new ImageThumbnail(paths.at(index), strip_), 0,
+                            Qt::AlignVCenter);
+      changed = true;
     }
-    if (matches) {
+    while (layout_->count() > paths.size()) {
+      QLayoutItem *item = layout_->takeAt(paths.size());
+      delete item->widget();
+      delete item;
+      changed = true;
+    }
+
+    if (!changed) {
       setVisible(!paths.isEmpty());
       return;
     }
 
-    while (QLayoutItem *item = layout_->takeAt(0)) {
-      delete item->widget();
-      delete item;
-    }
-    for (const QString &path : paths)
-      layout_->addWidget(new ImageThumbnail(path, strip_), 0, Qt::AlignVCenter);
-
+    const int retainedScroll = horizontalScrollBar()->value();
     layout_->activate();
     naturalSize_ = layout_->sizeHint().expandedTo(QSize(0, 0));
     strip_->setFixedSize(naturalSize_);
-    horizontalScrollBar()->setValue(0);
     refreshHeight();
+    horizontalScrollBar()->setValue(retainedScroll);
     setVisible(!paths.isEmpty());
   }
 
@@ -432,32 +515,12 @@ QLabel *makeLabel(const QString &value, const char *kind = "body",
   return label;
 }
 
-QString markdownHtml(const QString &markdown) {
-  QTextDocument document;
-  document.setMarkdown(markdown, QTextDocument::MarkdownFeatures(
-                                     QTextDocument::MarkdownDialectGitHub) |
-                                     QTextDocument::MarkdownNoHTML);
-  return document.toHtml();
-}
-
-QLabel *makeMarkdownLabel(const QString &value, QWidget *parent = nullptr) {
-  auto *label = new QLabel(parent);
-  label->setProperty("kind", "body");
-  label->setTextFormat(Qt::RichText);
-  label->setWordWrap(true);
-  label->setMinimumWidth(0);
-  // QTextDocument and QLabel round rich-text line geometry independently.
-  // Keep one descent of paint space below the measured document so the final
-  // baseline cannot be clipped when a nested card is fixed to heightForWidth.
-  label->setContentsMargins(0, 0, 0, MarkdownBottomPaintGuard);
-  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  label->setOpenExternalLinks(true);
-  label->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                 Qt::LinksAccessibleByMouse |
-                                 Qt::LinksAccessibleByKeyboard);
-  label->setProperty("markdownSource", value);
-  label->setText(markdownHtml(value));
-  return label;
+MarkdownTextView *makeMarkdownView(
+    const QString &value, std::shared_ptr<QTextDocument> preparedDocument,
+    int initialWidth, QWidget *parent = nullptr,
+    bool preserveSoftLineBreaks = false) {
+  return new MarkdownTextView(value, std::move(preparedDocument), initialWidth,
+                              parent, preserveSoftLineBreaks);
 }
 
 bool setVisibleText(QLabel *label, const QString &text) {
@@ -471,25 +534,22 @@ bool setVisibleText(QLabel *label, const QString &text) {
   return changed;
 }
 
-bool setVisibleMarkdown(QLabel *label, const QString &markdown) {
+bool setVisibleMarkdown(MarkdownTextView *view, const QString &markdown) {
   const bool visible = !markdown.isEmpty();
-  const bool contentChanged =
-      label->property("markdownSource").toString() != markdown;
-  const bool explicitlyVisible = !label->isHidden();
+  const bool contentChanged = view->markdownSource() != markdown;
+  const bool explicitlyVisible = !view->isHidden();
   const bool changed = contentChanged || explicitlyVisible != visible;
-  if (contentChanged) {
-    label->setProperty("markdownSource", markdown);
-    label->setText(markdownHtml(markdown));
-  }
+  if (contentChanged)
+    view->setContent(markdown);
   if (explicitlyVisible != visible)
-    label->setVisible(visible);
+    view->setVisible(visible);
   return changed;
 }
 
 QString displayStatus(const QString &status) {
   const QByteArray encoded = status.toUtf8();
-  return text(codexui::codex::displayStatus(std::string_view(
-      encoded.constData(), static_cast<std::size_t>(encoded.size()))));
+  return presentation::statusLabel(std::string_view(
+      encoded.constData(), static_cast<std::size_t>(encoded.size())));
 }
 
 QString statusTone(const QString &status) {
@@ -525,25 +585,9 @@ QString commandMetadata(const CommandExecutionData &command) {
   return metadata.join(QStringLiteral("  |  "));
 }
 
-QString agentMetadata(const AgentActivityData &activity) {
-  QStringList metadata;
-  if (!activity.tool.empty())
-    metadata << text(activity.tool);
-  if (activity.status.empty() && !activity.kind.empty())
-    metadata << displayStatus(text(activity.kind));
-  if (!activity.receivers.empty())
-    metadata << textList(activity.receivers).join(QStringLiteral(", "));
-  if (!activity.model.empty())
-    metadata << text(activity.model);
-  if (!activity.reasoningEffort.empty())
-    metadata << text(activity.reasoningEffort);
-  if (!activity.childThreadId.empty())
-    metadata << QStringLiteral("thread %1").arg(text(activity.childThreadId));
-  if (!activity.agentPath.empty())
-    metadata << text(activity.agentPath);
-  if (!activity.senderThreadId.empty())
-    metadata << QStringLiteral("sender %1").arg(text(activity.senderThreadId));
-  return metadata.join(QStringLiteral("  |  "));
+bool commandHasMetadata(const CommandExecutionData &command) noexcept {
+  return command.exitCode || !command.cwd.empty() ||
+         command.durationMilliseconds;
 }
 
 QString displayChangeKind(std::string_view kind) {
@@ -557,6 +601,18 @@ struct DiffCounts {
   int deletions = 0;
 };
 
+struct FileChangesRendering {
+  struct Link {
+    int start = 0;
+    int length = 0;
+  };
+
+  QString text;
+  QStringList openPaths;
+  std::vector<Link> links;
+  std::optional<DiffCounts> counts;
+};
+
 struct CardCopyContent {
   QString text;
   bool markdown = false;
@@ -567,25 +623,10 @@ QString joinedCopyText(QStringList parts) {
   return parts.join(QStringLiteral("\n\n"));
 }
 
-QString fileChangesText(const FileChangesData &data) {
-  QStringList rows;
-  for (const FileChangeData &change : data.changes) {
-    if (change.path.empty())
-      continue;
-    QString row = QStringLiteral("%1  ·  %2")
-                      .arg(text(change.path), displayChangeKind(change.kind));
-    if (change.additions && change.deletions)
-      row += QStringLiteral("  +%1 −%2")
-                 .arg(*change.additions)
-                 .arg(*change.deletions);
-    rows << row;
-  }
-  return rows.join(QLatin1Char('\n'));
-}
-
-QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
-  openPaths.clear();
-  QStringList rows;
+FileChangesRendering fileChangesRendering(const FileChangesData &data) {
+  FileChangesRendering result;
+  DiffCounts total;
+  bool countsAvailable = false;
   for (const FileChangeData &change : data.changes) {
     if (change.path.empty())
       continue;
@@ -593,72 +634,197 @@ QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
     QFileInfo resolved(displayPath);
     if (resolved.isRelative() && !data.cwd.empty())
       resolved = QFileInfo(QDir(text(data.cwd)), displayPath);
-    const int targetIndex = openPaths.size();
-    openPaths.push_back(QDir::cleanPath(resolved.absoluteFilePath()));
+    const int targetIndex = result.openPaths.size();
+    result.openPaths.push_back(QDir::cleanPath(resolved.absoluteFilePath()));
 
+    if (!result.text.isEmpty())
+      result.text += QLatin1Char('\n');
+    result.links.push_back(
+        {static_cast<int>(result.text.size()),
+         static_cast<int>(displayPath.size())});
+    result.text += displayPath;
+    result.text += QStringLiteral("  ·  ");
     QString detail = displayChangeKind(change.kind);
-    if (change.additions && change.deletions)
+    if (change.additions && change.deletions) {
       detail += QStringLiteral("  +%1 −%2")
                     .arg(*change.additions)
                     .arg(*change.deletions);
-    rows.push_back(
-        QStringLiteral("<a href=\"codexui-file:%1\" "
-                       "style=\"color:%2;text-decoration:none;\">%3</a>"
-                       "&nbsp;&nbsp;·&nbsp;&nbsp;%4")
-            .arg(targetIndex)
-            .arg(QString::fromLatin1(UiStyle::blue),
-                 displayPath.toHtmlEscaped(), detail.toHtmlEscaped()));
+      countsAvailable = true;
+      total.additions += *change.additions;
+      total.deletions += *change.deletions;
+    }
+    result.text += detail;
+    Q_ASSERT(targetIndex == static_cast<int>(result.links.size()) - 1);
   }
-  return rows.join(QStringLiteral("<br/>"));
+  if (countsAvailable)
+    result.counts = total;
+  return result;
 }
 
-std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
-  DiffCounts total;
-  bool available = false;
-  for (const FileChangeData &change : data.changes) {
-    if (!change.additions || !change.deletions)
-      continue;
-    available = true;
-    total.additions += *change.additions;
-    total.deletions += *change.deletions;
+class FileChangesView final : public QPlainTextEdit {
+public:
+  explicit FileChangesView(QWidget *parent = nullptr) : QPlainTextEdit(parent) {
+    setObjectName(QStringLiteral("fileChangesList"));
+    setProperty("kind", "body");
+    setStyleSheet(QStringLiteral(
+        "QPlainTextEdit#fileChangesList{background:transparent;border:0;"
+        "padding:0;margin:0;}"));
+    setFrameShape(QFrame::NoFrame);
+    setReadOnly(true);
+    setUndoRedoEnabled(false);
+    setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    setMinimumSize(0, 0);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Changed files"));
+    document()->setDocumentMargin(0);
   }
-  return available ? std::optional<DiffCounts>{total} : std::nullopt;
-}
 
-QString planMarkdown(const PlanData &plan) {
-  if (!plan.legacyText.empty())
-    return text(plan.legacyText);
-  QStringList rows;
-  if (!plan.explanation.empty())
-    rows << text(plan.explanation);
-  if (!plan.steps.empty() && !rows.empty())
-    rows << QString{};
-  for (const PlanStepData &step : plan.steps) {
-    const QString marker = step.status == "completed"    ? QStringLiteral("✓")
-                           : step.status == "inProgress" ? QStringLiteral("◉")
-                                                         : QStringLiteral("○");
-    rows << QStringLiteral("%1 %2  ").arg(marker, text(step.text));
+  void setContent(FileChangesRendering rendering) {
+    const QTextCursor retained = textCursor();
+    const int retainedPosition = retained.position();
+    const int retainedAnchor = retained.anchor();
+    QElapsedTimer phaseTimer;
+    phaseTimer.start();
+    setPlainText(rendering.text);
+    setProperty("fileChangesSetTextMicros",
+                phaseTimer.nsecsElapsed() / 1000);
+    phaseTimer.restart();
+    openPaths_ = std::move(rendering.openPaths);
+    QTextCharFormat linkFormat;
+    linkFormat.setForeground(QColor(QString::fromLatin1(UiStyle::blue)));
+    linkFormat.setFontUnderline(false);
+    linkFormat.setAnchor(true);
+    QTextCursor cursor(document());
+    cursor.beginEditBlock();
+    for (std::size_t index = 0; index < rendering.links.size(); ++index) {
+      const FileChangesRendering::Link &link = rendering.links[index];
+      linkFormat.setAnchorHref(
+          QStringLiteral("codexui-file:%1").arg(index));
+      cursor.setPosition(link.start);
+      cursor.setPosition(link.start + link.length, QTextCursor::KeepAnchor);
+      cursor.mergeCharFormat(linkFormat);
+    }
+    cursor.endEditBlock();
+    setProperty("fileChangesFormatLinksMicros",
+                phaseTimer.nsecsElapsed() / 1000);
+    phaseTimer.restart();
+    const int maximum = std::max(0, document()->characterCount() - 1);
+    QTextCursor restored(document());
+    restored.setPosition(std::clamp(retainedAnchor, 0, maximum));
+    restored.setPosition(std::clamp(retainedPosition, 0, maximum),
+                         QTextCursor::KeepAnchor);
+    setTextCursor(restored);
+    preferredWidth_ = 0;
+    preferredHeight_ = 0;
+    refreshPreferredHeight(std::max(1, viewport()->width()));
+    setProperty("fileChangesMeasureMicros",
+                phaseTimer.nsecsElapsed() / 1000);
+    updateGeometry();
   }
-  return rows.join(QLatin1Char('\n'));
-}
 
-QString boundedGenericActivity(const nlohmann::json &raw) {
-  QString rendered = QString::fromStdString(raw.dump(2));
-  if (rendered.size() <= MaximumGenericActivityCharacters)
-    return rendered;
-  rendered.truncate(MaximumGenericActivityCharacters);
-  return rendered + QStringLiteral("\n\n[Activity details truncated]");
-}
+  [[nodiscard]] QSize sizeHint() const override {
+    QSize result = QPlainTextEdit::sizeHint();
+    result.setHeight(preferredHeight(std::max(1, viewport()->width())));
+    return result;
+  }
 
-QString boundedGenericActivity(const GenericActivityData &activity) {
-  if (activity.displayDetail.empty())
-    return boundedGenericActivity(activity.raw);
-  QString rendered = text(activity.displayDetail);
-  if (rendered.size() <= MaximumGenericActivityCharacters)
-    return rendered;
-  rendered.truncate(MaximumGenericActivityCharacters);
-  return rendered + QStringLiteral("\n\n[Activity details truncated]");
-}
+  [[nodiscard]] QSize minimumSizeHint() const override { return {0, 0}; }
+
+protected:
+  void resizeEvent(QResizeEvent *event) override {
+    QPlainTextEdit::resizeEvent(event);
+    refreshPreferredHeight(std::max(1, viewport()->width()));
+  }
+
+  void mousePressEvent(QMouseEvent *event) override {
+    pressedLink_ = event->button() == Qt::LeftButton
+                       ? anchorAt(event->position().toPoint())
+                       : QString{};
+    QPlainTextEdit::mousePressEvent(event);
+  }
+
+  void mouseMoveEvent(QMouseEvent *event) override {
+    const QString link = anchorAt(event->position().toPoint());
+    viewport()->setCursor(link.isEmpty() ? Qt::IBeamCursor
+                                         : Qt::PointingHandCursor);
+    if (!link.isEmpty())
+      setToolTip(linkPath(link));
+    else
+      setToolTip({});
+    QPlainTextEdit::mouseMoveEvent(event);
+  }
+
+  void mouseReleaseEvent(QMouseEvent *event) override {
+    const QString releasedLink =
+        event->button() == Qt::LeftButton
+            ? anchorAt(event->position().toPoint())
+            : QString{};
+    QPlainTextEdit::mouseReleaseEvent(event);
+    if (!pressedLink_.isEmpty() && releasedLink == pressedLink_ &&
+        !textCursor().hasSelection())
+      static_cast<void>(activateLink(releasedLink));
+    pressedLink_.clear();
+  }
+
+  void keyPressEvent(QKeyEvent *event) override {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+        event->key() == Qt::Key_Space) {
+      QTextCursor cursor = textCursor();
+      QString link = cursor.charFormat().anchorHref();
+      if (link.isEmpty() && cursor.position() > 0) {
+        cursor.setPosition(cursor.position() - 1);
+        link = cursor.charFormat().anchorHref();
+      }
+      if (activateLink(link)) {
+        event->accept();
+        return;
+      }
+    }
+    QPlainTextEdit::keyPressEvent(event);
+  }
+
+  void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+
+private:
+  [[nodiscard]] QString linkPath(const QString &link) const {
+    constexpr QLatin1StringView prefix("codexui-file:");
+    if (!link.startsWith(prefix))
+      return {};
+    bool valid = false;
+    const int index = link.sliced(prefix.size()).toInt(&valid);
+    return valid && index >= 0 && index < openPaths_.size()
+               ? QDir::toNativeSeparators(openPaths_.at(index))
+               : QString{};
+  }
+
+  bool activateLink(const QString &link) {
+    const QString path = linkPath(link);
+    return !path.isEmpty() && openLocalFile(path);
+  }
+
+  int preferredHeight(int width) const {
+    refreshPreferredHeight(width);
+    return preferredHeight_;
+  }
+
+  void refreshPreferredHeight(int width) const {
+    if (preferredWidth_ == width && preferredHeight_ > 0)
+      return;
+    document()->setTextWidth(width);
+    preferredWidth_ = width;
+    preferredHeight_ =
+        std::max(1, static_cast<int>(std::ceil(document()->size().height())));
+  }
+
+  QStringList openPaths_;
+  QString pressedLink_;
+  mutable int preferredWidth_ = 0;
+  mutable int preferredHeight_ = 0;
+};
 
 CardCopyContent cardCopyContent(const VisibleCardData &card) {
   return std::visit(
@@ -684,15 +850,15 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
         } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
           return {text(payload.summary), true};
         } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
-          return {fileChangesText(payload), false};
+          return {presentation::fileChangesText(payload), false};
         } else if constexpr (std::is_same_v<Payload, PlanData>) {
-          return {planMarkdown(payload), true};
+          return {presentation::planMarkdown(payload), true};
         } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
           return {
               joinedCopyText({text(payload.revisedPrompt), text(payload.path)}),
               false};
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
-          return {boundedGenericActivity(payload), false};
+          return {presentation::boundedGenericActivityDetail(payload), false};
         } else {
           return payload.prompt.empty()
                      ? CardCopyContent{textList(payload.imagePaths)
@@ -700,6 +866,46 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
                                        false}
                      : CardCopyContent{text(payload.prompt), true};
         }
+      },
+      card.payload);
+}
+
+bool cardHasCopyContent(const VisibleCardData &card) {
+  return std::visit(
+      [](const auto &payload) {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, UserMessageData>)
+          return !payload.text.empty() ||
+                 std::ranges::any_of(payload.imagePaths,
+                                     [](const auto &path) {
+                                       return !path.empty();
+                                     });
+        else if constexpr (std::is_same_v<Payload, AgentMessageData>)
+          return !payload.text.empty();
+        else if constexpr (std::is_same_v<Payload, CommandExecutionData>)
+          return hasTextAfterTrimmingTrailingEmptyLines(payload.command) ||
+                 hasTextAfterTrimmingTrailingEmptyLines(payload.output);
+        else if constexpr (std::is_same_v<Payload, AgentActivityData>)
+          return !payload.prompt.empty() || !payload.resultText.empty();
+        else if constexpr (std::is_same_v<Payload, ReasoningData>)
+          return !payload.summary.empty();
+        else if constexpr (std::is_same_v<Payload, FileChangesData>)
+          return std::ranges::any_of(payload.changes, [](const auto &change) {
+            return !change.path.empty();
+          });
+        else if constexpr (std::is_same_v<Payload, PlanData>)
+          return !payload.explanation.empty() || !payload.steps.empty() ||
+                 !payload.legacyText.empty();
+        else if constexpr (std::is_same_v<Payload, ImageGenerationData>)
+          return !payload.revisedPrompt.empty() || !payload.path.empty();
+        else if constexpr (std::is_same_v<Payload, GenericActivityData>)
+          return !payload.displayDetail.empty();
+        else
+          return !payload.prompt.empty() ||
+                 std::ranges::any_of(payload.imagePaths,
+                                     [](const auto &path) {
+                                       return !path.empty();
+                                     });
       },
       card.payload);
 }
@@ -722,6 +928,191 @@ bool presentationEquals(const VisibleCardData &left,
 }
 
 } // namespace
+
+MarkdownTextView::MarkdownTextView(
+    const QString &markdown,
+    std::shared_ptr<QTextDocument> preparedDocument, int initialWidth,
+    QWidget *parent, bool preserveSoftLineBreaks)
+    : QTextBrowser(parent),
+      document_(preparedDocument ? preparedDocument
+                                 : std::make_shared<QTextDocument>()),
+      preserveSoftLineBreaks_(preserveSoftLineBreaks) {
+  setObjectName(QStringLiteral("markdownTextView"));
+  setProperty("kind", "body");
+  setStyleSheet(QStringLiteral(
+      "QTextBrowser#markdownTextView{background:transparent;border:0;"
+      "padding:0;margin:0;}"));
+  setFrameShape(QFrame::NoFrame);
+  setContentsMargins(0, 0, 0, 0);
+  setReadOnly(true);
+  setTextInteractionFlags(Qt::TextSelectableByMouse |
+                          Qt::TextSelectableByKeyboard |
+                          Qt::LinksAccessibleByMouse |
+                          Qt::LinksAccessibleByKeyboard);
+  setFocusPolicy(Qt::StrongFocus);
+  setOpenExternalLinks(true);
+  setOpenLinks(true);
+  setLineWrapMode(QTextEdit::WidgetWidth);
+  setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  // The editor already owns an exact document-height cache. A fixed vertical
+  // policy prevents QLayout from caching a speculative height-for-width query
+  // made against an intermediate narrow parent during card construction.
+  QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  setSizePolicy(policy);
+  setMinimumSize(0, 0);
+  if (initialWidth > 0)
+    resize(initialWidth, 1);
+  if (preparedDocument) {
+    preferredDocumentWidth_ =
+        std::max(1, static_cast<int>(std::lround(document_->textWidth())));
+    preferredHeight_ =
+        std::max(1, static_cast<int>(std::ceil(document_->size().height())) +
+                        MarkdownBottomPaintGuard);
+  }
+  setDocument(document_.get());
+  configureDocument();
+  if (preparedDocument) {
+    markdown_ = markdown;
+    renderedMarkdown_ = preserveSoftLineBreaks_
+                            ? presentation::userMessageMarkdown(markdown_)
+                            : markdown_;
+    markdownTail_ =
+        presentation::markdownTailState(*document_,
+                                        QStringView(renderedMarkdown_));
+    setProperty("markdownSource", markdown_);
+  } else {
+    setContent(markdown);
+  }
+}
+
+MarkdownTextView::~MarkdownTextView() {
+  // QTextEdit's base destructor still refers to its current document after
+  // derived members have been destroyed. Detach the shared cache document
+  // first so its lifetime remains explicit.
+  setDocument(new QTextDocument(this));
+  document_.reset();
+}
+
+void MarkdownTextView::configureDocument() {
+  document_->setDocumentMargin(0);
+  document_->setDefaultFont(font());
+  document_->setDefaultStyleSheet(
+      QStringLiteral("a{color:#5471a6;text-decoration:none;}"));
+  QTextOption option = document_->defaultTextOption();
+  option.setWrapMode(QTextOption::WordWrap);
+  document_->setDefaultTextOption(option);
+}
+
+bool MarkdownTextView::setContent(const QString &markdown) {
+  if (markdown_ == markdown)
+    return false;
+  const QString rendered = preserveSoftLineBreaks_
+                               ? presentation::userMessageMarkdown(markdown)
+                               : markdown;
+  const QTextCursor retainedCursor = textCursor();
+  const bool retainedSelection = retainedCursor.hasSelection();
+  const int retainedPosition = retainedCursor.position();
+  const int retainedAnchor = retainedCursor.anchor();
+  if (!presentation::appendMarkdownDocument(
+          *document_, QStringView(renderedMarkdown_), QStringView(rendered),
+          markdownTail_)) {
+    presentation::replaceMarkdownDocument(*document_, rendered, markdownTail_);
+  }
+  markdown_ = markdown;
+  renderedMarkdown_ = rendered;
+  setProperty("markdownSource", markdown_);
+  if (retainedSelection) {
+    const int maximum = std::max(0, document_->characterCount() - 1);
+    QTextCursor restored(document_.get());
+    restored.setPosition(std::clamp(retainedAnchor, 0, maximum));
+    restored.setPosition(std::clamp(retainedPosition, 0, maximum),
+                         QTextCursor::KeepAnchor);
+    setTextCursor(restored);
+  }
+  refreshPreferredHeight(std::max(1, viewport()->width() - 2));
+  updateGeometry();
+  viewport()->update();
+  return true;
+}
+
+const QString &MarkdownTextView::markdownSource() const noexcept {
+  return markdown_;
+}
+
+std::shared_ptr<QTextDocument> MarkdownTextView::sharedDocument() const {
+  return document_;
+}
+
+bool MarkdownTextView::hasSelectedText() const {
+  return textCursor().hasSelection();
+}
+
+int MarkdownTextView::selectionStart() const {
+  const QTextCursor cursor = textCursor();
+  return cursor.hasSelection() ? cursor.selectionStart() : -1;
+}
+
+QString MarkdownTextView::selectedText() const {
+  return textCursor().selectedText();
+}
+
+void MarkdownTextView::setSelection(int start, int length) {
+  const int maximum = std::max(0, document_->characterCount() - 1);
+  QTextCursor cursor(document_.get());
+  cursor.setPosition(std::clamp(start, 0, maximum));
+  cursor.setPosition(std::clamp(start + length, 0, maximum),
+                     QTextCursor::KeepAnchor);
+  setTextCursor(cursor);
+}
+
+int MarkdownTextView::heightForWidth(int width) const {
+  if (markdown_.isEmpty())
+    return 0;
+  // QVBoxLayout can ask with both the frame-inclusive and assigned child
+  // width. The viewport is the single authoritative rich-text paint width.
+  const int viewportWidth = viewport()->width();
+  refreshPreferredHeight(
+      std::max(1, viewportWidth > 0 ? viewportWidth - 2 : width - 4));
+  return preferredHeight_;
+}
+
+QSize MarkdownTextView::sizeHint() const {
+  QSize result = QTextBrowser::sizeHint();
+  result.setHeight(heightForWidth(std::max(1, width())));
+  return result;
+}
+
+QSize MarkdownTextView::minimumSizeHint() const { return {0, 0}; }
+
+void MarkdownTextView::keyPressEvent(QKeyEvent *event) {
+  if (event && event->matches(QKeySequence::Copy) && hasSelectedText()) {
+    // QTextBrowser owns the platform copy semantics. Remove only the
+    // presentation-only glyph used to keep authored blank prompt lines
+    // visible; it is not part of the user's canonical text.
+    copy();
+    if (QClipboard *clipboard = QApplication::clipboard()) {
+      QString text = clipboard->text();
+      if (text.contains(QChar(0x200B))) {
+        text.remove(QChar(0x200B));
+        clipboard->setText(text);
+      }
+    }
+    event->accept();
+    return;
+  }
+  QTextBrowser::keyPressEvent(event);
+}
+
+void MarkdownTextView::refreshPreferredHeight(int documentWidth) const {
+  if (preferredDocumentWidth_ == documentWidth && preferredHeight_ > 0)
+    return;
+  document_->setTextWidth(documentWidth);
+  preferredDocumentWidth_ = documentWidth;
+  preferredHeight_ =
+      std::max(1, static_cast<int>(std::ceil(document_->size().height())) +
+                      MarkdownBottomPaintGuard);
+}
 
 ContentSizedTextView::ContentSizedTextView(int maximumContentHeight,
                                            QWidget *parent)
@@ -855,6 +1246,12 @@ bool ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
         frame + static_cast<int>(std::ceil(document()->size().height()));
   }
   wantedHeight = std::clamp(wantedHeight, 0, maximumHeight());
+  return setPreferredContentHeight(wantedHeight, notifyParent);
+}
+
+bool ContentSizedTextView::setPreferredContentHeight(int height,
+                                                     bool notifyParent) {
+  const int wantedHeight = std::clamp(height, 0, maximumHeight());
   if (wantedHeight == preferredHeight_)
     return false;
   preferredHeight_ = wantedHeight;
@@ -868,12 +1265,28 @@ bool ContentSizedTextView::contentHeightCapped() const noexcept {
 }
 
 CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
-    : ContentSizedTextView(MaximumCommandOutputHeight, parent) {
+    : QTextEdit(parent) {
+  setReadOnly(true);
+  setAcceptRichText(false);
+  setMinimumHeight(0);
+  setLineWrapMode(QTextEdit::WidgetWidth);
+  setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  document()->setDocumentMargin(0);
   setProperty("kind", "code");
   setObjectName(QStringLiteral("commandOutputView"));
-  setStyleSheet(QStringLiteral(
-      "QTextEdit#commandOutputView{background:#111827;color:#e5e7eb;"
-      "border-radius:6px;}"));
+  setStyleSheet(
+      QStringLiteral("QTextEdit#commandOutputView{background:#111827;"
+                     "color:#e5e7eb;border-radius:6px;padding:%1px %2px;}")
+          .arg(CommandOutputVerticalPadding)
+          .arg(CommandOutputHorizontalPadding));
+  ensurePolished();
+  const int lineHeight = std::max(1, fontMetrics().lineSpacing());
+  const int contentBudget =
+      MaximumCommandOutputHeight - 2 * CommandOutputVerticalPadding;
+  const int maximumRows = std::max(1, contentBudget / lineHeight);
+  setMaximumHeight(2 * CommandOutputVerticalPadding + maximumRows * lineHeight);
 
   connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
@@ -893,8 +1306,9 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
   });
   connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int) {
     preservedScrollValue_ = verticalScrollBar()->sliderPosition();
-    followsLatest_ =
-        preservedScrollValue_ >= verticalScrollBar()->maximum() - 1;
+    // QPlainTextEdit scroll values are block based: one unit is a complete
+    // output line, not a one-pixel rounding tolerance.
+    followsLatest_ = preservedScrollValue_ >= verticalScrollBar()->maximum();
   });
   connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
           [this](int, int) {
@@ -907,8 +1321,55 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
   settleScroll();
 }
 
+bool CommandOutputView::retainsWheelGesture(QWheelEvent *event) {
+  if (!event)
+    return false;
+  const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
+                                                  : event->angleDelta().y();
+  QScrollBar *bar = verticalScrollBar();
+  const bool canScroll = bar->maximum() > bar->minimum() &&
+                         ((delta > 0 && bar->value() > bar->minimum()) ||
+                          (delta < 0 && bar->value() < bar->maximum()));
+  const bool hasDirection = delta != 0;
+  if (event->phase() == Qt::ScrollBegin) {
+    wheelGestureActive_ = true;
+    wheelGestureDecided_ = hasDirection;
+    wheelGestureOwned_ = hasDirection && canScroll;
+  } else if (event->phase() == Qt::ScrollEnd) {
+    const bool retained =
+        wheelGestureActive_ && wheelGestureDecided_ && wheelGestureOwned_;
+    wheelGestureActive_ = false;
+    wheelGestureDecided_ = false;
+    wheelGestureOwned_ = false;
+    return retained;
+  } else if (event->phase() == Qt::NoScrollPhase) {
+    return canScroll;
+  } else if (!wheelGestureActive_) {
+    wheelGestureActive_ = true;
+    wheelGestureDecided_ = hasDirection;
+    wheelGestureOwned_ = hasDirection && canScroll;
+  } else if (!wheelGestureDecided_ && hasDirection) {
+    wheelGestureDecided_ = true;
+    wheelGestureOwned_ = canScroll;
+  }
+  return wheelGestureDecided_ && wheelGestureOwned_;
+}
+
+QSize CommandOutputView::sizeHint() const {
+  QSize result = QTextEdit::sizeHint();
+  result.setHeight(preferredHeight_);
+  return result;
+}
+
+QSize CommandOutputView::minimumSizeHint() const {
+  QSize result = QTextEdit::minimumSizeHint();
+  result.setHeight(0);
+  return result;
+}
+
 CommandOutputView::ScrollState CommandOutputView::scrollState() const {
-  return {followsLatest_, preservedScrollValue_};
+  return {followsLatest_, followsLatest_ ? preservedScrollValue_
+                                         : verticalScrollBar()->value()};
 }
 
 bool CommandOutputView::followsLatest() const noexcept {
@@ -916,13 +1377,18 @@ bool CommandOutputView::followsLatest() const noexcept {
 }
 
 bool CommandOutputView::isHeightCapped() const noexcept {
-  return contentHeightCapped();
+  return preferredHeight_ >= maximumHeight();
 }
 
 bool CommandOutputView::setOutput(const QString &output) {
+  QElapsedTimer commitTimer;
+  commitTimer.start();
   const QString displayOutput = trimmedTrailingLines(output);
-  if (currentOutput_ == displayOutput)
+  if (currentOutput_ == displayOutput) {
+    settleScroll();
+    scheduleScrollSettlement();
     return false;
+  }
 
   const bool retainedHeightIsCapped = isHeightCapped();
   const bool retainedFollow = followsLatest_;
@@ -942,20 +1408,104 @@ bool CommandOutputView::setOutput(const QString &output) {
   preservedScrollValue_ = retainedValue;
   programmaticScroll_ = false;
   // Once the output has reached its bounded height, subsequent text cannot
-  // change the enclosing card's geometry. Avoid a complete QTextDocument
-  // measurement and ancestor LayoutRequest for the common streaming case.
-  if (!retainedHeightIsCapped || !appendOnly || displayOutput.isEmpty())
+  // change the enclosing card's geometry. Avoid whole-document geometry and
+  // an ancestor LayoutRequest for the common streaming case.
+  if (outputRequiresMaximumHeight(displayOutput)) {
+    static_cast<void>(setPreferredContentHeight(maximumHeight(), true));
+    setProperty("boundedOutputMeasurements",
+                property("boundedOutputMeasurements").toULongLong() + 1);
+  } else if (!retainedHeightIsCapped || !appendOnly || displayOutput.isEmpty()) {
     static_cast<void>(measureAtCurrentWidth(true));
-  else
+    setProperty("fullOutputMeasurements",
+                property("fullOutputMeasurements").toULongLong() + 1);
+  } else {
     viewport()->update();
+  }
   settleScroll();
+  scheduleScrollSettlement();
+  setProperty("lastOutputCommitMicros", commitTimer.nsecsElapsed() / 1000);
   return true;
+}
+
+bool CommandOutputView::outputRequiresMaximumHeight(
+    const QString &output) const {
+  if (output.isEmpty())
+    return false;
+  const int lineHeight = std::max(1, fontMetrics().lineSpacing());
+  const int availableHeight =
+      std::max(1, maximumHeight() - 2 * CommandOutputVerticalPadding);
+  const int requiredLines = availableHeight / lineHeight + 1;
+  const int availableWidth = std::max(1, viewport()->width());
+  int visualLines = 0;
+  qsizetype begin = 0;
+  while (begin <= output.size()) {
+    const qsizetype end = output.indexOf(QLatin1Char('\n'), begin);
+    const qsizetype length =
+        end < 0 ? output.size() - begin : end - begin;
+    const int advance =
+        fontMetrics().horizontalAdvance(output.sliced(begin, length));
+    visualLines += std::max(1, (advance + availableWidth - 1) / availableWidth);
+    if (visualLines >= requiredLines)
+      return true;
+    if (end < 0)
+      break;
+    begin = end + 1;
+  }
+  return false;
+}
+
+bool CommandOutputView::measureAtCurrentWidth(bool notifyParent) {
+  if (currentOutput_.isEmpty())
+    return setPreferredContentHeight(0, notifyParent);
+  if (outputRequiresMaximumHeight(currentOutput_))
+    return setPreferredContentHeight(maximumHeight(), notifyParent);
+
+  qreal contentHeight = 2 * CommandOutputVerticalPadding;
+  for (QTextBlock block = document()->begin(); block.isValid();
+       block = block.next()) {
+    if (block.layout())
+      contentHeight += block.layout()->boundingRect().height();
+    if (contentHeight >= maximumHeight())
+      return setPreferredContentHeight(maximumHeight(), notifyParent);
+  }
+  return setPreferredContentHeight(
+      static_cast<int>(std::ceil(contentHeight)),
+      notifyParent);
+}
+
+bool CommandOutputView::setPreferredContentHeight(int height,
+                                                  bool notifyParent) {
+  const int wantedHeight = std::clamp(height, 0, maximumHeight());
+  if (wantedHeight == preferredHeight_)
+    return false;
+  preferredHeight_ = wantedHeight;
+  if (notifyParent)
+    updateGeometry();
+  return true;
+}
+
+void CommandOutputView::resizeEvent(QResizeEvent *event) {
+  QTextEdit::resizeEvent(event);
+  if (outputRequiresMaximumHeight(currentOutput_)) {
+    static_cast<void>(setPreferredContentHeight(maximumHeight(), true));
+    setProperty("boundedOutputMeasurements",
+                property("boundedOutputMeasurements").toULongLong() + 1);
+    settleScroll();
+    scheduleScrollSettlement();
+    return;
+  }
+  static_cast<void>(measureAtCurrentWidth(true));
+  setProperty("fullOutputMeasurements",
+              property("fullOutputMeasurements").toULongLong() + 1);
+  settleScroll();
+  scheduleScrollSettlement();
 }
 
 void CommandOutputView::restoreScrollState(const ScrollState &state) {
   followsLatest_ = state.followsLatest;
   preservedScrollValue_ = std::max(0, state.value);
   settleScroll();
+  scheduleScrollSettlement();
 }
 
 void CommandOutputView::wheelEvent(QWheelEvent *event) {
@@ -964,7 +1514,13 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
                                                   : event->angleDelta().y();
   if (delta > 0)
     followsLatest_ = false;
-  ContentSizedTextView::wheelEvent(event);
+  const bool atBoundary = bar->maximum() <= bar->minimum() ||
+                          (delta > 0 && bar->value() <= bar->minimum()) ||
+                          (delta < 0 && bar->value() >= bar->maximum());
+  if (atBoundary)
+    event->accept();
+  else
+    QTextEdit::wheelEvent(event);
   preservedScrollValue_ = bar->value();
   followsLatest_ = isAtBottom();
 }
@@ -976,12 +1532,6 @@ void CommandOutputView::settleScroll() {
   QScrollBar *bar = verticalScrollBar();
   const bool wasProgrammatic = programmaticScroll_;
   programmaticScroll_ = true;
-  if (followsLatest_) {
-    QTextCursor cursor = textCursor();
-    cursor.movePosition(QTextCursor::End);
-    setTextCursor(cursor);
-    ensureCursorVisible();
-  }
   const int target =
       followsLatest_
           ? bar->maximum()
@@ -993,19 +1543,33 @@ void CommandOutputView::settleScroll() {
   settlingScroll_ = false;
 }
 
+void CommandOutputView::scheduleScrollSettlement() {
+  if (scrollSettlementPending_)
+    return;
+  scrollSettlementPending_ = true;
+  QTimer::singleShot(0, this, [this] {
+    scrollSettlementPending_ = false;
+    settleScroll();
+  });
+}
+
 bool CommandOutputView::isAtBottom() const {
-  return verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 1;
+  return verticalScrollBar()->value() >= verticalScrollBar()->maximum();
 }
 
 class ConversationCard::Impl final {
 public:
   Impl(ConversationCard *owner, const VisibleCardData &initial,
        bool commandInitiallyCollapsed, bool imageInitiallyCollapsed,
-       bool fileChangesInitiallyCollapsed)
+       bool fileChangesInitiallyCollapsed,
+       std::shared_ptr<QTextDocument> preparedMarkdownDocument,
+       std::optional<bool> collapsedOverride)
       : owner(owner), current(initial),
-        collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
-                                     imageInitiallyCollapsed,
-                                     fileChangesInitiallyCollapsed)) {
+        collapsed(collapsedOverride.value_or(initiallyCollapsed(
+            initial.kind, commandInitiallyCollapsed, imageInitiallyCollapsed,
+            fileChangesInitiallyCollapsed))),
+        deferCollapsedBodyProjection(collapsedOverride.has_value()),
+        preparedMarkdownDocument(std::move(preparedMarkdownDocument)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     owner->setProperty("conversationCardKey",
@@ -1026,6 +1590,7 @@ public:
     disclosure = new CardDisclosureButton(header);
     headerLayout->addWidget(title, 1);
     headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
+    headerLayout->addSpacing(4);
     headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(header);
 
@@ -1034,17 +1599,11 @@ public:
     contentLayout = new QVBoxLayout(content);
     contentLayout->setContentsMargins(0, 0, 0, 0);
     contentLayout->setSpacing(6);
+    const QMargins cardMargins = layout->contentsMargins();
+    content->resize(std::max(1, owner->contentsRect().width() -
+                                   cardMargins.left() - cardMargins.right()),
+                    1);
     layout->addWidget(content);
-
-    nestedCards = new QWidget(owner);
-    nestedCards->setObjectName(QStringLiteral("conversationNestedCards"));
-    nestedLayout = new QVBoxLayout(nestedCards);
-    // Keep a visible section boundary between the complete prompt and the
-    // activity nested beneath it, in addition to ordinary widget spacing.
-    nestedLayout->setContentsMargins(0, 8, 0, 0);
-    nestedLayout->setSpacing(8);
-    nestedCards->hide();
-    layout->addWidget(nestedCards);
 
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
@@ -1115,11 +1674,19 @@ public:
           before && after && before->command == after->command &&
           before->output == after->output && before->cwd == after->cwd &&
           !before->status.empty() && !after->status.empty() &&
-          !commandMetadata(*before).isEmpty() &&
-          !commandMetadata(*after).isEmpty();
+          commandHasMetadata(*before) && commandHasMetadata(*after);
     }
     if (becomingAuthoritative)
       promoteToAuthoritativeUserMessage();
+    bool fileChangesBodyChanged = true;
+    if (!becomingAuthoritative && current.kind == CardKind::FileChanges &&
+        next.kind == CardKind::FileChanges) {
+      const auto *before = std::get_if<FileChangesData>(&current.payload);
+      const auto *after = std::get_if<FileChangesData>(&next.payload);
+      fileChangesBodyChanged =
+          !before || !after || before->changes != after->changes ||
+          before->cwd != after->cwd;
+    }
     current = next;
     if (!presentationChanged)
       return PresentationImpact::None;
@@ -1128,12 +1695,21 @@ public:
       return PresentationImpact::PaintOnly;
     }
     const int previousNaturalHeight =
-        commandLifecycleOnly ? naturalHeightForCurrentWidth() : -1;
-    std::visit([this](const auto &payload) { updateComposition(payload); },
-               next.payload);
+        commandLifecycleOnly && !collapsed ? naturalHeightForCurrentWidth()
+                                           : -1;
+    std::visit(
+        [this, fileChangesBodyChanged](const auto &payload) {
+          using Payload = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Payload, FileChangesData>)
+            updateComposition(payload, fileChangesBodyChanged, !collapsed);
+          else
+            updateComposition(payload);
+        },
+        next.payload);
     if (next.activeWork)
       setActiveWork(*next.activeWork);
-    refreshCopyPresentation();
+    if (fileChangesBodyChanged)
+      refreshCopyPresentation();
     refreshFoldPresentation();
     const int nextNaturalHeight = commandLifecycleOnly
                                       ? naturalHeightForCurrentWidth()
@@ -1141,8 +1717,11 @@ public:
     const bool measuredLifecyclePaintOnly =
         commandLifecycleOnly && previousNaturalHeight >= 0 &&
         nextNaturalHeight == previousNaturalHeight;
-    const bool geometryChanged =
-        !cappedCommandOutputOnly && !measuredLifecyclePaintOnly;
+    const bool fileChangesLifecycleOnly = next.kind == CardKind::FileChanges &&
+                                          (!fileChangesBodyChanged || collapsed);
+    const bool geometryChanged = !cappedCommandOutputOnly &&
+                                 !measuredLifecyclePaintOnly &&
+                                 !fileChangesLifecycleOnly && !collapsed;
     if (geometryChanged)
       owner->updateGeometry();
     owner->update();
@@ -1175,6 +1754,8 @@ public:
     for (QLabel *label : {title, body, metadata})
       if (label)
         label->setStyleSheet(QString{});
+    if (markdownBody)
+      markdownBody->setStyleSheet(QString{});
     if (metadata) {
       metadata->clear();
       metadata->hide();
@@ -1196,6 +1777,17 @@ public:
     if (collapsed == next)
       return;
     collapsed = next;
+    if (!collapsed) {
+      std::visit(
+          [this](const auto &payload) {
+            using Payload = std::decay_t<decltype(payload)>;
+            if constexpr (std::is_same_v<Payload, FileChangesData>)
+              updateComposition(payload, false, true);
+            else
+              updateComposition(payload);
+          },
+          current.payload);
+    }
     refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
@@ -1234,6 +1826,21 @@ public:
     owner->update();
   }
 
+  void setVirtualTurnRootPresentation(bool fragmented) {
+    if (owner->property("virtualTurnRoot").toBool() == fragmented)
+      return;
+    owner->setProperty("virtualTurnRoot", fragmented);
+    const QMargins margins = layout->contentsMargins();
+    if (fragmented)
+      turnRootBottomMargin = margins.bottom();
+    layout->setContentsMargins(margins.left(), margins.top(), margins.right(),
+                               fragmented ? 0 : turnRootBottomMargin);
+    owner->style()->unpolish(owner);
+    owner->style()->polish(owner);
+    owner->updateGeometry();
+    owner->update();
+  }
+
   void setViewportVisible(bool visible) {
     if (viewportVisible == visible)
       return;
@@ -1242,81 +1849,6 @@ public:
     if (refreshPendingPresentation())
       owner->updateGeometry();
     owner->update();
-  }
-
-  void setNestedItems(const std::vector<QWidget *> &items) {
-    std::vector<QWidget *> currentItems;
-    currentItems.reserve(static_cast<std::size_t>(nestedLayout->count()));
-    for (int index = 0; index < nestedLayout->count(); ++index)
-      if (QWidget *item = nestedLayout->itemAt(index)->widget())
-        currentItems.push_back(item);
-
-    const bool unchanged = currentItems == items;
-    const bool appendOnly =
-        currentItems.size() <= items.size() &&
-        std::equal(currentItems.begin(), currentItems.end(), items.begin());
-    if (unchanged) {
-      const bool visible = std::ranges::any_of(
-          items, [](const QWidget *item) { return item && !item->isHidden(); });
-      if (hasVisibleNestedCards != visible) {
-        hasVisibleNestedCards = visible;
-        refreshFoldPresentation();
-      }
-      return;
-    }
-    if (appendOnly) {
-      for (std::size_t index = currentItems.size(); index < items.size();
-           ++index) {
-        QWidget *item = items[index];
-        if (!item)
-          continue;
-        const bool explicitlyHidden = item->isHidden();
-        nestedLayout->addWidget(item);
-        item->setVisible(!explicitlyHidden);
-        if (auto *card = dynamic_cast<ConversationCard *>(item))
-          card->impl_->setNestedConversationCard(true);
-      }
-      hasVisibleNestedCards = std::ranges::any_of(
-          items, [](const QWidget *item) { return item && !item->isHidden(); });
-      refreshFoldPresentation();
-      return;
-    }
-
-    const std::unordered_set<QWidget *> retained(items.begin(), items.end());
-    for (int index = nestedLayout->count() - 1; index >= 0; --index) {
-      QWidget *item = nestedLayout->itemAt(index)->widget();
-      if (!item || retained.contains(item))
-        continue;
-      const bool explicitlyHidden = item->isHidden();
-      nestedLayout->removeWidget(item);
-      item->setParent(owner->parentWidget());
-      item->setVisible(!explicitlyHidden);
-      if (auto *card = dynamic_cast<ConversationCard *>(item))
-        card->impl_->setNestedConversationCard(false);
-    }
-    for (std::size_t index = 0; index < items.size(); ++index) {
-      QWidget *item = items[index];
-      if (!item)
-        continue;
-      const bool explicitlyHidden = item->isHidden();
-      const int position = static_cast<int>(index);
-      if (nestedLayout->indexOf(item) != position)
-        nestedLayout->insertWidget(position, item);
-      item->setVisible(!explicitlyHidden);
-      if (auto *card = dynamic_cast<ConversationCard *>(item))
-        card->impl_->setNestedConversationCard(true);
-    }
-    hasVisibleNestedCards = std::ranges::any_of(
-        items, [](const QWidget *item) { return item && !item->isHidden(); });
-    refreshFoldPresentation();
-  }
-
-  void setNestedCards(const std::vector<ConversationCard *> &cards) {
-    std::vector<QWidget *> items;
-    items.reserve(cards.size());
-    for (ConversationCard *card : cards)
-      items.push_back(card);
-    setNestedItems(items);
   }
 
   [[nodiscard]] bool hasVisibleContent() const {
@@ -1329,15 +1861,14 @@ public:
   }
 
   void refreshFoldPresentation() {
-    const bool expandable = hasVisibleContent() || hasVisibleNestedCards;
+    const bool expandable = hasVisibleContent();
     disclosure->setExpanded(!collapsed);
     disclosure->setVisible(expandable);
     content->setVisible(expandable && !collapsed);
-    nestedCards->setVisible(hasVisibleNestedCards && !collapsed);
   }
 
   void refreshCopyPresentation() {
-    copy->setVisible(!cardCopyContent(current).text.isEmpty());
+    copy->setVisible(cardHasCopyContent(current));
   }
 
   void showPhase(const QString &value, const QString &objectName) {
@@ -1384,30 +1915,75 @@ public:
     contentLayout->addWidget(images);
   }
 
-  void setImages(const QStringList &paths, bool forceRebuild = false) {
-    images->setPaths(paths, forceRebuild);
+  std::shared_ptr<QTextDocument> takePreparedMarkdownDocument() {
+    return std::exchange(preparedMarkdownDocument, {});
+  }
+
+  std::shared_ptr<QTextDocument> takePreparedVisibleMarkdownDocument() {
+    if (collapsed && deferCollapsedBodyProjection) {
+      preparedMarkdownDocument.reset();
+      return {};
+    }
+    return takePreparedMarkdownDocument();
+  }
+
+  void markBodyProjectionDeferred() {
+    owner->setProperty("conversationBodyProjectionDeferred", true);
+  }
+
+  void markBodyProjectionReady() {
+    if (owner->property("conversationBodyProjectionDeferred").toBool())
+      owner->setProperty(
+          "conversationDeferredBodyBuilds",
+          owner->property("conversationDeferredBodyBuilds").toULongLong() + 1);
+    owner->setProperty("conversationBodyProjectionDeferred", false);
+  }
+
+  int markdownContentWidth() const {
+    const QMargins margins = layout->contentsMargins();
+    return std::max(1, owner->contentsRect().width() - margins.left() -
+                           margins.right());
+  }
+
+  void setImages(const QStringList &paths) {
+    images->setPaths(paths);
   }
 
   void createComposition(const UserMessageData &message) {
     owner->setProperty("messageRole", "user");
     title->setText(QStringLiteral("You"));
-    body = makeMarkdownLabel({}, content);
-    contentLayout->addWidget(body);
+    markdownBody = makeMarkdownView(
+        collapsed && deferCollapsedBodyProjection ? QString{}
+                                                   : text(message.text),
+        takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
+        content, true);
+    contentLayout->addWidget(markdownBody);
     createImageContainer();
     updateComposition(message);
   }
 
   void updateComposition(const UserMessageData &message) {
-    setVisibleMarkdown(body, text(message.text));
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!message.text.empty());
+      images->setVisible(!message.imagePaths.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
+    setVisibleMarkdown(markdownBody, text(message.text));
     setImages(textList(message.imagePaths));
+    markBodyProjectionReady();
   }
 
   void createComposition(const AgentMessageData &message) {
     owner->setProperty("messageRole", "agent");
     title->setText(QStringLiteral("Codex"));
     showPhase({}, QStringLiteral("agentMessagePhase"));
-    body = makeMarkdownLabel({}, content);
-    contentLayout->addWidget(body);
+    markdownBody = makeMarkdownView(
+        collapsed && deferCollapsedBodyProjection ? QString{}
+                                                   : text(message.text),
+        takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
+        content);
+    contentLayout->addWidget(markdownBody);
     updateComposition(message);
   }
 
@@ -1428,7 +2004,13 @@ public:
     setStatusTone(phase, phaseStatus);
     layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                message.finalAnswer ? 10 : 8);
-    setVisibleMarkdown(body, text(message.text));
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!message.text.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
+    setVisibleMarkdown(markdownBody, text(message.text));
+    markBodyProjectionReady();
   }
 
   void createComposition(const CommandExecutionData &execution) {
@@ -1446,12 +2028,26 @@ public:
     contentLayout->addWidget(command);
     contentLayout->addWidget(output);
     contentLayout->addWidget(metadata);
+    const QMargins outerMargins = layout->contentsMargins();
+    const int editorWidth = std::max(
+        1, owner->contentsRect().width() - outerMargins.left() -
+               outerMargins.right());
+    command->resize(editorWidth, command->maximumHeight());
+    output->resize(editorWidth, output->maximumHeight());
     updateComposition(execution);
   }
 
   void updateComposition(const CommandExecutionData &execution) {
     setActiveWork(isActiveStatus(execution.status));
     showStatus(text(execution.status), QStringLiteral("commandStatus"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      command->setVisible(
+          hasTextAfterTrimmingTrailingEmptyLines(execution.command));
+      output->setVisible(terminalOutputHasVisibleText(execution.output));
+      metadata->setVisible(commandHasMetadata(execution));
+      markBodyProjectionDeferred();
+      return;
+    }
     const std::string trimmedCommand =
         trimTrailingEmptyLines(execution.command);
     const QString displayCommand = text(trimmedCommand);
@@ -1472,13 +2068,18 @@ public:
       output->restoreScrollState({true, 0});
     }
     setVisibleText(metadata, commandMetadata(execution));
+    markBodyProjectionReady();
   }
 
   void createComposition(const AgentActivityData &activity) {
     title->setText(QStringLiteral("Agent activity"));
     metadata = makeLabel({}, "meta", content);
     body = makeLabel({}, "body", content);
-    detail = makeMarkdownLabel({}, content);
+    detail = makeMarkdownView(collapsed && deferCollapsedBodyProjection
+                                  ? QString{}
+                                  : text(activity.resultText),
+                              takePreparedVisibleMarkdownDocument(),
+                              markdownContentWidth(), content);
     contentLayout->addWidget(metadata);
     contentLayout->addWidget(body);
     contentLayout->addWidget(detail);
@@ -1487,73 +2088,109 @@ public:
 
   void updateComposition(const AgentActivityData &activity) {
     showStatus(text(activity.status), QStringLiteral("agentActivityStatus"));
-    setVisibleText(metadata, agentMetadata(activity));
+    if (collapsed && deferCollapsedBodyProjection) {
+      metadata->setVisible(!activity.tool.empty() || !activity.kind.empty() ||
+                           !activity.receivers.empty() ||
+                           !activity.model.empty() ||
+                           !activity.reasoningEffort.empty() ||
+                           !activity.childThreadId.empty() ||
+                           !activity.agentPath.empty() ||
+                           !activity.senderThreadId.empty());
+      body->setVisible(!activity.prompt.empty());
+      detail->setVisible(!activity.resultText.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
+    setVisibleText(metadata, presentation::agentMetadata(activity));
     setVisibleText(body, text(activity.prompt));
     setVisibleMarkdown(detail, text(activity.resultText));
+    markBodyProjectionReady();
   }
 
   void createComposition(const ReasoningData &reasoning) {
     title->setText(QStringLiteral("Reasoning"));
-    body = makeMarkdownLabel({}, content);
-    contentLayout->addWidget(body);
+    markdownBody = makeMarkdownView(collapsed && deferCollapsedBodyProjection
+                                        ? QString{}
+                                        : text(reasoning.summary),
+                                    takePreparedVisibleMarkdownDocument(),
+                                    markdownContentWidth(), content);
+    contentLayout->addWidget(markdownBody);
     updateComposition(reasoning);
   }
 
   void updateComposition(const ReasoningData &reasoning) {
-    setVisibleMarkdown(body, text(reasoning.summary));
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!reasoning.summary.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
+    setVisibleMarkdown(markdownBody, text(reasoning.summary));
+    markBodyProjectionReady();
   }
 
   void createComposition(const FileChangesData &changes) {
     title->setText(QStringLiteral("File changes"));
     metadata = makeLabel({}, "meta", content);
-    body = makeLabel({}, "body", content);
-    body->setObjectName(QStringLiteral("fileChangesList"));
-    body->setTextFormat(Qt::RichText);
-    body->setOpenExternalLinks(false);
-    body->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                  Qt::LinksAccessibleByMouse |
-                                  Qt::LinksAccessibleByKeyboard);
-    QObject::connect(body, &QLabel::linkActivated, owner,
-                     [this](const QString &link) {
-                       constexpr QLatin1StringView prefix("codexui-file:");
-                       if (!link.startsWith(prefix))
-                         return;
-                       bool valid = false;
-                       const int index = link.sliced(prefix.size()).toInt(&valid);
-                       if (valid && index >= 0 &&
-                           index < fileChangeOpenPaths.size())
-                         static_cast<void>(
-                             openLocalFile(fileChangeOpenPaths.at(index)));
-                     });
-    contentLayout->addWidget(body);
+    fileChanges = new FileChangesView(content);
+    contentLayout->addWidget(fileChanges);
     contentLayout->addWidget(metadata);
-    updateComposition(changes);
+    updateComposition(changes, true, !collapsed);
   }
 
-  void updateComposition(const FileChangesData &changes) {
-    const QString html = fileChangesHtml(changes, fileChangeOpenPaths);
-    if (body->text() != html)
-      body->setText(html);
-    body->setVisible(!html.isEmpty());
+  void updateComposition(const FileChangesData &changes, bool contentChanged,
+                         bool presentBody) {
+    if (contentChanged)
+      fileChangesBodyReady = false;
+    if (!presentBody) {
+      markBodyProjectionDeferred();
+      showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
+      return;
+    }
+    if (presentBody && !fileChangesBodyReady) {
+      QElapsedTimer buildTimer;
+      buildTimer.start();
+      FileChangesRendering rendering = fileChangesRendering(changes);
+      fileChanges->setVisible(!rendering.text.isEmpty());
+      QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
+      if (rendering.counts)
+        values << QStringLiteral("+%1 −%2")
+                      .arg(rendering.counts->additions)
+                      .arg(rendering.counts->deletions);
+      metadata->setText(values.join(QStringLiteral("  |  ")));
+      metadata->show();
+      fileChanges->setContent(std::move(rendering));
+      owner->setProperty("fileChangesBodyBuildMicros",
+                         buildTimer.nsecsElapsed() / 1000);
+      owner->setProperty(
+          "fileChangesBodyRebuilds",
+          owner->property("fileChangesBodyRebuilds").toULongLong() + 1);
+      fileChangesBodyReady = true;
+    }
+    markBodyProjectionReady();
     showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
-    QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
-    if (const auto counts = totalDiffCounts(changes))
-      values << QStringLiteral("+%1 −%2")
-                    .arg(counts->additions)
-                    .arg(counts->deletions);
-    metadata->setText(values.join(QStringLiteral("  |  ")));
-    metadata->show();
   }
 
   void createComposition(const PlanData &plan) {
     title->setText(QStringLiteral("Plan"));
-    body = makeMarkdownLabel({}, content);
-    contentLayout->addWidget(body);
+    markdownBody = makeMarkdownView(
+        collapsed && deferCollapsedBodyProjection
+            ? QString{}
+            : presentation::planMarkdown(plan),
+        takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
+        content);
+    contentLayout->addWidget(markdownBody);
     updateComposition(plan);
   }
 
   void updateComposition(const PlanData &plan) {
-    setVisibleMarkdown(body, planMarkdown(plan));
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!plan.explanation.empty() ||
+                               !plan.steps.empty() || !plan.legacyText.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
+    setVisibleMarkdown(markdownBody, presentation::planMarkdown(plan));
+    markBodyProjectionReady();
   }
 
   void createComposition(const ImageGenerationData &image) {
@@ -1571,28 +2208,37 @@ public:
         !image.status.empty() || !image.revisedPrompt.empty();
     title->setText(generated ? QStringLiteral("Generated image")
                              : QStringLiteral("Image"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      body->setVisible(!image.revisedPrompt.empty());
+      images->setVisible(!image.path.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleText(body, text(image.revisedPrompt));
-    // A generated image can become readable at the same path as its status
-    // advances, so its update remains the authoritative reload boundary.
     setImages(image.path.empty() ? QStringList{}
-                                 : QStringList{text(image.path)},
-              true);
+                                 : QStringList{text(image.path)});
+    markBodyProjectionReady();
   }
 
   void createComposition(const GenericActivityData &activity) {
     metadata = makeLabel({}, "meta", content);
+    metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     contentLayout->addWidget(metadata);
     updateComposition(activity);
   }
 
   void updateComposition(const GenericActivityData &activity) {
-    title->setText(activity.type.empty()
-                       ? QStringLiteral("Activity")
-                       : UiStyle::humanizeLabel(text(activity.type)));
+    title->setText(presentation::genericActivityTitle(activity));
     showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
-    metadata->setText(boundedGenericActivity(activity));
-    metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      metadata->setVisible(!activity.displayDetail.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
+    metadata->setText(
+        presentation::boundedGenericActivityDetail(activity));
     metadata->show();
+    markBodyProjectionReady();
   }
 
   void createComposition(const LocalPromptData &prompt) {
@@ -1601,9 +2247,13 @@ public:
         QStringLiteral("QFrame#pendingPromptCard{background:transparent;"
                        "border:1px solid transparent;border-radius:8px;}"));
     title->setText(QStringLiteral("You"));
-    body = makeMarkdownLabel({}, content);
+    markdownBody = makeMarkdownView(collapsed && deferCollapsedBodyProjection
+                                        ? QString{}
+                                        : text(prompt.prompt),
+                                    takePreparedVisibleMarkdownDocument(),
+                                    markdownContentWidth(), content, true);
     metadata = makeLabel({}, "meta", content);
-    contentLayout->addWidget(body);
+    contentLayout->addWidget(markdownBody);
     contentLayout->addWidget(metadata);
     recovery = new QPushButton(QStringLiteral("Restore to composer"), content);
     recovery->setObjectName(QStringLiteral("promptRecoveryButton"));
@@ -1635,8 +2285,15 @@ public:
   }
 
   void updateComposition(const LocalPromptData &prompt) {
-    setVisibleMarkdown(body, text(prompt.prompt));
-    setImages(textList(prompt.imagePaths));
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!prompt.prompt.empty());
+      images->setVisible(!prompt.imagePaths.empty());
+      markBodyProjectionDeferred();
+    } else {
+      setVisibleMarkdown(markdownBody, text(prompt.prompt));
+      setImages(textList(prompt.imagePaths));
+      markBodyProjectionReady();
+    }
     refreshPendingPresentation();
   }
 
@@ -1672,10 +2329,16 @@ public:
     changed = changed || previousPhase != lifecycle ||
               phaseWasVisible != !lifecycle.isEmpty();
     for (QLabel *label : {title, body, metadata}) {
+      if (!label)
+        continue;
       if (label->styleSheet() != style) {
         label->setStyleSheet(style);
         changed = true;
       }
+    }
+    if (markdownBody && markdownBody->styleSheet() != style) {
+      markdownBody->setStyleSheet(style);
+      changed = true;
     }
 
     QString status;
@@ -1746,10 +2409,12 @@ public:
   QWidget *content = nullptr;
   QVBoxLayout *contentLayout = nullptr;
   QLabel *body = nullptr;
+  MarkdownTextView *markdownBody = nullptr;
   QLabel *metadata = nullptr;
-  QLabel *detail = nullptr;
+  MarkdownTextView *detail = nullptr;
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
+  FileChangesView *fileChanges = nullptr;
   QTimer *animationTimer = nullptr;
   QTimer *pendingDelayTimer = nullptr;
   QPushButton *recovery = nullptr;
@@ -1757,21 +2422,30 @@ public:
   bool viewportVisible = true;
   std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
-  QStringList fileChangeOpenPaths;
-  QWidget *nestedCards = nullptr;
-  QVBoxLayout *nestedLayout = nullptr;
-  bool hasVisibleNestedCards = false;
+  bool fileChangesBodyReady = false;
+  bool deferCollapsedBodyProjection = false;
+  std::shared_ptr<QTextDocument> preparedMarkdownDocument;
   bool authoritativeTurnActive = false;
+  int turnRootBottomMargin = 10;
 };
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
                                    bool commandInitiallyCollapsed,
                                    bool imageInitiallyCollapsed,
-                                   bool fileChangesInitiallyCollapsed)
-    : QFrame(parent),
-      impl_(std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
-                                   imageInitiallyCollapsed,
-                                   fileChangesInitiallyCollapsed)) {}
+                                   bool fileChangesInitiallyCollapsed,
+                                   int initialWidth,
+                                   std::shared_ptr<QTextDocument>
+                                       markdownDocument,
+                                   std::optional<bool> collapsedOverride)
+    : QFrame(parent) {
+  if (initialWidth > 0)
+    resize(initialWidth, 1);
+  impl_ = std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
+                                 imageInitiallyCollapsed,
+                                 fileChangesInitiallyCollapsed,
+                                 std::move(markdownDocument),
+                                 collapsedOverride);
+}
 
 ConversationCard::~ConversationCard() = default;
 
@@ -1781,6 +2455,13 @@ CardKind ConversationCard::cardKind() const noexcept {
 
 const VisibleCardData &ConversationCard::data() const noexcept {
   return impl_->current;
+}
+
+std::shared_ptr<QTextDocument> ConversationCard::markdownDocument() const {
+  if (impl_->markdownBody)
+    return impl_->markdownBody->sharedDocument();
+  return impl_->detail ? impl_->detail->sharedDocument()
+                       : std::shared_ptr<QTextDocument>{};
 }
 
 bool ConversationCard::isCollapsed() const noexcept { return impl_->collapsed; }
@@ -1797,13 +2478,8 @@ void ConversationCard::setNestedPresentation(bool nested) {
   impl_->setNestedConversationCard(nested);
 }
 
-void ConversationCard::setNestedCards(
-    const std::vector<ConversationCard *> &cards) {
-  impl_->setNestedCards(cards);
-}
-
-void ConversationCard::setNestedItems(const std::vector<QWidget *> &items) {
-  impl_->setNestedItems(items);
+void ConversationCard::setVirtualTurnRootPresentation(bool fragmented) {
+  impl_->setVirtualTurnRootPresentation(fragmented);
 }
 
 void ConversationCard::setViewportVisible(bool visible) {
@@ -1927,10 +2603,15 @@ ConversationCard *createConversationCard(const VisibleCardData &data,
                                          QWidget *parent,
                                          bool commandInitiallyCollapsed,
                                          bool imageInitiallyCollapsed,
-                                         bool fileChangesInitiallyCollapsed) {
+                                         bool fileChangesInitiallyCollapsed,
+                                         int initialWidth,
+                                         std::shared_ptr<QTextDocument>
+                                             markdownDocument,
+                                         std::optional<bool> collapsedOverride) {
   return new ConversationCard(data, parent, commandInitiallyCollapsed,
                               imageInitiallyCollapsed,
-                              fileChangesInitiallyCollapsed);
+                              fileChangesInitiallyCollapsed, initialWidth,
+                              std::move(markdownDocument), collapsedOverride);
 }
 
 } // namespace codexui::codex::middle

@@ -5,8 +5,6 @@
 
 #include "codex/nodegraph/NodeGraph.h"
 
-#include <nlohmann/json.hpp>
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -49,6 +47,8 @@ using CardKey = std::variant<AuthoritativeItemKey, TurnPlanKey, LocalPromptKey>;
 [[nodiscard]] std::string stableKey(const CardKey &key);
 [[nodiscard]] bool terminalOutputHasVisibleText(std::string_view output);
 [[nodiscard]] std::string trimUnicodeWhitespace(std::string_view text);
+[[nodiscard]] bool
+hasTextAfterTrimmingTrailingEmptyLines(std::string_view text);
 [[nodiscard]] std::string trimTrailingEmptyLines(std::string_view text);
 
 enum class PromptState { Queued, InFlight, Accepted, Failed };
@@ -157,7 +157,6 @@ struct PlanData {
 
 struct GenericActivityData {
   std::string type;
-  nlohmann::json raw = nlohmann::json::object();
   std::string status;
   std::string displayDetail;
 
@@ -208,8 +207,47 @@ struct TurnSection {
   // its actual opening prompt. Rendering must never infer ownership from the
   // first user message that happens to survive history paging.
   std::optional<CardKey> rootCardKey;
+  // True only when the root lies before the requested activity suffix and is
+  // retained solely to preserve the canonical Turn/You owner.
+  bool rootPinned = false;
 
   bool operator==(const TurnSection &) const = default;
+};
+
+// Exact placement facts for one conversation row. They carry no authority:
+// the NodeRef target and all values are read from NodeGraph under one short
+// lock, then consumed by Qt after the lock has been released.
+struct ConversationRowPlacement {
+  VisibleCardData card;
+  std::string sectionKey;
+  bool turnRoot = false;
+  bool nested = false;
+  bool activeTurn = false;
+  bool historyActivity = true;
+};
+
+// One canonical row plus its immediate presented neighbors. The neighboring
+// keys are positioning facts only; NodeGraph remains the source of both the
+// row values and their order.
+struct ConversationRowChange {
+  ConversationRowPlacement placement;
+  std::optional<CardKey> previousCardKey;
+  std::optional<CardKey> nextCardKey;
+};
+
+// Prompt acknowledgement and authoritative row ownership are two different
+// identities during materialization. Keeping them explicit lets the Qt row
+// adopt the authoritative Item NodeRef before the local prompt is retired.
+struct PromptMaterialization {
+  VisibleCardData card;
+  nodegraph::NodeRef prompt;
+};
+
+// Bounded projection for the common canonical tail insertion, with the two
+// thread-history facts needed to update the retained window chrome.
+struct ConversationTailCard : ConversationRowPlacement {
+  std::size_t authoritativeItemCount = 0;
+  bool providerHasMore = false;
 };
 
 struct ConversationSnapshot {
