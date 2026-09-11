@@ -2457,9 +2457,13 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
       draftRow
           ? draftRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
           : nullptr;
+  auto *threadAnimation =
+      shell.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
   require(draft && list->currentItem() == draft && draftTitle &&
-              draftTitle->text() == chosenName,
-          "the local optimistic draft is selected with its chosen UI name");
+              draftTitle->text() == chosenName && threadAnimation &&
+              threadAnimation->isActive(),
+          "dialog Continue selects the named optimistic draft and starts its "
+          "animation before the first prompt");
 
   static_cast<void>(worker.connectionSettings(
       {{"selected", Value("unix")}, {"endpoint", Value("local")}}));
@@ -2504,9 +2508,9 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
           list->currentItem()->data(Qt::UserRole).toString().toStdString() ==
               graphDraft->id().canonical &&
           localPromptCard(shell, promptText.toStdString()) &&
-          draftTitle->text() == chosenName,
+          draftTitle->text() == chosenName && threadAnimation->isActive(),
       "the same optimistic row and chosen name hand off to the shared graph "
-      "draft");
+      "draft without stopping its animation");
 
   if (!transition.command)
     return;
@@ -2522,9 +2526,9 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   require(threadItem(list, "created-thread") == stableDraft &&
               list->currentItem() == stableDraft && threadPane &&
               threadPane->isOptimisticThread("created-thread") &&
-              draftTitle->text() == chosenName,
+              draftTitle->text() == chosenName && threadAnimation->isActive(),
           "the same row and chosen name survive promotion to the canonical "
-          "thread identity");
+          "thread identity with one continuous animation");
 
   static_cast<void>(
       worker.completePrompt(localPrompt, true, {}, "created-turn"));
@@ -2540,6 +2544,7 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
               acceptedCard &&
               !acceptedCard->property("pendingFeedbackVisible").toBool() &&
               acceptedAnimation && !acceptedAnimation->isActive() &&
+              !threadAnimation->isActive() &&
               draftTitle->text() == chosenName,
           "the exact prompt result confirms the canonical row without "
           "replacing its widget item or chosen name, and stops optimistic "

@@ -247,6 +247,8 @@ private:
   void restoreAnchor(const Anchor &anchor);
   void setScrollValue(int value);
   void stopFollowingAnimation();
+  void handleCommandOutputFollowLatest(CommandOutputView *output,
+                                       bool followsLatest);
   void animateToBottom(int previousValue);
   void handleUserScrollValue(int value);
   [[nodiscard]] bool applyWheel(QWheelEvent *event);
@@ -358,6 +360,7 @@ private:
   bool sliderDown_ = false;
   bool userActionPending_ = false;
   bool pausedByComposerGrowth_ = false;
+  QPointer<CommandOutputView> commandOutputPauseOwner_;
   bool dispatchingNativeWheel_ = false;
   bool materializing_ = false;
   bool adjustingScrollRange_ = false;

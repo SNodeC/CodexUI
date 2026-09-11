@@ -1294,7 +1294,7 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
               return;
             if (userScrollActive_) {
               preservedScrollValue_ = value;
-              followsLatest_ = isAtBottom();
+              setUserFollowLatest(isAtBottom());
             }
           });
   connect(verticalScrollBar(), &QScrollBar::sliderPressed, this,
@@ -1302,13 +1302,14 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
   connect(verticalScrollBar(), &QScrollBar::sliderReleased, this, [this] {
     userScrollActive_ = false;
     preservedScrollValue_ = verticalScrollBar()->value();
-    followsLatest_ = isAtBottom();
+    setUserFollowLatest(isAtBottom());
   });
   connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int) {
     preservedScrollValue_ = verticalScrollBar()->sliderPosition();
     // QPlainTextEdit scroll values are block based: one unit is a complete
     // output line, not a one-pixel rounding tolerance.
-    followsLatest_ = preservedScrollValue_ >= verticalScrollBar()->maximum();
+    setUserFollowLatest(preservedScrollValue_ >=
+                        verticalScrollBar()->maximum());
   });
   connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
           [this](int, int) {
@@ -1513,7 +1514,7 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
                                                   : event->angleDelta().y();
   if (delta > 0)
-    followsLatest_ = false;
+    setUserFollowLatest(false);
   const bool atBoundary = bar->maximum() <= bar->minimum() ||
                           (delta > 0 && bar->value() <= bar->minimum()) ||
                           (delta < 0 && bar->value() >= bar->maximum());
@@ -1522,7 +1523,14 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
   else
     QTextEdit::wheelEvent(event);
   preservedScrollValue_ = bar->value();
-  followsLatest_ = isAtBottom();
+  setUserFollowLatest(isAtBottom());
+}
+
+void CommandOutputView::setUserFollowLatest(bool followsLatest) {
+  if (followsLatest_ == followsLatest)
+    return;
+  followsLatest_ = followsLatest;
+  emit userFollowLatestChanged(followsLatest_);
 }
 
 void CommandOutputView::settleScroll() {

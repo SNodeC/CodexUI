@@ -43,6 +43,7 @@ constexpr int OptimisticRole = Qt::UserRole + 6;
 constexpr int OptimisticFailedRole = Qt::UserRole + 7;
 constexpr int AwaitingPromptRole = Qt::UserRole + 8;
 constexpr int PromptAdmittedAtRole = Qt::UserRole + 9;
+constexpr int OptimisticAnimationStartedAtRole = Qt::UserRole + 10;
 constexpr int ChildIndent = 16;
 constexpr int DisclosureWidth = 16;
 constexpr int DisclosureExtent = 24;
@@ -120,23 +121,32 @@ public:
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     painter->setBrush(
-        failed           ? QColor(QString::fromLatin1(UiStyle::redSurface))
-        : awaitingPrompt ? QColor(QString::fromLatin1(UiStyle::blueSurface))
-                         : QColor(QString::fromLatin1(UiStyle::orangeSurface)));
+        failed       ? QColor(QString::fromLatin1(UiStyle::redSurface))
+        : optimistic ? QColor(QString::fromLatin1(UiStyle::orangeSurface))
+                     : QColor(QString::fromLatin1(UiStyle::blueSurface)));
     painter->setPen(
         QPen(failed ? QColor(QString::fromLatin1(UiStyle::redBorder))
-             : awaitingPrompt
-                 ? QColor(QString::fromLatin1(UiStyle::blueBorderStrong))
-                 : QColor(QString::fromLatin1(UiStyle::orangeBorderStrong)),
-             awaitingPrompt ? 1.5 : 1.0));
+             : optimistic
+                 ? QColor(QString::fromLatin1(UiStyle::orangeBorderStrong))
+                 : QColor(QString::fromLatin1(UiStyle::blueBorderStrong)),
+             optimistic ? 1.0 : 1.5));
     painter->drawRoundedRect(bounds, 8.0, 8.0);
     const qint64 admittedAt = index.data(PromptAdmittedAtRole).toLongLong();
+    const qint64 optimisticStartedAt =
+        index.data(OptimisticAnimationStartedAtRole).toLongLong();
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const bool animate = awaitingPrompt && admittedAt > 0 &&
-                         now >= admittedAt + PendingAnimationDelayMilliseconds;
+    const qint64 animationStartedAt =
+        optimistic ? optimisticStartedAt
+                   : admittedAt + PendingAnimationDelayMilliseconds;
+    const bool hasAnimationEpoch =
+        optimistic ? optimisticStartedAt > 0 : admittedAt > 0;
+    const bool animate = !failed && hasAnimationEpoch &&
+                         (optimistic || awaitingPrompt) &&
+                         now >= animationStartedAt;
     if (animate) {
       constexpr qint64 HalfCycleMilliseconds = 850;
-      const qint64 phase = now % (2 * HalfCycleMilliseconds);
+      const qint64 phase =
+          (now - animationStartedAt) % (2 * HalfCycleMilliseconds);
       const qreal position = phase <= HalfCycleMilliseconds
                                  ? qreal(phase) / HalfCycleMilliseconds
                                  : qreal(2 * HalfCycleMilliseconds - phase) /
@@ -144,9 +154,15 @@ public:
       const qreal center = bounds.left() + position * bounds.width();
       const qreal radius = std::max(24.0, bounds.width() * 0.22);
       QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
-      sweep.setColorAt(0.0, QColor(47, 111, 235, 0));
-      sweep.setColorAt(0.5, QColor(117, 160, 239, 105));
-      sweep.setColorAt(1.0, QColor(47, 111, 235, 0));
+      QColor sweepEdge(QString::fromLatin1(
+          optimistic ? UiStyle::orangeBorderStrong : UiStyle::blueBorderStrong));
+      QColor sweepCenter(QString::fromLatin1(
+          optimistic ? UiStyle::orange : UiStyle::blueBorderStrong));
+      sweepEdge.setAlpha(0);
+      sweepCenter.setAlpha(105);
+      sweep.setColorAt(0.0, sweepEdge);
+      sweep.setColorAt(0.5, sweepCenter);
+      sweep.setColorAt(1.0, sweepEdge);
       QPainterPath clip;
       clip.addRoundedRect(bounds, 8.0, 8.0);
       painter->setClipPath(clip);
@@ -485,7 +501,8 @@ void ThreadPane::beginOptimisticThread(std::string id, std::string title,
   });
   optimisticThreads.insert(
       optimisticThreads.begin(),
-      OptimisticThread{std::move(id), std::move(title), std::move(cwd), false});
+      OptimisticThread{std::move(id), std::move(title), std::move(cwd), false,
+                       QDateTime::currentMSecsSinceEpoch()});
   visibleSnapshot.reset();
 }
 
@@ -605,6 +622,10 @@ void ThreadPane::updateAnimationTimer() {
       visibleSnapshot &&
       std::ranges::any_of(visibleSnapshot->rows,
                           [](const RenderedThreadRow &row) {
+                            if (row.optimistic)
+                              return !row.optimisticFailed &&
+                                     row.optimisticAnimationStartedAtMs
+                                         .value_or(0) > 0;
                             return row.awaitingPromptAcknowledgement;
                           });
   if (active && !optimisticAnimation->isActive())
@@ -769,6 +790,9 @@ bool ThreadPane::applyRowPresentation(const ui::ThreadListRow &row) {
   item->setData(
       PromptAdmittedAtRole,
       static_cast<qlonglong>(next.pendingPromptAdmittedAtMs.value_or(0)));
+  item->setData(OptimisticAnimationStartedAtRole,
+                static_cast<qlonglong>(
+                    next.optimisticAnimationStartedAtMs.value_or(0)));
   updateRow(list->itemWidget(item), next.id, next.title, next.status,
             next.pending, next.depth, next.hasChildren, next.expanded,
             next.optimistic, next.optimisticFailed);
@@ -819,7 +843,8 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                            true,
                            optimisticThread.failed,
                            thread->awaitingPromptAcknowledgement,
-                           thread->pendingPromptAdmittedAtMs});
+                           thread->pendingPromptAdmittedAtMs,
+                           optimisticThread.animationStartedAtMs});
     } else {
       next.rows.push_back({optimisticThread.id,
                            optimisticThread.title,
@@ -834,7 +859,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                            false,
                            false,
                            true,
-                           optimisticThread.failed});
+                           optimisticThread.failed,
+                           false,
+                           {},
+                           optimisticThread.animationStartedAtMs});
     }
     visited.insert(optimisticThread.id);
   }
@@ -905,6 +933,9 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
       item->setData(
           PromptAdmittedAtRole,
           static_cast<qlonglong>(row.pendingPromptAdmittedAtMs.value_or(0)));
+      item->setData(OptimisticAnimationStartedAtRole,
+                    static_cast<qlonglong>(
+                        row.optimisticAnimationStartedAtMs.value_or(0)));
       updateRow(list->itemWidget(item), row.id, row.title, row.status,
                 row.pending, row.depth, row.hasChildren, row.expanded,
                 row.optimistic, row.optimisticFailed);
@@ -1023,6 +1054,9 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
     item->setData(
         PromptAdmittedAtRole,
         static_cast<qlonglong>(row.pendingPromptAdmittedAtMs.value_or(0)));
+    item->setData(OptimisticAnimationStartedAtRole,
+                  static_cast<qlonglong>(
+                      row.optimisticAnimationStartedAtMs.value_or(0)));
     updateRow(list->itemWidget(item), row.id, row.title, row.status,
               row.pending, row.depth, row.hasChildren, row.expanded,
               row.optimistic, row.optimisticFailed);

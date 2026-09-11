@@ -76,6 +76,7 @@ private:
     bool optimisticFailed = false;
     bool awaitingPromptAcknowledgement = false;
     std::optional<std::int64_t> pendingPromptAdmittedAtMs;
+    std::optional<std::int64_t> optimisticAnimationStartedAtMs;
 
     bool operator==(const RenderedThreadRow &) const = default;
   };
@@ -91,6 +92,7 @@ private:
     std::string title;
     std::string cwd;
     bool failed = false;
+    std::int64_t animationStartedAtMs = 0;
   };
   void updateSortButton();
   void sortRootThreads(std::vector<ui::ThreadListRow> &rows) const;

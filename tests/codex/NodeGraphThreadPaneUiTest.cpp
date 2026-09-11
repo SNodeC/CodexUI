@@ -3,9 +3,12 @@
 #include "codex/ForkNaming.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QDateTime>
+#include <QImage>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
@@ -216,6 +219,79 @@ bool sortingAndPromptAnimationAreFixed() {
                  "prompt acknowledgement changed the chosen name");
 }
 
+int colorDistance(const QColor &left, const QColor &right) {
+  return std::abs(left.red() - right.red()) +
+         std::abs(left.green() - right.green()) +
+         std::abs(left.blue() - right.blue());
+}
+
+bool rowUsesSurface(QListWidget *list, QListWidgetItem *item,
+                    const QColor &expected) {
+  const QRect rect = list->visualItemRect(item);
+  const QImage image = list->viewport()->grab().toImage();
+  const QColor left = image.pixelColor(rect.left() + 12, rect.center().y());
+  const QColor right =
+      image.pixelColor(std::max(rect.left(), rect.right() - 12),
+                       rect.center().y());
+  // The moving sweep covers less than half the row, so one edge always
+  // exposes the unchanged base surface regardless of animation phase.
+  return std::min(colorDistance(left, expected),
+                  colorDistance(right, expected)) <= 6;
+}
+
+bool optimisticCreationAnimationOwnsOneOrangeLifetime() {
+  middle::ThreadPane pane;
+  pane.resize(320, 420);
+  pane.beginOptimisticThread("draft:new-thread", "Chosen name", "/workspace");
+  ui::ThreadListSnapshot empty;
+  empty.selectedThreadId = "draft:new-thread";
+  pane.refresh(empty);
+  pane.show();
+  QApplication::processEvents();
+
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  auto *animation =
+      pane.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
+  QListWidgetItem *draft = list && list->count() == 1 ? list->item(0) : nullptr;
+  const QColor orange(QString::fromLatin1(UiStyle::orangeSurface));
+  if (!require(draft && animation && animation->isActive(),
+               "dialog Continue did not immediately animate its draft row") ||
+      !require(rowUsesSurface(list, draft, orange),
+               "the initial optimistic animation is not orange"))
+    return false;
+
+  pane.promoteOptimisticThread("draft:new-thread", "created-thread");
+  ui::ThreadListSnapshot admitted;
+  admitted.selectedThreadId = "created-thread";
+  ui::ThreadListRow canonical;
+  canonical.id = "created-thread";
+  canonical.title = "Chosen name";
+  canonical.status = "active";
+  canonical.awaitingPromptAcknowledgement = true;
+  canonical.pendingPromptAdmittedAtMs =
+      QDateTime::currentMSecsSinceEpoch() - 1500;
+  admitted.roots.push_back(canonical);
+  pane.refresh(admitted);
+  QApplication::processEvents();
+  QListWidgetItem *promoted = list->item(0);
+  if (!require(promoted == draft && animation->isActive(),
+               "canonical promotion replaced or stopped the optimistic row") ||
+      !require(rowUsesSurface(list, promoted, orange),
+               "prompt admission changed the optimistic row away from orange"))
+    return false;
+
+  pane.confirmOptimisticThread("created-thread");
+  admitted.roots.front().awaitingPromptAcknowledgement = false;
+  admitted.roots.front().pendingPromptAdmittedAtMs.reset();
+  pane.refresh(admitted);
+  QApplication::processEvents();
+  return require(list->item(0) == draft && !animation->isActive(),
+                 "authoritative acknowledgement did not end the same row's "
+                 "optimistic animation") &&
+         require(!rowUsesSurface(list, draft, orange),
+                 "acknowledged thread row did not return to its native color");
+}
+
 bool pagingFollowsTheVisibleListEnd() {
   middle::ThreadPane pane;
   pane.resize(300, 500);
@@ -255,6 +331,7 @@ int main(int argc, char **argv) {
   if (!codexui::codex::forkNamesPreserveTheirLineage() ||
       !codexui::codex::selectedChildRetainsRootAndCanonicalIdentity() ||
       !codexui::codex::sortingAndPromptAnimationAreFixed() ||
+      !codexui::codex::optimisticCreationAnimationOwnsOneOrangeLifetime() ||
       !codexui::codex::pagingFollowsTheVisibleListEnd())
     return EXIT_FAILURE;
   std::cout << "NodeGraph ThreadPane UI tests passed\n";

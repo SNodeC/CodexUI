@@ -13,7 +13,9 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPlainTextEdit>
+#include <QRegion>
 #include <QScrollBar>
 #include <QThread>
 #include <QToolTip>
@@ -100,6 +102,39 @@ void settle(int passes = 4) {
   while (passes-- > 0)
     QApplication::processEvents(QEventLoop::AllEvents, 20);
 }
+
+class ViewportPaintRegionProbe final : public QObject {
+public:
+  explicit ViewportPaintRegionProbe(QWidget *viewport) : viewport_(viewport) {
+    viewport_->installEventFilter(this);
+  }
+
+  ~ViewportPaintRegionProbe() override {
+    viewport_->removeEventFilter(this);
+  }
+
+  void start() {
+    painted_ = {};
+    active_ = true;
+  }
+
+  QRegion stop() {
+    active_ = false;
+    return painted_;
+  }
+
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    if (active_ && watched == viewport_ && event->type() == QEvent::Paint)
+      painted_ += static_cast<QPaintEvent *>(event)->region();
+    return false;
+  }
+
+private:
+  QWidget *viewport_ = nullptr;
+  QRegion painted_;
+  bool active_ = false;
+};
 
 template <typename Predicate>
 bool waitUntil(Predicate &&predicate, int timeoutMilliseconds) {
@@ -910,6 +945,8 @@ bool directTailGrowsTheRetainedTurnSurface() {
       view.property("conversationCardConstructions").toULongLong();
   const qulonglong sectionRebuilds =
       view.property("conversationSectionRangeRebuilds").toULongLong();
+  ViewportPaintRegionProbe paintProbe(view.viewport());
+  paintProbe.start();
   ConversationTailCard tail;
   tail.card = {AuthoritativeItemKey{"tail-growth", "active-turn", "answer"},
                CardKind::AgentMessage,
@@ -926,12 +963,15 @@ bool directTailGrowsTheRetainedTurnSurface() {
   result &= expect(view.appendTailCard(std::move(tail)),
                    "the first nested direct-tail card appends");
   settle();
+  const QRegion directTailPaint = paintProbe.stop();
 
   const QModelIndex rootIndex =
       view.conversationModel()->indexForStableKey(stableKey(root.key));
   const QModelIndex answerIndex =
       view.conversationModel()->indexForStableKey(answerKey);
   const QRect answerRect = view.visualRect(answerIndex);
+  const QPoint bottomBorderPoint(answerRect.center().x(),
+                                 answerRect.bottom() + 10);
   const QImage frame = view.viewport()->grab().toImage();
   const QColor grownBorder = frame.pixelColor(
       1, std::clamp(answerRect.center().y(), 0, frame.height() - 1));
@@ -941,6 +981,7 @@ bool directTailGrowsTheRetainedTurnSurface() {
           !retained->property("authoritativeTurnActive").toBool() &&
           rootIndex.data(ConversationItemModel::ActiveTurnRole).toBool() &&
           answerIndex.isValid() && answerRect.left() == 12 &&
+          directTailPaint.contains(bottomBorderPoint) &&
           grownBorder.blue() > grownBorder.red() && grownBorder.red() < 183 &&
           view.property("conversationCardConstructions").toULongLong() ==
               constructions &&
@@ -950,6 +991,118 @@ bool directTailGrowsTheRetainedTurnSurface() {
       grew,
       "direct-tail growth retains the root editor and exposes one continuous "
       "emphasized Turn border without rebuilding section indexes");
+
+  paintProbe.start();
+  ConversationTailCard laterTail;
+  laterTail.card = {
+      AuthoritativeItemKey{"tail-growth", "active-turn", "later-update"},
+      CardKind::AgentMessage,
+      "tail-growth",
+      "active-turn",
+      "later-update",
+      AgentMessageData{"Later update", false}};
+  laterTail.sectionKey = "active-section";
+  laterTail.nested = true;
+  laterTail.activeTurn = true;
+  laterTail.historyActivity = true;
+  laterTail.authoritativeItemCount = 3;
+  const std::string laterKey = stableKey(laterTail.card.key);
+  result &= expect(view.appendTailCard(std::move(laterTail)),
+                   "a later nested direct-tail card appends");
+  settle();
+  const QRegion laterTailPaint = paintProbe.stop();
+  const QModelIndex laterIndex =
+      view.conversationModel()->indexForStableKey(laterKey);
+  const QRect laterRect = view.visualRect(laterIndex);
+  result &= expect(
+      laterIndex.isValid() &&
+          laterTailPaint.contains(
+              QPoint(laterRect.center().x(), laterRect.bottom() + 10)),
+      "every later direct-tail card invalidates its new Turn bottom border");
+  return result;
+}
+
+bool commandOutputScrollOwnsConversationFollowing() {
+  const std::string thread = "command-follow-ownership";
+  QString output;
+  for (int line = 0; line < 100; ++line)
+    output += QStringLiteral("streamed command line %1\n").arg(line);
+  VisibleCardData root{
+      AuthoritativeItemKey{thread, "turn", "root"}, CardKind::UserMessage,
+      thread, "turn", "root", UserMessageData{"Run it"}};
+  VisibleCardData command{
+      AuthoritativeItemKey{thread, "turn", "command"},
+      CardKind::CommandExecution,
+      thread,
+      "turn",
+      "command",
+      CommandExecutionData{"run long command", output.toStdString(),
+                           "inProgress", "/workspace", {}, {}}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = thread;
+  snapshot.activeTurnId = "turn";
+  snapshot.sections.push_back(
+      {"section", "turn", {root, command}, root.key, false});
+
+  ConversationView view;
+  auto options = view.presentationOptions();
+  options.commandsInitiallyExpanded = true;
+  view.setPresentationOptions(options);
+  view.resize(760, 300);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "command follow-ownership fixture reconciles");
+  settle();
+  ConversationCard *commandCard =
+      materializedCard(view, stableKey(command.key));
+  auto *commandOutput =
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
+                  : nullptr;
+  result &= expect(commandOutput &&
+                       commandOutput->verticalScrollBar()->maximum() > 0 &&
+                       commandOutput->followsLatest() &&
+                       view.mode() == ConversationView::Mode::Following &&
+                       view.isAtBottom(),
+                   "the visible command and conversation begin following");
+  if (!commandOutput)
+    return false;
+
+  commandOutput->verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderSingleStepSub);
+  settle();
+  result &= expect(!commandOutput->followsLatest() &&
+                       view.mode() == ConversationView::Mode::Paused,
+                   "scrolling command output upward pauses outer following");
+
+  ConversationTailCard tail;
+  tail.card = {AuthoritativeItemKey{thread, "turn", "answer"},
+               CardKind::AgentMessage,
+               thread,
+               "turn",
+               "answer",
+               AgentMessageData{std::string(1200, 'x'), true}};
+  tail.sectionKey = "section";
+  tail.nested = true;
+  tail.activeTurn = true;
+  tail.historyActivity = true;
+  tail.authoritativeItemCount = 3;
+  result &= expect(view.appendTailCard(std::move(tail)),
+                   "new tail activity arrives while command output is paused");
+  settle();
+  result &= expect(view.mode() == ConversationView::Mode::Paused &&
+                       !view.isAtBottom(),
+                   "paused command output prevents arrival from following");
+
+  commandOutput->verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderToMaximum);
+  result &= expect(
+      waitUntil([&] {
+        return commandOutput->followsLatest() &&
+               view.mode() == ConversationView::Mode::Following &&
+               view.isAtBottom();
+      }, 500),
+      "returning command output to its bottom resumes outer tail following");
   return result;
 }
 
@@ -1860,6 +2013,7 @@ int main(int argc, char **argv) {
                       delayedThreadSelectionSpinner() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
                       directTailGrowsTheRetainedTurnSurface() &&
+                      commandOutputScrollOwnsConversationFollowing() &&
                       acknowledgedSteeringMovesAboveFollowingActivity() &&
                       passiveAndInteractivePresentationShareExactGeometry() &&
                       bidirectionalLazyMeasurementPreservesNativeScrollMotion() &&

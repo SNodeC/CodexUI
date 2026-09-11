@@ -153,6 +153,7 @@ namespace {
 
 constexpr int CardSpacing = 8;
 constexpr int CardFrameExtent = 2;
+constexpr int TurnSurfaceBottomPadding = 10;
 constexpr int CardBodyHorizontalInsets = 28;
 constexpr int HistoryButtonHeight = 32;
 constexpr int NestedCardIndent = 12;
@@ -762,6 +763,7 @@ ConversationView::ConversationView(QWidget *parent)
   connect(verticalScrollBar(), &QScrollBar::sliderPressed, this, [this] {
     sliderDown_ = true;
     pausedByComposerGrowth_ = false;
+    commandOutputPauseOwner_.clear();
     stopFollowingAnimation();
   });
   connect(verticalScrollBar(), &QScrollBar::sliderReleased, this, [this] {
@@ -772,6 +774,7 @@ ConversationView::ConversationView(QWidget *parent)
           [this](int action) {
             userActionPending_ = true;
             pausedByComposerGrowth_ = false;
+            commandOutputPauseOwner_.clear();
             stopFollowingAnimation();
             if (action == QAbstractSlider::SliderSingleStepSub ||
                 action == QAbstractSlider::SliderPageStepSub ||
@@ -873,6 +876,7 @@ void ConversationView::setThread(const std::string &threadId) {
     return;
   storeCurrentThreadState();
   stopFollowingAnimation();
+  commandOutputPauseOwner_.clear();
   threadId_ = threadId;
   const auto saved = threadStates_.find(threadId_);
   mode_ = saved == threadStates_.end() ? Mode::Following : saved->second.mode;
@@ -2019,14 +2023,35 @@ bool ConversationView::appendTailCard(ConversationTailCard tail) {
     restoreAnchor(anchor);
   layoutMaterializedCards();
 
+  bool drawsTurnSurface = false;
+  if (const auto section = sectionRanges_.find(appendedSection);
+      section != sectionRanges_.end()) {
+    const std::optional<int> root = modelSectionRow(section->second.root);
+    const std::optional<int> last = modelSectionRow(section->second.last);
+    drawsTurnSurface = root && last && *last > *root;
+  }
+  const auto addTailDamage = [this, &damage,
+                              drawsTurnSurface](const QModelIndex &index) {
+    if (!index.isValid())
+      return;
+    QRect rowDamage = rowRect(index.row());
+    if (drawsTurnSurface && !rowDamage.isEmpty()) {
+      // A represented Turn owns side borders beside its indented children and
+      // a trailing border below its final child. Repaint those exact strips
+      // for both the former and new tail; neither lies inside rowRect().
+      rowDamage.setLeft(0);
+      rowDamage.setRight(std::max(0, viewport()->width() - 1));
+      rowDamage.setBottom(rowDamage.bottom() + TurnSurfaceBottomPadding +
+                          CardFrameExtent);
+    }
+    damage = damage.united(rowDamage);
+  };
   if (!oldLastKey.empty()) {
     const QModelIndex index = model_->indexForStableKey(oldLastKey);
-    if (index.isValid())
-      damage = damage.united(rowRect(index.row()));
+    addTailDamage(index);
   }
   const QModelIndex appendedIndex = model_->indexForStableKey(appendedKey);
-  if (appendedIndex.isValid())
-    damage = damage.united(rowRect(appendedIndex.row()));
+  addTailDamage(appendedIndex);
   if (!damage.isEmpty())
     viewport()->update(damage.intersected(viewport()->rect()));
 
@@ -2467,7 +2492,7 @@ int ConversationView::rowSpacing(int rowIndex,
   if (rowIndex == *root)
     return 14;
   if (rowIndex == *last)
-    return CardSpacing + 10;
+    return CardSpacing + TurnSurfaceBottomPadding;
   return CardSpacing;
 }
 
@@ -2748,6 +2773,14 @@ ConversationCard *ConversationView::createCard(const VisibleCardData &data,
       return;
     promptRecoveryAction_(card->data().target);
   });
+  if (auto *output =
+          card->findChild<CommandOutputView *>(
+              QStringLiteral("commandOutputView"))) {
+    connect(output, &CommandOutputView::userFollowLatestChanged, this,
+            [this, output](bool followsLatest) {
+              handleCommandOutputFollowLatest(output, followsLatest);
+            });
+  }
   return card;
 }
 
@@ -3282,6 +3315,31 @@ void ConversationView::stopFollowingAnimation() {
     followAnimation_->stop();
 }
 
+void ConversationView::handleCommandOutputFollowLatest(
+    CommandOutputView *output, bool followsLatest) {
+  if (!output)
+    return;
+  if (!followsLatest) {
+    if (mode_ != Mode::Following)
+      return;
+    stopFollowingAnimation();
+    pausedByComposerGrowth_ = false;
+    mode_ = Mode::Paused;
+    commandOutputPauseOwner_ = output;
+    storeCurrentThreadState();
+    return;
+  }
+  if (commandOutputPauseOwner_ != output)
+    return;
+  commandOutputPauseOwner_.clear();
+  if (mode_ != Mode::Paused)
+    return;
+  mode_ = Mode::Following;
+  pausedByComposerGrowth_ = false;
+  animateToBottom(verticalScrollBar()->value());
+  storeCurrentThreadState();
+}
+
 void ConversationView::animateToBottom(int previousValue) {
   if (mode_ != Mode::Following)
     return;
@@ -3305,6 +3363,7 @@ void ConversationView::animateToBottom(int previousValue) {
 void ConversationView::handleUserScrollValue(int value) {
   stopFollowingAnimation();
   pausedByComposerGrowth_ = false;
+  commandOutputPauseOwner_.clear();
   mode_ = value >= verticalScrollBar()->maximum() - 1 ? Mode::Following
                                                       : Mode::Paused;
   storeCurrentThreadState();
@@ -3318,6 +3377,7 @@ bool ConversationView::applyWheel(QWheelEvent *event) {
   if (intent == 0)
     return false;
   pausedByComposerGrowth_ = false;
+  commandOutputPauseOwner_.clear();
   const int oldValue = verticalScrollBar()->value();
   if (intent > 0) {
     stopFollowingAnimation();
@@ -3723,7 +3783,8 @@ void ConversationView::paintEvent(QPaintEvent *event) {
             static_cast<qreal>(
                 heights_.top(static_cast<std::size_t>(*sectionLast))) +
             heights_.height(static_cast<std::size_t>(*sectionLast)) -
-            rowSpacing(*sectionLast) + 10 - verticalScrollBar()->value();
+            rowSpacing(*sectionLast) + TurnSurfaceBottomPadding -
+            verticalScrollBar()->value();
         const QRectF surface(0.5, top + 0.5,
                              std::max(0, viewport()->width()) - 1.0,
                              std::max<qreal>(1.0, bottom - top - 1.0));

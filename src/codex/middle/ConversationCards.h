@@ -117,6 +117,11 @@ public:
   bool setOutput(const QString &output);
   void restoreScrollState(const ScrollState &state);
 
+signals:
+  // Emitted only for direct scrollbar/wheel interaction. Document updates and
+  // restored viewport state never claim conversation scroll ownership.
+  void userFollowLatestChanged(bool followsLatest);
+
 protected:
   void resizeEvent(QResizeEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
@@ -126,6 +131,7 @@ private:
   [[nodiscard]] bool setPreferredContentHeight(int height, bool notifyParent);
   void settleScroll();
   void scheduleScrollSettlement();
+  void setUserFollowLatest(bool followsLatest);
   [[nodiscard]] bool isAtBottom() const;
   [[nodiscard]] bool outputRequiresMaximumHeight(const QString &output) const;
 
