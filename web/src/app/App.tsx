@@ -270,7 +270,7 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
     const dialog = useRef<HTMLElement>(null);
     const workspaceInput = useRef<HTMLInputElement>(null);
     const [workspace, setWorkspace] = useState(initialDraft?.workspace ?? initialWorkspace);
-    const [name, setName] = useState(initialDraft?.name ?? "");
+    const [name, setName] = useState(initialDraft?.ephemeral ? "" : (initialDraft?.name ?? ""));
     const [baseInstructions, setBaseInstructions] = useState(initialDraft?.baseInstructions ?? "");
     const [developerInstructions, setDeveloperInstructions] = useState(initialDraft?.developerInstructions ?? "");
     const [ephemeral, setEphemeral] = useState(initialDraft?.ephemeral ?? false);
@@ -283,7 +283,7 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (workspace.trim() === "") { setError("Enter the app-server workspace path."); workspaceInput.current?.focus(); return; }
-        onContinue({workspace: workspace.trim(), name: name.trim(), baseInstructions: baseInstructions.trim(),
+        onContinue({workspace: workspace.trim(), name: ephemeral ? "" : name.trim(), baseInstructions: baseInstructions.trim(),
             developerInstructions: developerInstructions.trim(), ephemeral});
     };
     const keyDown = (event: React.KeyboardEvent<HTMLElement>) => {
@@ -300,10 +300,10 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
         <header><h2 id="thread-options-title">{title}</h2><p>{purpose === "fork" ? "Adjust the copied thread context." : "Set thread context."} Upcoming-turn controls retain model, reasoning, access, and style.</p></header>
         <form onSubmit={submit}>
             <label><span>Workspace</span><input ref={workspaceInput} value={workspace} onChange={event => { setWorkspace(event.target.value); setError(""); }} placeholder="Absolute app-server workspace path" /></label>
-            <label><span>Name</span><input value={name} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>
+            <label><span>Name</span><input value={name} disabled={ephemeral} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>
             <label><span>Base instructions</span><textarea value={baseInstructions} onChange={event => setBaseInstructions(event.target.value)} placeholder="Optional base instructions" /></label>
             <label><span>Developer instructions</span><textarea value={developerInstructions} onChange={event => setDeveloperInstructions(event.target.value)} placeholder="Optional developer instructions" /></label>
-            <label className="ephemeral-choice"><input type="checkbox" checked={ephemeral} onChange={event => setEphemeral(event.target.checked)} /><span><strong>Temporary thread</strong><small>Temporary threads are not retained in normal Codex history.</small></span></label>
+            <label className="ephemeral-choice"><input type="checkbox" checked={ephemeral} onChange={event => { const checked = event.target.checked; setEphemeral(checked); if (checked) setName(""); }} /><span><strong>Temporary thread</strong><small>Temporary threads are not retained in normal Codex history.</small></span></label>
             {error && <p className="dialog-error" role="alert">{error}</p>}
             <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">Continue</button></footer>
         </form>

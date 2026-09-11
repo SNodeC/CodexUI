@@ -303,7 +303,7 @@ export class BrowserFrontendSession {
         if (this.newThreadCreationInFlight) { this.setNotice("The current new thread is still being created.", false); return; }
         this.prompts.clearThread(DraftThreadId);
         this.newThreadDraft = {
-            workspace: draft.workspace.trim(), name: draft.name.trim(),
+            workspace: draft.workspace.trim(), name: draft.ephemeral ? "" : draft.name.trim(),
             baseInstructions: draft.baseInstructions.trim(), developerInstructions: draft.developerInstructions.trim(),
             ephemeral: draft.ephemeral,
         };
@@ -446,7 +446,7 @@ export class BrowserFrontendSession {
             destination = id;
             const runtime = this.threadRuntime(id);
             runtime.hydration = "hydrated"; runtime.operationReady = true;
-            const requestedName = threadDraft?.name ?? "";
+            const requestedName = threadDraft?.ephemeral ? "" : (threadDraft?.name ?? "");
             this.newThreadDraft = undefined;
             if (requestedName !== "") {
                 this.model.setThreadTitleLocally(id, requestedName);
@@ -498,7 +498,7 @@ export class BrowserFrontendSession {
     }
     forkThread(threadId: string, draft?: NewThreadDraft): void {
         const suggested = this.forkDraft(threadId);
-        const requestedName = draft?.name.trim() || suggested.name;
+        const requestedName = draft?.ephemeral ? "" : (draft?.name.trim() || suggested.name);
         const parameters: JsonObject = {threadId};
         if (draft) {
             if (draft.workspace.trim() !== "") parameters.cwd = draft.workspace.trim();
@@ -511,11 +511,11 @@ export class BrowserFrontendSession {
             const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
             const id = stringMember(thread, "id");
             if (response.ok && id !== "") {
-                this.model.setThreadTitleLocally(id, requestedName);
+                if (requestedName !== "") this.model.setThreadTitleLocally(id, requestedName);
                 const runtime = this.threadRuntime(id);
                 runtime.hydration = "hydrated";
                 runtime.operationReady = true;
-                this.renameThread(id, requestedName);
+                if (requestedName !== "") this.renameThread(id, requestedName);
                 this.selectThread(id);
             }
             else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");

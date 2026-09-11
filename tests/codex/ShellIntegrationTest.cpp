@@ -1740,6 +1740,7 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
           "Quick fork sends only the correct next nested chosen name");
 
   bool suggestedNameVisible = false;
+  bool nameDisabledForEphemeral = false;
   QAction *advanced = openAction(u"Fork with options…");
   QTimer::singleShot(0, [&] {
     auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
@@ -1765,8 +1766,11 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
       plainEdits[0]->setPlainText(QStringLiteral("Adjusted base"));
       plainEdits[1]->setPlainText(QStringLiteral("Adjusted developer"));
     }
-    if (auto *ephemeral = dialog->findChild<QCheckBox *>())
+    if (auto *ephemeral = dialog->findChild<QCheckBox *>()) {
       ephemeral->setChecked(true);
+      nameDisabledForEphemeral =
+          name && !name->isEnabled() && name->text().isEmpty();
+    }
     dialog->accept();
   });
   if (advanced)
@@ -1788,14 +1792,15 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
   const auto ephemeral = advancedFork
                              ? advancedFork->payload.find("ephemeral")
                              : Value::Object::const_iterator{};
-  require(advanced && suggestedNameVisible && advancedFork &&
-              hasString("requestedName", "Chosen advanced fork") &&
+  require(advanced && suggestedNameVisible && nameDisabledForEphemeral &&
+              advancedFork && !advancedFork->payload.contains("requestedName") &&
               hasString("cwd", "/adjusted-workspace") &&
               hasString("baseInstructions", "Adjusted base") &&
               hasString("developerInstructions", "Adjusted developer") &&
               ephemeral != advancedFork->payload.end() &&
               ephemeral->second.asBool() && *ephemeral->second.asBool(),
-          "Fork with options prefills lineage and sends every editable field");
+          "Temporary Fork with options disables its name while retaining "
+          "workspace and instruction fields");
 }
 
 void backgroundGraphChangesDoNotRefreshSelectedConversation(

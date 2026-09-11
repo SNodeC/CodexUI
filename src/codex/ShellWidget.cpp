@@ -3116,7 +3116,7 @@ void ShellWidget::Impl::forkThread(const nodegraph::NodeRef &thread,
     return;
   nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork};
   const QString requestedName = draft.name.trimmed();
-  if (!requestedName.isEmpty())
+  if (!draft.ephemeral && !requestedName.isEmpty())
     action.payload.emplace("requestedName", utf8(requestedName));
   if (includeOptions) {
     const QString workspace = draft.workspace.trimmed();
@@ -3283,7 +3283,8 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
         actionObject(settings->threadStartOptions());
     threadStart.insert_or_assign(
         "cwd", settings->workspace(utf8(QDir::currentPath())));
-    if (!newThreadDraft->name.trimmed().isEmpty())
+    if (!newThreadDraft->ephemeral &&
+        !newThreadDraft->name.trimmed().isEmpty())
       action.payload.insert_or_assign("requestedName",
                                       utf8(newThreadDraft->name));
     if (!newThreadDraft->baseInstructions.isEmpty())

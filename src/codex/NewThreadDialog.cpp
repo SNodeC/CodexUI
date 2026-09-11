@@ -96,7 +96,9 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
 
   name = new QLineEdit;
   name->setPlaceholderText(QStringLiteral("Optional thread name"));
-  name->setText(std::move(initialDraft.name));
+  if (!initialDraft.ephemeral)
+    name->setText(std::move(initialDraft.name));
+  name->setEnabled(!initialDraft.ephemeral);
   form->addWidget(field(QStringLiteral("Name"), name));
 
   baseInstructions = new QPlainTextEdit;
@@ -151,6 +153,11 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   root->addLayout(footer);
 
   connect(browse, &QPushButton::clicked, this, [this] { chooseWorkspace(); });
+  connect(ephemeral, &QCheckBox::toggled, this, [this](bool checked) {
+    if (checked)
+      name->clear();
+    name->setEnabled(!checked);
+  });
   connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
   connect(create, &QPushButton::clicked, this, [this] { acceptDraft(); });
 
@@ -177,7 +184,8 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
 
 NewThreadDraft NewThreadDialog::draft() const {
   return {QDir::fromNativeSeparators(workspace->text().trimmed()),
-          name->text().trimmed(), baseInstructions->toPlainText().trimmed(),
+          ephemeral->isChecked() ? QString{} : name->text().trimmed(),
+          baseInstructions->toPlainText().trimmed(),
           developerInstructions->toPlainText().trimmed(),
           ephemeral->isChecked()};
 }

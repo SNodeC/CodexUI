@@ -1045,7 +1045,13 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   create.attachments.push_back(
       {"/tmp/wire-image.png", "wire-image.png", "image/png", std::nullopt});
   create.payload = {
-      {"threadStart", Value(Value::Object{{"cwd", Value("/tmp/wire-create")}})},
+      {"requestedName", Value("Unsupported ephemeral name")},
+      {"threadStart",
+       Value(Value::Object{
+           {"cwd", Value("/tmp/wire-create")},
+           {"baseInstructions", Value("Ephemeral base instructions")},
+           {"developerInstructions", Value("Ephemeral developer instructions")},
+           {"ephemeral", Value(true)}})},
       {"turnStart",
        Value(Value::Object{{"approvalPolicy", Value("on-request")}})}};
   expect(sendAction(runtime.channels(), std::move(create)),
@@ -1053,8 +1059,15 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   request = bridge.receiveAppServer();
   expect(request && request->value("method", std::string{}) == "thread/start" &&
              request->at("params").value("cwd", std::string{}) ==
-                 "/tmp/wire-create",
-         "Create Thread encodes its thread options exactly once");
+                 "/tmp/wire-create" &&
+             request->at("params").value("baseInstructions",
+                                          std::string{}) ==
+                 "Ephemeral base instructions" &&
+             request->at("params").value("developerInstructions",
+                                          std::string{}) ==
+                 "Ephemeral developer instructions" &&
+             request->at("params").value("ephemeral", false),
+         "Create Thread keeps ephemeral instructions in its thread options");
   if (!request) {
     runtime.drainNotifications();
     return;
@@ -1084,8 +1097,8 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
                  std::string::npos &&
              input.at(1).value("type", std::string{}) == "localImage" &&
              input.at(1).value("path", std::string{}) == "/tmp/wire-image.png",
-         "the first prompt moves text, options, and attachment into one "
-         "turn/start request");
+         "the first ephemeral prompt skips metadata updates and moves text, "
+         "options, and attachment into one turn/start request");
   if (request) {
     expect(bridge.reply(*request, {{"turn",
                                     {{"id", "wire-created-turn"},
@@ -1228,17 +1241,8 @@ void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
          "successful fork retains its authoritative thread node");
   if (!forked)
     return;
-  request = bridge.receiveAppServer();
-  expect(request &&
-             request->value("method", std::string{}) == "thread/name/set" &&
-             request->at("params").value("threadId", std::string{}) ==
-                 "runtime-fork" &&
-             request->at("params").value("name", std::string{}) ==
-                 "Runtime thread (fork 1)",
-         "the fork name is synchronized through thread/name/set");
-  if (request)
-    expect(bridge.reply(*request, nlohmann::json::object()),
-           "the fork rename acknowledgement is delivered");
+  expect(!bridge.receiveAppServer(100ms),
+         "an ephemeral fork never sends an unsupported metadata update");
   NodeAction prompt{forked, NodeActionKind::SubmitPrompt};
   prompt.promptText = "Answer after a successful fork";
   expect(sendAction(runtime.channels(), std::move(prompt)),

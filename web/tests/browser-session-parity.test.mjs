@@ -374,7 +374,7 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     const draft = session.getSnapshot().optimisticThreads[0];
     assert.equal(draft?.id, "__codexui_new_thread__");
     assert.equal(draft?.state, "awaiting");
-    assert.equal(draft?.title, "Named draft");
+    assert.equal(draft?.title, "New thread");
     assert.equal(draft?.cwd, "/workspace");
 
     const submitted = session.submitPrompt("first prompt", [], {}, {model: "gpt-current"});
@@ -392,12 +392,10 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     respond(socket, create, {thread: {id: "created-thread", name: "Created thread", cwd: "/workspace", status: {type: "idle"}}});
     assert.equal(await submitted, true);
     await Promise.resolve();
-    assert.equal(session.getSnapshot().optimisticThreads[0]?.title, "Named draft",
-        "the canonical thread handoff never substitutes the provider name or UUID");
-    assert.equal(session.model.thread("created-thread")?.title, "Named draft");
-    const rename = requests(socket, "thread/name/set").at(-1);
-    assert.equal(rename?.payload.params.name, "Named draft");
-    respond(socket, rename, {});
+    assert.equal(session.getSnapshot().optimisticThreads[0]?.title, "New thread");
+    assert.equal(session.model.thread("created-thread")?.title, "Created thread");
+    assert.equal(requests(socket, "thread/name/set").length, 0,
+        "an ephemeral thread never sends an unsupported metadata update");
 
     const promoted = session.getSnapshot().optimisticThreads[0];
     assert.equal(promoted?.id, "created-thread");
@@ -412,14 +410,8 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     assert.notEqual(session.getSnapshot().optimisticThreads[0]?.state, "awaiting");
     assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey,
         "canonical styling retains the optimistic row's React identity");
-    assert.equal(session.model.thread("created-thread")?.title, "Named draft",
-        "turn acknowledgement leaves the chosen name intact");
-    socket.receive(appserver({jsonrpc: "2.0", method: "thread/name/updated", params: {
-        threadId: "created-thread", threadName: "Named draft",
-    }}));
+    assert.equal(session.model.thread("created-thread")?.title, "Created thread");
     assert.equal(session.model.thread("created-thread")?.localNameOverlay, undefined);
-    assert.equal(session.model.thread("created-thread")?.title, "Named draft",
-        "matching name acknowledgement retires the overlay without changing the title");
     session.dispose();
 });
 
@@ -484,7 +476,7 @@ test("fork names preserve root and nested lineage without collisions", () => {
     assert.equal(suggestForkName("Separate", titles), "Separate (fork 1)");
 });
 
-test("Fork with options sends adjustable fork fields and names separately", async () => {
+test("ephemeral Fork with options sends adjustable fields without a rename", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "fork-options");
@@ -506,9 +498,8 @@ test("Fork with options sends adjustable fork fields and names separately", asyn
     });
     respond(socket, fork, {thread: {id: "advanced", name: "Provider name", cwd: "/new"}});
     await Promise.resolve(); await Promise.resolve();
-    assert.equal(session.model.thread("advanced")?.title, "Chosen fork");
-    assert.deepEqual(requests(socket, "thread/name/set").at(-1).payload.params,
-        {threadId: "advanced", name: "Chosen fork"});
+    assert.equal(session.model.thread("advanced")?.title, "Provider name");
+    assert.equal(requests(socket, "thread/name/set").length, 0);
     session.dispose();
 });
 

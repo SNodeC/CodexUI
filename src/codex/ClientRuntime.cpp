@@ -1829,6 +1829,11 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
               return;
             }
             const std::string requestedName = pending->requestedName;
+            const nodegraph::Value *ephemeralValue =
+                valueMember(pending->options, "ephemeral");
+            const bool ephemeral = ephemeralValue &&
+                                   ephemeralValue->asBool() &&
+                                   *ephemeralValue->asBool();
             static_cast<void>(workerLogic.completeCreatedThread(
                 std::move(decoded), *pending, threadId));
             if (pending->kind == PromptCommandKind::CreateThread ||
@@ -1838,7 +1843,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                   "Could not attach the prompt to the created thread");
               return;
             }
-            if (!requestedName.empty()) {
+            if (!ephemeral && !requestedName.empty()) {
               dispatchRequest<codex::generated::client_requests::ThreadSetName>(
                   sdk,
                   nlohmann::json{{"threadId", threadId},
@@ -2343,12 +2348,17 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         }
       }
       std::string requestedForkName;
+      bool ephemeralFork = false;
       if (action.kind == Fork) {
         const nodegraph::Value *nameValue =
             valueMember(action.payload, "requestedName");
         if (const std::string *name = nameValue ? nameValue->asString()
                                                 : nullptr)
           requestedForkName = *name;
+        const nodegraph::Value *ephemeralValue =
+            valueMember(action.payload, "ephemeral");
+        ephemeralFork = ephemeralValue && ephemeralValue->asBool() &&
+                        *ephemeralValue->asBool();
         action.payload.erase("requestedName");
       }
       nlohmann::json parameters = jsonObject(std::move(action.payload));
@@ -2365,8 +2375,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         dispatchRequestHandled<codex::generated::client_requests::ThreadFork>(
             sdk, std::move(parameters), workerLogic, target,
             [](const nodegraph::ProtocolRequestId &) {},
-            [&, requestedForkName](RequestOutcome outcome,
-                                   nodegraph::DecodedMessage decoded) {
+            [&, requestedForkName, ephemeralFork](
+                RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
               if (!outcome.ok) {
                 static_cast<void>(
                     workerLogic.applyDetailed(std::move(decoded)));
@@ -2386,7 +2396,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                   currentNode({nodegraph::NodeKind::Thread, forkId});
               if (!fork)
                 return;
-              if (!requestedForkName.empty()) {
+              if (!ephemeralFork && !requestedForkName.empty()) {
                 dispatchRequest<
                     codex::generated::client_requests::ThreadSetName>(
                     sdk,

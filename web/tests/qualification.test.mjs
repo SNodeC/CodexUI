@@ -89,7 +89,7 @@ test("new-thread dialog exposes the complete native creation draft", () => {
     assert.match(markup, /value="\/workspace"/u);
 });
 
-test("fork-with-options dialog reuses every creation field and prefills its chosen name", () => {
+test("ephemeral fork options disable and clear the unsupported name", () => {
     const markup = renderToStaticMarkup(createElement(NewThreadDialog, {
         initialWorkspace: "/fallback", purpose: "fork", initialDraft: {
             workspace: "/fork", name: "Original (fork 1.2)",
@@ -98,7 +98,7 @@ test("fork-with-options dialog reuses every creation field and prefills its chos
     }));
     assert.match(markup, />Fork with options</u);
     assert.match(markup, /value="\/fork"/u);
-    assert.match(markup, /value="Original \(fork 1\.2\)"/u);
+    assert.match(markup, /<input disabled="" placeholder="Optional thread name" value=""\/>/u);
     assert.match(markup, />Base<\/textarea>/u);
     assert.match(markup, />Developer<\/textarea>/u);
     assert.match(markup, /type="checkbox" checked=""/u);
