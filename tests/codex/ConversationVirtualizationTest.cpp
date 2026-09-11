@@ -1299,6 +1299,63 @@ bool selectionFocusAndOneGesturePromotion() {
   return result;
 }
 
+bool expandingCardRepaintsDisplacedPassiveRows() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "expand-damage";
+  VisibleCardData reasoning{
+      AuthoritativeItemKey{"expand-damage", "reasoning-turn", "reasoning"},
+      CardKind::Reasoning,
+      "expand-damage",
+      "reasoning-turn",
+      "reasoning",
+      ReasoningData{"First paragraph expands the card.\n\nSecond paragraph "
+                    "adds enough height to move the following row."}};
+  VisibleCardData following{
+      AuthoritativeItemKey{"expand-damage", "answer-turn", "answer"},
+      CardKind::AgentMessage,
+      "expand-damage",
+      "answer-turn",
+      "answer",
+      AgentMessageData{"Following passive card", true}};
+  snapshot.sections.push_back(
+      {"reasoning-section", "reasoning-turn", {reasoning}, std::nullopt});
+  snapshot.sections.push_back(
+      {"answer-section", "answer-turn", {following}, std::nullopt});
+
+  ConversationView view;
+  view.resize(620, 320);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "mixed expansion-damage fixture reconciles");
+  settle();
+  const QModelIndex reasoningIndex =
+      view.conversationModel()->indexForStableKey(stableKey(reasoning.key));
+  const QModelIndex followingIndex =
+      view.conversationModel()->indexForStableKey(stableKey(following.key));
+  const QRect collapsed = view.visualRect(reasoningIndex);
+  const QRect followingBefore = view.visualRect(followingIndex);
+  const QPoint disclosurePoint(collapsed.right() - 16, collapsed.top() + 22);
+  ViewportPaintRegionProbe paintProbe(view.viewport());
+  paintProbe.start();
+  sendViewportMouse(view, QEvent::MouseButtonPress, disclosurePoint,
+                    Qt::LeftButton, Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, disclosurePoint,
+                    Qt::LeftButton, Qt::NoButton);
+  settle();
+  const QRegion expansionPaint = paintProbe.stop();
+  const QRect expanded = view.visualRect(reasoningIndex);
+  const QRect followingAfter = view.visualRect(followingIndex);
+  result &= expect(
+      expanded.height() > collapsed.height() &&
+          followingAfter.top() > followingBefore.top() &&
+          followingAfter.bottom() < view.viewport()->height(),
+      "expansion moves the following passive row within the viewport");
+  result &= expect(
+      expansionPaint.contains(followingAfter.center()),
+      "expansion repaints the displaced passive card at its final position");
+  return result;
+}
+
 bool passiveAndInteractivePresentationShareExactGeometry() {
   ConversationSnapshot snapshot;
   snapshot.threadId = "geometry-invariant";
@@ -2021,6 +2078,7 @@ int main(int argc, char **argv) {
                       streamingMarkdownReparsesOnlyMutableTail() &&
                       passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() &&
                       selectionFocusAndOneGesturePromotion() &&
+                      expandingCardRepaintsDisplacedPassiveRows() &&
                       outsideTextDragDoesNotReenterTheView() &&
                       interactiveResizeCoalescesConversationReflow() &&
                       collapsedLargeCardsSkipBodyProjection() &&

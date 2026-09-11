@@ -3071,6 +3071,7 @@ void ConversationView::setCardCollapsed(const std::string &key,
   const QModelIndex index = model_->indexForStableKey(key);
   if (!index.isValid())
     return;
+  const QRect geometryBefore = rowRect(index.row());
   Anchor anchor = captureAnchor();
   anchor.stableKey = key;
   anchor.pixelOffset = rowRect(index.row()).top();
@@ -3149,7 +3150,6 @@ void ConversationView::setCardCollapsed(const std::string &key,
     updateMaterialization(true);
     restoreAnchor(anchor);
     layoutMaterializedCards();
-    viewport()->update();
   } else {
     const int height = measureCard(card, rowWidth(*row));
     static_cast<void>(updateMeasuredHeight(index.row(), height, false));
@@ -3164,6 +3164,22 @@ void ConversationView::setCardCollapsed(const std::string &key,
                      availableBottom);
   }
   layoutMaterializedCards();
+  const QRect geometryAfter = rowRect(index.row());
+  if (!geometryBefore.isEmpty() || !geometryAfter.isEmpty()) {
+    const int firstAffectedY = std::clamp(
+        std::min(geometryBefore.isEmpty() ? geometryAfter.top()
+                                          : geometryBefore.top(),
+                 geometryAfter.isEmpty() ? geometryBefore.top()
+                                         : geometryAfter.top()) -
+            CardFrameExtent,
+        0, viewport()->height());
+    // Every later row changes viewport position when one variable-height row
+    // expands or collapses. Real child widgets repaint themselves when moved;
+    // delegate-painted rows do not, so invalidate the affected visible suffix
+    // only after the final anchor/scroll position has been established.
+    viewport()->update(0, firstAffectedY, viewport()->width(),
+                       viewport()->height() - firstAffectedY);
+  }
   storeCurrentThreadState();
 }
 
