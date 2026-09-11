@@ -3449,12 +3449,28 @@ bool testInitialCommandGeometrySettlement() {
                    "single logical output line changes to two visual lines");
   spin();
   const QTextBlock wrappedBlock = outputView->document()->firstBlock();
-  result &= expect(
+  const bool wrappedOutputFullyVisible =
       wrappedBlock.layout() && wrappedBlock.layout()->lineCount() == 2 &&
           outputView->verticalScrollBar()->maximum() == 0 &&
           outputView->viewport()->height() >=
               static_cast<int>(
-                  std::ceil(outputView->document()->size().height())),
+                  std::ceil(outputView->document()->size().height()));
+  if (!wrappedOutputFullyVisible)
+    std::cerr << "initial command geometry: widget=" << outputView->height()
+              << " hint=" << outputView->sizeHint().height()
+              << " viewport=" << outputView->viewport()->height()
+              << " document=" << outputView->document()->size().height()
+              << " lines="
+              << (wrappedBlock.layout() ? wrappedBlock.layout()->lineCount()
+                                        : -1)
+              << " block="
+              << (wrappedBlock.layout()
+                      ? wrappedBlock.layout()->boundingRect().height()
+                      : -1)
+              << " scroll=" << outputView->verticalScrollBar()->maximum()
+              << '\n';
+  result &= expect(
+      wrappedOutputFullyVisible,
       "two visual output lines are fully visible without inner scrolling");
   return result;
 }

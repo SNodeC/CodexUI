@@ -1460,14 +1460,14 @@ bool CommandOutputView::measureAtCurrentWidth(bool notifyParent) {
   if (outputRequiresMaximumHeight(currentOutput_))
     return setPreferredContentHeight(maximumHeight(), notifyParent);
 
-  qreal contentHeight = 2 * CommandOutputVerticalPadding;
-  for (QTextBlock block = document()->begin(); block.isValid();
-       block = block.next()) {
-    if (block.layout())
-      contentHeight += block.layout()->boundingRect().height();
-    if (contentHeight >= maximumHeight())
-      return setPreferredContentHeight(maximumHeight(), notifyParent);
-  }
+  // QTextDocument::size() is the authoritative laid-out extent. Newer Qt
+  // versions can round a wrapped document slightly taller than the union of
+  // its QTextBlock layout rectangles; using the latter would then create a
+  // needless one-step inner scrollbar.
+  const qreal contentHeight =
+      2 * CommandOutputVerticalPadding + document()->size().height();
+  if (contentHeight >= maximumHeight())
+    return setPreferredContentHeight(maximumHeight(), notifyParent);
   return setPreferredContentHeight(
       static_cast<int>(std::ceil(contentHeight)),
       notifyParent);
