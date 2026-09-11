@@ -15,6 +15,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -3438,13 +3439,19 @@ bool testInitialCommandGeometrySettlement() {
                        outputView->sizeHint().height() == immediateHint,
                    "initial wrapped output has no delayed geometry settlement");
 
-  const int glyphWidth = std::max(
-      1, outputView->fontMetrics().horizontalAdvance(QLatin1Char('W')));
-  const int charactersPerLine =
-      std::max(1, outputView->viewport()->width() / glyphWidth);
+  const QFontMetricsF glyphMetrics(outputView->font());
+  const qreal glyphWidth =
+      std::max(0.01, glyphMetrics.horizontalAdvance(QLatin1Char('W')));
+  const int charactersPerLine = std::max(
+      1, static_cast<int>(std::floor(outputView->viewport()->width() /
+                                     glyphWidth)));
+  QString wrappedOutput(charactersPerLine + 1, QLatin1Char('W'));
+  while (glyphMetrics.horizontalAdvance(wrappedOutput) <=
+         outputView->viewport()->width())
+    wrappedOutput += QLatin1Char('W');
   auto &execution = std::get<CommandExecutionData>(
       snapshot.sections.front().cards.front().payload);
-  execution.output = utf8(QString(charactersPerLine + 1, QLatin1Char('W')));
+  execution.output = utf8(wrappedOutput);
   result &= expect(applyConversation(view, snapshot),
                    "single logical output line changes to two visual lines");
   spin();
