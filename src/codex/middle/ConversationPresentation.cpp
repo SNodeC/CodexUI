@@ -120,7 +120,16 @@ bool simpleMarkdownParagraphs(QStringView source) {
 
 } // namespace
 
+QRect cardDisclosureIndicator(const QRect &control, bool expanded) {
+  QRect indicator(control.left(), control.top() + 3, 12,
+                  std::max(0, control.height() - 6));
+  indicator.translate(expanded ? 3 : 5, 0);
+  return indicator;
+}
+
 QString statusLabel(std::string_view status) {
+  if (status.empty())
+    return {};
   return text(codexui::codex::displayStatus(status));
 }
 
@@ -301,6 +310,18 @@ QString boundedGenericActivityDetail(const GenericActivityData &activity) {
   return rendered + QStringLiteral("\n\n[Activity details truncated]");
 }
 
+void allowPreformattedMarkdownWrapping(QTextDocument &document) {
+  for (QTextBlock block = document.begin(); block.isValid();
+       block = block.next()) {
+    QTextBlockFormat format = block.blockFormat();
+    if (!format.nonBreakableLines())
+      continue;
+    format.setNonBreakableLines(false);
+    QTextCursor cursor(block);
+    cursor.setBlockFormat(format);
+  }
+}
+
 MarkdownTailState markdownTailState(const QTextDocument &document,
                                     QStringView markdown) {
   if (markdown.isEmpty())
@@ -316,6 +337,7 @@ MarkdownTailState markdownTailState(const QTextDocument &document,
 void replaceMarkdownDocument(QTextDocument &document, const QString &markdown,
                              MarkdownTailState &tailState) {
   document.setMarkdown(markdown, MarkdownFeatures);
+  allowPreformattedMarkdownWrapping(document);
   tailState = markdownTailState(document, QStringView(markdown));
 }
 
@@ -332,6 +354,7 @@ bool appendMarkdownDocument(QTextDocument &document, QStringView previous,
   cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
   cursor.removeSelectedText();
   cursor.insertMarkdown(reparsedTail.toString(), MarkdownFeatures);
+  allowPreformattedMarkdownWrapping(document);
   tailState = markdownTailState(document, next);
   return true;
 }

@@ -41,6 +41,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <initializer_list>
 #include <iostream>
@@ -902,11 +903,22 @@ QToolButton *copyButton(ConversationCard *card) {
              : nullptr;
 }
 
-bool usesNarrowPhaseCopySpacing(ConversationCard *card, QLabel *phase) {
+int phaseTextRight(ConversationCard *card, QLabel *phase) {
+  if (!card || !phase || !phase->parentWidget())
+    return -1;
+  return phase
+      ->mapTo(card, QPoint(phase->contentsRect().right(),
+                           phase->contentsRect().center().y()))
+      .x();
+}
+
+bool usesReferencePhaseCopySpacing(ConversationCard *card, QLabel *phase) {
   QToolButton *copy = copyButton(card);
-  return phase && copy && phase->parentWidget() == copy->parentWidget() &&
-         phase->parentWidget()->layout()->spacing() == 0 &&
-         copy->geometry().left() - phase->geometry().right() - 1 == 0;
+  if (!phase || !copy || phase->parentWidget() != copy->parentWidget())
+    return false;
+  const int copyLeft = copy->mapTo(card, QPoint{}).x();
+  return !copy->isHidden() && phase->parentWidget()->layout()->spacing() == 0 &&
+         copyLeft - phaseTextRight(card, phase) - 1 == 12;
 }
 
 QRect paintedDisclosureBounds(QToolButton *button) {
@@ -937,6 +949,128 @@ bool setFolded(ConversationCard *card, bool collapsed) {
   button->click();
   spin();
   return guard && guard->isCollapsed() == collapsed;
+}
+
+bool testAgentActivityLifecycleLabelRetention() {
+  VisibleCardData activity{
+      AuthoritativeItemKey{"agent-lifecycle", "turn", "activity"},
+      CardKind::AgentActivity,
+      "agent-lifecycle",
+      "turn",
+      "activity",
+      AgentActivityData{"spawn_agent", {}, {}, "Inspect lifecycle", {}}};
+  ConversationCard card(activity);
+  card.resize(620, card.sizeHint().height());
+  card.show();
+  spin();
+  auto *status =
+      card.findChild<QLabel *>(QStringLiteral("agentActivityStatus"));
+  bool result = expect(
+      (!status || status->isHidden()) &&
+          std::ranges::none_of(card.findChildren<QLabel *>(), [](QLabel *label) {
+            return label->text() == QStringLiteral("unknown");
+          }),
+      "agent activity with no authoritative lifecycle omits unknown");
+
+  std::get<AgentActivityData>(activity.payload).status = "completed";
+  result &= expect(
+      card.applyPresentation(activity) == PresentationImpact::PaintOnly,
+      "collapsed agent completion updates only its header presentation");
+  spin();
+  status = card.findChild<QLabel *>(QStringLiteral("agentActivityStatus"));
+  result &= expect(status && !status->isHidden() &&
+                       status->text() == QStringLiteral("completed") &&
+                       status->property("tone") == QStringLiteral("success"),
+                   "completed agent lifecycle remains visible in a QWidget");
+  const QSize retainedSize = card.size();
+  result &= expect(
+      card.applyPresentation(activity) == PresentationImpact::None &&
+          card.size() == retainedSize,
+      "an identical agent lifecycle update performs no presentation work");
+  return result;
+}
+
+bool testMarkdownLongLinesWrapInsideMaterializedCards() {
+  std::string naturalLine;
+  for (int word = 0; word < 90; ++word)
+    naturalLine += "segment ";
+  const std::string longToken =
+      "/workspace/" + std::string(420, 'p') + "/artifact.txt";
+  const std::string indented = "    keep    authored    indentation " +
+                               std::string(260, 'I');
+  const std::string markdown =
+      "An ordinary paragraph keeps its established wrapping.\n\n```text\n" +
+      naturalLine + "\n" + longToken + "\n```\n\n" + indented;
+  bool result = true;
+  for (const bool nested : {false, true}) {
+    ConversationCard card(VisibleCardData{
+        AuthoritativeItemKey{"markdown-overflow", "turn",
+                             nested ? "nested" : "root"},
+        CardKind::AgentMessage,
+        "markdown-overflow",
+        "turn",
+        nested ? "nested" : "root",
+        AgentMessageData{markdown, false}});
+    card.setNestedPresentation(nested);
+    card.resize(nested ? 676 : 700, card.sizeHint().height());
+    card.show();
+    spin();
+    auto *body = card.findChild<MarkdownTextView *>();
+    if (!body) {
+      result &= expect(false, "materialized Markdown body exists");
+      continue;
+    }
+    bool linesBounded = true;
+    for (const int width : {nested ? 676 : 700, nested ? 336 : 360,
+                            nested ? 676 : 700}) {
+      card.resize(width, std::max(1, card.height()));
+      spin();
+      card.resize(width, card.sizeHint().height());
+      spin();
+      const qreal documentWidth = body->sharedDocument()->textWidth();
+      for (QTextBlock block = body->sharedDocument()->begin(); block.isValid();
+           block = block.next()) {
+        const QTextLayout *layout = block.layout();
+        if (!layout)
+          continue;
+        for (int line = 0; line < layout->lineCount(); ++line)
+          linesBounded =
+              linesBounded &&
+              layout->lineAt(line).naturalTextWidth() <= documentWidth + 0.5;
+      }
+    }
+    const QRect bodyRect(body->mapTo(&card, QPoint{}), body->size());
+    result &= expect(
+        bodyRect.left() >= card.contentsRect().left() &&
+            bodyRect.right() <= card.contentsRect().right() &&
+            body->horizontalScrollBarPolicy() == Qt::ScrollBarAlwaysOff &&
+            body->markdownSource() == QString::fromStdString(markdown) &&
+            body->toPlainText().contains(
+                QStringLiteral("keep    authored    indentation")) &&
+            linesBounded,
+        nested ? "nested materialized Markdown wraps every code line inside "
+                 "its editor"
+               : "root materialized Markdown wraps every code line inside "
+                 "its editor");
+
+    body->setSelection(0, 22);
+    const QString selected = body->selectedText();
+    body->setFocus(Qt::OtherFocusReason);
+    QKeyEvent copySelection(QEvent::KeyPress, Qt::Key_C,
+                            Qt::ControlModifier);
+    QApplication::sendEvent(body, &copySelection);
+    result &= expect(!selected.isEmpty() &&
+                         QApplication::clipboard()->text() == selected,
+                     "selection and Ctrl+C remain native after code wraps");
+    QApplication::clipboard()->clear();
+    if (QToolButton *copy = copyButton(&card))
+      copy->click();
+    result &= expect(QApplication::clipboard()->text() ==
+                         QString::fromStdString(markdown),
+                     "card Copy retains the canonical Markdown source after "
+                     "code wrapping");
+  }
+  return result;
 }
 
 std::pair<std::string, int> firstVisible(ConversationView &view) {
@@ -2179,7 +2313,11 @@ bool testMutableCardsAndCommandOutput() {
                 {}}},
       {AuthoritativeItemKey{thread, "turn", "generic"},
        CardKind::GenericActivity, thread, "turn", "generic",
-       GenericActivityData{"custom activity", {}, "detail: initial"}},
+       GenericActivityData{"custom activity", "inProgress",
+                           "detail: initial"}},
+      {AuthoritativeItemKey{thread, "turn", "image"},
+       CardKind::ImageGeneration, thread, "turn", "image",
+       ImageGenerationData{{}, "inProgress", "A generated diagram"}},
       {LocalPromptKey{77},
        CardKind::LocalPrompt,
        thread,
@@ -2287,7 +2425,7 @@ bool testMutableCardsAndCommandOutput() {
           agentPhase->text() == QStringLiteral("update") &&
           agentPhase->property("tone").toString() == QStringLiteral("active") &&
           agentPhase->font().weight() == QFont::Normal &&
-          usesNarrowPhaseCopySpacing(agentCardWidget, agentPhase) &&
+          usesReferencePhaseCopySpacing(agentCardWidget, agentPhase) &&
           agentPhase->parentWidget()->layout()->indexOf(agentPhase) <
               agentPhase->parentWidget()->layout()->indexOf(
                   copyButton(agentCardWidget)),
@@ -2310,6 +2448,29 @@ bool testMutableCardsAndCommandOutput() {
       QStringLiteral("fileChangesList"));
   auto *planCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "plan"}})];
+  auto *genericCard = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "generic"}})];
+  auto *imageCard = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "image"}})];
+  const std::array<std::pair<ConversationCard *, QString>, 6> statusCards{{
+      {agentCardWidget, QStringLiteral("agentMessagePhase")},
+      {commandCard, QStringLiteral("commandStatus")},
+      {activityCard, QStringLiteral("agentActivityStatus")},
+      {filesCard, QStringLiteral("fileChangesStatus")},
+      {imageCard, QStringLiteral("imageGenerationStatus")},
+      {genericCard, QStringLiteral("genericActivityStatus")},
+  }};
+  result &= expect(
+      std::ranges::all_of(
+          statusCards,
+          [](const std::pair<ConversationCard *, QString> &entry) {
+        QLabel *status = entry.first
+                             ? entry.first->findChild<QLabel *>(entry.second)
+                             : nullptr;
+        return status && usesReferencePhaseCopySpacing(entry.first, status);
+          }),
+      "every rich-card lifecycle label uses the Codex Update status-to-Copy "
+      "geometry");
   result &= expect(
       filesList && filesList->toPlainText().contains(
                        QStringLiteral("src/card.cpp")) &&
@@ -2412,8 +2573,8 @@ bool testMutableCardsAndCommandOutput() {
   auto &generic = std::get<GenericActivityData>(cards[7].payload);
   generic.type = "updated custom activity";
   generic.displayDetail = "detail: updated";
-  std::get<LocalPromptData>(cards[8].payload).state = PromptState::Failed;
-  std::get<LocalPromptData>(cards[8].payload).error = "error";
+  std::get<LocalPromptData>(cards[9].payload).state = PromptState::Failed;
+  std::get<LocalPromptData>(cards[9].payload).error = "error";
   result &= expect(applyConversation(view, snapshot),
                    "all card types accept visible updates");
   result &= spinUntil([&] {
@@ -2803,7 +2964,7 @@ bool testCardFoldingGeometryAndRetention() {
           cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
           steeringPhase->text() == QStringLiteral("steering · pending") &&
           steeringPhase->font().weight() == QFont::Normal &&
-          usesNarrowPhaseCopySpacing(steeringCard, steeringPhase) &&
+          usesReferencePhaseCopySpacing(steeringCard, steeringPhase) &&
           steeringPhase->parentWidget()->layout()->indexOf(steeringPhase) <
               steeringPhase->parentWidget()->layout()->indexOf(
                   copyButton(steeringCard)) &&
@@ -3229,7 +3390,9 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                              "First image"}},
         {firstFileChangesKey, CardKind::FileChanges, thread, "turn", "files-1",
          FileChangesData{"completed",
-                         {{"src/first.cpp", "update", 2, 1}},
+                         {{"src/a-deliberately-long-file-name-that-wraps-at-"
+                           "the-final-viewport-width.cpp",
+                           "update", 2, 1}},
                          "/workspace"}}}});
   const auto containsText = [](QWidget *widget, const QString &needle) {
     return std::ranges::any_of(
@@ -3279,6 +3442,20 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                    "commands, images, and file changes");
   if (!update || !final || !firstCommand || !firstImage || !firstFileChanges)
     return false;
+  auto *firstFileChangesList = firstFileChanges->findChild<QPlainTextEdit *>(
+      QStringLiteral("fileChangesList"));
+  view.resize(360, 5000);
+  spin();
+  result &= expect(
+      firstFileChangesList && firstFileChangesList->isVisible() &&
+          firstFileChangesList->height() >=
+              2 * firstFileChangesList->fontMetrics().lineSpacing() &&
+          firstFileChangesList->toPlainText().contains(
+              QStringLiteral("a-deliberately-long-file-name")),
+      "an initially expanded file-change card keeps its body height after "
+      "viewport reflow");
+  view.resize(700, 5000);
+  spin();
 
   view.setPresentationOptions({false, false, false, false, false});
   spin();
@@ -7637,6 +7814,14 @@ int main(int argc, char **argv) {
       std::cout << "Conversation settlement tests passed\n";
     return focused ? 0 : 1;
   }
+  if (qEnvironmentVariableIsSet("CODEXUI_FILE_CHANGES_REFLOW_TESTS"))
+    return testPresentationOptionsRetainCardsAndInitialFolding() ? 0 : 1;
+  if (qEnvironmentVariableIsSet("CODEXUI_REMAINING_UI_TESTS")) {
+    bool focused = testAgentActivityLifecycleLabelRetention();
+    focused &= testMarkdownLongLinesWrapInsideMaterializedCards();
+    focused &= testMutableCardsAndCommandOutput();
+    return focused ? 0 : 1;
+  }
   bool result = testPerceptuallyUniformPalette();
   result &= testMessageIdentityPalette();
   result &= testActiveWorkBordersFollowStatus();
@@ -7648,6 +7833,8 @@ int main(int argc, char **argv) {
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
   result &= testCardCopyControls();
+  result &= testAgentActivityLifecycleLabelRetention();
+  result &= testMarkdownLongLinesWrapInsideMaterializedCards();
   result &= testUserMessageLineBreakPresentation();
   result &= testMutableCardsAndCommandOutput();
   result &= testCardFoldingGeometryAndRetention();

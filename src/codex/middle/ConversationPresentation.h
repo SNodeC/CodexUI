@@ -5,6 +5,7 @@
 
 #include "codex/middle/MiddleTypes.h"
 
+#include <QRect>
 #include <QString>
 #include <QStringView>
 
@@ -13,6 +14,23 @@
 class QTextDocument;
 
 namespace codexui::codex::middle::presentation {
+
+struct CardHeaderMetrics final {
+  // The delegate-painted Codex Update header is the established optical
+  // reference for both passive and materialized cards.
+  static constexpr int LineHeight = 24;
+  static constexpr int HorizontalInset = 12;
+  static constexpr int StatusWidth = 145;
+  static constexpr int CopyInkLeftFromRight = 43;
+  static constexpr int StatusToCopyInkGap = 17;
+  static constexpr int RichStatusTrailingMargin = 12;
+  static constexpr int CopyControlWidth = 16;
+  static constexpr int DisclosureControlWidth = 14;
+  static constexpr int CopyDisclosureSpacing = 4;
+};
+
+[[nodiscard]] QRect cardDisclosureIndicator(const QRect &control,
+                                            bool expanded);
 
 struct MarkdownTailState {
   qsizetype sourceOffset = -1;

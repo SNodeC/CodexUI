@@ -8,6 +8,7 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QAbstractTextDocumentLayout>
 #include <QClipboard>
 #include <QColor>
 #include <QDateTime>
@@ -131,7 +132,8 @@ public:
       : QToolButton(parent) {
     setObjectName(QStringLiteral("cardDisclosureButton"));
     setProperty("kind", "subtle");
-    setFixedSize(14, 24);
+    setFixedSize(presentation::CardHeaderMetrics::DisclosureControlWidth,
+                 presentation::CardHeaderMetrics::LineHeight);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Expand card"));
@@ -153,11 +155,8 @@ public:
 protected:
   void paintEvent(QPaintEvent *event) override {
     static_cast<void>(event);
-    QRect indicator(0, 3, 12, height() - 6);
-    // Keep the visible stroke at the accepted card-right inset. The narrower
-    // left glyph needs two pixels more optical compensation than the down
-    // glyph, while the compact control width avoids artificial action gaps.
-    indicator.translate(expanded_ ? 3 : 5, 0);
+    const QRect indicator =
+        presentation::cardDisclosureIndicator(rect(), expanded_);
     UiStyle::drawChevron(this, indicator, isEnabled(),
                          underMouse() || hasFocus(),
                          expanded_ ? UiStyle::ChevronDirection::Down
@@ -172,7 +171,8 @@ class CardCopyButton final : public QToolButton {
 public:
   explicit CardCopyButton(QWidget *parent = nullptr) : QToolButton(parent) {
     setObjectName(QStringLiteral("cardCopyButton"));
-    setFixedSize(16, 24);
+    setFixedSize(presentation::CardHeaderMetrics::CopyControlWidth,
+                 presentation::CardHeaderMetrics::LineHeight);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Copy card content"));
@@ -737,7 +737,10 @@ public:
 protected:
   void resizeEvent(QResizeEvent *event) override {
     QPlainTextEdit::resizeEvent(event);
+    const int previousHeight = preferredHeight_;
     refreshPreferredHeight(std::max(1, viewport()->width()));
+    if (preferredHeight_ != previousHeight)
+      updateGeometry();
   }
 
   void mousePressEvent(QMouseEvent *event) override {
@@ -814,16 +817,40 @@ private:
   void refreshPreferredHeight(int width) const {
     if (preferredWidth_ == width && preferredHeight_ > 0)
       return;
+    if (preferredHeight_ > 0 && allBlocksUnwrapped_ &&
+        widestUnwrappedLine_ <= width) {
+      document()->setTextWidth(width);
+      preferredWidth_ = width;
+      return;
+    }
     document()->setTextWidth(width);
     preferredWidth_ = width;
+    qreal laidOutHeight = 0;
+    allBlocksUnwrapped_ = true;
+    widestUnwrappedLine_ = 0;
+    QAbstractTextDocumentLayout *documentLayout = document()->documentLayout();
+    for (QTextBlock block = document()->begin(); block.isValid();
+         block = block.next()) {
+      laidOutHeight += documentLayout->blockBoundingRect(block).height();
+      QTextLayout *blockLayout = block.layout();
+      if (!blockLayout || blockLayout->lineCount() != 1) {
+        allBlocksUnwrapped_ = false;
+      } else {
+        widestUnwrappedLine_ =
+            std::max(widestUnwrappedLine_,
+                     blockLayout->lineAt(0).naturalTextWidth());
+      }
+    }
     preferredHeight_ =
-        std::max(1, static_cast<int>(std::ceil(document()->size().height())));
+        std::max(1, static_cast<int>(std::ceil(laidOutHeight)));
   }
 
   QStringList openPaths_;
   QString pressedLink_;
   mutable int preferredWidth_ = 0;
   mutable int preferredHeight_ = 0;
+  mutable qreal widestUnwrappedLine_ = 0;
+  mutable bool allBlocksUnwrapped_ = false;
 };
 
 CardCopyContent cardCopyContent(const VisibleCardData &card) {
@@ -1000,7 +1027,7 @@ void MarkdownTextView::configureDocument() {
   document_->setDefaultStyleSheet(
       QStringLiteral("a{color:#5471a6;text-decoration:none;}"));
   QTextOption option = document_->defaultTextOption();
-  option.setWrapMode(QTextOption::WordWrap);
+  option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
   document_->setDefaultTextOption(option);
 }
 
@@ -1598,7 +1625,8 @@ public:
     disclosure = new CardDisclosureButton(header);
     headerLayout->addWidget(title, 1);
     headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
-    headerLayout->addSpacing(4);
+    headerLayout->addSpacing(
+        presentation::CardHeaderMetrics::CopyDisclosureSpacing);
     headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(header);
 
@@ -1873,10 +1901,26 @@ public:
     disclosure->setExpanded(!collapsed);
     disclosure->setVisible(expandable);
     content->setVisible(expandable && !collapsed);
+    refreshPhaseSpacing();
   }
 
   void refreshCopyPresentation() {
     copy->setVisible(cardHasCopyContent(current));
+    refreshPhaseSpacing();
+  }
+
+  void refreshPhaseSpacing() {
+    if (!phase)
+      return;
+    int trailing = presentation::CardHeaderMetrics::RichStatusTrailingMargin;
+    if (copy->isHidden())
+      trailing += presentation::CardHeaderMetrics::CopyControlWidth;
+    if (disclosure->isHidden())
+      trailing += presentation::CardHeaderMetrics::DisclosureControlWidth;
+    const QMargins margins = phase->contentsMargins();
+    if (margins.right() != trailing)
+      phase->setContentsMargins(margins.left(), margins.top(), trailing,
+                                margins.bottom());
   }
 
   void showPhase(const QString &value, const QString &objectName) {
@@ -1887,9 +1931,13 @@ public:
       headerLayout->insertWidget(headerLayout->indexOf(copy), phase, 0,
                                  Qt::AlignVCenter);
     }
-    phase->setObjectName(objectName);
-    phase->setText(value);
-    phase->show();
+    if (phase->objectName() != objectName)
+      phase->setObjectName(objectName);
+    if (phase->text() != value)
+      phase->setText(value);
+    if (phase->isHidden())
+      phase->show();
+    refreshPhaseSpacing();
   }
 
   void showStatus(const QString &status, const QString &objectName) {

@@ -18,7 +18,9 @@
 #include <QRegion>
 #include <QScrollBar>
 #include <QThread>
+#include <QToolButton>
 #include <QToolTip>
+#include <QUrl>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -34,6 +36,33 @@ bool expect(bool condition, const char *message) {
   if (!condition)
     std::cerr << "FAILED: " << message << '\n';
   return condition;
+}
+
+QRect paintedWidgetBounds(QWidget *widget) {
+  if (!widget)
+    return {};
+  QImage image(widget->size(), QImage::Format_ARGB32_Premultiplied);
+  image.fill(QColor(QStringLiteral("#f9f4ea")));
+  widget->render(&image, QPoint{}, QRegion{}, QWidget::DrawChildren);
+  QRect bounds;
+  for (int y = 0; y < image.height(); ++y)
+    for (int x = 0; x < image.width(); ++x)
+      if (const QColor pixel = image.pixelColor(x, y);
+          pixel.red() < 160 && pixel.green() < 160 && pixel.blue() < 160)
+        bounds |= QRect(x, y, 1, 1);
+  return bounds;
+}
+
+QRect delegateChevronBounds(const QImage &image, const QRect &row) {
+  QRect bounds;
+  const QRect search(row.right() - 26, row.top() + 4, 24, 32);
+  for (int y = search.top(); y <= search.bottom(); ++y)
+    for (int x = search.left(); x <= search.right(); ++x) {
+      const QColor pixel = image.pixelColor(x, y);
+      if (pixel.red() < 160 && pixel.green() < 160 && pixel.blue() < 160)
+        bounds |= QRect(x - row.left(), y - row.top(), 1, 1);
+    }
+  return bounds;
 }
 
 VisibleCardData message(std::size_t serial, std::string text = {}) {
@@ -134,6 +163,29 @@ private:
   QWidget *viewport_ = nullptr;
   QRegion painted_;
   bool active_ = false;
+};
+
+class MouseDeliveryProbe final : public QObject {
+public:
+  explicit MouseDeliveryProbe(QWidget *ignored) : ignored_(ignored) {
+    qApp->installEventFilter(this);
+  }
+
+  ~MouseDeliveryProbe() override { qApp->removeEventFilter(this); }
+
+  [[nodiscard]] QObject *receiver() const noexcept { return receiver_; }
+
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    if (!receiver_ && watched != ignored_ &&
+        event->type() == QEvent::MouseButtonPress)
+      receiver_ = watched;
+    return false;
+  }
+
+private:
+  QWidget *ignored_ = nullptr;
+  QObject *receiver_ = nullptr;
 };
 
 template <typename Predicate>
@@ -1106,6 +1158,360 @@ bool commandOutputScrollOwnsConversationFollowing() {
   return result;
 }
 
+bool completedAgentLifecycleUsesBothRenderPaths() {
+  VisibleCardData activity{
+      AuthoritativeItemKey{"agent-lifecycle", "turn", "activity"},
+      CardKind::AgentActivity,
+      "agent-lifecycle",
+      "turn",
+      "activity",
+      AgentActivityData{"spawn_agent", "completed", {}, "Inspect", {}}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = activity.threadId;
+  VisibleCardData sentinel{
+      AuthoritativeItemKey{"agent-lifecycle", "sentinel-turn", "sentinel"},
+      CardKind::UserMessage,
+      "agent-lifecycle",
+      "sentinel-turn",
+      "sentinel",
+      UserMessageData{"Keep the lifecycle row passive"}};
+  snapshot.sections.push_back(
+      {"agent-lifecycle-sentinel", sentinel.turnId, {sentinel},
+       std::nullopt});
+  snapshot.sections.push_back(
+      {"agent-lifecycle-section", activity.turnId, {activity}, std::nullopt});
+
+  ConversationView view;
+  view.resize(820, 240);
+  view.show();
+  bool result = expect(view.reconcile(snapshot),
+                       "completed-agent lifecycle fixture reconciles");
+  settle();
+  const QModelIndex index =
+      view.conversationModel()->indexForStableKey(stableKey(activity.key));
+  const QRect rect = view.visualRect(index);
+  view.viewport()->repaint(rect);
+  const QImage passive = view.viewport()->grab().toImage();
+  const QRect statusArea(rect.right() - 205, rect.top() + 8, 145, 28);
+  bool paintedStatus = false;
+  for (int y = statusArea.top(); y <= statusArea.bottom() && !paintedStatus;
+       ++y)
+    for (int x = statusArea.left(); x <= statusArea.right(); ++x) {
+      const QColor pixel = passive.pixelColor(x, y);
+      if (pixel.red() < 170 && pixel.green() < 170 && pixel.blue() < 170) {
+        paintedStatus = true;
+        break;
+      }
+    }
+  result &= expect(index.isValid() &&
+                       materializedCard(view, stableKey(activity.key)) ==
+                           nullptr &&
+                       paintedStatus,
+                   "delegate-painted agent activity keeps completed visible");
+
+  view.setCurrentIndex(index);
+  settle();
+  ConversationCard *widget = materializedCard(view, stableKey(activity.key));
+  auto *status = widget ? widget->findChild<QLabel *>(
+                              QStringLiteral("agentActivityStatus"))
+                        : nullptr;
+  result &= expect(widget && status && !status->isHidden() &&
+                       status->text() == QStringLiteral("completed"),
+                   "materialized agent activity keeps completed visible");
+  const qulonglong commitsBefore =
+      view.property("targetedCardCommits").toULongLong();
+  const qulonglong refreshesBefore =
+      view.property("graphRefreshPasses").toULongLong();
+  const auto impact = view.applyCardPresentation(activity);
+  result &= expect(impact == PresentationImpact::None &&
+                       view.property("targetedCardCommits").toULongLong() ==
+                           commitsBefore &&
+                       view.property("graphRefreshPasses").toULongLong() ==
+                           refreshesBefore,
+                   "identical completed lifecycle performs no extra work");
+  return result;
+}
+
+bool steeringUsesTealAcrossRenderPathsAndRematerialization() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "steering-color";
+  TurnSection section;
+  section.key = "steering-color-section";
+  section.turnId = "steering-color-turn";
+  VisibleCardData root{
+      AuthoritativeItemKey{"steering-color", section.turnId, "root"},
+      CardKind::UserMessage,
+      "steering-color",
+      section.turnId,
+      "root",
+      UserMessageData{"Opening prompt"}};
+  VisibleCardData steering{
+      AuthoritativeItemKey{"steering-color", section.turnId, "steering"},
+      CardKind::UserMessage,
+      "steering-color",
+      section.turnId,
+      "steering",
+      UserMessageData{"Steering prompt"}};
+  const std::string steeringKey = stableKey(steering.key);
+  section.rootCardKey = root.key;
+  section.cards = {root, steering};
+  for (int row = 0; row < 80; ++row)
+    section.cards.push_back(
+        {AuthoritativeItemKey{"steering-color", section.turnId,
+                              "tail-" + std::to_string(row)},
+         CardKind::AgentMessage,
+         "steering-color",
+         section.turnId,
+         "tail-" + std::to_string(row),
+         AgentMessageData{"Following activity " + std::to_string(row),
+                          false}});
+  snapshot.sections.push_back(std::move(section));
+
+  ConversationView view;
+  view.resize(820, 320);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "steering-color fixture reconciles");
+  const QModelIndex index =
+      view.conversationModel()->indexForStableKey(steeringKey);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->minimum());
+  settle();
+  const auto surfaceColor = [&] {
+    const QRect rect = view.visualRect(index);
+    return view.viewport()->grab().toImage().pixelColor(rect.left() + 6,
+                                                        rect.bottom() - 6);
+  };
+  const QColor teal(QString::fromLatin1(UiStyle::tealSurface));
+  result &= expect(index.isValid() &&
+                       materializedCard(view, steeringKey) == nullptr &&
+                       surfaceColor() == teal,
+                   "delegate-painted steering keeps its teal surface");
+
+  view.setCurrentIndex(index);
+  settle();
+  ConversationCard *widget = materializedCard(view, steeringKey);
+  result &= expect(widget &&
+                       widget->property("nestedConversationCard").toBool() &&
+                       surfaceColor() == teal,
+                   "materializing steering preserves the same teal surface");
+
+  VisibleCardData streamed =
+      *view.conversationModel()->card(index.row());
+  std::get<UserMessageData>(streamed.payload).text += " while streaming";
+  result &= expect(view.applyCardPresentation(streamed).has_value(),
+                   "steering accepts an in-place streaming update");
+  settle();
+  result &= expect(materializedCard(view, steeringKey) == widget &&
+                       surfaceColor() == teal,
+                   "streaming never changes materialized steering to blue");
+
+  if (QWidget *focused = QApplication::focusWidget())
+    focused->clearFocus();
+  view.selectionModel()->clearCurrentIndex();
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  settle();
+  result &= expect(materializedCard(view, steeringKey) == nullptr,
+                   "offscreen steering releases its materialized widget");
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->minimum());
+  settle();
+  result &= expect(materializedCard(view, steeringKey) == nullptr &&
+                       surfaceColor() == teal,
+                   "returning steering is teal in the delegate path");
+  view.setCurrentIndex(index);
+  settle();
+  result &= expect(materializedCard(view, steeringKey) &&
+                       surfaceColor() == teal,
+                   "rematerialized steering remains teal");
+  return result;
+}
+
+bool nestedDelegateMarkdownDoesNotCrossItsCardBorder() {
+  std::string naturalLine;
+  for (int word = 0; word < 80; ++word)
+    naturalLine += "code-segment ";
+  const std::string longToken =
+      "/workspace/" + std::string(420, 'P') + "/artifact.txt";
+  const std::string markdown =
+      "```text\n" + naturalLine + "\n" + longToken +
+      "\n```\n\n    indented    code " + std::string(220, 'I');
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "markdown-overflow";
+  VisibleCardData rootMarkdown{
+      AuthoritativeItemKey{snapshot.threadId, "root-turn", "root-markdown"},
+      CardKind::AgentMessage,
+      snapshot.threadId,
+      "root-turn",
+      "root-markdown",
+      AgentMessageData{markdown, false}};
+  const std::string rootKey = stableKey(rootMarkdown.key);
+  snapshot.sections.push_back(
+      {"root-markdown-section", "root-turn", {std::move(rootMarkdown)},
+       std::nullopt});
+  TurnSection section;
+  section.key = "markdown-overflow-section";
+  section.turnId = "turn";
+  VisibleCardData root{
+      AuthoritativeItemKey{snapshot.threadId, section.turnId, "root"},
+      CardKind::UserMessage,
+      snapshot.threadId,
+      section.turnId,
+      "root",
+      UserMessageData{"Opening prompt"}};
+  VisibleCardData nested{
+      AuthoritativeItemKey{snapshot.threadId, section.turnId, "nested"},
+      CardKind::AgentMessage,
+      snapshot.threadId,
+      section.turnId,
+      "nested",
+      AgentMessageData{markdown, false}};
+  const std::string nestedKey = stableKey(nested.key);
+  section.rootCardKey = root.key;
+  section.cards = {std::move(root), std::move(nested)};
+  snapshot.sections.push_back(std::move(section));
+  for (int row = 0; row < 12; ++row) {
+    const std::string suffix = std::to_string(row);
+    VisibleCardData filler{
+        AuthoritativeItemKey{snapshot.threadId, "filler-turn-" + suffix,
+                             "filler-" + suffix},
+        CardKind::AgentMessage,
+        snapshot.threadId,
+        "filler-turn-" + suffix,
+        "filler-" + suffix,
+        AgentMessageData{"Following filler " + suffix, true}};
+    snapshot.sections.push_back(
+        {"filler-section-" + suffix, filler.turnId, {std::move(filler)},
+         std::nullopt});
+  }
+
+  bool result = true;
+  for (const int width : {700, 360, 700}) {
+    for (const std::string *key : {&rootKey, &nestedKey}) {
+      ConversationView view;
+      view.setFocusPolicy(Qt::NoFocus);
+      view.resize(width, 760);
+      view.show();
+      result &= expect(view.reconcile(snapshot),
+                       "delegate Markdown overflow fixture reconciles");
+      view.selectionModel()->clearCurrentIndex();
+      settle();
+      const QModelIndex index =
+          view.conversationModel()->indexForStableKey(*key);
+      view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+      settle();
+      view.scrollTo(index, QAbstractItemView::PositionAtTop);
+      settle();
+      const QRect rect = view.visualRect(index);
+      view.viewport()->repaint(rect.intersected(view.viewport()->rect()));
+      const QImage rendered = view.viewport()->grab().toImage();
+      const int bodyTop = std::max(rect.top() + 38, 1);
+      const int bodyBottom =
+          std::min(rect.bottom() - 3, view.viewport()->height() - 2);
+      int darkPixelsOutsideContent = 0;
+      for (int y = bodyTop; y <= bodyBottom; ++y) {
+        for (int x = std::max(0, rect.left() + 2);
+             x <= std::min(view.viewport()->width() - 1, rect.left() + 10);
+             ++x) {
+          const QColor pixel = rendered.pixelColor(x, y);
+          if (pixel.red() < 150 && pixel.green() < 150 && pixel.blue() < 150)
+            ++darkPixelsOutsideContent;
+        }
+        for (int x = std::max(0, rect.right() - 10);
+             x <= std::min(view.viewport()->width() - 1, rect.right() - 2);
+             ++x) {
+          const QColor pixel = rendered.pixelColor(x, y);
+          if (pixel.red() < 150 && pixel.green() < 150 && pixel.blue() < 150)
+            ++darkPixelsOutsideContent;
+        }
+        if (*key == nestedKey)
+          for (int x = rect.right() + 2;
+               x < view.viewport()->width() - 2; ++x) {
+            const QColor pixel = rendered.pixelColor(x, y);
+            if (pixel.red() < 150 && pixel.green() < 150 &&
+                pixel.blue() < 150)
+              ++darkPixelsOutsideContent;
+          }
+      }
+      result &= expect(
+          index.isValid() && materializedCard(view, *key) == nullptr &&
+              bodyBottom >= bodyTop && darkPixelsOutsideContent == 0,
+          *key == nestedKey
+              ? "nested delegate Markdown remains inside its content and "
+                "card rectangles after resize"
+              : "root delegate Markdown remains inside its content and card "
+                "rectangles after resize");
+    }
+  }
+  return result;
+}
+
+bool delegateAndWidgetChevronsMatchExactly() {
+  const auto verify = [](VisibleCardData card, bool collapsed,
+                         const char *message) {
+    ConversationSnapshot snapshot;
+    snapshot.threadId = card.threadId;
+    VisibleCardData sentinel{
+        AuthoritativeItemKey{card.threadId, "sentinel", "sentinel"},
+        CardKind::UserMessage,
+        card.threadId,
+        "sentinel",
+        "sentinel",
+        UserMessageData{"Keep the chevron target passive"}};
+    snapshot.sections.push_back(
+        {"chevron-sentinel", sentinel.turnId, {sentinel}, std::nullopt});
+    snapshot.sections.push_back(
+        {"chevron-section", card.turnId, {card}, std::nullopt});
+    ConversationView view;
+    view.resize(620, 240);
+    view.show();
+    if (!view.reconcile(std::move(snapshot)))
+      return false;
+    settle();
+    const QModelIndex index =
+        view.conversationModel()->indexForStableKey(stableKey(card.key));
+    const QRect passiveRect = view.visualRect(index);
+    const QRect passiveBounds =
+        delegateChevronBounds(view.viewport()->grab().toImage(), passiveRect);
+    if (materializedCard(view, stableKey(card.key)))
+      return false;
+
+    view.setCurrentIndex(index);
+    settle();
+    ConversationCard *widget = materializedCard(view, stableKey(card.key));
+    QToolButton *button = widget ? widget->findChild<QToolButton *>(
+                                       QStringLiteral("cardDisclosureButton"))
+                                 : nullptr;
+    const QRect widgetRect = view.visualRect(index);
+    const QRect widgetBounds =
+        button ? paintedWidgetBounds(button).translated(
+                     button->mapTo(view.viewport(), QPoint{}) -
+                     widgetRect.topLeft())
+               : QRect{};
+    return expect(widget && button && widget->isCollapsed() == collapsed &&
+                      passiveBounds.isValid() &&
+                      passiveBounds == widgetBounds,
+                  message);
+  };
+
+  const std::string thread = "chevron-parity";
+  bool result = verify(
+      {AuthoritativeItemKey{thread, "expanded", "update"},
+       CardKind::AgentMessage,
+       thread,
+       "expanded",
+       "update",
+       AgentMessageData{"Expanded body", false}},
+      false, "expanded delegate and QWidget chevrons are pixel-aligned");
+  result &= verify(
+      {AuthoritativeItemKey{thread, "collapsed", "reasoning"},
+       CardKind::Reasoning,
+       thread,
+       "collapsed",
+       "reasoning",
+       ReasoningData{"Collapsed body"}},
+      true, "collapsed delegate and QWidget chevrons are pixel-aligned");
+  return result;
+}
+
 bool acknowledgedSteeringMovesAboveFollowingActivity() {
   ConversationSnapshot snapshot = conversation(12);
   TurnSection active;
@@ -1296,6 +1702,386 @@ bool selectionFocusAndOneGesturePromotion() {
       expect(foldedView.hasFocus() && foldedView.currentIndex().row() == 0,
              "keyboard current-row focus remains visibly owned by the "
              "item view");
+  return result;
+}
+
+bool tallPromotionPreservesTheOriginalSemanticTarget() {
+  enum class Gesture {
+    Copy,
+    Disclosure,
+    Link,
+    Selection,
+    RightClick,
+    MiddleClick,
+    Title,
+    Padding,
+  };
+
+  const auto exercise = [](bool nested, Gesture gesture) {
+    const std::string thread = nested ? "nested-tall-promotion"
+                                      : "root-tall-promotion";
+    const std::string link = "https://example.com/original-target";
+    std::string targetText = "[Original link](" + link +
+                             ") selection target words";
+    for (int paragraph = 0; paragraph < 48; ++paragraph)
+      targetText += "\n\nTall paragraph " + std::to_string(paragraph) + ' ' +
+                    std::string(96, static_cast<char>('a' + paragraph % 26));
+
+    ConversationSnapshot snapshot;
+    snapshot.threadId = thread;
+    VisibleCardData target{
+        AuthoritativeItemKey{thread, "target-turn", "target"},
+        nested ? CardKind::AgentMessage : CardKind::UserMessage,
+        thread,
+        "target-turn",
+        "target",
+        AgentMessageData{"[Original link](" + link +
+                             ") selection target words",
+                         false}};
+    if (!nested)
+      target.payload = UserMessageData{
+          "[Original link](" + link + ") selection target words"};
+    const std::string targetKey = stableKey(target.key);
+    for (int row = 0; row < 12; ++row) {
+      const std::string suffix = std::to_string(row);
+      VisibleCardData filler{
+          AuthoritativeItemKey{thread, "filler-turn-" + suffix,
+                               "filler-" + suffix},
+          CardKind::AgentMessage,
+          thread,
+          "filler-turn-" + suffix,
+          "filler-" + suffix,
+          AgentMessageData{"Filler " + suffix, true}};
+      snapshot.sections.push_back(
+          {"filler-section-" + suffix, filler.turnId, {std::move(filler)},
+           std::nullopt});
+    }
+    TurnSection section;
+    section.key = "target-section";
+    section.turnId = "target-turn";
+    if (nested) {
+      VisibleCardData root{
+          AuthoritativeItemKey{thread, "target-turn", "target-root"},
+          CardKind::UserMessage,
+          thread,
+          "target-turn",
+          "target-root",
+          UserMessageData{"Root prompt"}};
+      section.rootCardKey = root.key;
+      section.cards = {std::move(root), target};
+    } else {
+      section.rootCardKey = target.key;
+      section.cards = {target};
+    }
+    snapshot.sections.push_back(std::move(section));
+
+    ConversationView view;
+    view.resize(620, 320);
+    view.show();
+    view.activateWindow();
+    bool result = expect(view.reconcile(std::move(snapshot)),
+                         "tall interaction-promotion fixture reconciles");
+    settle();
+    const QModelIndex index =
+        view.conversationModel()->indexForStableKey(targetKey);
+    if (!index.isValid())
+      return false;
+
+    const bool pausedAnchor = true;
+    if (nested)
+      std::get<AgentMessageData>(target.payload).text = targetText;
+    else
+      std::get<UserMessageData>(target.payload).text = targetText;
+    static_cast<void>(view.conversationModel()->updateCard(target));
+    view.setTrailingSpaceHeight(40);
+    view.viewport()->repaint(view.visualRect(index));
+    const QRect estimatedRect = view.visualRect(index);
+    const auto anchorBefore = firstVisible(view);
+    result &= expect(!materializedCard(view, targetKey) &&
+                         estimatedRect.height() < 200,
+                     "the tall target begins delegate-painted with a small "
+                     "retained estimate");
+    QPoint pressPoint;
+    Qt::MouseButton button = Qt::LeftButton;
+    switch (gesture) {
+    case Gesture::Copy:
+      pressPoint = {estimatedRect.right() - 40, estimatedRect.top() + 20};
+      break;
+    case Gesture::Disclosure:
+      pressPoint = {estimatedRect.right() - 16, estimatedRect.top() + 20};
+      break;
+    case Gesture::Link:
+    case Gesture::Selection:
+    case Gesture::RightClick:
+    case Gesture::MiddleClick:
+      pressPoint = {estimatedRect.left() + 16, estimatedRect.top() + 46};
+      if (gesture == Gesture::RightClick)
+        button = Qt::RightButton;
+      else if (gesture == Gesture::MiddleClick)
+        button = Qt::MiddleButton;
+      break;
+    case Gesture::Title:
+      pressPoint = {estimatedRect.left() + 20, estimatedRect.top() + 20};
+      break;
+    case Gesture::Padding:
+      pressPoint = {estimatedRect.left() + 2, estimatedRect.top() + 20};
+      break;
+    }
+
+    QApplication::clipboard()->clear();
+    MouseDeliveryProbe delivery(view.viewport());
+    view.activateWindow();
+    view.setFocus(Qt::MouseFocusReason);
+    settle();
+    sendViewportMouse(view, QEvent::MouseButtonPress, pressPoint, button,
+                      button);
+    ConversationCard *card = materializedCard(view, targetKey);
+    MarkdownTextView *body =
+        card ? card->findChild<MarkdownTextView *>() : nullptr;
+    const QRect measuredRect = view.visualRect(index);
+    result &= expect(card && body &&
+                         measuredRect.height() > estimatedRect.height() + 500,
+                     "first press replaces the estimate with the tall real "
+                     "editor geometry");
+    if (!card || !body)
+      return false;
+    if (pausedAnchor) {
+      const auto anchorAfter = firstVisible(view);
+      result &= expect(anchorAfter == anchorBefore,
+                       "paused promotion preserves the exact viewport anchor");
+    } else {
+      result &= expect(
+          measuredRect.top() != estimatedRect.top() && view.isAtBottom(),
+          "following promotion preserves the exact tail anchor while the "
+          "pressed card moves");
+    }
+
+    QUrl activated;
+    if (gesture == Gesture::Link) {
+      body->setOpenExternalLinks(false);
+      body->setOpenLinks(false);
+      QObject::connect(body, &QTextBrowser::anchorClicked, body,
+                       [&activated](const QUrl &url) { activated = url; });
+    }
+    QString copiedImmediately;
+    if (gesture == Gesture::Selection) {
+      const QPoint finish = pressPoint + QPoint(130, 0);
+      sendViewportMouse(view, QEvent::MouseMove, finish, Qt::NoButton,
+                        Qt::LeftButton);
+      sendViewportMouse(view, QEvent::MouseButtonRelease, finish,
+                        Qt::LeftButton, Qt::NoButton);
+    } else {
+      sendViewportMouse(view, QEvent::MouseButtonRelease, pressPoint, button,
+                        Qt::NoButton);
+      if (gesture == Gesture::Copy)
+        copiedImmediately = QApplication::clipboard()->text();
+    }
+    settle();
+
+    switch (gesture) {
+    case Gesture::Copy:
+      result &= expect(copiedImmediately ==
+                               QString::fromStdString(targetText),
+                       "Copy reaches its real control on the first displaced "
+                       "gesture");
+      break;
+    case Gesture::Disclosure:
+      result &= expect(card->isCollapsed(),
+                       "disclosure reaches its real control and collapses on "
+                       "the first displaced gesture");
+      break;
+    case Gesture::Link:
+      result &= expect(delivery.receiver() == body->viewport() &&
+                           activated == QUrl(QString::fromStdString(link)),
+                       "link release activates the originally pressed anchor");
+      break;
+    case Gesture::Selection:
+      result &= expect(delivery.receiver() == body->viewport() &&
+                           body->hasSelectedText() &&
+                           body->textCursor().hasSelection() &&
+                           body->selectedText().contains(
+                               QStringLiteral("Original link")) &&
+                           !body->selectedText().contains(
+                               QStringLiteral("Tall paragraph")),
+                       "text selection starts at the original document point "
+                       "and survives its drag");
+      break;
+    case Gesture::RightClick:
+      result &= expect(delivery.receiver() == body->viewport(),
+                       "right press targets the original Markdown body");
+      break;
+    case Gesture::MiddleClick:
+      result &= expect(delivery.receiver() == body->viewport(),
+                       "middle press targets the original Markdown body");
+      break;
+    case Gesture::Title:
+    case Gesture::Padding:
+      result &= expect(delivery.receiver() != body->viewport() &&
+                           !body->hasFocus(),
+                       "header and padding presses do not accidentally focus "
+                       "the body");
+      break;
+    }
+    return result;
+  };
+
+  bool result = true;
+  for (const bool nested : {false, true})
+    for (const Gesture gesture :
+         {Gesture::Copy, Gesture::Disclosure, Gesture::Link,
+          Gesture::Selection, Gesture::RightClick, Gesture::MiddleClick,
+          Gesture::Title, Gesture::Padding})
+      result &= exercise(nested, gesture);
+  return result;
+}
+
+bool partiallyClippedHeaderActionActivatesOnFirstGesture() {
+  enum class Action { Copy, Disclosure };
+  const auto exercise = [](Action action, bool materialized) {
+    ConversationSnapshot snapshot;
+    snapshot.threadId = "clipped-header-action";
+    for (int row = 0; row < 10; ++row) {
+      const std::string suffix = std::to_string(row);
+      VisibleCardData filler{
+          AuthoritativeItemKey{snapshot.threadId, "before-turn-" + suffix,
+                               "before-" + suffix},
+          CardKind::AgentMessage,
+          snapshot.threadId,
+          "before-turn-" + suffix,
+          "before-" + suffix,
+          AgentMessageData{"Before " + suffix, true}};
+      snapshot.sections.push_back(
+          {"before-section-" + suffix, filler.turnId, {std::move(filler)},
+           std::nullopt});
+    }
+    const std::string source =
+        "Header action body\n\nSecond paragraph keeps the card taller than "
+        "its visible header.";
+    VisibleCardData target{
+        AuthoritativeItemKey{snapshot.threadId, "target-turn", "target"},
+        CardKind::AgentMessage,
+        snapshot.threadId,
+        "target-turn",
+        "target",
+        AgentMessageData{source, false}};
+    const std::string targetKey = stableKey(target.key);
+    snapshot.sections.push_back(
+        {"target-section", target.turnId, {target}, std::nullopt});
+    for (int row = 0; row < 10; ++row) {
+      const std::string suffix = std::to_string(row);
+      VisibleCardData follower{
+          AuthoritativeItemKey{snapshot.threadId, "after-turn-" + suffix,
+                               "after-" + suffix},
+          CardKind::AgentMessage,
+          snapshot.threadId,
+          "after-turn-" + suffix,
+          "after-" + suffix,
+          AgentMessageData{"After " + suffix, true}};
+      snapshot.sections.push_back(
+          {"after-section-" + suffix, follower.turnId,
+           {std::move(follower)}, std::nullopt});
+    }
+
+    ConversationView view;
+    view.resize(620, 240);
+    view.show();
+    bool result = expect(view.reconcile(std::move(snapshot)),
+                         "clipped header-action fixture reconciles");
+    settle();
+    const QModelIndex index =
+        view.conversationModel()->indexForStableKey(targetKey);
+    const int desiredTop = view.viewport()->height() - 30;
+    const auto positionClipped = [&] {
+      for (int pass = 0; pass < 3; ++pass) {
+        const QRect rect = view.visualRect(index);
+        view.verticalScrollBar()->setValue(
+            view.verticalScrollBar()->value() + rect.top() - desiredTop);
+        settle();
+      }
+    };
+    positionClipped();
+    ConversationCard *card = nullptr;
+    if (materialized) {
+      view.setCurrentIndex(index);
+      settle();
+      card = materializedCard(view, targetKey);
+      view.setCurrentIndex(view.conversationModel()->index(index.row() + 1));
+      view.setFocus(Qt::OtherFocusReason);
+      settle();
+      positionClipped();
+      card = materializedCard(view, targetKey);
+    }
+    const QRect clipped = view.visualRect(index);
+    result &= expect(index.isValid() &&
+                         (materializedCard(view, targetKey) != nullptr) ==
+                             materialized &&
+                         clipped.top() == desiredTop &&
+                         clipped.bottom() >= view.viewport()->height(),
+                     materialized
+                         ? "QWidget header starts partially clipped"
+                         : "delegate header starts partially clipped");
+    const QPoint point(clipped.right() -
+                           (action == Action::Copy ? 40 : 16),
+                       clipped.top() + 20);
+    const int scrollBefore = view.verticalScrollBar()->value();
+    QApplication::clipboard()->clear();
+    QAbstractButton *button = nullptr;
+    QPoint originalGlobal;
+    if (materialized) {
+      button = card ? card->findChild<QAbstractButton *>(
+                          action == Action::Copy
+                              ? QStringLiteral("cardCopyButton")
+                              : QStringLiteral("cardDisclosureButton"))
+                    : nullptr;
+      if (button) {
+        const QPoint local = button->rect().center();
+        originalGlobal = button->mapToGlobal(local);
+        button->setFocus(Qt::MouseFocusReason);
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(local),
+                          QPointF(button->mapTo(view.window(), local)),
+                          QPointF(originalGlobal), Qt::LeftButton,
+                          Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(button, &press);
+      }
+    } else {
+      sendViewportMouse(view, QEvent::MouseButtonPress, point, Qt::LeftButton,
+                        Qt::LeftButton);
+      card = materializedCard(view, targetKey);
+    }
+    const QRect promoted = view.visualRect(index);
+    result &= expect(card && promoted.top() == clipped.top() &&
+                         view.verticalScrollBar()->value() == scrollBefore,
+                     "first press preserves the clipped card's exact viewport "
+                     "anchor");
+    if (materialized && button) {
+      const QPoint local = button->mapFromGlobal(originalGlobal);
+      QMouseEvent release(
+          QEvent::MouseButtonRelease, QPointF(local),
+          QPointF(view.window()->mapFromGlobal(originalGlobal)),
+          QPointF(originalGlobal), Qt::LeftButton, Qt::NoButton,
+          Qt::NoModifier);
+      QApplication::sendEvent(button, &release);
+    } else {
+      sendViewportMouse(view, QEvent::MouseButtonRelease, point,
+                        Qt::LeftButton, Qt::NoButton);
+    }
+    settle();
+    if (action == Action::Copy)
+      result &= expect(QApplication::clipboard()->text() ==
+                           QString::fromStdString(source),
+                       "partially clipped Copy activates on its first gesture");
+    else
+      result &= expect(card && card->isCollapsed(),
+                       "partially clipped disclosure activates on its first "
+                       "gesture");
+    return result;
+  };
+
+  bool result = true;
+  for (const bool materialized : {false, true}) {
+    result &= exercise(Action::Copy, materialized);
+    result &= exercise(Action::Disclosure, materialized);
+  }
   return result;
 }
 
@@ -1940,7 +2726,7 @@ bool collapsedLargeCardsSkipBodyProjection() {
               << " measure="
               << (fileList ? fileList->property("fileChangesMeasureMicros")
                                  .toLongLong()
-                           : -1)
+                          : -1)
               << '\n';
   result &= expect(
       boundedExpansion,
@@ -2060,6 +2846,15 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   using namespace codexui::codex::middle;
+  if (qEnvironmentVariableIsSet("CODEXUI_REMAINING_UI_TESTS")) {
+    bool focused = completedAgentLifecycleUsesBothRenderPaths();
+    focused &= steeringUsesTealAcrossRenderPathsAndRematerialization();
+    focused &= nestedDelegateMarkdownDoesNotCrossItsCardBorder();
+    focused &= delegateAndWidgetChevronsMatchExactly();
+    focused &= tallPromotionPreservesTheOriginalSemanticTarget();
+    focused &= partiallyClippedHeaderActionActivatesOnFirstGesture();
+    return focused ? EXIT_SUCCESS : EXIT_FAILURE;
+  }
   const bool result = viewportProportionalFoundation() &&
                       exactStructuralRowsPreserveTheViewport() &&
                       boundedTailAppendIsViewportProportional() &&
@@ -2071,6 +2866,10 @@ int main(int argc, char **argv) {
                       virtualTurnSurfaceAndInteractivePromotion() &&
                       directTailGrowsTheRetainedTurnSurface() &&
                       commandOutputScrollOwnsConversationFollowing() &&
+                      completedAgentLifecycleUsesBothRenderPaths() &&
+                      steeringUsesTealAcrossRenderPathsAndRematerialization() &&
+                      nestedDelegateMarkdownDoesNotCrossItsCardBorder() &&
+                      delegateAndWidgetChevronsMatchExactly() &&
                       acknowledgedSteeringMovesAboveFollowingActivity() &&
                       passiveAndInteractivePresentationShareExactGeometry() &&
                       bidirectionalLazyMeasurementPreservesNativeScrollMotion() &&
@@ -2078,6 +2877,8 @@ int main(int argc, char **argv) {
                       streamingMarkdownReparsesOnlyMutableTail() &&
                       passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() &&
                       selectionFocusAndOneGesturePromotion() &&
+                      tallPromotionPreservesTheOriginalSemanticTarget() &&
+                      partiallyClippedHeaderActionActivatesOnFirstGesture() &&
                       expandingCardRepaintsDisplacedPassiveRows() &&
                       outsideTextDragDoesNotReenterTheView() &&
                       interactiveResizeCoalescesConversationReflow() &&

@@ -15,7 +15,7 @@
 
 namespace codexui::UiStyle {
 
-void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
+void drawChevron(QPainter &painter, const QRect &indicator, bool enabled,
                  bool highlighted, ChevronDirection direction) {
   if (!indicator.isValid() || indicator.isEmpty())
     return;
@@ -41,11 +41,16 @@ void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
   else if (highlighted)
     color = QColor(QStringLiteral("#1d2633"));
 
-  QPainter painter(widget);
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   painter.setBrush(Qt::NoBrush);
   painter.drawPath(chevron);
+}
+
+void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
+                 bool highlighted, ChevronDirection direction) {
+  QPainter painter(widget);
+  drawChevron(painter, indicator, enabled, highlighted, direction);
 }
 
 void ChevronToolButton::paintEvent(QPaintEvent *event) {

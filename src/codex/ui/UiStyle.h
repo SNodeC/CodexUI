@@ -7,6 +7,7 @@
 #include <QToolButton>
 
 class QPaintEvent;
+class QPainter;
 class QRect;
 class QWidget;
 
@@ -82,6 +83,9 @@ inline constexpr auto tealText = "#0d6565";
 QString applicationStyleSheet();
 QString humanizeLabel(QString value);
 enum class ChevronDirection { Down, Left, Right };
+void drawChevron(QPainter &painter, const QRect &indicator, bool enabled,
+                 bool highlighted,
+                 ChevronDirection direction = ChevronDirection::Down);
 void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
                  bool highlighted,
                  ChevronDirection direction = ChevronDirection::Down);

@@ -239,7 +239,7 @@ struct ConversationRowChange {
 // identities during materialization. Keeping them explicit lets the Qt row
 // adopt the authoritative Item NodeRef before the local prompt is retired.
 struct PromptMaterialization {
-  VisibleCardData card;
+  ConversationRowChange change;
   nodegraph::NodeRef prompt;
 };
 

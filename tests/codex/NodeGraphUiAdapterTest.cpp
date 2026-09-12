@@ -151,6 +151,71 @@ bool limitsHistoryButPinsTheOwningPrompt() {
                  "pinned root does not own the turn");
 }
 
+bool projectsCanonicalAgentActivityLifecycle() {
+  struct LifecycleCase {
+    const char *id;
+    const char *kind;
+    nodegraph::NodeStatus graphStatus = nodegraph::NodeStatus::Unknown;
+    const char *fieldStatus = nullptr;
+    const char *expected;
+  };
+  const LifecycleCase cases[] = {
+      {"started", "started", nodegraph::NodeStatus::Unknown, nullptr,
+       "inProgress"},
+      {"progress", "progress", nodegraph::NodeStatus::Unknown, nullptr,
+       "inProgress"},
+      {"completed", "completed", nodegraph::NodeStatus::Unknown, nullptr,
+       "completed"},
+      {"failed", "failed", nodegraph::NodeStatus::Unknown, nullptr,
+       "failed"},
+      {"interrupted", "interrupted", nodegraph::NodeStatus::Unknown, nullptr,
+       "interrupted"},
+      {"published-running", "", nodegraph::NodeStatus::Running, nullptr,
+       "inProgress"},
+      {"field-running", "", nodegraph::NodeStatus::Unknown, "inProgress",
+       "inProgress"},
+      {"missing", "", nodegraph::NodeStatus::Unknown, nullptr, ""},
+  };
+
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  std::vector<NodeRef> items;
+  {
+    auto write = graph.write();
+    thread = write.upsert({NodeKind::Thread, "agent-lifecycle-thread"});
+    const NodeRef turn =
+        write.upsert({NodeKind::Turn, "agent-lifecycle-turn"});
+    write.setParent(thread, turn);
+    for (const LifecycleCase &value : cases) {
+      NodeState state;
+      state.status = value.graphStatus;
+      state.fields.emplace("id", value.id);
+      state.fields.emplace("type", "subAgentActivity");
+      state.fields.emplace("tool", "spawn_agent");
+      if (*value.kind)
+        state.fields.emplace("kind", value.kind);
+      if (value.fieldStatus)
+        state.fields.emplace("status", value.fieldStatus);
+      NodeRef item =
+          write.upsert({NodeKind::Item, value.id}, std::move(state));
+      write.setParent(turn, item);
+      items.push_back(std::move(item));
+    }
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  bool result = true;
+  for (std::size_t index = 0; index < std::size(cases); ++index) {
+    const auto card = adapter.card(thread, items[index]);
+    const auto *activity =
+        card ? std::get_if<middle::AgentActivityData>(&card->payload) : nullptr;
+    result &= require(activity && activity->status == cases[index].expected,
+                      "agent activity lost its canonical lifecycle");
+  }
+  return result;
+}
+
 bool boundedOptimisticPromptKeepsItsCanonicalSlot() {
   nodegraph::NodeGraph graph;
   NodeRef thread;
@@ -242,6 +307,99 @@ bool boundedOptimisticPromptKeepsItsCanonicalSlot() {
                  "row while awaiting UI acknowledgement");
 }
 
+bool boundedSteeringPromptsKeepSubmissionOrder() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef root;
+  NodeRef older;
+  NodeRef newer;
+  {
+    auto write = graph.write();
+    NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{84});
+    thread = write.upsert({NodeKind::Thread, "bounded-steering-thread"},
+                          std::move(threadState));
+    turn = write.upsert({NodeKind::Turn, "bounded-steering-turn"});
+    write.setField(turn, "id", "bounded-steering-turn");
+    write.setParent(thread, turn);
+    root = write.upsert(
+        {NodeKind::Item, "bounded-steering-root"},
+        itemState("bounded-steering-root", "userMessage", "Opening prompt"));
+    write.setParent(turn, root);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+
+    const auto appendActivity = [&](int index) {
+      const std::string id = "bounded-steering-activity-" +
+                             std::to_string(index);
+      NodeRef activity = write.upsert(
+          {NodeKind::Item, id}, itemState(id, "agentMessage", id));
+      write.setParent(turn, activity);
+    };
+    for (int index = 0; index < 7; ++index)
+      appendActivity(index);
+
+    NodeState olderState =
+        itemState("bounded-steering-older", "localPrompt",
+                  "Populate the plan tab");
+    olderState.fields.emplace("local", true);
+    olderState.fields.emplace("submissionId", std::uint64_t{101});
+    olderState.fields.emplace("dispatchState", "inFlight");
+    olderState.fields.emplace("startsTurn", false);
+    older = write.upsert({NodeKind::Item, "bounded-steering-older"},
+                         std::move(olderState));
+    write.setParent(turn, older);
+    write.relate(thread, nodegraph::RelationKind::PendingPrompt, older);
+
+    for (int index = 7; index < 79; ++index)
+      appendActivity(index);
+
+    NodeState newerState =
+        itemState("bounded-steering-newer", "localPrompt", "New steering");
+    newerState.fields.emplace("local", true);
+    newerState.fields.emplace("submissionId", std::uint64_t{102});
+    newerState.fields.emplace("dispatchState", "inFlight");
+    newerState.fields.emplace("startsTurn", false);
+    newer = write.upsert({NodeKind::Item, "bounded-steering-newer"},
+                         std::move(newerState));
+    write.setParent(turn, newer);
+    write.relate(thread, nodegraph::RelationKind::PendingPrompt, newer);
+    for (int index = 79; index < 83; ++index)
+      appendActivity(index);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  const auto projected = adapter.conversation(thread, 8);
+  if (!require(projected && projected->sections.size() == 1,
+               "bounded multi-steering projection was unavailable"))
+    return false;
+  const auto &cards = projected->sections.front().cards;
+  const auto olderPosition = std::ranges::find_if(cards, [](const auto &card) {
+    return card.key == middle::CardKey{middle::LocalPromptKey{101}};
+  });
+  const auto newerPosition = std::ranges::find_if(cards, [](const auto &card) {
+    return card.key == middle::CardKey{middle::LocalPromptKey{102}};
+  });
+  const auto firstRetainedActivity =
+      std::ranges::find_if(cards, [](const auto &card) {
+        return card.itemId == "bounded-steering-activity-75";
+      });
+  const auto firstPostNewer = std::ranges::find_if(cards, [](const auto &card) {
+    return card.itemId == "bounded-steering-activity-79";
+  });
+  return require(olderPosition != cards.end() &&
+                     newerPosition != cards.end() &&
+                     firstRetainedActivity != cards.end() &&
+                     firstPostNewer != cards.end(),
+                 "bounded projection lost a retained steering row") &&
+         require(olderPosition < firstRetainedActivity &&
+                     firstRetainedActivity < newerPosition &&
+                     newerPosition < firstPostNewer,
+                 "bounded projection pinned older steering at the tail or "
+                 "let newer steering overtake it");
+}
+
 bool projectsOnlyTheExactCanonicalTail() {
   nodegraph::NodeGraph graph;
   NodeRef thread;
@@ -315,11 +473,12 @@ bool projectsExactPromptMaterialization() {
   const auto result = adapter.promptMaterialization(thread, authoritative);
   return require(result.has_value(),
                  "exact prompt materialization was not projected") &&
-         require(result->card.key ==
+         require(result->change.placement.card.key ==
                      middle::CardKey{middle::LocalPromptKey{91}},
                  "prompt materialization changed the stable local key") &&
-         require(result->card.kind == middle::CardKind::UserMessage &&
-                     result->card.target == authoritative &&
+         require(result->change.placement.card.kind ==
+                         middle::CardKind::UserMessage &&
+                     result->change.placement.card.target == authoritative &&
                      result->prompt == prompt,
                  "prompt materialization conflated authoritative row and "
                  "exact acknowledgement identities") &&
@@ -502,7 +661,9 @@ int main() {
   using namespace codexui::codex::ui;
   if (!projectsCanonicalTurnStructureAndRoot() ||
       !limitsHistoryButPinsTheOwningPrompt() ||
+      !projectsCanonicalAgentActivityLifecycle() ||
       !boundedOptimisticPromptKeepsItsCanonicalSlot() ||
+      !boundedSteeringPromptsKeepSubmissionOrder() ||
       !projectsOnlyTheExactCanonicalTail() ||
       !projectsExactPromptMaterialization() ||
       !projectsExactRowPlacementAndNeighbors() ||

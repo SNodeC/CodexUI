@@ -94,6 +94,10 @@ public:
             InspectorProjection projection = InspectorProjection::All) const;
 
 private:
+  [[nodiscard]] static ConversationRowProjection projectRowChange(
+      std::optional<nodegraph::NodeGraph::ReadAccess> &read,
+      const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item);
+
   const nodegraph::NodeGraph *graph_;
 };
 

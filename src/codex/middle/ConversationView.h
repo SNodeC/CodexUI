@@ -17,6 +17,7 @@
 #include <vector>
 
 class QLabel;
+class QAbstractButton;
 class QEvent;
 class QPaintEvent;
 class QPushButton;
@@ -367,11 +368,16 @@ private:
   bool structuralStagePassScheduled_ = false;
   bool committingStructuralStage_ = false;
   bool interactiveResize_ = false;
+  bool preservePointerAnchor_ = false;
   // A synthetic event ignored by a card child can propagate back through the
   // viewport. Stop that propagated event from entering the forwarding path a
   // second time.
   bool forwardingMouseEvent_ = false;
+  QPointer<QAbstractButton> forwardedButtonAction_;
+  QRect forwardedButtonViewportRect_;
   QPointer<QWidget> forwardedMouseTarget_;
+  QPoint forwardedMouseViewportOrigin_;
+  QPoint forwardedMouseLocalOrigin_;
 };
 
 } // namespace codexui::codex::middle

@@ -4,6 +4,7 @@
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/ui/UiStyle.h"
 
+#include <QAbstractButton>
 #include <QAbstractSlider>
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
@@ -219,8 +220,13 @@ struct PassivePresentation {
 };
 
 struct PassivePointerHit {
+  enum class Target { Position, Copy, Disclosure, Text };
+
+  Target target = Target::Position;
   bool text = false;
-  bool action = false;
+  int block = -1;
+  QPoint documentPosition;
+  QRect viewportRect;
   QString link;
   QString tooltip;
 };
@@ -233,16 +239,22 @@ QFont passiveBlockFont(bool metadata) {
 }
 
 PassivePresentation passivePresentation(const VisibleCardData &card,
-                                        bool includeBlocks = true) {
+                                        bool includeBlocks = true,
+                                        bool nested = false) {
   PassivePresentation result;
   std::visit(
       [&](const auto &payload) {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, UserMessageData>) {
           result.title = QStringLiteral("You");
-          result.background = QColor(QStringLiteral("#eff5fe"));
-          result.border = QColor(QStringLiteral("#b7cff9"));
-          result.titleColor = QColor(QStringLiteral("#415882"));
+          result.background = QColor(QString::fromLatin1(
+              nested ? UiStyle::tealSurface : UiStyle::blueSurface));
+          result.border = QColor(QString::fromLatin1(
+              nested ? UiStyle::tealBorder : UiStyle::blueBorder));
+          result.titleColor = QColor(QString::fromLatin1(
+              nested ? UiStyle::tealText : UiStyle::blueText));
+          if (nested)
+            result.status = QStringLiteral("steering");
           if (includeBlocks)
             result.blocks.push_back(
                 {presentation::userMessageMarkdown(text(payload.text)), true,
@@ -350,7 +362,7 @@ public:
     if (!row)
       return {};
     const PassivePresentation presentation =
-        passivePresentation(row->card, !collapsed);
+        passivePresentation(row->card, !collapsed, row->nested);
     int height = CardFrameExtent + 24 + 2 * presentation.verticalMargin;
     if (!collapsed) {
       const int bodyWidth =
@@ -382,7 +394,7 @@ public:
       return;
 
     const PassivePresentation presentation =
-        passivePresentation(row->card, !collapsed);
+        passivePresentation(row->card, !collapsed, row->nested);
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     const QRectF bounds = QRectF(option.rect).adjusted(0.5, 0.5, -0.5, -0.5);
@@ -397,8 +409,10 @@ public:
     painter->setFont(titleFont);
     painter->setPen(presentation.titleColor);
     const int top = option.rect.top() + presentation.verticalMargin;
-    const QRect titleRect(option.rect.left() + 12, top,
-                          std::max(0, option.rect.width() - 88), 24);
+    const QRect titleRect(
+        option.rect.left() + presentation::CardHeaderMetrics::HorizontalInset,
+        top, std::max(0, option.rect.width() - 88),
+        presentation::CardHeaderMetrics::LineHeight);
     painter->drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
                       QFontMetrics(titleFont).elidedText(
                           presentation.title, Qt::ElideRight,
@@ -408,7 +422,16 @@ public:
       const QFont statusFont = QApplication::font();
       painter->setFont(statusFont);
       painter->setPen(QColor(QStringLiteral("#667085")));
-      const QRect statusRect(option.rect.right() - 205, top, 145, 24);
+      const int copyInkLeft =
+          option.rect.right() -
+          presentation::CardHeaderMetrics::CopyInkLeftFromRight;
+      const int statusRight =
+          copyInkLeft -
+          presentation::CardHeaderMetrics::StatusToCopyInkGap - 1;
+      const QRect statusRect(
+          statusRight - presentation::CardHeaderMetrics::StatusWidth + 1,
+          top, presentation::CardHeaderMetrics::StatusWidth,
+          presentation::CardHeaderMetrics::LineHeight);
       painter->drawText(statusRect, Qt::AlignRight | Qt::AlignVCenter,
                         QFontMetrics(statusFont).elidedText(
                             presentation.status, Qt::ElideRight,
@@ -433,22 +456,28 @@ public:
 
     painter->setPen(QPen(QColor(QStringLiteral("#667085")), 1.3));
     painter->setBrush(Qt::NoBrush);
-    const qreal copyLeft = option.rect.right() - 43.0;
+    const qreal copyLeft =
+        option.rect.right() -
+        presentation::CardHeaderMetrics::CopyInkLeftFromRight;
     painter->drawRoundedRect(
         QRectF(copyLeft, option.rect.top() + 14.0, 8.0, 9.0), 1.0, 1.0);
     painter->drawRoundedRect(
         QRectF(copyLeft + 3.0, option.rect.top() + 17.0, 8.0, 9.0), 1.0, 1.0);
-    QPainterPath chevron;
-    if (collapsed) {
-      chevron.moveTo(option.rect.right() - 15.0, top + 7.0);
-      chevron.lineTo(option.rect.right() - 19.0, top + 12.0);
-      chevron.lineTo(option.rect.right() - 15.0, top + 17.0);
-    } else {
-      chevron.moveTo(option.rect.right() - 20.0, top + 9.0);
-      chevron.lineTo(option.rect.right() - 15.0, top + 14.0);
-      chevron.lineTo(option.rect.right() - 10.0, top + 9.0);
-    }
-    painter->drawPath(chevron);
+    const QRect disclosureControl(
+        option.rect.right() -
+            presentation::CardHeaderMetrics::HorizontalInset -
+            presentation::CardHeaderMetrics::DisclosureControlWidth,
+        top + 1, presentation::CardHeaderMetrics::DisclosureControlWidth,
+        presentation::CardHeaderMetrics::LineHeight);
+    const bool highlighted =
+        parent()->property("conversationHoveredDisclosureKey").toString() ==
+        QString::fromStdString(row->stableKey);
+    UiStyle::drawChevron(
+        *painter,
+        presentation::cardDisclosureIndicator(disclosureControl, !collapsed),
+        option.state & QStyle::State_Enabled, highlighted,
+        collapsed ? UiStyle::ChevronDirection::Left
+                  : UiStyle::ChevronDirection::Down);
     if (row->card.activeWork.value_or(false)) {
       painter->setPen(QPen(QColor(QStringLiteral("#98a2b3")), 2.0));
       painter->drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), 9.0, 9.0);
@@ -527,12 +556,17 @@ public:
     if (!row || !option.rect.contains(position))
       return {};
     const PassivePresentation presentation =
-        passivePresentation(row->card, !collapsed);
+        passivePresentation(row->card, !collapsed, row->nested);
     const int top = option.rect.top() + presentation.verticalMargin;
-    if (QRect(option.rect.right() - 52, top, 24, 24).contains(position))
-      return {.action = true, .tooltip = QStringLiteral("Copy")};
-    if (QRect(option.rect.right() - 28, top, 24, 24).contains(position))
-      return {.action = true,
+    const QRect copyRect(option.rect.right() - 52, top, 24, 24);
+    if (copyRect.contains(position))
+      return {.target = PassivePointerHit::Target::Copy,
+              .viewportRect = copyRect,
+              .tooltip = QStringLiteral("Copy")};
+    const QRect disclosureRect(option.rect.right() - 28, top, 24, 24);
+    if (disclosureRect.contains(position))
+      return {.target = PassivePointerHit::Target::Disclosure,
+              .viewportRect = disclosureRect,
               .tooltip = collapsed ? QStringLiteral("Expand")
                                    : QStringLiteral("Collapse")};
     if (collapsed)
@@ -568,7 +602,12 @@ public:
         cursor.setPosition(std::clamp(
             character, 0, found->second.document->characterCount() - 1));
         const QString link = cursor.charFormat().anchorHref();
-        return {.text = true, .link = link, .tooltip = link};
+        return {.target = PassivePointerHit::Target::Text,
+                .text = true,
+                .block = static_cast<int>(block),
+                .documentPosition = local,
+                .link = link,
+                .tooltip = link};
       }
       blockTop += height + 6;
     }
@@ -636,7 +675,7 @@ private:
       record.document->setDefaultStyleSheet(
           QStringLiteral("a{color:#5471a6;text-decoration:none;}"));
       QTextOption textOption = record.document->defaultTextOption();
-      textOption.setWrapMode(QTextOption::WordWrap);
+      textOption.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
       record.document->setDefaultTextOption(textOption);
       if (value.markdown)
         presentation::replaceMarkdownDocument(
@@ -1281,8 +1320,22 @@ std::optional<PresentationImpact> ConversationView::applyPromptMaterialization(
     PromptMaterialization materialization) {
   if (!materialization.prompt)
     return std::nullopt;
-  return applyCardPresentationOwned(std::move(materialization.card),
-                                    std::move(materialization.prompt));
+  const std::string key = stableKey(materialization.change.placement.card.key);
+  const QModelIndex index = model_->indexForStableKey(key);
+  const ConversationItemModel::Row *before = model_->row(index.row());
+  if (!index.isValid() || !before ||
+      before->card.kind != CardKind::LocalPrompt ||
+      materialization.change.placement.card.kind != CardKind::UserMessage)
+    return std::nullopt;
+
+  const std::optional<PresentationImpact> impact =
+      applyCardPresentationOwned(materialization.change.placement.card);
+  if (!impact || !applyRowChange(std::move(materialization.change)))
+    return std::nullopt;
+  if (promptMaterializedAction_)
+    static_cast<void>(
+        promptMaterializedAction_(std::move(materialization.prompt)));
+  return impact;
 }
 
 bool ConversationView::applyRowChange(ConversationRowChange change) {
@@ -3422,6 +3475,8 @@ QRect ConversationView::visualRect(const QModelIndex &index) const {
 }
 
 void ConversationView::scrollTo(const QModelIndex &index, ScrollHint hint) {
+  if (preservePointerAnchor_ && hint == EnsureVisible)
+    return;
   const QRect geometry = visualRect(index);
   if (geometry.isEmpty())
     return;
@@ -3591,8 +3646,15 @@ bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
     const std::string key =
         card->property("conversationAnchorKey").toString().toStdString();
     const QModelIndex index = model_->indexForStableKey(key);
-    if (index.isValid())
-      setCurrentIndex(index);
+    if (index.isValid()) {
+      const auto *focus = static_cast<QFocusEvent *>(event);
+      if (focus->reason() == Qt::MouseFocusReason) {
+        const QScopedValueRollback preserveAnchor(preservePointerAnchor_, true);
+        setCurrentIndex(index);
+      } else {
+        setCurrentIndex(index);
+      }
+    }
   }
   if (card && event->type() == QEvent::FocusOut) {
     const std::string key =
@@ -3646,10 +3708,18 @@ void ConversationView::mouseMoveEvent(QMouseEvent *event) {
     event->accept();
     return;
   }
+  if (forwardedButtonAction_ && event->buttons() != Qt::NoButton) {
+    forwardedButtonAction_->setDown(
+        forwardedButtonViewportRect_.contains(event->position().toPoint()));
+    event->accept();
+    return;
+  }
   if (forwardedMouseTarget_ && event->buttons() != Qt::NoButton) {
     const QPointer<QWidget> target = forwardedMouseTarget_;
     const QPoint viewportPosition = event->position().toPoint();
-    const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
+    const QPoint localPosition =
+        forwardedMouseLocalOrigin_ +
+        (viewportPosition - forwardedMouseViewportOrigin_);
     QMouseEvent forwarded(event->type(), QPointF(localPosition),
                           event->scenePosition(), event->globalPosition(),
                           event->button(), event->buttons(), event->modifiers(),
@@ -3670,13 +3740,28 @@ void ConversationView::mouseMoveEvent(QMouseEvent *event) {
         static_cast<const ConversationPassiveDelegate *>(itemDelegate());
     const PassivePointerHit hit = delegate->pointerHit(
         option, index, event->position().toPoint(), rowCollapsed(*row));
-    if (hit.action || !hit.link.isEmpty())
+    const QString hoveredDisclosure =
+        hit.target == PassivePointerHit::Target::Disclosure
+            ? QString::fromStdString(row->stableKey)
+            : QString{};
+    if (property("conversationHoveredDisclosureKey").toString() !=
+        hoveredDisclosure) {
+      setProperty("conversationHoveredDisclosureKey", hoveredDisclosure);
+      viewport()->update();
+    }
+    if (hit.target == PassivePointerHit::Target::Copy ||
+        hit.target == PassivePointerHit::Target::Disclosure ||
+        !hit.link.isEmpty())
       viewport()->setCursor(Qt::PointingHandCursor);
     else if (hit.text)
       viewport()->setCursor(Qt::IBeamCursor);
     else
       viewport()->unsetCursor();
   } else {
+    if (!property("conversationHoveredDisclosureKey").toString().isEmpty()) {
+      setProperty("conversationHoveredDisclosureKey", QString{});
+      viewport()->update();
+    }
     viewport()->unsetCursor();
   }
   QAbstractItemView::mouseMoveEvent(event);
@@ -3688,12 +3773,35 @@ void ConversationView::mousePressEvent(QMouseEvent *event) {
     return;
   }
   const QPoint viewportPosition = event->position().toPoint();
-  const QModelIndex index = indexAt(viewportPosition);
+  QModelIndex index = indexAt(viewportPosition);
   if (!index.isValid()) {
     QAbstractItemView::mousePressEvent(event);
     return;
   }
-  setCurrentIndex(index);
+  const ConversationItemModel::Row *initialRow = model_->row(index.row());
+  if (!initialRow) {
+    QAbstractItemView::mousePressEvent(event);
+    return;
+  }
+  const std::string stableKey = initialRow->stableKey;
+  const QRect initialRowRect = visualRect(index);
+  const QPoint initialRowPosition = viewportPosition - initialRowRect.topLeft();
+  PassivePointerHit passiveHit;
+  const bool delegatePainted = !cardForStableKey(stableKey);
+  if (delegatePainted) {
+    QStyleOptionViewItem option;
+    option.initFrom(this);
+    option.rect = initialRowRect;
+    const auto *delegate =
+        static_cast<const ConversationPassiveDelegate *>(itemDelegate());
+    passiveHit = delegate->pointerHit(option, index, viewportPosition,
+                                      rowCollapsed(*initialRow));
+  }
+  {
+    const QScopedValueRollback preserveAnchor(preservePointerAnchor_, true);
+    setCurrentIndex(index);
+  }
+  index = model_->indexForStableKey(stableKey);
   const ConversationItemModel::Row *row = model_->row(index.row());
   ConversationCard *card = row ? cardForStableKey(row->stableKey) : nullptr;
   if (!card) {
@@ -3716,10 +3824,38 @@ void ConversationView::mousePressEvent(QMouseEvent *event) {
     return;
   }
 
-  const QPoint cardPosition = card->mapFrom(viewport(), viewportPosition);
-  QWidget *target = card->childAt(cardPosition);
-  if (!target)
-    target = card;
+  QWidget *target = nullptr;
+  QPoint localPosition;
+  if (delegatePainted &&
+      passiveHit.target == PassivePointerHit::Target::Copy) {
+    target = card->findChild<QToolButton *>(QStringLiteral("cardCopyButton"));
+    if (target)
+      localPosition = target->rect().center();
+  } else if (delegatePainted &&
+             passiveHit.target == PassivePointerHit::Target::Disclosure) {
+    target = card->findChild<QToolButton *>(
+        QStringLiteral("cardDisclosureButton"));
+    if (target)
+      localPosition = target->rect().center();
+  } else if (delegatePainted &&
+             passiveHit.target == PassivePointerHit::Target::Text) {
+    const QList<MarkdownTextView *> markdownViews =
+        card->findChildren<MarkdownTextView *>();
+    if (!markdownViews.isEmpty()) {
+      MarkdownTextView *markdown = markdownViews.front();
+      target = markdown->viewport();
+      localPosition = passiveHit.documentPosition;
+    }
+  }
+  if (!target) {
+    const QPoint cardPosition =
+        delegatePainted ? initialRowPosition
+                        : card->mapFrom(viewport(), viewportPosition);
+    target = card->childAt(cardPosition);
+    if (!target)
+      target = card;
+    localPosition = target->mapFrom(card, cardPosition);
+  }
   if (event->button() == Qt::LeftButton) {
     for (QWidget *candidate = target; candidate && candidate != card;
          candidate = candidate->parentWidget()) {
@@ -3729,12 +3865,25 @@ void ConversationView::mousePressEvent(QMouseEvent *event) {
       }
     }
   }
-  const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
+  if (delegatePainted && event->button() == Qt::LeftButton &&
+      (passiveHit.target == PassivePointerHit::Target::Copy ||
+       passiveHit.target == PassivePointerHit::Target::Disclosure)) {
+    if (auto *button = qobject_cast<QAbstractButton *>(target)) {
+      forwardedButtonAction_ = button;
+      forwardedButtonViewportRect_ = passiveHit.viewportRect;
+      button->setFocus(Qt::MouseFocusReason);
+      button->setDown(true);
+      event->accept();
+      return;
+    }
+  }
   QMouseEvent forwarded(event->type(), QPointF(localPosition),
                         event->scenePosition(), event->globalPosition(),
                         event->button(), event->buttons(), event->modifiers(),
                         event->pointingDevice());
   forwardedMouseTarget_ = target;
+  forwardedMouseViewportOrigin_ = viewportPosition;
+  forwardedMouseLocalOrigin_ = localPosition;
   const QScopedValueRollback forwarding(forwardingMouseEvent_, true);
   QApplication::sendEvent(target, &forwarded);
   event->setAccepted(forwarded.isAccepted());
@@ -3745,6 +3894,21 @@ void ConversationView::mouseReleaseEvent(QMouseEvent *event) {
     event->accept();
     return;
   }
+  if (forwardedButtonAction_) {
+    const QPointer<QAbstractButton> button = forwardedButtonAction_;
+    forwardedButtonAction_.clear();
+    const bool activate =
+        event->button() == Qt::LeftButton &&
+        forwardedButtonViewportRect_.contains(event->position().toPoint());
+    forwardedButtonViewportRect_ = {};
+    if (button) {
+      button->setDown(false);
+      if (activate)
+        button->click();
+    }
+    event->accept();
+    return;
+  }
   if (!forwardedMouseTarget_) {
     QAbstractItemView::mouseReleaseEvent(event);
     return;
@@ -3752,7 +3916,9 @@ void ConversationView::mouseReleaseEvent(QMouseEvent *event) {
   const QPointer<QWidget> target = forwardedMouseTarget_;
   forwardedMouseTarget_.clear();
   const QPoint viewportPosition = event->position().toPoint();
-  const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
+  const QPoint localPosition =
+      forwardedMouseLocalOrigin_ +
+      (viewportPosition - forwardedMouseViewportOrigin_);
   QMouseEvent forwarded(event->type(), QPointF(localPosition),
                         event->scenePosition(), event->globalPosition(),
                         event->button(), event->buttons(), event->modifiers(),

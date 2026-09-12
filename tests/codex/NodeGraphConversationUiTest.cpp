@@ -420,6 +420,101 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
       "steering retirement recreated, moved, or reordered its stable card");
 }
 
+bool steeringMaterializationRepairsItsCanonicalSlot() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef root;
+  NodeRef progress;
+  NodeRef steering;
+  {
+    auto write = graph.write();
+    NodeState threadState = state("thread-steering-relocation");
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{2});
+    thread = write.upsert({NodeKind::Thread, "thread-steering-relocation"},
+                          std::move(threadState));
+    turn = write.upsert({NodeKind::Turn, "turn-steering-relocation"},
+                        state("turn-steering-relocation"));
+    root = write.upsert(
+        {NodeKind::Item, "root-steering-relocation"},
+        state("root-steering-relocation", "userMessage", "Start"));
+    progress = write.upsert(
+        {NodeKind::Item, "progress-steering-relocation"},
+        state("progress-steering-relocation", "agentMessage",
+              "Activity already shown"));
+    NodeState local = state("local-steering-relocation", "localPrompt",
+                            "Populate the plan tab");
+    local.fields.emplace("submissionId", std::uint64_t{91});
+    local.fields.emplace("dispatchState", "inFlight");
+    local.fields.emplace("startsTurn", false);
+    steering = write.upsert({NodeKind::Item, "local-steering-relocation"},
+                            std::move(local));
+    write.setParent(thread, turn);
+    write.setParent(turn, root);
+    write.setParent(turn, progress);
+    write.setParent(turn, steering);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    write.relate(thread, nodegraph::RelationKind::PendingPrompt, steering);
+    static_cast<void>(write.finish());
+  }
+
+  ui::NodeGraphUiAdapter adapter(graph);
+  middle::ConversationView view;
+  view.resize(700, 480);
+  view.show();
+  auto snapshot = adapter.conversation(thread, 80);
+  if (!require(snapshot && view.reconcile(*snapshot),
+               "steering relocation fixture did not reconcile"))
+    return false;
+  QApplication::processEvents();
+  const std::string steeringKey =
+      middle::stableKey(middle::LocalPromptKey{91});
+  const std::string progressKey = middle::stableKey(
+      middle::AuthoritativeItemKey{"thread-steering-relocation",
+                                   "turn-steering-relocation",
+                                   "progress-steering-relocation"});
+  if (!require(view.conversationModel()->indexForStableKey(progressKey).row() <
+                   view.conversationModel()->indexForStableKey(steeringKey).row(),
+               "relocation fixture did not begin with a stale tail row"))
+    return false;
+
+  NodeRef authoritative;
+  {
+    auto write = graph.write();
+    write.setField(steering, "dispatchState", "awaitingMaterialization");
+    authoritative = write.upsert(
+        {NodeKind::Item, "provider-steering-relocation"},
+        state("provider-steering-relocation", "userMessage",
+              "Populate the plan tab"));
+    write.setField(authoritative, "localSubmissionId", std::uint64_t{91});
+    write.setParent(turn, authoritative);
+    write.relate(authoritative,
+                 nodegraph::RelationKind::PromptMaterialization, steering);
+    write.replaceChildren(
+        turn, std::array<NodeRef, 4>{root, steering, authoritative, progress});
+    static_cast<void>(write.finish());
+  }
+  const auto materialization =
+      adapter.promptMaterialization(thread, authoritative);
+  if (!require(materialization &&
+                   view.applyPromptMaterialization(*materialization)
+                       .has_value(),
+               "canonical steering materialization was unavailable"))
+    return false;
+  QApplication::processEvents();
+  const QModelIndex steeringIndex =
+      view.conversationModel()->indexForStableKey(steeringKey);
+  const QModelIndex progressIndex =
+      view.conversationModel()->indexForStableKey(progressKey);
+  const middle::VisibleCardData *card =
+      view.conversationModel()->card(steeringIndex.row());
+  return require(steeringIndex.isValid() && progressIndex.isValid() && card &&
+                     card->kind == middle::CardKind::UserMessage &&
+                     steeringIndex.row() < progressIndex.row(),
+                 "one prompt materialization left its acknowledged steering "
+                 "row glued to the stale tail slot");
+}
+
 bool fileChangesUseCanonicalWorkspace() {
   nodegraph::NodeGraph graph;
   NodeRef thread;
@@ -489,6 +584,7 @@ int main(int argc, char **argv) {
       !pausedViewportKeepsItsPaintedAnchor() ||
       !promptMorphPreservesExactTargetAndWidget() ||
       !steeringMorphKeepsItsSlotThroughRetirement() ||
+      !steeringMaterializationRepairsItsCanonicalSlot() ||
       !fileChangesUseCanonicalWorkspace())
     return EXIT_FAILURE;
   std::cout << "NodeGraph conversation UI tests passed\n";

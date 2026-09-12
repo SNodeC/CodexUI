@@ -117,6 +117,8 @@ bool graphTurnIsActive(const nodegraph::NodeState &state) {
          graphBool(graphField(state, "local"));
 }
 
+std::string agentActivityStatus(const nodegraph::NodeState &state);
+
 std::optional<std::int64_t> graphInteger(const nodegraph::Value *value) {
   if (!value)
     return std::nullopt;
@@ -537,7 +539,7 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
   case CardKind::AgentActivity:
     result.payload =
         AgentActivityData{graphString(graphField(state, "tool")),
-                          graphStatus(state),
+                          agentActivityStatus(state),
                           graphString(graphField(state, "kind")),
                           graphString(graphField(state, "prompt")),
                           graphString(graphField(state, "resultText")),
@@ -1666,12 +1668,13 @@ std::optional<PromptMaterialization> NodeGraphUiAdapter::promptMaterialization(
     if (!submissionId || *submissionId < 0)
       continue;
 
-    VisibleCardData card = graphCardData(
-        item, thread->id().canonical,
-        nodegraph::protocolCanonicalId(*turnState, turn), *state,
-        graphString(graphField(*threadState, "cwd")));
-    card.key = LocalPromptKey{static_cast<std::uint64_t>(*submissionId)};
-    return PromptMaterialization{std::move(card), prompt};
+    ConversationRowProjection placement =
+        projectRowChange(read, thread, item);
+    if (!placement)
+      return std::nullopt;
+    placement->placement.card.key =
+        LocalPromptKey{static_cast<std::uint64_t>(*submissionId)};
+    return PromptMaterialization{std::move(*placement), prompt};
   }
   return std::nullopt;
 }
@@ -1682,6 +1685,13 @@ NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
   if (!graph_ || !thread || !item)
     return {};
   auto read = graph_->tryRead();
+  return projectRowChange(read, thread, item);
+}
+
+NodeGraphUiAdapter::ConversationRowProjection
+NodeGraphUiAdapter::projectRowChange(
+    std::optional<nodegraph::NodeGraph::ReadAccess> &read,
+    const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item) {
   if (!read)
     return {true, std::nullopt};
   if (!read->contains(thread) || !read->contains(item) ||
@@ -2018,8 +2028,38 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
       if (position == turnPositions.end())
         continue;
       std::vector<nodegraph::NodeRef> &items = turns[position->second].items;
-      if (std::ranges::find(items, prompt) == items.end())
-        items.push_back(prompt);
+      if (std::ranges::find(items, prompt) != items.end())
+        continue;
+
+      // A pending steering prompt is retained even when its submission slot
+      // has aged out of the bounded authoritative suffix. Merge that retained
+      // row at the same canonical child boundary instead of pinning it to the
+      // projected tail, where later activity or a newer steering prompt could
+      // incorrectly overtake it.
+      std::unordered_set<const nodegraph::Node *> selected;
+      selected.reserve(items.size());
+      for (const nodegraph::NodeRef &item : items)
+        if (item)
+          selected.insert(item.get());
+      std::size_t insertion = 0;
+      bool foundPrompt = false;
+      const std::size_t childCount = read->childCount(turn);
+      for (std::size_t child = 0; child < childCount; ++child) {
+        const nodegraph::NodeRef candidate = read->childAt(turn, child);
+        if (candidate == prompt) {
+          foundPrompt = true;
+          continue;
+        }
+        if (!candidate || !selected.contains(candidate.get()))
+          continue;
+        if (foundPrompt)
+          break;
+        ++insertion;
+      }
+      items.insert(items.begin() +
+                       static_cast<std::vector<nodegraph::NodeRef>::difference_type>(
+                           foundPrompt ? insertion : items.size()),
+                   prompt);
     }
   } else {
     for (TurnInput &input : turns) {
