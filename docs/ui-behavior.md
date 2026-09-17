@@ -25,28 +25,33 @@ expansion, focus, geometry, and the editable composer form.
 
 Conversation history is retained canonically in NodeGraph. The established
 view receives only the current 80-activity window (plus pinned owning prompts)
-and materializes that complete window invisibly inside one reconciliation.
-Clicking Load 80 expands the complete retained window in the same way. Cards
-remain materialized when merely scrolled offscreen; scrolling never replaces
-them with placeholders or exposes late construction. Thread rows materialize
-for the currently expanded hierarchy. Inspector row widgets are constructed
-only for the active tab when that tab's effective snapshot changes. Every graph
-read ends before a QWidget is called, and no permanent parallel domain model or
-NodeId-to-widget registry exists.
+and commits that complete value window in one reconciliation. Only rows in the
+viewport and bounded overscan own a `ConversationCard`; a thread replacement
+prepares just that first resident surface invisibly before its atomic reveal.
+Clicking Load 80 expands model data and cached scalar heights while preserving
+the same bounded residency. A card leaving residency saves compatible semantic
+interaction state and its scalar height, then releases its widget; returning
+constructs the same sole renderer without moving pixels or changing semantic
+state. Thread rows materialize for the currently expanded hierarchy. Inspector
+row widgets are constructed only for the active tab when that tab's effective
+snapshot changes. Every graph read ends before a QWidget is called, and no
+permanent parallel domain model or NodeId-to-widget registry exists.
 
 The conversation has one semantic grouping level: an app-server turn contains
 its items in server order. When a turn has a prompt, its first You card is the
-visible turn container and owns all later cards from that turn. Steering You
-cards are nested with the activity they steer rather than starting a second
-visual turn. For every turn represented in the retained activity window, the
-graph-backed renderer identifies that opening prompt from the complete turn
-and pins it outside the activity budget. History paging therefore never
-promotes a later steering You card to turn ownership; loading earlier activity
-retains the same root identity without duplication. Authoritative cards are
-keyed by stable thread, turn, and item IDs; local prompt cards are keyed by
-their submission IDs. The same keyed reconcile path handles initial display
-and updates, mutating a card in place when its visible data changes. An
-identical visible node state does not rebuild widgets or change geometry.
+structural Turn root; `ConversationView` paints the continuous cross-row Turn
+decoration while each resident row remains one sibling `ConversationCard`.
+Steering You cards are nested with the activity they steer rather than starting
+a second visual turn. For every turn represented in the retained activity
+window, the graph-backed projection identifies that opening prompt from the
+complete turn and pins its model row outside the activity budget. History
+paging therefore never promotes a later steering You card to turn ownership;
+loading earlier activity retains the same root identity without duplication.
+Authoritative cards are keyed by stable thread, turn, and item IDs; local
+prompt cards are keyed by their submission IDs. The same keyed reconcile path
+handles initial display and updates, mutating a resident card in place and
+updating only model/scalar state while it is offscreen. An identical visible
+node state does not rebuild widgets or change geometry.
 The complete prompt content, including attachments, adds the canonical 8 px
 structural section gap before its first nested turn card. This spacing is
 layout geometry and never becomes part of authored Markdown.
@@ -55,9 +60,11 @@ Local prompt admission resumes bottom following when the only pause was caused
 by composer overlay growth, so the complete pending prompt becomes visible.
 It never overrides a pause created by user scrolling.
 
-Mouse-wheel and touchpad gestures use Qt's native platform/device scroll
-handling. CodexUI only records whether the resulting position follows the
-bottom or is owned by the user.
+Mouse-wheel and touchpad gestures retain Qt's native platform/device data.
+`MiddleRegionWidget` selects one phased owner across nested conversation and
+composer scroll surfaces, preserves that owner across pointer crossing and
+boundaries until ScrollEnd, and separately records whether the conversation
+follows the bottom or is manually paused.
 
 ## Thread identity and prompt routing
 
@@ -543,9 +550,9 @@ retain a gesture that started while they could scroll; only a fresh gesture
 begun at their current boundary is handed to the conversation.
 
 Horizontal splitter drags keep all three pane boundaries live. The conversation
-resizes materialized card widths immediately, coalesces width-dependent rich
-text and passive-card height measurement to at most one pass per display
-interval, and leaves off-screen row heights lazy during the gesture. Releasing
+resizes resident card widths immediately, coalesces width-dependent rich-text
+remeasurement to at most one pass per display interval, and leaves offscreen
+scalar row heights lazy during the gesture. Releasing
 the handle performs one exact height-index reconciliation while preserving the
 paused visible-card pixel anchor or, in Following mode, the current bottom.
 

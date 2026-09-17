@@ -131,6 +131,303 @@ async function waitUntil(devTools, expression, description) {
     throw new Error(`Timed out waiting for ${description}`);
 }
 
+async function performanceSnapshot(devTools) {
+    const {metrics} = await devTools.call("Performance.getMetrics");
+    return Object.fromEntries(metrics.map(metric => [metric.name, metric.value]));
+}
+
+function performanceDelta(before, after) {
+    const duration = name => Number(((after[name] - before[name]) * 1000).toFixed(2));
+    return {
+        taskMilliseconds: duration("TaskDuration"),
+        scriptMilliseconds: duration("ScriptDuration"),
+        layoutMilliseconds: duration("LayoutDuration"),
+        styleMilliseconds: duration("RecalcStyleDuration"),
+        layouts: after.LayoutCount - before.LayoutCount,
+        styleRecalculations: after.RecalcStyleCount - before.RecalcStyleCount,
+    };
+}
+
+const applicationPerformanceLimits = Object.freeze({
+    hydrateWallMilliseconds: 141,
+    hydrateTaskMilliseconds: 154,
+    idleTaskMilliseconds: 1,
+    semanticNoOpTaskMilliseconds: 25,
+    streamIngestMilliseconds: 20,
+    streamSettledMilliseconds: 47,
+    streamTaskMilliseconds: 48,
+});
+
+const applicationProfileSetup = `(async()=>{
+    const delay=milliseconds=>new Promise(complete=>setTimeout(complete,milliseconds));
+    const waitFor=async(predicate,description)=>{for(let attempt=0;attempt<400;++attempt){
+        if(predicate())return;await delay(5);}throw new Error("Timed out waiting for "+description);};
+    class ProfileWebSocket{
+        constructor(){this.protocol="codex";this.readyState=0;this.bufferedAmount=0;this.binaryType="arraybuffer";
+            this.onopen=null;this.onmessage=null;this.onerror=null;this.onclose=null;this.sent=[];
+            this.pendingCatalogs=[];
+            globalThis.codexuiProfileSocket=this;queueMicrotask(()=>{this.readyState=1;this.onopen?.();});}
+        send(data){const message=JSON.parse(data);this.sent.push(message);const payload=message.kind==="appserver"?message.payload:null;
+            if(!payload?.method||payload.method==="thread/read")return;
+            const result=payload.method==="thread/list"?{data:[{id:"profile",status:{type:"idle"}}],nextCursor:null}
+                :payload.method==="model/list"?{data:[
+                    {id:"gpt-a",model:"gpt-a",displayName:"GPT A",description:"Primary model",isDefault:true,
+                        supportedReasoningEfforts:[{reasoningEffort:"low"},{reasoningEffort:"medium"}],
+                        defaultReasoningEffort:"medium",serviceTiers:[{id:"fast",name:"Fast",description:"Fast tier"}],
+                        defaultServiceTier:"fast",supportsPersonality:true},
+                    {id:"gpt-b",model:"gpt-b",displayName:"GPT B",description:"No style model",
+                        supportedReasoningEfforts:[{reasoningEffort:"medium"}],supportsPersonality:false}]}
+                :payload.method==="permissionProfile/list"?{data:[{id:":workspace",description:"Workspace access"}]}:{data:[]};
+            if(payload.method==="model/list"||payload.method==="permissionProfile/list"){
+                this.pendingCatalogs.push({id:payload.id,result});return;}
+            queueMicrotask(()=>this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:payload.id,result}}));}
+        releaseCatalogs(){for(const pending of this.pendingCatalogs)
+            this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:pending.id,result:pending.result}});
+            this.pendingCatalogs=[];}
+        receive(message){this.onmessage?.({data:JSON.stringify(message)});}
+        close(_code,reason=""){this.readyState=3;this.onclose?.({reason});}
+    }
+    ProfileWebSocket.CONNECTING=0;ProfileWebSocket.OPEN=1;ProfileWebSocket.CLOSING=2;ProfileWebSocket.CLOSED=3;
+    globalThis.WebSocket=ProfileWebSocket;
+    document.querySelector(".connection-control button").click();
+    await waitFor(()=>globalThis.codexuiProfileSocket?.readyState===1,"profile WebSocket");
+    const socket=globalThis.codexuiProfileSocket;
+    socket.receive({kind:"bridge.connection",event:"opened",connectionId:"profile",role:"controller"});
+    socket.receive({kind:"bridge.provider",state:"ready",providerGeneration:1});
+    await waitFor(()=>document.querySelector(".thread-row"),"profile thread row");
+    const reasoning=document.querySelector('[aria-label="Show reasoning cards"]');
+    reasoning?.click();
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    document.querySelector(".thread-row").click();
+    await waitFor(()=>socket.sent.some(message=>message.kind==="appserver"&&message.payload.method==="thread/read"),
+        "profile thread read");
+    const read=socket.sent.findLast(message=>message.kind==="appserver"&&message.payload.method==="thread/read");
+    await waitFor(()=>socket.pendingCatalogs.length===2,"deferred settings catalogs");
+    const settingsToggle=document.querySelector(".settings-toggle");settingsToggle.click();
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const grid=document.querySelector(".settings-grid");
+    const selectFor=caption=>[...grid.querySelectorAll("label")].find(
+        label=>label.querySelector("span")?.textContent===caption)?.querySelector("select");
+    const modelSelect=selectFor("Model");const profileSelect=selectFor("Permission profile");
+    socket.releaseCatalogs();
+    await waitFor(()=>modelSelect?.querySelector('option[value="gpt-a"]')&&
+        profileSelect?.querySelector('option[value=":workspace"]'),"visible settings catalog refresh");
+    const catalogUpdated=modelSelect===selectFor("Model")&&profileSelect===selectFor("Permission profile");
+    settingsToggle.click();
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    globalThis.codexuiApplicationProfile={socket,read};
+    return {readRequests:socket.sent.filter(message=>message.kind==="appserver"&&message.payload.method==="thread/read").length,
+        catalogUpdated};
+})()`;
+
+const exactInteractionLifetimeCheck = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;const socket=profile.socket;
+    const editor=document.querySelector('.composer textarea');
+    const setEditorValue=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;
+    setEditorValue.call(editor,'retain authored text');editor.dispatchEvent(new Event('input',{bubbles:true}));
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    const turnStartsBefore=socket.sent.filter(message=>message.kind==='appserver'&&message.payload.method==='turn/start').length;
+    socket.receive({kind:'bridge.controller',controllerConnectionId:'another-client'});
+    editor.form.requestSubmit();
+    const composerImmediate=editor.value;
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const composerSettled=editor.value;const turnStartsAfter=socket.sent.filter(
+        message=>message.kind==='appserver'&&message.payload.method==='turn/start').length;
+    socket.receive({kind:'bridge.controller',controllerConnectionId:'profile'});
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    setEditorValue.call(editor,'');editor.dispatchEvent(new Event('input',{bubbles:true}));
+
+    const receiveThread=(id,preview,parentThreadId)=>socket.receive({kind:'appserver',payload:{jsonrpc:'2.0',
+        method:'thread/started',params:{thread:{id,preview,status:{type:'idle'},...(parentThreadId?{parentThreadId}:{})}}}});
+    receiveThread('reparent-parent','Reparent parent');receiveThread('reparent-child','Reparent child','reparent-parent');
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const treeItem=title=>[...document.querySelectorAll('.thread-row strong')]
+        .find(label=>label.textContent===title)?.closest('[role="treeitem"]');
+    treeItem('Reparent parent').querySelector('.tree-toggle').click();
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    const childBefore=treeItem('Reparent child');const triggerBefore=childBefore.querySelector('.thread-menu-trigger');
+    triggerBefore.focus();const levelBefore=childBefore.getAttribute('aria-level');
+    socket.receive({kind:'appserver',payload:{jsonrpc:'2.0',method:'thread/deleted',params:{threadId:'reparent-parent'}}});
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const childAfter=treeItem('Reparent child');const triggerAfter=childAfter.querySelector('.thread-menu-trigger');
+    const rowRetained=childAfter===childBefore&&triggerAfter===triggerBefore;
+    const focusRetained=document.activeElement===triggerBefore;const levelAfter=childAfter.getAttribute('aria-level');
+    triggerAfter.click();await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const menu=document.querySelector('.thread-context-menu');const menuFocused=menu?.contains(document.activeElement)??false;
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    const menuClosed=!document.querySelector('.thread-context-menu');
+    const focusReturned=document.activeElement===triggerAfter&&triggerAfter.isConnected;
+    socket.receive({kind:'appserver',payload:{jsonrpc:'2.0',method:'thread/deleted',params:{threadId:'reparent-child'}}});
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    return {composerImmediate,composerSettled,turnStartsBefore,turnStartsAfter,rowRetained,focusRetained,
+        levelBefore,levelAfter,menuFocused,menuClosed,focusReturned};
+})()`;
+
+const applicationProfileHydrate = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;
+    const turns=Array.from({length:100},(_,turn)=>({id:"turn-"+turn,status:turn===99?"inProgress":"completed",
+        items:Array.from({length:100},(_,item)=>({id:"item-"+turn+"-"+item,
+            type:item%3===0?"agentMessage":item%3===1?"reasoning":"commandExecution",
+            text:item%3===0?"Answer "+item:undefined,summary:item%3===1?["Thinking"]:undefined,
+            command:item%3===2?"true":undefined,status:"completed"}))}));
+    const started=performance.now();
+    profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:profile.read.payload.id,result:{thread:{
+        id:"profile",model:"gpt-a",approvalPolicy:"future-policy",status:{type:"active"},turns}}}});
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    return {wallMilliseconds:performance.now()-started,authoritativeItems:10000,
+        visibleCards:document.querySelectorAll(".conversation-card").length,
+        hasHistoryBoundary:Boolean(document.querySelector(".load-more"))};
+})()`;
+
+const applicationProfilePrepare = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;
+    document.querySelector(".settings-toggle").click();
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const grid=document.querySelector(".settings-grid");if(!grid)throw new Error("Settings grid did not open");
+    const controls=[...grid.querySelectorAll("select,input")];const options=[...grid.querySelectorAll("option")];
+    controls[0]?.focus();
+    const cards=[...document.querySelectorAll(".conversation-card")];const targetCard=cards.at(-1);
+    const targetText=targetCard?.querySelector(".safe-markdown p")?.firstChild;
+    const scroll=document.querySelector(".conversation-scroll");
+    if(!targetCard||!targetText)throw new Error("Stream target did not render");
+    const mutations={settingsStructuralMutations:0,conversationStructuralMutations:0,targetTextMutations:0};
+    const settingsObserver=new MutationObserver(records=>{for(const record of records)
+        if(record.type==="childList")mutations.settingsStructuralMutations+=record.addedNodes.length+record.removedNodes.length;});
+    settingsObserver.observe(grid,{childList:true,subtree:true});
+    const conversationObserver=new MutationObserver(records=>{for(const record of records){
+        if(record.type==="childList")mutations.conversationStructuralMutations+=record.addedNodes.length+record.removedNodes.length;
+        else if(record.target===targetText)++mutations.targetTextMutations;}});
+    conversationObserver.observe(document.querySelector(".conversation-scroll"),{childList:true,characterData:true,subtree:true});
+    profile.grid=grid;profile.controls=controls;profile.options=options;profile.cards=cards;
+    profile.targetCard=targetCard;profile.targetText=targetText;profile.settingsObserver=settingsObserver;
+    profile.conversationObserver=conversationObserver;profile.mutations=mutations;
+    profile.activityText=document.querySelector(".conversation-activity")?.textContent||"";
+    profile.scroll=scroll;profile.focused=controls[0];profile.scrollTop=scroll.scrollTop;
+    profile.followingGap=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight;
+    return {settingsControls:controls.length};
+})()`;
+
+const applicationProfileNoOp = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;
+    profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"thread/settings/updated",params:{
+        threadId:"profile",threadSettings:{model:"gpt-a"}}}});
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const grid=profile.grid;const controls=profile.controls;const options=profile.options;
+    const nextControls=[...grid.querySelectorAll("select,input")];const nextOptions=[...grid.querySelectorAll("option")];
+    return {gridStable:grid===document.querySelector(".settings-grid"),
+        controlsStable:controls.length===nextControls.length&&controls.every((node,index)=>node===nextControls[index]),
+        optionsStable:options.length===nextOptions.length&&options.every((node,index)=>node===nextOptions[index]),
+        focusStable:document.activeElement===profile.focused,scrollStable:profile.scroll.scrollTop===profile.scrollTop,
+        activityBefore:profile.activityText,
+        activityAfter:document.querySelector(".conversation-activity")?.textContent||"",
+        ...profile.mutations};
+})()`;
+
+const applicationProfileIdle = `(async()=>{
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    return {};
+})()`;
+
+const applicationProfileStream = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;profile.mutations.settingsStructuralMutations=0;
+    profile.mutations.conversationStructuralMutations=0;profile.mutations.targetTextMutations=0;
+    const beforeText=profile.targetText.data;const started=performance.now();
+    for(let index=0;index<2000;++index)profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",
+        method:"item/agentMessage/delta",params:{threadId:"profile",turnId:"turn-99",itemId:"item-99-99",delta:"x"}}});
+    const ingestMilliseconds=performance.now()-started;
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const cards=[...document.querySelectorAll(".conversation-card")];const controls=[...profile.grid.querySelectorAll("select,input")];
+    const options=[...profile.grid.querySelectorAll("option")];profile.settingsObserver.disconnect();profile.conversationObserver.disconnect();
+    return {ingestMilliseconds,settledMilliseconds:performance.now()-started,streamedDeltas:2000,
+        textGrowth:profile.targetText.data.length-beforeText.length,targetCardStable:profile.targetCard===cards.at(-1),
+        targetTextStable:profile.targetText===profile.targetCard.querySelector(".safe-markdown p")?.firstChild,
+        cardsStable:profile.cards.length===cards.length&&profile.cards.every((node,index)=>node===cards[index]),
+        focusStable:document.activeElement===profile.focused,followingGapBefore:profile.followingGap,
+        followingGapAfter:profile.scroll.scrollHeight-profile.scroll.scrollTop-profile.scroll.clientHeight,
+        controlsStable:profile.controls.length===controls.length&&profile.controls.every((node,index)=>node===controls[index]),
+        optionsStable:profile.options.length===options.length&&profile.options.every((node,index)=>node===options[index]),
+        ...profile.mutations};
+})()`;
+
+const applicationProfileDetachedStream = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;const scroll=profile.scroll;
+    const anchor=profile.cards[50];const source=profile.cards[22];
+    const contentTop=anchor.getBoundingClientRect().top-scroll.getBoundingClientRect().top+scroll.scrollTop;
+    scroll.scrollTop=contentTop-32;scroll.dispatchEvent(new Event("scroll"));
+    await new Promise(complete=>requestAnimationFrame(()=>complete()));
+    const beforeTop=anchor.getBoundingClientRect().top-scroll.getBoundingClientRect().top;
+    const beforeGap=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight;
+    const sourceText=source.querySelector(".safe-markdown p")?.firstChild;const beforeLength=sourceText?.data.length||0;
+    profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"item/agentMessage/delta",params:{
+        threadId:"profile",turnId:"turn-99",itemId:"item-99-42",delta:" detached".repeat(300)}}});
+    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    return {anchorStable:anchor===profile.cards[50],anchorTopDelta:Math.abs(
+        anchor.getBoundingClientRect().top-scroll.getBoundingClientRect().top-beforeTop),
+        detachedBefore:beforeGap,detachedAfter:scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight,
+        sourceGrowth:(sourceText?.data.length||0)-beforeLength};
+})()`;
+
+const applicationSettingsDomContract = `(async()=>{
+    const profile=globalThis.codexuiApplicationProfile;const grid=profile.grid;
+    const frame=()=>new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const waitFor=async(predicate,description)=>{for(let attempt=0;attempt<200;++attempt){
+        if(predicate())return;await new Promise(complete=>setTimeout(complete,5));}
+        throw new Error("Timed out waiting for "+description);};
+    const labelFor=caption=>[...grid.querySelectorAll("label")].find(
+        label=>label.querySelector(":scope > span")?.textContent===caption);
+    const controlFor=caption=>labelFor(caption)?.querySelector("select,input");
+    const setValue=async(caption,value)=>{const control=controlFor(caption);
+        if(!control)throw new Error("Missing settings control: "+caption);
+        const prototype=control instanceof HTMLSelectElement?HTMLSelectElement.prototype:HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype,"value").set.call(control,value);
+        control.dispatchEvent(new Event(control instanceof HTMLSelectElement?"change":"input",{bubbles:true}));
+        await frame();return controlFor(caption);};
+    const captions=["Model","Reasoning","Access","Network","Workspace","Approval","Style",
+        "Approval reviewer","Permission profile","Service tier","Reasoning summary","Collaboration mode"];
+    const labelsAssociated=captions.every(caption=>{const label=labelFor(caption);const control=controlFor(caption);
+        return Boolean(label&&control&&label.control===control);});
+    const modelDescription=controlFor("Model").querySelector('option[value="gpt-a"]')?.title;
+    const profileDescription=controlFor("Permission profile").querySelector('option[value=":workspace"]')?.title;
+    const approval=controlFor("Approval");
+    const unknownApproval={value:approval.value,label:approval.selectedOptions[0]?.textContent};
+
+    await setValue("Model","gpt-b");
+    const unsupportedStyle={disabled:controlFor("Style").disabled,title:labelFor("Style").title};
+    await setValue("Model","gpt-a");
+    await setValue("Style","friendly");
+    await setValue("Reasoning","low");
+    await setValue("Approval","never");
+    await setValue("Approval reviewer","auto_review");
+    await setValue("Service tier","fast");
+    await setValue("Reasoning summary","concise");
+    await setValue("Collaboration mode","plan");
+    await setValue("Workspace","/authored/browser");
+    await setValue("Access","danger-full-access");
+    const fullAccessNetwork={value:controlFor("Network").value,disabled:controlFor("Network").disabled,
+        title:labelFor("Network").title};
+    await setValue("Permission profile",":workspace");
+    const profileSelected={value:controlFor("Permission profile").value,access:controlFor("Access").value,
+        network:controlFor("Network").value};
+    await setValue("Access","workspace-write");
+    await setValue("Network","enabled");
+    const changedText=document.querySelector(".settings-toggle")?.textContent||"";
+
+    profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"turn/completed",params:{
+        threadId:"profile",turn:{id:"turn-99",status:"completed"}}}});
+    await frame();
+    const editor=document.querySelector(".composer textarea");
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(editor,"settings DOM contract");
+    editor.dispatchEvent(new Event("input",{bubbles:true}));await frame();
+    const previous=profile.socket.sent.filter(message=>message.kind==="appserver"&&message.payload.method==="turn/start").length;
+    editor.form.requestSubmit();
+    await waitFor(()=>profile.socket.sent.filter(message=>message.kind==="appserver"&&
+        message.payload.method==="turn/start").length===previous+1,"settings turn/start");
+    const request=profile.socket.sent.filter(message=>message.kind==="appserver"&&message.payload.method==="turn/start").at(-1);
+    return {labelsAssociated,modelDescription,profileDescription,unknownApproval,unsupportedStyle,
+        fullAccessNetwork,profileSelected,changedText,params:request.payload.params};
+})()`;
+
 const fullTopBarMeasurement = `(()=>{
     const actions=document.querySelector(".top-actions");
     if(!actions.querySelector(".qualification-control")){
@@ -227,8 +524,120 @@ try {
     assert.equal(touch.coarse, true);
     assert(touch.paneHeight >= 44 && touch.viewHeight >= 44);
 
+    await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: false});
+    await setWidth(devTools, 1280);
+    await waitUntil(devTools, `document.querySelector(".thread-list")&&document.querySelector(".inspector-pane")`,
+        "desktop application profile layout");
+    await devTools.call("Performance.enable");
+    const setup = await devTools.evaluate(applicationProfileSetup);
+    assert.equal(setup.readRequests, 1, "the application profile hydrates through one authoritative read");
+    assert.equal(setup.catalogUpdated, true,
+        "an unchanged settings draft reprojects refreshed model and permission catalogs");
+    const exactInteraction = await devTools.evaluate(exactInteractionLifetimeCheck);
+    assert.deepEqual(exactInteraction, {
+        composerImmediate: "retain authored text", composerSettled: "retain authored text",
+        turnStartsBefore: 0, turnStartsAfter: 0, rowRetained: true, focusRetained: true,
+        levelBefore: "2", levelAfter: "1", menuFocused: true, menuClosed: true, focusReturned: true,
+    });
+
+    const beforeHydrate = await performanceSnapshot(devTools);
+    const hydrateResult = await devTools.evaluate(applicationProfileHydrate);
+    const afterHydrate = await performanceSnapshot(devTools);
+    const hydratePerformance = performanceDelta(beforeHydrate, afterHydrate);
+    assert.deepEqual({items: hydrateResult.authoritativeItems, cards: hydrateResult.visibleCards,
+        history: hydrateResult.hasHistoryBoundary}, {items: 10_000, cards: 80, history: true});
+    assert(hydrateResult.wallMilliseconds <= applicationPerformanceLimits.hydrateWallMilliseconds
+        && hydratePerformance.taskMilliseconds <= applicationPerformanceLimits.hydrateTaskMilliseconds,
+        `10k App hydration exceeded its gate: ${hydrateResult.wallMilliseconds}/${hydratePerformance.taskMilliseconds} ms`);
+    assert(hydratePerformance.layouts <= 2 && hydratePerformance.styleRecalculations <= 2,
+        `10k App hydration caused ${hydratePerformance.layouts} layouts and ${hydratePerformance.styleRecalculations} style passes`);
+
+    const prepareResult = await devTools.evaluate(applicationProfilePrepare);
+    assert.equal(prepareResult.settingsControls, 12);
+    const beforeIdle = await performanceSnapshot(devTools);
+    await devTools.evaluate(applicationProfileIdle);
+    const idlePerformance = performanceDelta(beforeIdle, await performanceSnapshot(devTools));
+    assert(idlePerformance.taskMilliseconds <= applicationPerformanceLimits.idleTaskMilliseconds
+        && idlePerformance.layouts === 0 && idlePerformance.styleRecalculations === 0,
+    `idle App exceeded its zero-work gate: ${idlePerformance.taskMilliseconds} ms, ${idlePerformance.layouts}/${idlePerformance.styleRecalculations} passes`);
+    const beforeNoOp = await performanceSnapshot(devTools);
+    const noOpResult = await devTools.evaluate(applicationProfileNoOp);
+    const afterNoOp = await performanceSnapshot(devTools);
+    const noOpPerformance = performanceDelta(beforeNoOp, afterNoOp);
+    assert(noOpResult.gridStable && noOpResult.controlsStable && noOpResult.optionsStable,
+        "a semantic settings no-op replaced its visual objects");
+    assert(noOpResult.focusStable && noOpResult.scrollStable
+        && noOpResult.activityBefore === noOpResult.activityAfter,
+    "a semantic settings no-op changed focus, scroll, or displayed activity");
+    assert.equal(noOpResult.settingsStructuralMutations, 0);
+    assert.equal(noOpResult.conversationStructuralMutations, 0);
+    assert.equal(noOpPerformance.layouts, 0, "a semantic settings no-op caused layout");
+    assert.equal(noOpPerformance.styleRecalculations, 0, "a semantic settings no-op caused style recalculation");
+    assert(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
+        `semantic settings no-op exceeded its task gate: ${noOpPerformance.taskMilliseconds} ms`);
+
+    const beforeStream = await performanceSnapshot(devTools);
+    const streamResult = await devTools.evaluate(applicationProfileStream);
+    const afterStream = await performanceSnapshot(devTools);
+    const streamPerformance = performanceDelta(beforeStream, afterStream);
+    assert.equal(streamResult.streamedDeltas, 2_000);
+    assert.equal(streamResult.textGrowth, 2_000);
+    assert(streamResult.targetCardStable && streamResult.targetTextStable && streamResult.cardsStable,
+        "streaming replaced the visible card or Markdown text object");
+    assert(streamResult.controlsStable && streamResult.optionsStable && streamResult.focusStable,
+        "conversation streaming replaced unchanged settings controls");
+    assert(streamResult.followingGapBefore <= 1 && streamResult.followingGapAfter <= 1,
+        `following-tail drifted from ${streamResult.followingGapBefore} to ${streamResult.followingGapAfter}px`);
+    assert.equal(streamResult.settingsStructuralMutations, 0);
+    assert.equal(streamResult.conversationStructuralMutations, 0);
+    assert(streamResult.targetTextMutations <= 1,
+        `2,000 coalesced deltas caused ${streamResult.targetTextMutations} text mutations`);
+    assert(streamResult.ingestMilliseconds <= applicationPerformanceLimits.streamIngestMilliseconds
+        && streamResult.settledMilliseconds <= applicationPerformanceLimits.streamSettledMilliseconds
+        && streamPerformance.taskMilliseconds <= applicationPerformanceLimits.streamTaskMilliseconds,
+    `2k App stream exceeded its gate: ${streamResult.ingestMilliseconds}/${streamResult.settledMilliseconds}/${streamPerformance.taskMilliseconds} ms`);
+    assert(streamPerformance.layouts <= 2 && streamPerformance.styleRecalculations <= 2,
+        `2k App stream caused ${streamPerformance.layouts} layouts and ${streamPerformance.styleRecalculations} style passes`);
+
+    const detachedResult = await devTools.evaluate(applicationProfileDetachedStream);
+    assert(detachedResult.detachedBefore > 24 && detachedResult.detachedAfter > 24,
+        "a manually detached viewport resumed following-tail");
+    assert(detachedResult.anchorStable && detachedResult.anchorTopDelta <= 1 && detachedResult.sourceGrowth === 2_700,
+        `paused anchor moved ${detachedResult.anchorTopDelta}px across an above-anchor stream update`);
+
+    const settingsDom = await devTools.evaluate(applicationSettingsDomContract);
+    assert.equal(settingsDom.labelsAssociated, true, "every settings control has one visible label association");
+    assert.deepEqual({model: settingsDom.modelDescription, profile: settingsDom.profileDescription},
+        {model: "Primary model", profile: "Workspace access"});
+    assert.deepEqual(settingsDom.unknownApproval, {value: "future-policy", label: "Future policy"});
+    assert.deepEqual(settingsDom.unsupportedStyle,
+        {disabled: true, title: "The selected model does not support style choices"});
+    assert.deepEqual(settingsDom.fullAccessNetwork,
+        {value: "enabled", disabled: true, title: "Full access already includes network access"});
+    assert.deepEqual(settingsDom.profileSelected,
+        {value: ":workspace", access: "default", network: "default"});
+    assert.match(settingsDom.changedText, /12 changed/u);
+    const {threadId, clientUserMessageId, input, ...settingsParams} = settingsDom.params;
+    assert.equal(threadId, "profile");
+    assert.equal(typeof clientUserMessageId, "string");
+    assert.deepEqual(input, [{type: "text", text: "settings DOM contract", text_elements: []}]);
+    assert.deepEqual(settingsParams, {
+        model: "gpt-a", effort: "low", personality: "friendly", approvalPolicy: "never",
+        approvalsReviewer: "auto_review", serviceTier: "fast", summary: "concise", cwd: "/authored/browser",
+        permissions: null,
+        sandboxPolicy: {type: "workspaceWrite", writableRoots: [], networkAccess: true,
+            excludeTmpdirEnvVar: false, excludeSlashTmp: false},
+        collaborationMode: {mode: "plan", settings: {model: "gpt-a", developer_instructions: null,
+            reasoning_effort: "low"}},
+    });
+
     console.log(JSON.stringify({browser: "Chromium", widths: [760, 521, 360], overflow: 0,
-        drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px"}, null, 2));
+        drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
+        appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
+            idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},
+            stream: {...streamResult, ...streamPerformance},
+            detachedStream: detachedResult,
+            nodes: afterStream.Nodes, jsHeapBytes: afterStream.JSHeapUsedSize}}, null, 2));
 } catch (error) {
     if (chromeErrors) process.stderr.write(chromeErrors);
     throw error;

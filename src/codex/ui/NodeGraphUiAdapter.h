@@ -3,12 +3,17 @@
 #ifndef CODEXUI_CODEX_UI_NODEGRAPHUIADAPTER_H
 #define CODEXUI_CODEX_UI_NODEGRAPHUIADAPTER_H
 
+#include "codex/TurnSettingsPolicy.h"
 #include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/Messages.h"
 #include "codex/nodegraph/NodeGraph.h"
 #include "codex/ui/UiViewState.h"
 
 #include <cstddef>
 #include <optional>
+#include <span>
+#include <string_view>
+#include <vector>
 
 namespace codexui::codex::ui {
 
@@ -18,70 +23,45 @@ namespace codexui::codex::ui {
 // values, and releases the graph before any QWidget code runs.
 class NodeGraphUiAdapter final {
 public:
+  static constexpr std::size_t MaximumConversationDeltaItems = 64;
+
   struct ConversationInfo {
-    std::size_t authoritativeItemCount = 0;
     bool readyForDisplay = false;
     bool hydrationFailed = false;
     bool providerHasMore = false;
+    bool historyRequestPending = false;
   };
 
-  struct ConversationRowProjection {
-    bool graphBusy = false;
-    std::optional<middle::ConversationRowChange> change;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-      return change.has_value();
-    }
-    [[nodiscard]] middle::ConversationRowChange &operator*() noexcept {
-      return *change;
-    }
-    [[nodiscard]] const middle::ConversationRowChange &
-    operator*() const noexcept {
-      return *change;
-    }
-    [[nodiscard]] middle::ConversationRowChange *operator->() noexcept {
-      return &*change;
-    }
-    [[nodiscard]] const middle::ConversationRowChange *
-    operator->() const noexcept {
-      return &*change;
-    }
+  struct ConversationRoute {
+    bool affected = false;
+    bool structural = false;
+    bool authorityReplacement = false;
+    std::vector<nodegraph::NodeRef> items;
+    std::optional<bool> historyRequestPending;
   };
 
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
-  conversation(const nodegraph::NodeRef &thread,
-               std::size_t itemLimit) const;
+  conversation(const nodegraph::NodeRef &thread) const;
 
   [[nodiscard]] std::optional<ConversationInfo>
   conversationInfo(const nodegraph::NodeRef &thread) const;
 
-  [[nodiscard]] std::optional<middle::VisibleCardData>
-  card(const nodegraph::NodeRef &thread,
-       const nodegraph::NodeRef &item) const;
+  // Classifies one graph notification at the graph boundary. Shell only
+  // coalesces the returned identities and never derives ancestry, placement,
+  // prompt aliases, or authority-replacement policy itself.
+  [[nodiscard]] ConversationRoute
+  conversationRoute(const nodegraph::GraphChanged &change,
+                    const nodegraph::NodeRef &thread) const;
 
-  // Projects an authoritative user item only when it exactly materializes a
-  // still-current local prompt. The returned card retains the LocalPromptKey
-  // and authoritative Item identity; the separate prompt identity is used
-  // only to acknowledge that one stable row transition.
-  [[nodiscard]] std::optional<middle::PromptMaterialization>
-  promptMaterialization(const nodegraph::NodeRef &thread,
-                        const nodegraph::NodeRef &item) const;
-
-  // Projects one live Item together with its immediate canonical row
-  // neighbors. This is the bounded structural adapter for non-tail insertion
-  // and actual movement; it never returns a complete conversation snapshot.
-  [[nodiscard]] ConversationRowProjection
-  rowChange(const nodegraph::NodeRef &thread,
-            const nodegraph::NodeRef &item) const;
-
-  // Projects only a canonical last item of the selected thread. It is the
-  // bounded structural fast path for ordinary append; any non-tail or prompt
-  // alias case returns nullopt and proceeds through exact neighbor placement.
-  [[nodiscard]] std::optional<middle::ConversationTailCard>
-  tailCard(const nodegraph::NodeRef &thread,
-           const nodegraph::NodeRef &item) const;
+  // Projects a coalesced bounded set through one graph read. Presentation-only
+  // values and canonically ordered structural rows share graphCardData and the
+  // same stable identity policy used by complete snapshots.
+  [[nodiscard]] std::optional<middle::ConversationDelta>
+  conversationDelta(const nodegraph::NodeRef &thread,
+                    std::span<const nodegraph::NodeRef> items,
+                    bool structural) const;
 
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread) const;
@@ -89,14 +69,41 @@ public:
   [[nodiscard]] std::optional<ThreadListRow>
   threadRow(const nodegraph::NodeRef &thread) const;
 
+  [[nodiscard]] std::optional<InspectorPageSnapshot>
+  pendingRequests(const InspectorRowRequest &request = {}) const;
+
+  [[nodiscard]] std::optional<PendingRequestsSummary>
+  pendingRequestSummary(
+      std::string_view selectedThreadId,
+      std::span<const nodegraph::NodeRef> localTargets = {}) const;
+
+  [[nodiscard]] std::optional<PendingRequestDescriptor>
+  pendingRequest(const nodegraph::NodeRef &target, bool *busy = nullptr) const;
+
+  [[nodiscard]] std::optional<TurnSettingsContext>
+  turnSettings(const nodegraph::NodeRef &thread,
+               std::string_view draftIdentity = {},
+               std::string_view draftWorkspace = {}) const;
+
   [[nodiscard]] std::optional<InspectorSnapshot>
   inspector(const nodegraph::NodeRef &selectedThread,
-            InspectorProjection projection = InspectorProjection::All) const;
+            InspectorProjection projection,
+            const InspectorRowRequest &request = {}) const;
+
+  // Routes graph notifications through the same dependency policy that owns
+  // the corresponding projection. Shell does not reconstruct graph ancestry
+  // or presentation dependencies.
+  [[nodiscard]] bool
+  inspectorAffected(const nodegraph::GraphChanged &change,
+                    const nodegraph::NodeRef &selectedThread,
+                    InspectorProjection projection) const;
 
 private:
-  [[nodiscard]] static ConversationRowProjection projectRowChange(
-      std::optional<nodegraph::NodeGraph::ReadAccess> &read,
-      const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item);
+  [[nodiscard]] static std::optional<middle::ConversationRowChange>
+  projectRowChange(std::optional<nodegraph::NodeGraph::ReadAccess> &read,
+                   const nodegraph::NodeRef &thread,
+                   const nodegraph::NodeRef &item, std::string_view threadCwd,
+                   const nodegraph::NodeRef &activeTurn);
 
   const nodegraph::NodeGraph *graph_;
 };

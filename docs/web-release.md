@@ -12,22 +12,22 @@ The SDK revision is machine-readable in `web/AISUITE_REVISION` and is checked
 by CI before either SDK or application tests run. The source layout and build
 commands are documented in `web/README.md`.
 
-## Equality and release gate
+## Qualification and release gate
 
 A release candidate is eligible only when one CI revision proves all of the
 following:
 
 - the pinned SDK installs from its lockfile and passes protocol generation,
-  routing/lifecycle, and WebSocket transport equality tests;
+  routing/lifecycle, and WebSocket transport tests;
 - the browser application installs from its lockfile and passes the complete
-  75-test suite across ten web test files;
+  registered web test suite, including the shared frontend-presentation corpus;
 - the production bundle passes the real-Chromium responsive, focus, drawer,
   overflow, and coarse-pointer qualification workflow;
 - the production Vite artifact builds, passes its relocatability check, and is
   installed through the standalone CMake packaging project;
 - CI asserts the staged `share/codexui/web/index.html` and generated assets
   before uploading that installed tree, without source or development files;
-- the complete seven-test native CTest suite passes against the same AISuite
+- the complete registered native CTest suite passes against the same AISuite
   revision;
 - `git diff --check` passes and the recorded performance profile shows no
   material regression from `web-qualification.md`.

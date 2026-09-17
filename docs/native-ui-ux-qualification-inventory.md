@@ -81,11 +81,11 @@ child/root persistence in the full shell, and an idle-CPU/full-app check.
 | --- | --- |
 | No selection | Empty instruction and disabled settings/composer are stable and idle |
 | Initial hydration | Cold ready thread, `notLoaded` resume, delayed `thread/read`, active thread and failed hydration preserve authored input and show no partial history |
-| Atomic selection | All cards in the selected loaded window are constructed and laid out invisibly; one final frame appears with correct bottom/remembered anchor and no prior reserved blank space |
+| Atomic selection | The complete selected value window commits atomically while only its first viewport/overscan cards are constructed and laid out invisibly; one final frame appears with correct bottom/remembered anchor and no prior reserved blank space |
 | Mixed long selection | A retained history containing every supported card family, expanded command output, pending decisions, failures and completed work is exposed in one final frame with canonical order, ownership, expansion and heights |
 | Thread switch | Outgoing thread remains visually stable until the incoming final layout is ready; each thread restores its own anchor, follow mode, folds and nested output scroll |
-| Load 80 | Existing viewport remains unchanged while all newly requested cards materialize; one final anchored frame appears; repeated pages do not make later live updates history-sized |
-| Turn ownership | Every represented child card has its canonical opening You card as QWidget ancestor from its first visible frame; steering You remains nested and never becomes the turn owner |
+| Load 80 | Existing viewport remains unchanged while newly requested model rows and scalar heights are inserted; only the resulting viewport/overscan cards are resident in the final anchored frame; repeated pages do not make later live updates history-sized |
+| Turn ownership | Every represented row retains its canonical opening You identity as structural Turn root; resident cards are siblings under one view-owned Turn decoration, and steering You remains nested without becoming the root |
 | Root handoff | Local prompt to authoritative user item retains the same widget, parent, key, fold, height and anchor; item/result arrival in either order has no parentless frame |
 | Authoritative replacement | Removed/rolled-back nodes disappear atomically; retained optimistic tails stay attached; stale IDs have no widget |
 | Final geometry | Initial wrapping uses final viewport width; after reveal, card/turn/content heights and scroll maximum remain unchanged without new data |
@@ -98,10 +98,10 @@ intermediate empty extent or later layout correction at 30 fps.
 
 | Mutation | Following bottom | User scrolled up / holding scrollbar |
 | --- | --- | --- |
-| New normal prompt | Pending outer You card appears atomically and bottom remains visible | Card is fully constructed below the viewport; exact visible card/pixel and horizontal position do not move |
+| New normal prompt | Pending outer You card appears atomically and bottom remains visible | Offscreen model/state and scalar geometry update without constructing a card; exact visible card/pixel and horizontal position do not move |
 | New steering prompt | Pending teal You card appears inside the active owner atomically | Same owner and anchor remain visible; no temporary parentless or outer card |
 | Prompt acknowledgement | Same widget morphs to authoritative identity and stops delayed feedback | No movement, replacement or temporary neutral styling |
-| New agent/process/review card | Complete card and correct owner appear in one frame | No reserved blank extent, viewport movement or neighboring-card repaint |
+| New agent/process/review card | Complete card and correct owner appear in one frame | Offscreen value/scalar state is admitted without a resident widget, reserved blank extent, viewport movement, or neighboring-card repaint |
 | Streaming text/output | Affected card updates once per GUI frame; following remains at bottom | Offscreen updates perform zero QWidget work; visible updates preserve the anchored pixel except for required local growth |
 | Status-only change | Header/status/border paint only unless text width truly changes | No global geometry or viewport movement; terminal state cannot be overwritten by stale active state |
 | Card height change above viewport | Bottom/follow behavior remains natural | Scroll value compensates by the exact height delta so the painted anchor is stationary |
@@ -172,11 +172,13 @@ interrupt, disconnect, deletion, provider reset, reconnect, and navigation
 away/back while pending.
 
 Normal Send and steering submission are each repeated while following the
-bottom and while paused at the top, middle and near-bottom. The local prompt is
-materialized invisibly and exposed complete, remains under its canonical Turn/
-You owner while unrelated cards and decisions arrive before acknowledgement,
-keeps keyboard focus and the painted anchor stable, targets the selected node
-exactly once, and transitions from pending to accepted without replacement.
+bottom and while paused at the top, middle and near-bottom. A resident local
+prompt is prepared invisibly and exposed complete; an offscreen prompt remains
+model/state plus scalar geometry until it enters bounded residency. In both
+cases it retains its canonical Turn/You ownership while unrelated cards and
+decisions arrive before acknowledgement, keeps keyboard focus and the painted
+anchor stable, targets the selected node exactly once, and transitions from
+pending to accepted without replacement.
 
 Every decision workflow is exercised from the user's point of view: approval
 accept/reject/review, command permission, file-change review, structured
@@ -237,8 +239,8 @@ Protocol and Changes.
 - Queue full, eventfd wake failure, disconnect, lost controller, stale
   generation, graph contention, malformed/unknown protocol, app-server error,
   removal and shutdown are visible and never consume authored input silently.
-- No non-idempotent mutation is retried. Shutdown cannot hang. Retired nodes
-  detach QWidget state before acknowledgement and no queued pass touches a
+- No non-idempotent mutation is retried. Shutdown cannot hang. Qt projections
+  observe retired nodes before acknowledgement, and no queued pass touches a
   destroyed pane or stale generation.
 - Continuous unrelated revisions cannot starve conversation, thread or
   Inspector scans. Contention uses a nonzero bounded retry and does not create
@@ -294,8 +296,9 @@ that complete affected set interactively on a dedicated Xvfb display with
 `QT_QPA_PLATFORM=xcb`, not only with Qt's minimal `offscreen` plugin. Then run
 the corresponding full CodexUI script above against real `codex-bridge` and
 its app-server and inspect the movie frame by frame. A focused test gate is
-followed by the full native suite and WebUI parity suite at the qualification
-boundary.
+followed by the full native and browser behavioral suites at the qualification
+boundary. Parity is claimed only for a shared semantic corpus executed by both
+frontends.
 
 The inventory and test selection use only files checked into this local branch.
 No GitHub or other remote operation is part of testing or documentation.

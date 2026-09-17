@@ -10,15 +10,14 @@
 
 namespace codexui::codex {
 
-// These functions adapt an already-decoded worker-thread DOM. They do not
-// parse or encode JSON text and must not be called from the Qt main thread.
+// These pure conversions adapt already-decoded values. They neither parse nor
+// encode JSON text and retain no graph or protocol state.
 [[nodiscard]] nodegraph::Value valueFromJson(const nlohmann::json &value);
 [[nodiscard]] nodegraph::Value::Object
 objectFromJson(const nlohmann::json &value);
 [[nodiscard]] nodegraph::ProtocolRequestId
 requestIdFromJson(const nlohmann::json &value);
 
-// Reverse conversion is for worker-thread CodexBridge calls only.
 [[nodiscard]] nlohmann::json jsonFromValue(const nodegraph::Value &value);
 [[nodiscard]] nlohmann::json
 jsonFromRequestId(const nodegraph::ProtocolRequestId &requestId);

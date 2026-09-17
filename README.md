@@ -37,9 +37,9 @@ listed in the [1.0 contract](docs/web-1.0-contract.md).
 
 ## Build
 
-Qt 6 Widgets, Threads, libgit2 development files (discoverable as `libgit2`
-through pkg-config), SNode.C `master`/HEAD, and an installed canonical AISuite
-package exporting `AISuite::OpenAICodex` are required. On Debian and Ubuntu,
+Qt 6.6 or newer with Widgets, Threads, libgit2 development files (discoverable
+as `libgit2` through pkg-config), SNode.C `master`/HEAD, and an installed
+canonical AISuite package exporting `AISuite::OpenAICodex` are required. On Debian and Ubuntu,
 the libgit2 package is `libgit2-dev`. A combined install also requires the
 `web/app-dist/` artifact produced by the Browser build below. For a deliberately
 native-only build, add `-DCODEXUI_INSTALL_WEB=OFF` to the configure command.
@@ -98,12 +98,12 @@ geometry, shell-output, Inspector, and desktop-integration decisions are
 documented in
 [`docs/ui-behavior.md`](docs/ui-behavior.md).
 
-The browser architecture, native/web parity boundary, state ownership, and
+The browser architecture, native/web semantic boundary, state ownership, and
 version 1.0 delivery gates are documented in
 [`docs/web-1.0-contract.md`](docs/web-1.0-contract.md).
 
-Measured performance, equality evidence, packaging, and the release gate are
-recorded in [`docs/web-qualification.md`](docs/web-qualification.md) and
+Measured performance, shared-contract evidence, packaging, and the release
+gate are recorded in [`docs/web-qualification.md`](docs/web-qualification.md) and
 [`docs/web-release.md`](docs/web-release.md).
 
 ## License

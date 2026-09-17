@@ -6,6 +6,7 @@
 #include <QPlainTextEdit>
 
 class QFocusEvent;
+class QEvent;
 class QInputMethodEvent;
 class QKeyEvent;
 class QResizeEvent;
@@ -15,39 +16,40 @@ namespace codexui {
 
 // Owns the prompt-specific keyboard and content-height behavior. The parent
 // dock remains responsible for submission policy and for anchoring itself.
-class ExpandingPromptEditor final : public QPlainTextEdit
-{
-    Q_OBJECT
+class ExpandingPromptEditor final : public QPlainTextEdit {
+  Q_OBJECT
 
 public:
-    explicit ExpandingPromptEditor(QWidget* parent = nullptr);
+  explicit ExpandingPromptEditor(QWidget *parent = nullptr);
 
-    [[nodiscard]] static constexpr int compactHeight() noexcept { return 32; }
-    [[nodiscard]] static constexpr int maximumVisibleLineCount() noexcept { return 20; }
-    [[nodiscard]] bool requiresExpandedLayout(int widgetWidth) const;
+  [[nodiscard]] static constexpr int compactHeight() noexcept { return 32; }
+  [[nodiscard]] static constexpr int maximumVisibleLineCount() noexcept {
+    return 20;
+  }
+  [[nodiscard]] bool requiresExpandedLayout(int widgetWidth) const;
 
 signals:
-    void submitRequested();
-    void focusStateChanged(bool focused);
-    void editorHeightChanged(int height);
+  void submitRequested();
+  void focusStateChanged(bool focused);
+  void editorHeightChanged(int height);
 
 protected:
-    void focusInEvent(QFocusEvent* event) override;
-    void focusOutEvent(QFocusEvent* event) override;
-    void inputMethodEvent(QInputMethodEvent* event) override;
-    void keyPressEvent(QKeyEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
-    void wheelEvent(QWheelEvent* event) override;
+  void changeEvent(QEvent *event) override;
+  void focusInEvent(QFocusEvent *event) override;
+  void focusOutEvent(QFocusEvent *event) override;
+  void inputMethodEvent(QInputMethodEvent *event) override;
+  void keyPressEvent(QKeyEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
+  void wheelEvent(QWheelEvent *event) override;
 
 private:
-    void scheduleRemeasure();
-    void remeasure();
+  void scheduleRemeasure();
+  void remeasure();
 
-    int maximumEditorHeight = compactHeight();
-    int currentContentHeight = compactHeight();
-    bool contentScrollable = false;
-    bool preeditActive = false;
-    bool remeasureScheduled = false;
+  int currentContentHeight = compactHeight();
+  bool contentScrollable = false;
+  bool preeditActive = false;
+  bool remeasureScheduled = false;
 };
 
 } // namespace codexui

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {BrowserFrontendSession, suggestForkName} from "../dist/app/BrowserFrontendSession.js";
-import {cardKeys, result, stableKey} from "../dist/index.js";
+import {BrowserFrontendSession, DraftThreadId, suggestForkName} from "../dist/app/BrowserFrontendSession.js";
+import {cardKeys, changeSettingDraft, result, settingDraftFor, settingPromptOptions, stableKey,
+    turnSettingCatalog} from "../dist/index.js";
 
 class FakeSocket {
     protocol = "codex";
@@ -36,6 +37,9 @@ function respond(socket, request, result) {
 }
 function reject(socket, request, message) {
     socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, error: {code: -32000, message}}));
+}
+function rejectWithCode(socket, request, code, message) {
+    socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, error: {code, message}}));
 }
 async function readyProvider(socket, connectionId, role = "controller", providerGeneration = 1) {
     socket.receive({kind: "bridge.connection", event: "opened", connectionId, role});
@@ -87,10 +91,111 @@ test("selected-thread loading follows the latest hydration identity", async () =
     session.dispose();
 });
 
+test("repeated reloads share one thread read until it settles", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "reload-single-flight");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "reload-thread", status: {type: "idle"}},
+    ]});
+    session.selectThread("reload-thread");
+    const initialRead = requests(socket, "thread/read").at(-1);
+
+    session.reloadThread("reload-thread"); session.reloadThread("reload-thread");
+    assert.equal(requests(socket, "thread/read").length, 1);
+    respond(socket, initialRead, {thread: {id: "reload-thread", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+
+    session.reloadThread("reload-thread"); session.reloadThread("reload-thread");
+    assert.equal(requests(socket, "thread/read").length, 2);
+    respond(socket, requests(socket, "thread/read").at(-1), {
+        thread: {id: "reload-thread", status: {type: "idle"}, turns: []},
+    });
+    await Promise.resolve(); await Promise.resolve();
+    session.dispose();
+});
+
+test("browser history hydration separates metadata, turn summaries, and bounded item pages", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "paged-history");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "paged", status: {type: "idle"}},
+    ]});
+    session.selectThread("paged");
+    const metadata = requests(socket, "thread/read").at(-1);
+    assert.deepEqual(metadata.payload.params, {threadId: "paged", includeTurns: false});
+    respond(socket, metadata, {thread: {id: "paged", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+
+    const turns = requests(socket, "thread/turns/list").at(-1);
+    assert.deepEqual(turns.payload.params, {
+        threadId: "paged", limit: 80, sortDirection: "desc", itemsView: "summary",
+    });
+    respond(socket, turns, {data: [
+        {id: "newer", items: [{id: "newer-summary", type: "agentMessage", text: "summary"}]},
+        {id: "older", items: [{id: "older-summary", type: "agentMessage", text: "summary"}]},
+    ], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+
+    const itemPages = requests(socket, "thread/items/list");
+    assert.equal(itemPages.length, 2);
+    for (const page of itemPages) {
+        assert.equal(page.payload.params.limit, 80);
+        assert.equal(page.payload.params.sortDirection, "desc");
+        const turnId = page.payload.params.turnId;
+        respond(socket, page, {data: [
+            {turnId, item: {id: `${turnId}-agent`, type: "agentMessage", text: "answer"}},
+            {turnId, item: {id: `${turnId}-user`, type: "userMessage", content: [{type: "inputText", text: "prompt"}]}},
+        ], nextCursor: null});
+    }
+    await Promise.resolve(); await Promise.resolve();
+
+    const thread = session.model.thread("paged");
+    assert.deepEqual(thread?.turnOrder, ["older", "newer"]);
+    assert.deepEqual(thread?.turns.get("older")?.itemOrder,
+        ["older-user", "older-agent", "older-summary"]);
+    assert.deepEqual(thread?.turns.get("newer")?.itemOrder,
+        ["newer-user", "newer-agent", "newer-summary"]);
+    session.dispose();
+});
+
+test("browser history hydration admits at most eight concurrent item pages", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "bounded-item-pages");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "bounded", status: {type: "idle"}},
+    ]});
+    session.selectThread("bounded");
+    respond(socket, requests(socket, "thread/read").at(-1), {
+        thread: {id: "bounded", status: {type: "idle"}, turns: []},
+    });
+    await Promise.resolve(); await Promise.resolve();
+
+    const turns = requests(socket, "thread/turns/list").at(-1);
+    respond(socket, turns, {
+        data: Array.from({length: 10}, (_, index) => ({id: `turn-${index}`, items: []})),
+        nextCursor: null,
+    });
+    await Promise.resolve(); await Promise.resolve();
+    const firstWave = requests(socket, "thread/items/list");
+    assert.equal(firstWave.length, 8,
+        "the item scheduler has an exact eight-request concurrency ceiling");
+
+    respond(socket, firstWave[0], {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "thread/items/list").length, 9,
+        "one completion admits exactly one queued turn");
+    session.dispose();
+});
+
 test("user thread operations are single-flight and report failures", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "operation-feedback");
+    for (const id of ["thread-1", "provider-code", "transport-code"])
+        socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {id}}}));
 
     session.renameThread("thread-1", "Renamed");
     session.renameThread("thread-1", "Duplicate");
@@ -102,17 +207,46 @@ test("user thread operations are single-flight and report failures", async () =>
     assert.equal(session.operationPending("thread.rename", "thread-1"), false);
     assert.match(session.getSnapshot().notice, /Rename thread failed: rename denied/u);
 
-    respond(socket, requests(socket, "thread/list").at(-1), {data: [], nextCursor: null});
+    for (const [threadId, code] of [["provider-code", -32002], ["transport-code", -32020]]) {
+        session.dismissNotice();
+        session.renameThread(threadId, "Lifecycle-class rejection");
+        const lifecycleFailure = requests(socket, "thread/name/set").at(-1);
+        rejectWithCode(socket, lifecycleFailure, code, "request rejected without a lifecycle transition");
+        assert.equal(session.operationPending("thread.rename", threadId), true,
+            "lifecycle-class response waits for the SDK lifecycle ordering boundary");
+        await Promise.resolve(); await Promise.resolve();
+        assert.equal(session.operationPending("thread.rename", threadId), false);
+        assert.match(session.getSnapshot().notice, /request rejected without a lifecycle transition/u,
+            "an unchanged epoch completes the deferred error normally");
+    }
+
+    session.dispose();
+});
+
+test("stale operation completion cannot clear a newer exact pending operation", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "operation-generation");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "operation-thread"},
+    }}));
+    const presentationKey = session.threadVisualKey("operation-thread");
+    session.renameThread("operation-thread", "First", presentationKey);
+    const first = requests(socket, "thread/name/set").at(-1);
+    socket.receive({kind: "bridge.provider", state: "starting", providerGeneration: 1});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    assert.equal(session.threadVisualKey("operation-thread"), presentationKey,
+        "work invalidation alone cannot replace presentation identity");
+    session.renameThread("operation-thread", "Second", presentationKey);
+    const second = requests(socket, "thread/name/set").at(-1);
+    assert.notEqual(second, first);
+    respond(socket, first, {});
     await Promise.resolve(); await Promise.resolve();
-    const listsBefore = requests(socket, "thread/list").length;
-    session.requestThreads(); session.requestThreads();
-    assert.equal(requests(socket, "thread/list").length, listsBefore + 1);
-    assert.equal(session.operationPending("threads.refresh"), true);
-    const refresh = requests(socket, "thread/list").at(-1);
-    reject(socket, refresh, "refresh denied");
+    assert.equal(session.operationPending("thread.rename", "operation-thread", presentationKey), true,
+        "the stale promise cannot delete the new operation token");
+    respond(socket, second, {});
     await Promise.resolve(); await Promise.resolve();
-    assert.equal(session.operationPending("threads.refresh"), false);
-    assert.match(session.getSnapshot().notice, /Refresh threads failed: refresh denied/u);
+    assert.equal(session.operationPending("thread.rename", "operation-thread", presentationKey), false);
     session.dispose();
 });
 
@@ -190,7 +324,7 @@ test("the first prompt after a successful fork starts without redundant hydratio
     session.forkThread("fork-source");
     const fork = requests(socket, "thread/fork").at(-1);
     assert.ok(fork);
-    assert.deepEqual(fork.payload.params, {threadId: "fork-source"},
+    assert.deepEqual(fork.payload.params, {threadId: "fork-source", excludeTurns: true},
         "Quick fork changes no copied thread options and never sends a name field");
     const observedForkTitles = [];
     const unsubscribe = session.subscribe(() => {
@@ -232,7 +366,7 @@ test("the first prompt after a successful fork starts without redundant hydratio
     session.dispose();
 });
 
-test("browser session uses the C++ action routing and preserves prompt-response order", async () => {
+test("browser session uses canonical action routing and preserves prompt-response order", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect();
@@ -242,14 +376,15 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     const threadList = requests(socket, "thread/list").at(-1);
     const modelList = requests(socket, "model/list").at(-1);
     const profiles = requests(socket, "permissionProfile/list").at(-1);
-    assert.ok(threadList && modelList && profiles, "native catalog actions map to current protocol methods");
-    respond(socket, threadList, {data: [{id: "thread-1", preview: "Browser parity", cwd: "/workspace", status: {type: "idle"}}]});
+    assert.ok(threadList && modelList && profiles, "catalog actions map to current protocol methods");
+    respond(socket, threadList, {data: [{id: "thread-1", preview: "Browser thread", cwd: "/workspace", status: {type: "idle"}}]});
     respond(socket, modelList, {data: [{id: "gpt-current", displayName: "Current"}]});
     respond(socket, profiles, {data: []});
     session.selectThread("thread-1");
     const read = requests(socket, "thread/read").at(-1);
-    assert.deepEqual(read.payload.params, {threadId: "thread-1", includeTurns: true});
-    respond(socket, read, {thread: {id: "thread-1", preview: "Browser parity", cwd: "/workspace", status: {type: "idle"}, turns: []}});
+    assert.deepEqual(read.payload.params, {threadId: "thread-1", includeTurns: false},
+        "metadata hydration cannot embed retained history");
+    respond(socket, read, {thread: {id: "thread-1", preview: "Browser thread", cwd: "/workspace", status: {type: "idle"}, turns: []}});
 
     const authoredPrompt = "  first authored line\n\nthird authored line\n\n";
     assert.equal(await session.submitPrompt(authoredPrompt), true);
@@ -316,6 +451,8 @@ test("acknowledged turn roots stay active across a delayed lifecycle event", asy
     await waitForPublish();
     const promoted = session.conversation();
     assert.equal(promoted.activeTurnId, "handoff-turn");
+    assert.equal(session.model.activeTurnId("handoff-thread"), "handoff-turn",
+        "the presentation model owns successful turn-start identity");
     assert.equal(promoted.sections[0]?.cards[0]?.kind, "userMessage");
 
     socket.receive(appserver({jsonrpc: "2.0", method: "turn/started", params: {
@@ -361,7 +498,7 @@ test("stream deltas reconcile prompts only when a user message can materialize",
     session.dispose();
 });
 
-test("new threads retain one optimistic row through first-turn acknowledgment", async () => {
+test("new threads promote one draft identity into the authoritative row", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
@@ -371,44 +508,71 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
         workspace: "/workspace", name: "Named draft", baseInstructions: "Base context",
         developerInstructions: "Developer context", ephemeral: true,
     });
-    const draft = session.getSnapshot().optimisticThreads[0];
-    assert.equal(draft?.id, "__codexui_new_thread__");
-    assert.equal(draft?.state, "awaiting");
-    assert.equal(draft?.title, "New thread");
-    assert.equal(draft?.cwd, "/workspace");
+    const draftKey = session.threadVisualKey(DraftThreadId);
+    const composerKey = session.composerVisualKey();
+    const settingCatalog = turnSettingCatalog({models: [], permissionProfiles: []});
+    const initialSettings = settingDraftFor(session.settingDrafts, draftKey, {cwd: "/workspace"}, settingCatalog);
+    let authoredSettings = changeSettingDraft(session.settingDrafts, draftKey, {cwd: "/workspace"},
+        settingCatalog, initialSettings.settingStamps, "approval", "never");
+    authoredSettings = changeSettingDraft(session.settingDrafts, draftKey, {cwd: "/workspace"},
+        settingCatalog, authoredSettings.settingStamps, "cwd", "/authored/workspace");
+    assert.deepEqual(session.getSnapshot().newThreadDraft, {
+        workspace: "/workspace", name: "", baseInstructions: "Base context",
+        developerInstructions: "Developer context", ephemeral: true,
+    });
 
-    const submitted = session.submitPrompt("first prompt", [], {}, {model: "gpt-current"});
+    const options = settingPromptOptions(authoredSettings, settingCatalog);
+    const submitted = session.submitPrompt("first prompt", [], {effort: "high", summary: "concise"},
+        {...options.thread, model: "gpt-current"});
     const create = requests(socket, "thread/start").at(-1);
     assert.ok(create);
     assert.deepEqual(create.payload.params, {
-        model: "gpt-current", cwd: "/workspace", baseInstructions: "Base context",
+        model: "gpt-current", approvalPolicy: "never", cwd: "/authored/workspace", baseInstructions: "Base context",
         developerInstructions: "Developer context", ephemeral: true,
     });
-    assert.equal(await session.submitPrompt("queued during creation"), true);
+    assert.equal(await session.submitPrompt("queued during creation", [], {effort: "must-not-steer"},
+        {model: "must-not-create"}), true);
     session.beginNewThread();
-    assert.equal(session.getSnapshot().optimisticThreads[0]?.visualKey, draft?.visualKey);
+    assert.equal(session.threadVisualKey(DraftThreadId), draftKey);
     assert.equal(requests(socket, "thread/start").length, 1,
         "additional prompts and New Thread cannot duplicate an in-flight creation");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "created-thread", name: "Created thread", cwd: "/workspace", status: {type: "idle"}},
+    }}));
+    const displacedKey = session.threadVisualKey("created-thread");
+    settingDraftFor(session.settingDrafts, displacedKey, session.model.thread("created-thread").raw,
+        settingCatalog, session.model.thread("created-thread").settingStamps);
     respond(socket, create, {thread: {id: "created-thread", name: "Created thread", cwd: "/workspace", status: {type: "idle"}}});
     assert.equal(await submitted, true);
     await Promise.resolve();
-    assert.equal(session.getSnapshot().optimisticThreads[0]?.title, "New thread");
+    assert.equal(session.getSnapshot().newThreadDraft, undefined);
     assert.equal(session.model.thread("created-thread")?.title, "Created thread");
     assert.equal(requests(socket, "thread/name/set").length, 0,
         "an ephemeral thread never sends an unsupported metadata update");
 
-    const promoted = session.getSnapshot().optimisticThreads[0];
-    assert.equal(promoted?.id, "created-thread");
-    assert.equal(promoted?.visualKey, draft?.visualKey);
-    assert.equal(promoted?.state, "awaiting");
-    assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey);
+    assert.equal(session.threadVisualKey("created-thread"), draftKey);
+    assert.equal(session.composerVisualKey(), composerKey,
+        "acknowledgement cannot replace the shared composer object");
+    assert.equal(session.settingDrafts.get(draftKey), authoredSettings,
+        "optimistic promotion retains the exact settings draft object");
+    assert.equal(session.settingDrafts.has(displacedKey), false,
+        "promotion retires a pre-published duplicate presentation bucket and its draft");
 
     const start = requests(socket, "turn/start").at(-1);
     assert.ok(start);
+    assert.equal(start.payload.params.effort, "high");
+    assert.equal(start.payload.params.summary, "concise");
+    assert.equal(Object.hasOwn(start.payload.params, "model"), false,
+        "thread/start options cannot leak into turn/start");
     respond(socket, start, {turn: {id: "created-turn", status: "inProgress"}});
     await Promise.resolve(); await waitForPublish();
-    assert.notEqual(session.getSnapshot().optimisticThreads[0]?.state, "awaiting");
-    assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey,
+    const steer = requests(socket, "turn/steer").at(-1);
+    assert.ok(steer);
+    assert.equal(steer.payload.params.expectedTurnId, "created-turn");
+    assert.equal(steer.payload.params.input[0].text, "queued during creation");
+    assert.equal(Object.hasOwn(steer.payload.params, "effort"), false);
+    assert.equal(Object.hasOwn(steer.payload.params, "model"), false);
+    assert.equal(session.threadVisualKey("created-thread"), draftKey,
         "canonical styling retains the optimistic row's React identity");
     assert.equal(session.model.thread("created-thread")?.title, "Created thread");
     assert.equal(session.model.thread("created-thread")?.localNameOverlay, undefined);
@@ -423,9 +587,15 @@ test("new-thread completion preserves later navigation and explicit drafts start
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "other-thread"}]});
 
     session.beginNewThread();
-    const firstDraftRevision = session.getSnapshot().newThreadDraftRevision;
+    const firstDraftKey = session.threadVisualKey(DraftThreadId);
+    const firstComposerKey = session.composerVisualKey();
     const submitted = session.submitPrompt("background creation");
     const create = requests(socket, "thread/start").at(-1);
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    await Promise.resolve(); await waitForPublish();
+    assert.equal(requests(socket, "thread/read").some(request =>
+        request.payload.params.threadId === DraftThreadId), false,
+    "provider publication cannot hydrate the optimistic sentinel");
     session.selectThread("other-thread");
     respond(socket, create, {thread: {id: "background-thread", status: {type: "idle"}}});
     assert.equal(await submitted, true);
@@ -436,8 +606,59 @@ test("new-thread completion preserves later navigation and explicit drafts start
 
     session.beginNewThread();
     assert.equal(session.prompts.submissions("__codexui_new_thread__").length, 0);
-    assert.equal(session.getSnapshot().newThreadDraftRevision, firstDraftRevision + 1,
-        "explicit New thread establishes a clean shared composer generation");
+    assert.notEqual(session.threadVisualKey(DraftThreadId), firstDraftKey,
+        "explicit New thread establishes a fresh shared composer identity");
+    assert.notEqual(session.composerVisualKey(), firstComposerKey,
+        "only explicit New thread replaces the shared composer draft lifetime");
+    session.dispose();
+});
+
+test("settings drafts follow thread incarnations and remain bounded across retirement", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "settings-lifetime");
+    const catalog = turnSettingCatalog({models: [], permissionProfiles: []});
+
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "settings-thread", approvalPolicy: "on-request"},
+    }}));
+    const thread = session.model.thread("settings-thread");
+    const firstIdentity = session.threadVisualKey("settings-thread");
+    const initial = settingDraftFor(session.settingDrafts, firstIdentity, thread.raw,
+        catalog, thread.settingStamps);
+    const authored = changeSettingDraft(session.settingDrafts, firstIdentity, thread.raw,
+        catalog, initial.settingStamps, "approval", "never");
+    session.selectThread("settings-thread");
+    session.selectThread("another-thread");
+    assert.equal(session.settingDrafts.get(firstIdentity), authored,
+        "ordinary navigation preserves the semantic thread's exact draft");
+
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    await Promise.resolve();
+    assert.equal(session.settingDrafts.size, 0, "provider replacement retires prior-authority drafts");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "settings-thread", approvalPolicy: "on-request"},
+    }}));
+    const replacement = session.model.thread("settings-thread");
+    const replacementIdentity = session.threadVisualKey("settings-thread");
+    assert.notEqual(replacementIdentity, firstIdentity);
+    const fresh = settingDraftFor(session.settingDrafts, replacementIdentity, replacement.raw,
+        catalog, replacement.settingStamps);
+    assert.notEqual(fresh, authored);
+    assert.equal(fresh.touched.size, 0, "a reused provider ID starts a fresh draft incarnation");
+
+    for (let index = 0; index < 128; ++index) {
+        const id = `retired-settings-${index}`;
+        socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {id}}}));
+        const current = session.model.thread(id);
+        settingDraftFor(session.settingDrafts, session.threadVisualKey(id), current.raw, catalog,
+            current.settingStamps);
+        socket.receive(appserver({jsonrpc: "2.0", method: "thread/deleted", params: {threadId: id}}));
+    }
+    assert.equal(session.settingDrafts.size, 1,
+        "explicit retirement removes each draft in constant work without a render-time sweep");
+    assert.equal(session.viewportState.retainedPresentationCount(), 1,
+        "viewport, fold, and presentation identity retire at the same boundary");
     session.dispose();
 });
 
@@ -493,7 +714,7 @@ test("ephemeral Fork with options sends adjustable fields without a rename", asy
     });
     const fork = requests(socket, "thread/fork").at(-1);
     assert.deepEqual(fork.payload.params, {
-        threadId: "source", cwd: "/new", baseInstructions: "Base",
+        threadId: "source", excludeTurns: true, cwd: "/new", baseInstructions: "Base",
         developerInstructions: "Developer", ephemeral: true,
     });
     respond(socket, fork, {thread: {id: "advanced", name: "Provider name", cwd: "/new"}});
@@ -551,7 +772,7 @@ test("Recent promotes on turn admission, reverts rejection, confirms acknowledge
             "acknowledgement confirms the admitted turn order");
         assert.equal(session.model.thread("older").recencyAt, 10,
             "client confirmation preserves app-server recency as provider data");
-        assert.equal(session.model.thread("older").updatedAt, 12,
+        assert.equal(session.model.thread("older").raw.updatedAt, 12,
             "turn ordering never rewrites last-changed data");
 
         session.selectThread("recent");
@@ -609,7 +830,7 @@ test("thread activity preserves provider time during hydration and advances for 
     respond(socket, rename, {});
     assert.ok(session.model.thread("tracked").lastActivityAt >= beforeResponse,
         "meaningful thread responses advance local activity");
-    assert.equal(session.model.thread("tracked").updatedAt, 20);
+    assert.equal(session.model.thread("tracked").raw.updatedAt, 20);
     assert.equal(session.model.thread("tracked").recencyAt, 30,
         "non-prompt traffic does not reorder Recent or rewrite provider timestamps");
 
@@ -620,6 +841,26 @@ test("thread activity preserves provider time during hydration and advances for 
     }}));
     assert.ok(session.model.thread("tracked").lastActivityAt >= beforeInbound,
         "thread-scoped app-server frames advance local activity");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {
+        threadId: "tracked", threadSettings: {model: "gpt-a"},
+    }}));
+    session.model.thread("tracked").lastActivityAt = 1;
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {
+        threadId: "tracked", threadSettings: {model: "gpt-a"},
+    }}));
+    assert.equal(session.model.thread("tracked").lastActivityAt, 1,
+        "an effective settings no-op does not create conversation activity");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {
+        threadId: "tracked", threadSettings: {reasoningEffort: "high"},
+    }}));
+    session.model.thread("tracked").lastActivityAt = 1;
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {
+        threadId: "tracked", threadSettings: {effort: "high"},
+    }}));
+    assert.equal(session.model.thread("tracked").lastActivityAt, 1,
+        "an equivalent setting-alias migration does not create activity");
+    assert.equal(session.model.thread("tracked").raw.effort, "high");
+    assert.equal(Object.hasOwn(session.model.thread("tracked").raw, "reasoningEffort"), false);
     session.dispose();
 });
 
@@ -641,7 +882,7 @@ test("browser transport reconnects cleanly across provider generations", async (
     await readyProvider(sockets[1], "second", "controller", 2);
     assert.ok(requests(sockets[1], "thread/list").length > 0);
     assert.equal(session.model.connection().providerGeneration, 2);
-    assert.equal(session.model.connection().role, "controller");
+    assert.equal(session.role(), "controller");
     session.dispose();
 });
 
@@ -652,7 +893,6 @@ test("a pre-open WebSocket failure can retry after completed detach", async () =
     });
     session.connect();
     sockets[0].onerror?.();
-    assert.equal(session.model.connection().detail, "bridge WebSocket transport failed");
     session.connect();
     assert.equal(sockets.length, 1, "replacement waits until the failed endpoint releases the connection");
     sockets[0].finishClose();
@@ -684,10 +924,70 @@ test("browser session resumes a not-loaded thread before starting its queued tur
     await Promise.resolve();
     const resume = requests(socket, "thread/resume").at(-1);
     assert.ok(resume);
+    assert.equal(resume.payload.params.excludeTurns, true,
+        "resume activates live state without embedding thread history");
     assert.equal(requests(socket, "turn/start").length, 0);
     respond(socket, resume, {thread: {id: "sleeping", status: {type: "idle"}}});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wake and work");
+    session.dispose();
+});
+
+test("a successful resume that leaves the thread not loaded terminates without retry", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "resume-without-progress");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "still-sleeping", status: {type: "notLoaded"}},
+    ]});
+    await Promise.resolve();
+    session.selectThread("still-sleeping");
+    respond(socket, requests(socket, "thread/read").at(-1), {
+        thread: {id: "still-sleeping", status: {type: "notLoaded"}, turns: []},
+    });
+    await Promise.resolve(); await Promise.resolve();
+    await session.submitPrompt("do not spin"); await Promise.resolve();
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume);
+    respond(socket, resume, {thread: {id: "still-sleeping", status: {type: "notLoaded"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 1);
+    assert.equal(requests(socket, "turn/start").length, 0);
+    assert.equal(session.prompts.submissions("still-sleeping").at(-1).state, "failed");
+    assert.match(session.getSnapshot().notice, /resume returned without loading/u);
+    session.dispose();
+});
+
+test("resume eligibility follows authoritative lifecycle state after hydration", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "lifecycle-resume");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "closed-after-read", status: {type: "idle"}},
+        {id: "woken-after-read", status: {type: "notLoaded"}},
+    ]});
+
+    session.selectThread("closed-after-read");
+    respond(socket, requests(socket, "thread/read").at(-1),
+        {thread: {id: "closed-after-read", status: {type: "idle"}, turns: []}});
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/closed", params: {
+        threadId: "closed-after-read",
+    }}));
+    await session.submitPrompt("resume closed thread"); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 0);
+    assert.equal(requests(socket, "thread/resume").length, 1,
+        "a post-read close is derived from current model status");
+
+    session.selectThread("woken-after-read");
+    respond(socket, requests(socket, "thread/read").at(-1),
+        {thread: {id: "woken-after-read", status: {type: "notLoaded"}, turns: []}});
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/status/changed", params: {
+        threadId: "woken-after-read", status: {type: "idle"},
+    }}));
+    await session.submitPrompt("already awake"); await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 1,
+        "a post-read active status does not retain stale resume state");
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.threadId, "woken-after-read");
     session.dispose();
 });
 
@@ -731,8 +1031,8 @@ test("pending request responses require current controller authority and resolve
     assert.match(retainedDiagnostic, /redacted; inspect the typed Requests view/u,
         "Protocol diagnostics do not retain raw server-request content");
     assert.equal(session.canResolvePending(request), true);
-    assert.equal(session.resolvePending(request, {result: {decision: "accept"}}), true);
-    assert.equal(session.resolvePending(request, {result: {decision: "accept"}}), false);
+    assert.equal(session.resolvePending(request, {choice: "accept"}), true);
+    assert.equal(session.resolvePending(request, {choice: "accept"}), false);
     const responses = socket.sent.filter(message => message.kind === "appserver" && message.payload.id === 77
         && !Object.hasOwn(message.payload, "method"));
     assert.equal(responses.length, 1, "a repeated action cannot emit a duplicate JSON-RPC response");
@@ -741,7 +1041,7 @@ test("pending request responses require current controller authority and resolve
     socket.receive(appserver({jsonrpc: "2.0", method: "serverRequest/resolved", params: {
         requestId: 77, threadId: "thread-request",
     }}));
-    assert.equal(session.model.pendingRequestCount(), 0);
+    assert.equal(session.model.pendingRequestPresentations().size, 0);
     assert.equal(session.isPendingResolving(request), false);
 
     socket.receive(appserver({jsonrpc: "2.0", id: 78, method: "item/commandExecution/requestApproval", params: {
@@ -751,9 +1051,55 @@ test("pending request responses require current controller authority and resolve
     assert.ok(guarded);
     socket.receive({kind: "bridge.controller", controllerConnectionId: "another-client"});
     assert.equal(session.canResolvePending(guarded), false);
-    assert.equal(session.resolvePending(guarded, {result: {decision: "accept"}}), false);
+    assert.equal(session.resolvePending(guarded, {choice: "accept"}), false);
     socket.receive({kind: "bridge.controller", controllerConnectionId: "request-controller"});
     assert.equal(session.canResolvePending(guarded), true);
+    session.dispose();
+});
+
+test("pending request identity is immutable until retirement and resets before same-ID reuse", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "request-lifetime");
+    const request = command => socket.receive(appserver({jsonrpc: "2.0", id: 90,
+        method: "item/commandExecution/requestApproval", params: {
+            threadId: "request-thread", turnId: "request-turn", itemId: "request-item", command,
+            availableDecisions: ["accept", "decline"],
+        }}));
+    request("echo first");
+    const first = session.model.pendingRequestPresentations().get("90");
+    assert.ok(first);
+    const firstPresentation = first.presentationKey;
+    const protocolCount = session.getSnapshot().protocolFrames.length;
+    request("echo updated");
+    const updated = session.model.pendingRequestPresentations().get("90");
+    assert.equal(updated, first);
+    assert.equal(updated.presentationKey, firstPresentation);
+    assert.equal(updated.raw.command, "echo first",
+        "a duplicate JSON-RPC slot cannot mutate the request behind rendered actions");
+    assert.equal(session.getSnapshot().protocolFrames.length, protocolCount,
+        "an ambiguous same-ID request is rejected before presentation side effects");
+    assert.equal(session.resolvePending(updated, {choice: "accept"}), true);
+    socket.receive({kind: "bridge.provider", state: "starting", providerGeneration: 1});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    assert.equal(session.model.pendingRequestPresentations().get("90"), first);
+    assert.equal(session.isPendingResolving(first), true);
+    assert.equal(session.resolvePending(first, {choice: "accept"}), false,
+        "a transient provider state cannot revive an accepted reverse-interaction token");
+    socket.receive(appserver({jsonrpc: "2.0", method: "serverRequest/resolved", params: {
+        requestId: 90, threadId: "request-thread",
+    }}));
+    assert.equal(session.isPendingResolving(first), false);
+
+    request("echo replacement");
+    const replacement = session.model.pendingRequestPresentations().get("90");
+    assert.ok(replacement);
+    assert.notEqual(replacement, first);
+    assert.notEqual(replacement.presentationKey, firstPresentation,
+        "React form state cannot cross an explicit request retirement boundary");
+    assert.equal(session.isPendingResolving(replacement), false);
+    assert.equal(session.canResolvePending(first), false);
+    assert.equal(session.canResolvePending(replacement), true);
     session.dispose();
 });
 
@@ -794,7 +1140,7 @@ test("a queued prompt waits through controller loss and resumes after control re
     session.dispose();
 });
 
-test("provider loss preserves a queued hydration-gated prompt for the next generation", async () => {
+test("provider loss makes a queued hydration-gated prompt terminal instead of resending it", async () => {
     const sockets = [];
     const session = new BrowserFrontendSession("ws://bridge.test/", () => {
         const socket = new FakeSocket(); sockets.push(socket); return socket;
@@ -803,10 +1149,12 @@ test("provider loss preserves a queued hydration-gated prompt for the next gener
     respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
     session.selectThread("retained");
     const staleRead = requests(sockets[0], "thread/read").at(-1);
-    assert.equal(await session.submitPrompt("survive restart"), true);
+    assert.equal(await session.submitPrompt("do not send after restart"), true);
     sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
     sockets[0].close(1000, "restart");
     respond(sockets[0], staleRead, {thread: {id: "retained", status: {type: "idle"}, turns: []}});
+    assert.equal(session.prompts.submissions("retained").at(-1).state, "failed");
+    assert.match(session.prompts.submissions("retained").at(-1).error, /queued prompt was sent/u);
 
     session.reconnect(); await Promise.resolve();
     sockets[1].open(); await readyProvider(sockets[1], "generation-b", "controller", 2);
@@ -815,7 +1163,197 @@ test("provider loss preserves a queued hydration-gated prompt for the next gener
     respond(sockets[1], currentRead, {thread: {id: "retained", status: {type: "idle"}, turns: []}});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(sockets[0], "turn/start").length, 0);
-    assert.equal(requests(sockets[1], "turn/start").at(-1).payload.params.input[0].text, "survive restart");
+    assert.equal(requests(sockets[1], "turn/start").length, 0,
+        "reconnection and hydration never submit an already-admitted prompt");
+    session.dispose();
+});
+
+test("provider replacement retires an in-flight turn with an uncertain outcome and no resend", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "inflight-generation-a");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "inflight-thread", status: {type: "idle"}},
+    ]});
+    await Promise.resolve();
+    session.selectThread("inflight-thread");
+    respond(socket, requests(socket, "thread/read").at(-1), {
+        thread: {id: "inflight-thread", status: {type: "idle"}, turns: []},
+    });
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(await session.submitPrompt("send exactly once"), true);
+    await Promise.resolve();
+    const start = requests(socket, "turn/start").at(-1);
+    assert.ok(start);
+
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    await Promise.resolve(); await Promise.resolve();
+    const submission = session.prompts.submissions("inflight-thread").at(-1);
+    assert.equal(submission.state, "failed");
+    assert.match(submission.error, /outcome is unknown/u);
+    assert.equal(session.getSnapshot().protocolFrames.some(frame =>
+        frame?.kind === "result" && frame?.action === "turn.start"), false,
+    "the synthetic stale SDK failure never enters presentation diagnostics");
+
+    const currentRead = requests(socket, "thread/read").at(-1);
+    respond(socket, currentRead, {thread: {id: "inflight-thread", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 1);
+    session.dispose();
+});
+
+test("transport detach retires an in-flight turn before its synthetic failure callback", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "inflight-detach");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "detach-thread", status: {type: "idle"}},
+    ]});
+    await Promise.resolve();
+    session.selectThread("detach-thread");
+    respond(socket, requests(socket, "thread/read").at(-1), {
+        thread: {id: "detach-thread", status: {type: "idle"}, turns: []},
+    });
+    await Promise.resolve(); await Promise.resolve();
+    await session.submitPrompt("uncertain transport outcome"); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 1);
+
+    socket.close(1006, "network lost");
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.prompts.submissions("detach-thread").at(-1).state, "failed");
+    assert.equal(session.getSnapshot().protocolFrames.some(frame =>
+        frame?.kind === "result" && frame?.action === "turn.start"), false);
+    session.dispose();
+});
+
+test("a provider-generation jump cannot apply pending create, user-operation, or interrupt callbacks", async () => {
+    const createSocket = new FakeSocket();
+    const createSession = new BrowserFrontendSession("ws://bridge.test/", () => createSocket);
+    createSession.connect(); createSocket.open(); await readyProvider(createSocket, "stale-create");
+    createSession.beginNewThread({workspace: "/work", name: "Draft name",
+        baseInstructions: "", developerInstructions: "", ephemeral: false});
+    const draftPresentation = createSession.threadVisualKey(DraftThreadId);
+    const draftComposer = createSession.composerVisualKey();
+    createSession.viewportState.updateScroll(DraftThreadId, draftPresentation, 144, false,
+        {cardKey: "local-prompt", pixelOffset: 12});
+    createSession.viewportState.setCardCollapsed(DraftThreadId, draftPresentation, "local-prompt", true);
+    const creating = createSession.submitPrompt("retained draft prompt");
+    assert.equal(requests(createSocket, "thread/start").length, 1);
+    createSocket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    assert.equal(await creating, false);
+    await Promise.resolve();
+    assert.equal(createSession.getSnapshot().selectedThreadId, DraftThreadId);
+    assert.equal(createSession.getSnapshot().newThreadDraft?.name, "Draft name");
+    assert.equal(createSession.threadVisualKey(DraftThreadId), draftPresentation,
+        "provider replacement cannot remount an authored draft");
+    assert.equal(createSession.composerVisualKey(), draftComposer);
+    assert.deepEqual(createSession.viewportState.scroll(DraftThreadId, draftPresentation), {
+        anchor: {cardKey: "local-prompt", pixelOffset: 12}, scrollTop: 144, following: false,
+    });
+    assert.equal(createSession.viewportState.cardCollapsed(DraftThreadId, draftPresentation,
+        "local-prompt", false), true);
+    assert.equal(createSession.prompts.submissions(DraftThreadId).at(-1).state, "failed");
+    assert.equal(requests(createSocket, "turn/start").length, 0);
+    assert.equal(createSession.getSnapshot().notice, "");
+    assert.equal(createSession.getSnapshot().protocolFrames.some(frame =>
+        frame?.kind === "result" && frame?.action === "thread.create"), false);
+    createSession.dispose();
+
+    const operationSocket = new FakeSocket();
+    const operationSession = new BrowserFrontendSession("ws://bridge.test/", () => operationSocket);
+    operationSession.connect(); operationSocket.open(); await readyProvider(operationSocket, "stale-operation");
+    respond(operationSocket, requests(operationSocket, "thread/list").at(-1), {data: [
+        {id: "operation-thread", status: {type: "active"}},
+    ]});
+    await Promise.resolve();
+    operationSession.selectThread("operation-thread");
+    respond(operationSocket, requests(operationSocket, "thread/read").at(-1), {thread: {
+        id: "operation-thread", status: {type: "active"},
+        turns: [{id: "operation-turn", status: "inProgress", items: []}],
+    }});
+    await Promise.resolve(); await Promise.resolve();
+    operationSession.renameThread("operation-thread", "Old generation name");
+    operationSession.interrupt();
+    assert.equal(requests(operationSocket, "thread/name/set").length, 1);
+    assert.equal(requests(operationSocket, "turn/interrupt").length, 1);
+
+    operationSocket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(operationSession.operationPending("thread.rename", "operation-thread"), false);
+    assert.equal(operationSession.getSnapshot().notice, "");
+    assert.equal(operationSession.getSnapshot().protocolFrames.some(frame => frame?.kind === "result"
+        && ["thread.rename", "turn.interrupt"].includes(frame?.action)), false);
+    operationSocket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "operation-thread", status: {type: "idle"}},
+    }}));
+    operationSession.renameThread("operation-thread", "Current generation name");
+    const currentRename = requests(operationSocket, "thread/name/set").at(-1);
+    assert.equal(requests(operationSocket, "thread/name/set").length, 2,
+        "the exact operation key is reusable after its stale completion retires");
+    respond(operationSocket, currentRename, {});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(operationSession.getSnapshot().protocolFrames.filter(frame =>
+        frame?.kind === "result" && frame?.action === "thread.rename").length, 1);
+    operationSession.dispose();
+});
+
+test("same-ID replacement rejects stale browser interactions and provider frames", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "exact-browser-lifetime");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "holder", status: {type: "idle"}},
+    }}));
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "reused", status: {type: "active"}, turns: [{
+            id: "reused-turn", status: "inProgress", items: [],
+        }]},
+    }}));
+    const firstPresentation = session.threadVisualKey("reused");
+    session.selectThread("reused", firstPresentation);
+    session.interrupt(firstPresentation);
+    const staleInterrupt = requests(socket, "turn/interrupt").at(-1);
+    assert.ok(staleInterrupt);
+    session.selectThread("holder");
+
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/deleted", params: {threadId: "reused"}}));
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "reused", status: {type: "idle"}},
+    }}));
+    const replacement = session.model.thread("reused");
+    const replacementPresentation = session.threadVisualKey("reused");
+    assert.notEqual(replacementPresentation, firstPresentation);
+    replacement.lastActivityAt = 17;
+    respond(socket, staleInterrupt, {});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(replacement.lastActivityAt, 17,
+        "an old interrupt callback cannot record activity against a reused ID");
+    assert.equal(session.getSnapshot().protocolFrames.some(frame => frame?.kind === "result"
+        && frame?.action === "turn.interrupt"), false);
+    session.selectThread("reused", firstPresentation);
+    assert.equal(session.getSnapshot().selectedThreadId, "holder");
+    session.renameThread("reused", "Stale name", firstPresentation);
+    assert.equal(requests(socket, "thread/name/set").length, 0);
+
+    session.selectThread("reused", replacementPresentation);
+    assert.equal(session.canSubmit(firstPresentation), false,
+        "a stale mounted Composer cannot admit or clear its authored text");
+    assert.equal(session.canSubmit(replacementPresentation), true);
+    assert.equal(await session.submitPrompt("stale composer", [], {}, {}, firstPresentation), false);
+    assert.equal(session.prompts.submissions("reused").length, 0);
+    session.viewportState.updateScroll("reused", replacementPresentation, 91, false);
+    session.viewportState.setCardCollapsed("reused", replacementPresentation, "card", true);
+    const protocolCount = session.getSnapshot().protocolFrames.length;
+    socket.receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 0});
+    assert.equal(session.model.thread("reused"), replacement,
+        "a lower provider generation cannot retire current presentation state");
+    assert.equal(session.threadVisualKey("reused"), replacementPresentation);
+    assert.deepEqual(session.viewportState.scroll("reused", replacementPresentation), {
+        scrollTop: 91, following: false,
+    });
+    assert.equal(session.viewportState.cardCollapsed("reused", replacementPresentation, "card", false), true);
+    assert.equal(session.getSnapshot().protocolFrames.length, protocolCount,
+        "a rejected stale frame is a complete semantic no-op");
     session.dispose();
 });
 
@@ -823,6 +1361,8 @@ test("a provider-generation transition invalidates prior thread hydration", asyn
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "generation-transition");
+    const staleModels = requests(socket, "model/list").at(-1);
+    const staleProfiles = requests(socket, "permissionProfile/list").at(-1);
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "same-thread", status: {type: "idle"}}]});
     session.selectThread("same-thread");
     respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "same-thread", status: {type: "idle"}, turns: []}});
@@ -831,6 +1371,18 @@ test("a provider-generation transition invalidates prior thread hydration", asyn
 
     socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
     await Promise.resolve();
+    const currentModels = requests(socket, "model/list").at(-1);
+    const currentProfiles = requests(socket, "permissionProfile/list").at(-1);
+    respond(socket, staleModels, {data: [{id: "stale-model"}]});
+    respond(socket, staleProfiles, {data: [{id: "stale-profile"}]});
+    respond(socket, currentModels, {data: [{id: "current-model"}]});
+    respond(socket, currentProfiles, {data: [{id: "current-profile"}]});
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(session.model.turnSettingsCatalogs(), {
+        models: [{id: "current-model"}], permissionProfiles: {data: [{id: "current-profile"}]},
+    });
+    assert.doesNotMatch(JSON.stringify(session.getSnapshot().protocolFrames), /stale-(?:model|profile)/u,
+        "stale catalog results never enter retained diagnostics");
     assert.equal(requests(socket, "thread/list").length, 2);
     const currentRead = requests(socket, "thread/read").at(-1);
     assert.equal(requests(socket, "thread/read").length, readsBefore + 1);
@@ -843,7 +1395,7 @@ test("a provider-generation transition invalidates prior thread hydration", asyn
     session.dispose();
 });
 
-test("thread-not-found turn submission performs exactly one resume recovery", async () => {
+test("a rejected turn is terminal and never resubmitted automatically", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "recover");
@@ -851,19 +1403,12 @@ test("thread-not-found turn submission performs exactly one resume recovery", as
     session.selectThread("recover-thread");
     respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "recover-thread", status: {type: "idle"}, turns: []}});
     await Promise.resolve();
-    await session.submitPrompt("recover once"); await Promise.resolve();
+    await session.submitPrompt("do not resend"); await Promise.resolve();
     const first = requests(socket, "turn/start").at(-1);
     reject(socket, first, "thread not found");
-    await Promise.resolve();
-    const resume = requests(socket, "thread/resume").at(-1);
-    assert.ok(resume);
-    respond(socket, resume, {thread: {id: "recover-thread", status: {type: "idle"}}});
     await Promise.resolve(); await Promise.resolve();
-    assert.equal(requests(socket, "turn/start").length, 2);
-    const second = requests(socket, "turn/start").at(-1);
-    reject(socket, second, "thread not found");
-    await Promise.resolve();
-    assert.equal(requests(socket, "thread/resume").length, 1);
+    assert.equal(requests(socket, "turn/start").length, 1);
+    assert.equal(requests(socket, "thread/resume").length, 0);
     assert.equal(session.prompts.submissions("recover-thread").at(-1).state, "failed");
     session.dispose();
 });

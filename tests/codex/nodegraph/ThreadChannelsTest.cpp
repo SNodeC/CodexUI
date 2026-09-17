@@ -185,13 +185,18 @@ bool testDescriptorsAndVariantOrder() {
     target = write.upsert(
         id(NodeKind::Thread, "thread/order"),
         NodeState{NodeStatus::Pending, {{"title", "Ordered thread"}}});
+    const NodeRef turn =
+        write.upsert(id(NodeKind::Turn, "thread/order/turn"));
+    write.setParent(target, turn);
     graphChange = write.finish();
   }
   const GraphChanged expectedGraphChanged{
-      graphChange.revision, graphChange.affected, graphChange.removed, false};
+      graphChange.revision, graphChange.affected, graphChange.removed, false,
+      graphChange.childListsChanged};
   passed &= expect(channels.sendGraphChanged(std::move(graphChange)) ==
                        ChannelSendStatus::Accepted,
-                   "a graph change is admitted worker-to-Qt");
+                   "a graph change and its ordered-child cause are admitted "
+                   "worker-to-Qt");
 
   UiEffect effect{
       UiEffectKind::ShowNotice, target, "focus", {{"reason", "new-thread"}}};
@@ -416,7 +421,8 @@ bool testGraphCoalescingAndRetiredLifetime() {
     write.remove(removed);
     change = write.finish();
   }
-  const std::uint64_t latestRevision = change.revision;
+  change.providerAuthorityRevision = 1;
+  std::uint64_t latestRevision = change.revision;
   passed &= expect(
       change.affected.size() == 1 && change.affected.front() == affected &&
           change.removed.size() == 1 && change.removed.front() == removed,
@@ -433,10 +439,23 @@ bool testGraphCoalescingAndRetiredLifetime() {
           channels.workerToQtSizeApprox() == ThreadChannels::WorkerToQtCapacity,
       "full worker mailbox coalesces GraphChanged into an explicit rescan");
 
+  GraphChange laterChange;
+  {
+    auto write = graph.write();
+    write.setField(affected, "title", "newer ordinary title");
+    laterChange = write.finish();
+  }
+  latestRevision = laterChange.revision;
+  passed &= expect(
+      laterChange.providerAuthorityRevision == 0 &&
+          channels.sendGraphChanged(std::move(laterChange)) ==
+              ChannelSendStatus::CoalescedRescan,
+      "a later ordinary change preserves the pending authority replacement");
+
   const EventFd::DrainResult wake = channels.drainWorkerToQtWake();
   passed &=
       expect(wake.status == EventFd::DrainStatus::Drained &&
-                 wake.count == ordinaryAdmissions + 3,
+                 wake.count == ordinaryAdmissions + 4,
              "coalesced rescan still wakes Qt without queue payload copies");
 
   WorkerToQtMessage message;
@@ -447,6 +466,8 @@ bool testGraphCoalescingAndRetiredLifetime() {
                  std::get<GraphChanged>(message).affected.empty() &&
                  std::get<GraphChanged>(message).removed.empty() &&
                  std::get<GraphChanged>(message).rescanRequired &&
+                 std::get<GraphChanged>(message)
+                         .providerAuthorityRevision == 1 &&
                  !channels.rescanPending(),
              "Qt receives the latest synthesized rescan before stale queued "
              "notifications");
@@ -474,13 +495,171 @@ bool testGraphCoalescingAndRetiredLifetime() {
   passed &= expect(!channels.tryReceiveForQt(message),
                    "rescan is synthesized only once");
 
+  {
+    ThreadChannels orderedChannels;
+    NodeGraph orderedGraph;
+    const NodeRef orderedThread = insertNode(
+        orderedGraph, id(NodeKind::Thread, "thread/ordered-reset"));
+    GraphChange older;
+    {
+      auto write = orderedGraph.write();
+      write.setField(orderedThread, "title", "older queued change");
+      older = write.finish();
+    }
+    GraphChange reset;
+    {
+      auto write = orderedGraph.write();
+      write.setField(orderedThread, "title", "provider replacement");
+      reset = write.finish();
+    }
+    reset.providerAuthorityRevision = 1;
+    passed &= expect(
+        orderedChannels.sendGraphChanged(std::move(older)) ==
+                ChannelSendStatus::Accepted &&
+            orderedChannels.sendGraphChanged(std::move(reset)) ==
+                ChannelSendStatus::Accepted,
+        "provider replacement can queue directly behind older graph traffic");
+
+    for (std::size_t index = 0;; ++index) {
+      UiEffect filler{UiEffectKind::ShowNotice, std::nullopt,
+                      "ordered-fill-" + std::to_string(index), {}};
+      if (orderedChannels.sendUiEffect(filler) == ChannelSendStatus::QueueFull)
+        break;
+    }
+    GraphChange newest;
+    {
+      auto write = orderedGraph.write();
+      write.setField(orderedThread, "title", "latest coalesced change");
+      newest = write.finish();
+    }
+    const std::uint64_t newestRevision = newest.revision;
+    passed &= expect(
+        orderedChannels.sendGraphChanged(std::move(newest)) ==
+            ChannelSendStatus::CoalescedRescan,
+        "later saturation coalesces a newer ordinary graph change");
+    static_cast<void>(orderedChannels.drainWorkerToQtWake());
+
+    std::size_t replacementDeliveries = 0;
+    WorkerToQtMessage orderedMessage;
+    bool latestFirst = false;
+    while (orderedChannels.tryReceiveForQt(orderedMessage)) {
+      if (const auto *graphChanged =
+              std::get_if<GraphChanged>(&orderedMessage)) {
+        if (!latestFirst)
+          latestFirst = graphChanged->rescanRequired &&
+                        graphChanged->revision == newestRevision;
+        replacementDeliveries +=
+            graphChanged->providerAuthorityRevision != 0;
+      }
+    }
+    passed &= expect(
+        latestFirst && replacementDeliveries == 2,
+        "the latest rescan exposes current provider authority while the "
+        "delayed removal retains its provider-reset cause");
+  }
+
+  {
+    ThreadChannels fifoChannels;
+    NodeGraph fifoGraph;
+    const NodeRef fifoThread =
+        insertNode(fifoGraph, id(NodeKind::Thread, "thread/fifo-reset"));
+    GraphChange ordinary;
+    {
+      auto write = fifoGraph.write();
+      write.setField(fifoThread, "title", "ordinary");
+      ordinary = write.finish();
+    }
+    const std::uint64_t ordinaryRevision = ordinary.revision;
+    GraphChange reset;
+    {
+      auto write = fifoGraph.write();
+      write.setField(fifoThread, "title", "replacement");
+      reset = write.finish();
+    }
+    reset.providerAuthorityRevision = 7;
+    const std::uint64_t resetRevision = reset.revision;
+    passed &= expect(
+        fifoChannels.sendGraphChanged(std::move(ordinary)) ==
+                ChannelSendStatus::Accepted &&
+            fifoChannels.sendGraphChanged(std::move(reset)) ==
+                ChannelSendStatus::Accepted,
+        "ordinary and provider-reset changes are admitted in FIFO order");
+    static_cast<void>(fifoChannels.drainWorkerToQtWake());
+    WorkerToQtMessage fifoMessage;
+    const bool receivedOrdinary = fifoChannels.tryReceiveForQt(fifoMessage);
+    const auto *ordinaryMessage =
+        receivedOrdinary ? std::get_if<GraphChanged>(&fifoMessage) : nullptr;
+    const bool ordinaryStayedOrdinary =
+        ordinaryMessage && ordinaryMessage->revision == ordinaryRevision &&
+        ordinaryMessage->providerAuthorityRevision == 0;
+    const bool receivedReset = fifoChannels.tryReceiveForQt(fifoMessage);
+    const auto *resetMessage =
+        receivedReset ? std::get_if<GraphChanged>(&fifoMessage) : nullptr;
+    passed &= expect(
+        ordinaryStayedOrdinary && resetMessage &&
+            resetMessage->revision == resetRevision &&
+            resetMessage->providerAuthorityRevision == 7,
+        "provider authority causality stays on its own queued transaction");
+  }
+
+  {
+    ThreadChannels resetChannels;
+    GraphChange firstReset;
+    firstReset.revision = 10;
+    firstReset.providerAuthorityRevision = 10;
+    passed &= expect(
+        resetChannels.sendGraphChanged(std::move(firstReset)) ==
+            ChannelSendStatus::Accepted,
+        "the first provider boundary is queued directly");
+    for (std::size_t index = 0;; ++index) {
+      UiEffect filler{UiEffectKind::ShowNotice, std::nullopt,
+                      "reset-fill-" + std::to_string(index), {}};
+      if (resetChannels.sendUiEffect(filler) == ChannelSendStatus::QueueFull)
+        break;
+    }
+    GraphChange secondReset;
+    secondReset.revision = 20;
+    secondReset.providerAuthorityRevision = 20;
+    passed &= expect(
+        resetChannels.sendGraphChanged(std::move(secondReset)) ==
+            ChannelSendStatus::CoalescedRescan,
+        "the second provider boundary is retained by a saturated rescan");
+    static_cast<void>(resetChannels.drainWorkerToQtWake());
+
+    WorkerToQtMessage resetMessage;
+    const bool receivedSecond = resetChannels.tryReceiveForQt(resetMessage);
+    const auto *second =
+        receivedSecond ? std::get_if<GraphChanged>(&resetMessage) : nullptr;
+    const bool secondWasCoalesced = second && second->rescanRequired &&
+                                    second->providerAuthorityRevision == 20;
+    GraphChange thirdReset;
+    thirdReset.revision = 30;
+    thirdReset.providerAuthorityRevision = 30;
+    const ChannelSendStatus thirdStatus =
+        resetChannels.sendGraphChanged(std::move(thirdReset));
+    const bool receivedFirst = resetChannels.tryReceiveForQt(resetMessage);
+    const auto *first =
+        receivedFirst ? std::get_if<GraphChanged>(&resetMessage) : nullptr;
+    const bool firstStayedExact = first && !first->rescanRequired &&
+                                  first->providerAuthorityRevision == 10;
+    const bool receivedThird = resetChannels.tryReceiveForQt(resetMessage);
+    const auto *third =
+        receivedThird ? std::get_if<GraphChanged>(&resetMessage) : nullptr;
+    passed &= expect(
+        secondWasCoalesced &&
+            thirdStatus == ChannelSendStatus::CoalescedRescan &&
+            firstStayedExact && third && third->rescanRequired &&
+            third->providerAuthorityRevision == 30,
+        "an older direct reset cannot consume a newer pending authority boundary");
+  }
+
   NodeRef retired;
   {
     auto read = graph.tryRead();
-    if (read && read->retiredNodes().size() == 1)
-      retired = read->retiredNodes().front();
+    if (read && read->retiredCount() == 1)
+      retired = read->retiredAt(0);
     passed &=
-        expect(read.has_value() && retired && read->removed(retired) &&
+        expect(read.has_value() && retired && !read->live(retired) &&
                    retired->id() == id(NodeKind::Item, "item/removed") &&
                    !removedLifetime.expired(),
                "removed node stays reachable after its notification coalesces");
@@ -603,34 +782,69 @@ bool testWakeFailureAfterAdmission() {
 bool testOversizedGraphChangeRequiresRescan() {
   ThreadChannels channels;
   NodeGraph graph;
-  GraphChange oversized;
-  {
+  constexpr std::size_t PairCount =
+      ThreadChannels::MaximumDirectGraphReferences / 3;
+  constexpr std::size_t ExactExtraCount =
+      ThreadChannels::MaximumDirectGraphReferences - PairCount * 3;
+  const auto makeChange = [&](std::string prefix, std::size_t extraCount) {
     auto write = graph.write();
-    for (std::size_t index = 0;
-         index <= ThreadChannels::MaximumDirectGraphReferences; ++index) {
-      static_cast<void>(write.upsert(
-          id(NodeKind::Item, "oversized/" + std::to_string(index))));
+    for (std::size_t index = 0; index < PairCount; ++index) {
+      const NodeRef parent = write.upsert(
+          id(NodeKind::Turn, prefix + "/turn/" + std::to_string(index)));
+      const NodeRef child = write.upsert(
+          id(NodeKind::Item, prefix + "/item/" + std::to_string(index)));
+      write.setParent(parent, child);
     }
-    oversized = write.finish();
-  }
-  const std::uint64_t revision = oversized.revision;
+    for (std::size_t index = 0; index < extraCount; ++index)
+      static_cast<void>(write.upsert(
+          id(NodeKind::Operation,
+             prefix + "/extra/" + std::to_string(index))));
+    return write.finish();
+  };
 
+  GraphChange bounded = makeChange("bounded", ExactExtraCount);
   bool passed = true;
   passed &= expect(
-      channels.sendGraphChanged(std::move(oversized)) ==
+      bounded.affected.size() + bounded.removed.size() +
+                  bounded.childListsChanged.size() ==
+              ThreadChannels::MaximumDirectGraphReferences &&
+          channels.sendGraphChanged(std::move(bounded)) ==
+              ChannelSendStatus::Accepted,
+      "a graph event at the exact stored-reference limit remains direct");
+  passed &= expect(channels.drainWorkerToQtWake().count == 1,
+                   "the exact-limit direct event produces one wake");
+  WorkerToQtMessage message;
+  passed &= expect(
+      channels.tryReceiveForQt(message) &&
+          std::holds_alternative<GraphChanged>(message) &&
+          !std::get<GraphChanged>(message).rescanRequired &&
+          std::get<GraphChanged>(message).affected.size() +
+                  std::get<GraphChanged>(message).removed.size() +
+                  std::get<GraphChanged>(message).childListsChanged.size() ==
+              ThreadChannels::MaximumDirectGraphReferences,
+      "the exact-limit event preserves every direct cause record");
+
+  GraphChange oversized = makeChange("oversized", ExactExtraCount + 1);
+  const std::uint64_t revision = oversized.revision;
+
+  passed &= expect(
+      oversized.affected.size() + oversized.removed.size() +
+                  oversized.childListsChanged.size() ==
+              ThreadChannels::MaximumDirectGraphReferences + 1 &&
+          channels.sendGraphChanged(std::move(oversized)) ==
               ChannelSendStatus::CoalescedRescan &&
           channels.workerToQtSizeApprox() == 0 && channels.rescanPending(),
-      "an oversized committed transaction coalesces even with queue space");
+      "one reference over the direct limit coalesces with queue space");
   passed &= expect(channels.drainWorkerToQtWake().count == 1,
                    "an oversized graph rescan produces one eventfd wake");
-  WorkerToQtMessage message;
   passed &= expect(
       channels.tryReceiveForQt(message) &&
           std::holds_alternative<GraphChanged>(message) &&
           std::get<GraphChanged>(message).revision == revision &&
           std::get<GraphChanged>(message).rescanRequired &&
           std::get<GraphChanged>(message).affected.empty() &&
-          std::get<GraphChanged>(message).removed.empty(),
+          std::get<GraphChanged>(message).removed.empty() &&
+          std::get<GraphChanged>(message).childListsChanged.empty(),
       "Qt receives only the explicit rescan marker, never an unbounded ref "
       "vector");
   return passed;

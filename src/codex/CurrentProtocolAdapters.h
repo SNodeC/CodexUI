@@ -17,6 +17,13 @@ using Value = ai::openai::codex::generated::Value;
 
 namespace client_requests {
 
+struct ThreadItemsList final {
+  static constexpr std::string_view method = "thread/items/list";
+  using Params = Value;
+  using Response = Value;
+  static constexpr bool paramsRequired = true;
+};
+
 struct ThreadTurnsList final {
   static constexpr std::string_view method = "thread/turns/list";
   using Params = Value;

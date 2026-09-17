@@ -3,87 +3,165 @@
 #ifndef CODEXUI_CODEX_UISTATUS_H
 #define CODEXUI_CODEX_UISTATUS_H
 
-#include <cctype>
+#include "codex/nodegraph/ProtocolUpdater.h"
+
 #include <string>
 #include <string_view>
 
 namespace codexui::codex {
 
-enum class StatusKind {
-  Unknown,
-  Active,
-  Completed,
-  Failed,
-  Interrupted,
-  Pending,
-  NotLoaded,
+// A presentation status owns only forward-compatible unknown text. Known
+// protocol aliases collapse to one typed value before reaching a renderer.
+struct UiStatus final {
+  nodegraph::NodeStatus semantic = nodegraph::NodeStatus::Unknown;
+  std::string unknownText;
+
+  UiStatus() = default;
+  UiStatus(nodegraph::NodeStatus value) noexcept : semantic(value) {}
+
+  [[nodiscard]] bool empty() const noexcept {
+    return semantic == nodegraph::NodeStatus::Unknown && unknownText.empty();
+  }
+
+  bool operator==(const UiStatus &) const = default;
 };
 
-struct UiStatus {
-  StatusKind kind;
-  std::string_view text;
-  std::string_view tone;
-};
-
-constexpr UiStatus classifyStatus(std::string_view status) noexcept {
-  if (status == "active" || status == "inProgress" || status == "running" ||
-      status == "started")
-    return {StatusKind::Active, "running", "active"};
-  if (status == "completed" || status == "idle")
-    return {StatusKind::Completed, "completed", "success"};
-  if (status == "failed" || status == "systemError")
-    return {StatusKind::Failed, "failed", "danger"};
-  if (status == "interrupted")
-    return {StatusKind::Interrupted, "interrupted", "warning"};
-  if (status == "pending")
-    return {StatusKind::Pending, "pending", {}};
-  if (status == "notLoaded")
-    return {StatusKind::NotLoaded, "not loaded", {}};
-  return {StatusKind::Unknown, status.empty() ? "unknown" : status,
-          std::string_view{}};
+inline UiStatus statusFromNode(nodegraph::NodeStatus status,
+                               std::string_view unknownText = {}) {
+  UiStatus result{status};
+  if (status == nodegraph::NodeStatus::Unknown)
+    result.unknownText = unknownText;
+  return result;
 }
 
-inline std::string displayStatus(std::string_view status) {
-  const UiStatus classified = classifyStatus(status);
-  if (classified.kind != StatusKind::Unknown || status.empty())
-    return std::string(classified.text);
+inline UiStatus statusFromState(const nodegraph::NodeState &state) {
+  const std::string_view raw =
+      nodegraph::statusTextFromValue(nodegraph::valueMember(state, "status"));
+  return statusFromNode(state.status, raw);
+}
+
+inline std::string_view statusToken(const UiStatus &status) noexcept {
+  switch (status.semantic) {
+  case nodegraph::NodeStatus::Running:
+    return "running";
+  case nodegraph::NodeStatus::Completed:
+    return "completed";
+  case nodegraph::NodeStatus::Failed:
+    return "failed";
+  case nodegraph::NodeStatus::Interrupted:
+    return "interrupted";
+  case nodegraph::NodeStatus::Pending:
+    return "pending";
+  case nodegraph::NodeStatus::NotLoaded:
+    return "notLoaded";
+  case nodegraph::NodeStatus::Connected:
+    return "connected";
+  case nodegraph::NodeStatus::Disconnected:
+    return "disconnected";
+  case nodegraph::NodeStatus::Unknown:
+    return status.unknownText;
+  }
+  return {};
+}
+
+constexpr bool asciiWhitespace(unsigned char value) noexcept {
+  return value == ' ' || value == '\t' || value == '\n' || value == '\r' ||
+         value == '\f' || value == '\v';
+}
+
+constexpr bool asciiUpper(unsigned char value) noexcept {
+  return value >= 'A' && value <= 'Z';
+}
+
+constexpr bool asciiLower(unsigned char value) noexcept {
+  return value >= 'a' && value <= 'z';
+}
+
+constexpr bool asciiDigit(unsigned char value) noexcept {
+  return value >= '0' && value <= '9';
+}
+
+inline std::string displayStatus(const UiStatus &status) {
+  if (status.semantic != nodegraph::NodeStatus::Unknown) {
+    if (status.semantic == nodegraph::NodeStatus::NotLoaded)
+      return "not loaded";
+    return std::string(statusToken(status));
+  }
+  const std::string_view raw = status.unknownText;
+  if (raw.empty())
+    return "unknown";
 
   std::string result;
-  result.reserve(status.size() + 4);
+  result.reserve(raw.size() + 4);
   bool pendingSpace = false;
-  for (std::size_t index = 0; index < status.size(); ++index) {
-    const unsigned char character = static_cast<unsigned char>(status[index]);
-    if (std::isspace(character) || character == '-' || character == '_' ||
+  for (std::size_t index = 0; index < raw.size(); ++index) {
+    const unsigned char character = static_cast<unsigned char>(raw[index]);
+    if (asciiWhitespace(character) || character == '-' || character == '_' ||
         character == '.' || character == '/') {
       pendingSpace = !result.empty();
       continue;
     }
     const unsigned char previous =
-        index == 0 ? 0 : static_cast<unsigned char>(status[index - 1]);
-    const unsigned char next =
-        index + 1 == status.size()
-            ? 0
-            : static_cast<unsigned char>(status[index + 1]);
-    const bool upper = std::isupper(character);
-    const bool boundary =
-        upper && (std::islower(previous) || std::isdigit(previous) ||
-                  (std::isupper(previous) && std::islower(next)));
+        index == 0 ? 0 : static_cast<unsigned char>(raw[index - 1]);
+    const unsigned char next = index + 1 == raw.size()
+                                   ? 0
+                                   : static_cast<unsigned char>(raw[index + 1]);
+    const bool boundary = asciiUpper(character) &&
+                          (asciiLower(previous) || asciiDigit(previous) ||
+                           (asciiUpper(previous) && asciiLower(next)));
     if ((pendingSpace || boundary) && !result.empty() && result.back() != ' ')
       result.push_back(' ');
-    result.push_back(static_cast<char>(std::tolower(character)));
+    result.push_back(asciiUpper(character)
+                         ? static_cast<char>(character - 'A' + 'a')
+                         : static_cast<char>(character));
     pendingSpace = false;
   }
   return result.empty() ? std::string("unknown") : result;
 }
 
-constexpr bool isActiveStatus(std::string_view status) noexcept {
-  return classifyStatus(status).kind == StatusKind::Active;
+inline std::string_view statusTone(const UiStatus &status) noexcept {
+  switch (status.semantic) {
+  case nodegraph::NodeStatus::Running:
+    return "active";
+  case nodegraph::NodeStatus::Completed:
+  case nodegraph::NodeStatus::Connected:
+    return "success";
+  case nodegraph::NodeStatus::Failed:
+  case nodegraph::NodeStatus::Disconnected:
+    return "danger";
+  case nodegraph::NodeStatus::Interrupted:
+    return "warning";
+  case nodegraph::NodeStatus::Unknown:
+  case nodegraph::NodeStatus::Pending:
+  case nodegraph::NodeStatus::NotLoaded:
+    return {};
+  }
+  return {};
 }
 
-constexpr bool isTerminalTurnStatus(std::string_view status) noexcept {
-  const StatusKind kind = classifyStatus(status).kind;
-  return kind == StatusKind::Completed || kind == StatusKind::Failed ||
-         kind == StatusKind::Interrupted;
+constexpr bool isActiveStatus(const UiStatus &status) noexcept {
+  return status.semantic == nodegraph::NodeStatus::Running;
+}
+
+constexpr bool isWorkingStatus(const UiStatus &status) noexcept {
+  return status.semantic == nodegraph::NodeStatus::Pending ||
+         status.semantic == nodegraph::NodeStatus::Running;
+}
+
+constexpr bool isTerminalTurnStatus(const UiStatus &status) noexcept {
+  return status.semantic == nodegraph::NodeStatus::Completed ||
+         status.semantic == nodegraph::NodeStatus::Failed ||
+         status.semantic == nodegraph::NodeStatus::Interrupted;
+}
+
+inline UiStatus effectivePlanStepStatus(const UiStatus &stepStatus,
+                                        const UiStatus &turnStatus,
+                                        const UiStatus &threadStatus) {
+  if (!isActiveStatus(stepStatus))
+    return stepStatus;
+  const UiStatus &outcome =
+      isTerminalTurnStatus(turnStatus) ? turnStatus : threadStatus;
+  return isTerminalTurnStatus(outcome) ? outcome : stepStatus;
 }
 
 } // namespace codexui::codex

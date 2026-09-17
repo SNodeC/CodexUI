@@ -3,6 +3,7 @@
 #include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/SpscQueue.h"
 
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <cstdint>
@@ -218,7 +219,7 @@ void pinsAndNodeRefsOutliveReplacementAndRemoval() {
   {
     auto read = graph.tryRead();
     expect(read && !read->find(NodeId{NodeKind::Item, "pinned-item"}) &&
-               read->retiredNodes().empty(),
+               read->retiredCount() == 0,
            "removal unlinks the node and releases graph ownership");
   }
   initialGeneration = unsignedField(pinnedState, "generation");
@@ -232,6 +233,78 @@ void pinsAndNodeRefsOutliveReplacementAndRemoval() {
   node.reset();
   expect(weakNode.expired(),
          "a removed node is destroyed after the final NodeRef is released");
+}
+
+void foreignMembershipNeverReadsUnsynchronizedTopology() {
+  constexpr std::size_t Iterations = 5'000;
+
+  NodeGraph graph;
+  NodeGraph foreignGraph;
+  NodeRef retired;
+  NodeRef foreignParent;
+  NodeRef foreign;
+  NodeRef foreignSibling;
+  {
+    auto write = graph.write();
+    retired = write.upsert(NodeId{NodeKind::Item, "shared-id"});
+    static_cast<void>(write.finish());
+  }
+  GraphChange removed;
+  {
+    auto write = graph.write();
+    write.remove(retired);
+    removed = write.finish();
+  }
+  {
+    auto write = foreignGraph.write();
+    foreignParent = write.upsert(NodeId{NodeKind::Thread, "foreign-parent"});
+    foreign = write.upsert(NodeId{NodeKind::Item, "shared-id"});
+    foreignSibling = write.upsert(NodeId{NodeKind::Item, "foreign-sibling"});
+    write.setParent(foreignParent, foreign);
+    write.setParent(foreignParent, foreignSibling);
+    static_cast<void>(write.finish());
+  }
+
+  std::barrier launch(2);
+  std::atomic<bool> valid{true};
+  std::thread topologyWriter([&] {
+    launch.arrive_and_wait();
+    for (std::size_t iteration = 0; iteration < Iterations; ++iteration) {
+      auto write = foreignGraph.write();
+      const std::array order = iteration % 2 == 0
+                                   ? std::array{foreignSibling, foreign}
+                                   : std::array{foreign, foreignSibling};
+      write.replaceChildren(foreignParent, order);
+      static_cast<void>(write.finish());
+    }
+  });
+  std::thread membershipReader([&] {
+    launch.arrive_and_wait();
+    for (std::size_t iteration = 0; iteration < Iterations; ++iteration) {
+      {
+        auto read = graph.tryRead();
+        if (!read || read->contains(foreign) || !read->contains(retired))
+          valid.store(false, std::memory_order_relaxed);
+      }
+      {
+        const std::array candidate{foreign};
+        auto write = graph.write();
+        write.releaseRetired(candidate);
+        static_cast<void>(write.finish());
+      }
+    }
+  });
+  topologyWriter.join();
+  membershipReader.join();
+
+  expect(valid.load(std::memory_order_relaxed),
+         "foreign membership and release probes stay exact while the foreign "
+         "child slot changes concurrently");
+  {
+    auto write = graph.write();
+    write.releaseRetired(removed.removed);
+    static_cast<void>(write.finish());
+  }
 }
 
 struct MoveOnlyPayload final {
@@ -328,6 +401,7 @@ int main() {
   readNeverWaitsForWriter();
   correlatedStateIsPublishedAtomically();
   pinsAndNodeRefsOutliveReplacementAndRemoval();
+  foreignMembershipNeverReadsUnsynchronizedTopology();
   queuePreservesRejectedAndOrderedMoveOnlyPayloads();
 
   if (failures != 0)

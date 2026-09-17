@@ -3,100 +3,41 @@
 #ifndef CODEXUI_CODEX_TURNSETTINGSWIDGET_H
 #define CODEXUI_CODEX_TURNSETTINGSWIDGET_H
 
-#include <nlohmann/json.hpp>
+#include "codex/TurnSettingsPolicy.h"
 
 #include <QWidget>
 
 #include <array>
-#include <string>
 
 class QComboBox;
 class QLineEdit;
-class QMenu;
-class QPushButton;
+class QToolButton;
 
 namespace codexui::codex {
 
 class TurnSettingsWidget final : public QWidget {
 public:
-  explicit TurnSettingsWidget(QWidget *parent = nullptr);
+  explicit TurnSettingsWidget(TurnSettingsPolicy &settings,
+                              QWidget *parent = nullptr);
 
-  void
-  setContext(std::string identity, const nlohmann::json &canonical,
-             const nlohmann::json &models,
-             const nlohmann::json &permissionProfiles,
-             std::uint64_t settingsRevision = 0,
-             const nlohmann::json &settingsUpdate = nlohmann::json::object());
-  // The shared-graph binding updates these independently so unrelated stream
-  // revisions never rebuild catalog-backed controls.
-  void setCanonicalContext(
-      std::string identity, const nlohmann::json &canonical,
-      std::uint64_t settingsRevision = 0,
-      const nlohmann::json &settingsUpdate = nlohmann::json::object());
-  void setModelCatalog(const nlohmann::json &models);
-  void setPermissionProfileCatalog(const nlohmann::json &permissionProfiles);
-  void setControlsEnabled(bool enabled);
-  void setWorkspace(QString path);
-
-  [[nodiscard]] std::string workspace(const std::string &fallback) const;
-  [[nodiscard]] nlohmann::json threadStartOptions() const;
-  [[nodiscard]] nlohmann::json turnStartOptions() const;
+  void setContext(TurnSettingsContext context);
 
 private:
-  enum class Field : std::size_t {
-    Model,
-    Effort,
-    Personality,
-    Sandbox,
-    Network,
-    Approval,
-    Reviewer,
-    Workspace,
-    PermissionProfile,
-    ServiceTier,
-    Summary,
-    Collaboration,
-    Count,
-  };
-
-  void markTouched(Field field);
-  [[nodiscard]] bool
-  applyCanonicalContext(std::string identity, const nlohmann::json &canonical,
-                        std::uint64_t settingsRevision,
-                        const nlohmann::json &settingsUpdate);
-  void refreshFromCanonical(
-      const nlohmann::json &canonical,
-      const std::array<bool, static_cast<std::size_t>(Field::Count)> &fields);
-  void refreshModels(const nlohmann::json &models);
+  void markTouched(TurnSettingField field);
+  void render();
+  void refreshModels();
   void refreshModelOptions();
-  void refreshPermissionProfiles(const nlohmann::json &profiles);
+  void refreshPermissionProfiles();
   void refreshAccessCompatibility();
   void refreshMoreIndicator();
-  [[nodiscard]] bool touched(Field field) const noexcept;
-  [[nodiscard]] QString value(const QComboBox *combo) const;
-  [[nodiscard]] nlohmann::json sandboxPolicy() const;
-  [[nodiscard]] nlohmann::json collaborationMode() const;
+  [[nodiscard]] QComboBox *combo(TurnSettingField field) const noexcept {
+    return combos[static_cast<std::size_t>(field)];
+  }
 
-  std::string contextIdentity;
-  nlohmann::json canonicalContext = nlohmann::json::object();
-  std::uint64_t canonicalSettingsRevision = 0;
-  nlohmann::json modelCatalog = nlohmann::json::array();
-  std::array<bool, static_cast<std::size_t>(Field::Count)> touchedFields{};
-
-  QComboBox *model = nullptr;
-  QComboBox *effort = nullptr;
-  QComboBox *personality = nullptr;
-  QComboBox *sandbox = nullptr;
-  QComboBox *network = nullptr;
-  QComboBox *approval = nullptr;
-  QComboBox *reviewer = nullptr;
+  TurnSettingsPolicy &settings;
+  std::array<QComboBox *, TurnSettingFieldCount> combos{};
   QLineEdit *cwd = nullptr;
-  QComboBox *permissionProfile = nullptr;
-  QComboBox *serviceTier = nullptr;
-  QComboBox *summary = nullptr;
-  QComboBox *collaboration = nullptr;
-  QPushButton *more = nullptr;
-  QMenu *moreMenu = nullptr;
+  QToolButton *more = nullptr;
 };
 
 } // namespace codexui::codex

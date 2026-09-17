@@ -65,8 +65,7 @@ Every node has:
 - a unique graph `NodeId` and concrete `NodeKind`;
 - one immutable current `NodeState` storage object;
 - ordered parent/child and directly derived cross-entity relations;
-- a changed revision and removed marker;
-- one opaque, non-owning UI attachment slot.
+- a changed revision and removed marker.
 
 Globally unique protocol entities, such as threads, use their canonical wire
 IDs directly. Protocol turn IDs are scoped by thread and item IDs are scoped
@@ -86,21 +85,19 @@ of the natural declared kind: `CatalogEntry`, `PermissionProfile`, `Skill`,
 entities. The remaining declared kinds likewise have concrete protocol
 lifecycles; none exists only as an opaque catalog blob.
 
-Nodes are held by `std::shared_ptr<Node>`. The graph, queued notifications,
-materialized widgets, and active reads therefore pin lifetime. Relations may
-be non-owning while protected by graph synchronization. Removal unlinks a node
-and erases its indexes under the write lock, marks it removed, and includes a
-stable `NodeRef` in the direct Qt notification. If that notification coalesces,
-the graph's retired-node set remains the lifetime source and Qt collects it in
-bounded 64-node rescan slices. Qt clears the attachment and destroys the
-QWidget on Qt-main, then acknowledges detachment through the typed action
-queue; final node destruction waits for the graph retirement pin and every
-other `NodeRef` to be released.
+Nodes are held by `std::shared_ptr<Node>`. The graph, queued notifications, and
+active reads therefore pin lifetime. Relations may be non-owning while
+protected by graph synchronization. Removal unlinks a node and erases its
+indexes under the write lock, marks it removed, and includes a stable `NodeRef`
+in the direct Qt notification. If that notification coalesces, the graph's
+retired-node set remains the lifetime source and Qt collects it in bounded
+64-node rescan slices. Qt acknowledges a retirement only after the relevant
+callbacks and every older queued notification have run; final node destruction
+waits for the graph retirement pin and every other `NodeRef` to be released.
 
-Only Qt-main sets, clears, or dereferences the opaque attachment. The native Qt
-adapter may place a `QPointer<QWidget>`, last rendered revision, and viewport
-materialization state behind it. The worker never inspects it, and no permanent
-NodeId-to-widget registry is allowed.
+Widget residency is owned entirely by Qt projections and stable presentation
+keys. Domain nodes contain no QWidget attachment or opaque presentation
+back-pointer.
 
 ## Synchronization and atomic updates
 
@@ -279,12 +276,12 @@ remains in NodeGraph, while the adapter supplies the established view with one
 bounded 80-activity DTO plus any pinned owning prompts. The native conversation
 is a variable-height `QAbstractItemView` backed by a thin
 `ConversationItemModel` plus presentation-only row-order and variable-height
-order-statistic indexes. Passive rows are delegate
-painted; real `ConversationCard` widgets exist only for rich rows in the
-viewport plus bounded overscan. Selection and Load 80 stage only initially
-visible rich editors beneath a hidden owner and expose one complete final
-frame. Stable keys, row-local interaction records, stable-key Turn boundaries,
-and exact row/pixel anchors
+order-statistic indexes. Every viewport and overscan row uses the sole real
+`ConversationCard`; rows outside residency retain model values, compatible
+stable-keyed interaction state, and cached scalar heights only. Selection and
+Load 80 stage only the initially resident cards beneath a hidden owner and
+expose one complete final frame. Stable keys, row-local interaction records,
+stable-key Turn boundaries, and exact row/pixel anchors
 preserve both scroll axes across eviction and rematerialization. Ordinary graph
 deltas resolve directly to one model index; offscreen changes construct and
 paint no QWidget. An ordinary canonical last-item delta is verified under one
@@ -331,8 +328,9 @@ including:
   Inspector behavior, dialogs, menus, desktop identity, accessibility, and
   progress presentation.
 
-Native tests in `tests/codex/` and the WebUI parity suite are behavioral
-oracles. They may be extended but not weakened.
+Native tests in `tests/codex/` and the browser behavioral suite are oracles.
+A frontend-specific suite is not parity evidence unless both implementations
+execute the same semantic corpus. Tests may be extended but not weakened.
 
 ## Implemented cutover and qualification
 
@@ -344,7 +342,7 @@ revalidated against current connection, controller, generation, target, and
 active-turn state before its one direct CodexBridge call; compound workflows
 such as creation followed by the first prompt remain ordered distinct
 operations. The same mailbox carries the two concrete local lifecycle actions:
-prompt-materialization acknowledgement and removed-widget detachment; they
+prompt-materialization acknowledgement and graph-retirement acknowledgement; they
 update graph lifetime state without a bridge call. The old presentation
 authority, JSONL framing, socketpair endpoints, and temporary comparison path
 have been deleted; no outbound operation is dual-sent.
@@ -459,27 +457,27 @@ re-executed inside this final sandbox. Their most recent complete passing runs
 remain the 17/17 native and full browser/Xvfb evidence recorded above; neither
 listener path nor WebUI source changed in the post-polish commits.
 
-### Qt item-view requalification (2026-09-10)
+### Qt item-view remediation qualification (2026-09-13)
 
-The retained-card surface has now been replaced without changing the graph,
-worker, bridge, mailbox, eventfd, or two-thread ownership boundaries. The final
-view uses stable `NodeRef`-backed model rows, precise Qt insert/remove/move/data
-signals, a logarithmic variable-height index, passive delegates, and only
-viewport/overscan rich editors. The complete API, behavior matrix, benchmark,
-and recording inventory are in `qt-virtualized-conversation-view.md`.
+The conversation renderer is being consolidated without changing the graph,
+worker, bridge, mailbox, eventfd, or two-thread ownership boundaries. Stable
+`NodeRef`-backed model rows, precise Qt insert/remove/move/data signals, and the
+logarithmic variable-height index remain. Every viewport and overscan row now
+uses the same authoritative `ConversationCard`; offscreen rows retain model
+values, compatible semantic interaction state, and cached scalar height only.
+The passive delegate/card renderer and its Markdown cache, document-transfer
+bridge, hit testing, and synthetic input forwarding are deleted.
 
-The current persistent Debug build passes 19/19 native suites. Integrated
-ASan/UBSan also passes 19/19 without a diagnostic, and the supported independent
-NodeGraph/queue/worker TSan boundary passes 5/5 without a race report. WebUI is
-unchanged and its full release gate passes 85/85 tests, the profile, production
-build, Chromium qualification, and artifact verification.
+Retained-state transition normalization, runtime font/style/DPR invalidation,
+and one physical accessibility tree are implemented. Twelve quantitative
+conversation profiles are registered for 320/1,280/10,000 rows and DPR
+1.0/1.25/1.5/2.0. Full Debug and Release runs each pass 31/31 tests, and the
+ASan/UBSan run passes 31/31 without a sanitizer diagnostic. The benchmark
+gates resident cards, documents, widgets, initial staging, exact
+viewport-derived residency, construction, scroll/seek median/p95/max,
+streaming, resize, hidden-row traversal, and RSS.
 
-At 320/1,280/10,000 passive rows, the final Debug benchmark retains exactly
-eight descendant QWidgets and zero `ConversationCard` instances. Median initial
-reveal is 11/33/259 ms and the 240-position sweep is 313.8/355.6/448.4 ms. One
-bounded tail append remains 0.45/0.51/0.48 ms with zero model-index or
-section-range rebuilds. The
-isolated full application was recorded through atomic long-thread selection,
-Load 80, manual outer and nested scrolling during long commands, paused
-steering, selection/copy, folds/focus, approval rejection, and Plan-mode input
-submission. No remote operation was performed.
+S1 is complete under the deterministic offscreen matrix. Native XCB/Wayland
+interaction and real AT-SPI behavior remain explicit S8 qualification work.
+The current contract and exact performance gates are in
+`qt-virtualized-conversation-view.md`.

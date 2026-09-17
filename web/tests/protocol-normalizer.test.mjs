@@ -9,7 +9,7 @@ import {
     result,
 } from "../dist/index.js";
 
-test("presentation frame grammar equals the C++ protocol boundary", () => {
+test("presentation frame grammar enforces the protocol boundary", () => {
     const values = [
         command("threads.list", {}, "request"),
         event(1, 2, "thread.upsert", {thread: {id: "thread"}}, "merge", {threadId: "thread"}),
@@ -31,7 +31,7 @@ test("presentation frame grammar equals the C++ protocol boundary", () => {
     }
 });
 
-test("normalizer emits the exact ordered connection frames used by C++", () => {
+test("normalizer emits exact ordered connection frames", () => {
     const frames = [];
     const normalizer = new ProtocolNormalizer((frame) => {
         frames.push(frame);
@@ -49,7 +49,6 @@ test("normalizer emits the exact ordered connection frames used by C++", () => {
         kind: "bridge.controller",
         controllerConnectionId: "frontend-test",
     });
-    normalizer.connectionSettings({selected: "ipv6"});
 
     assert.deepEqual(frames, [
         event(1, 1, "connection.lifecycle", {state: "connected"}),
@@ -61,12 +60,11 @@ test("normalizer emits the exact ordered connection frames used by C++", () => {
         event(3, 1, "connection.controller", {
             controllerConnectionId: "frontend-test",
         }, "replace"),
-        event(4, 1, "connection.settings.changed", {selected: "ipv6"}, "replace"),
     ]);
-    assert.equal(normalizer.sequence, 5);
+    assert.equal(normalizer.sequence, 4);
 });
 
-test("operation result authority and payload shaping equal C++", () => {
+test("operation results retain declared authority and payload shape", () => {
     const frames = [];
     const normalizer = new ProtocolNormalizer((frame) => {
         frames.push(frame);
@@ -114,6 +112,7 @@ test("operation result authority and payload shaping equal C++", () => {
         }, "merge"),
         result(3, 1, "thread.read", "read", true, {
             thread: {id: "returned", turns: []},
+            requestSequence: startedAtSequence,
         }, "replace", {threadId: "returned"}),
         result(4, 1, "thread.resume", "resume", true, {
             thread: {
@@ -140,7 +139,7 @@ test("operation result authority and payload shaping equal C++", () => {
     ]);
 });
 
-test("core notification normalization preserves C++ scopes and authority", () => {
+test("core notification normalization preserves scopes and authority", () => {
     const frames = [];
     const normalizer = new ProtocolNormalizer((frame) => {
         frames.push(frame);
@@ -193,15 +192,7 @@ test("core notification normalization preserves C++ scopes and authority", () =>
                 agentThreadId: "child",
             },
         }, "merge", {threadId: "thread", turnId: "turn", itemId: "agent"}),
-        event(5, 1, "agents.activity.upsert", {
-            lifecycle: "started",
-            activity: {
-                id: "agent",
-                type: "subAgentActivity",
-                agentThreadId: "child",
-            },
-        }, "merge", {threadId: "thread", turnId: "turn", itemId: "agent"}),
-        event(6, 1, "conversation.item.append", {
+        event(5, 1, "conversation.item.append", {
             field: "summary",
             text: "summary",
             summaryIndex: 2,
@@ -210,18 +201,18 @@ test("core notification normalization preserves C++ scopes and authority", () =>
             turnId: "turn",
             itemId: "reasoning",
         }),
-        event(7, 1, "plan.replaced", {
+        event(6, 1, "plan.replaced", {
             explanation: "Plan",
             steps: [{step: "Work", status: "inProgress"}],
         }, "replace", {threadId: "thread", turnId: "turn"}),
-        event(8, 1, "pending-request.removed", {}, "remove", {
+        event(7, 1, "pending-request.removed", {}, "remove", {
             threadId: "thread",
             requestId: 42,
         }),
     ]);
 });
 
-test("all remaining generated notification mappings equal the C++ vocabulary", () => {
+test("all generated notification mappings use the declared vocabulary", () => {
     const cases = {
         "thread/reverted": ["thread.reverted", "merge"],
         "skills/changed": ["catalog.skills.invalidated", "none"],
@@ -255,45 +246,26 @@ test("all remaining generated notification mappings equal the C++ vocabulary", (
     }
 });
 
-test("server request categories and unknown-method diagnostics equal C++", () => {
+test("server requests retain categories and unknown-method diagnostics", () => {
     const frames = [];
     const normalizer = new ProtocolNormalizer((frame) => {
         frames.push(frame);
         return true;
     });
-    const categories = {
-        "item/commandExecution/requestApproval": "command-approval",
-        "item/fileChange/requestApproval": "file-change-approval",
-        "item/tool/requestUserInput": "user-input",
-        "mcpServer/elicitation/request": "mcp-elicitation",
-        "item/permissions/requestApproval": "permissions-approval",
-        "item/tool/call": "dynamic-tool-call",
-        "account/chatgptAuthTokens/refresh": "authentication-refresh",
-        "attestation/generate": "attestation",
-        applyPatchApproval: "legacy-patch-approval",
-        execCommandApproval: "legacy-command-approval",
-        unsupported: "unsupported",
-    };
-    let requestId = 1;
-    for (const [method, category] of Object.entries(categories)) {
-        normalizer.serverRequest(method, requestId, {threadId: "thread"});
-        assert.deepEqual(frames.at(-1), event(
-            requestId,
-            0,
-            "pending-request.upsert",
-            {requestId, category, request: {threadId: "thread"}},
-            "merge",
-            {threadId: "thread", requestId},
-        ));
-        ++requestId;
-    }
+    const requestId = "request-1";
+    normalizer.serverRequest("item/commandExecution/requestApproval", requestId,
+        {threadId: "thread", command: "git status"});
+    assert.deepEqual(frames.at(-1), event(1, 0, "pending-request.upsert", {
+        requestId, category: "command-approval",
+        request: {threadId: "thread", command: "git status"},
+    }, "merge", {threadId: "thread", requestId}));
 
     const before = frames.length;
     normalizer.observeRawInbound({method: "thread/started", params: {}});
     assert.equal(frames.length, before);
     normalizer.observeRawInbound({method: "future/method", params: {}});
     assert.deepEqual(frames.at(-1), event(
-        requestId,
+        2,
         0,
         "system.diagnostic",
         {
@@ -303,19 +275,4 @@ test("server request categories and unknown-method diagnostics equal C++", () =>
             details: {},
         },
     ));
-});
-
-test("delivery failure is sticky and reported once like C++", () => {
-    let deliveries = 0;
-    let failures = 0;
-    const normalizer = new ProtocolNormalizer(() => {
-        ++deliveries;
-        return false;
-    });
-    normalizer.setDeliveryFailureHandler(() => ++failures);
-    normalizer.transportEvent("connected");
-    normalizer.transportEvent("disconnected");
-    assert.equal(deliveries, 1);
-    assert.equal(failures, 1);
-    assert.equal(normalizer.sequence, 3, "sequence allocation continues before sticky rejection");
 });

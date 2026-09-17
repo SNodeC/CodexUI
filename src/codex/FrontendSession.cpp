@@ -117,8 +117,15 @@ FrontendSession::sendNodeAction(nodegraph::NodeAction &action) {
     action.correlation =
         "ui-action-" + std::to_string(nextUiActionCorrelation++);
   const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
-  if (status == nodegraph::ChannelSendStatus::QueueFull && assignedCorrelation)
-    action.correlation.clear();
+  if (status == nodegraph::ChannelSendStatus::QueueFull) {
+    if (assignedCorrelation)
+      action.correlation.clear();
+    if (action.kind == nodegraph::NodeActionKind::PromptMaterialized) {
+      queueNodeAcknowledgement(std::move(action));
+      scheduleWorkerMessageDrain();
+      return nodegraph::ChannelSendStatus::Accepted;
+    }
+  }
   return status;
 }
 
@@ -170,8 +177,7 @@ void FrontendSession::drainWorkerMessages() {
   std::size_t processed = 0;
   nodegraph::WorkerToQtMessage message;
   while (processed < MaximumMessagesPerPass &&
-         (processed == 0 ||
-          drainBudget.elapsed() < MaximumDrainMilliseconds) &&
+         (processed == 0 || drainBudget.elapsed() < MaximumDrainMilliseconds) &&
          channels.tryReceiveForQt(message)) {
     ++processed;
     std::visit(
@@ -184,7 +190,7 @@ void FrontendSession::drainWorkerMessages() {
               } catch (...) {
               }
             }
-            collectDetachedNodes(payload.removed);
+            queueRetirementAcknowledgements(payload.removed);
             if (payload.rescanRequired) {
               requireRescanRetirementCollection();
               collectRescanRetirements();
@@ -210,11 +216,11 @@ void FrontendSession::drainWorkerMessages() {
   const bool workerBacklogDrained =
       channels.workerToQtSizeApprox() == 0 && !channels.rescanPending();
   if (workerBacklogDrained && !rescanRetirementPending)
-    flushDetachAcknowledgements();
+    flushNodeAcknowledgements();
   if (workerFinished.load(std::memory_order_acquire))
     notifyRuntimeStopped();
   if (!workerBacklogDrained || rescanRetirementPending ||
-      !pendingDetachAcknowledgements.empty())
+      !pendingNodeAcknowledgements.empty())
     scheduleWorkerMessageDrain();
 }
 
@@ -235,7 +241,6 @@ void FrontendSession::requireRescanRetirementCollection() {
   if (!rescanRetirementPending) {
     retirementScanOffset = 0;
     retirementScanGenerationKnown = false;
-    retirementRetryNeeded = false;
   }
   rescanRetirementPending = true;
 }
@@ -254,7 +259,6 @@ void FrontendSession::collectRescanRetirements() {
     retirementScanOffset = 0;
     retirementScanOrderGeneration = orderGeneration;
     retirementScanGenerationKnown = true;
-    retirementRetryNeeded = false;
   }
 
   const std::size_t count = read->retiredCount();
@@ -266,16 +270,46 @@ void FrontendSession::collectRescanRetirements() {
   for (std::size_t index = retirementScanOffset; index < end; ++index)
     retired.emplace_back(read->retiredAt(index));
   const std::uint64_t revision = read->revision();
+  std::uint64_t providerAuthorityRevision = 0;
+  if (const nodegraph::NodeRef connection =
+          read->find({nodegraph::NodeKind::Connection, "connection"})) {
+    const auto state = read->state(connection);
+    providerAuthorityRevision =
+        nodegraph::unsignedIntegerFromValue(
+            nodegraph::valueMember(*state, "providerAuthorityRevision"))
+            .value_or(0);
+  }
+  std::vector<nodegraph::NodeRef> providerRetired;
+  std::vector<nodegraph::NodeRef> ordinaryRetired;
+  providerRetired.reserve(retired.size());
+  ordinaryRetired.reserve(retired.size());
+  for (const nodegraph::NodeRef &node : retired) {
+    std::vector<nodegraph::NodeRef> &destination =
+        providerAuthorityRevision != 0 &&
+                read->changedRevision(node) <= providerAuthorityRevision
+            ? providerRetired
+            : ordinaryRetired;
+    destination.emplace_back(node);
+  }
   const bool complete = end == count;
   read.reset();
 
-  if (graphChangedHandler && !retired.empty()) {
-    try {
-      graphChangedHandler(nodegraph::GraphChanged{revision, {}, retired, true});
-    } catch (...) {
-    }
+  if (graphChangedHandler) {
+    const auto notify = [this,
+                         revision](const std::vector<nodegraph::NodeRef> &nodes,
+                                   std::uint64_t authorityRevision) {
+      if (nodes.empty())
+        return;
+      try {
+        graphChangedHandler(nodegraph::GraphChanged{
+            revision, {}, nodes, false, {}, authorityRevision});
+      } catch (...) {
+      }
+    };
+    notify(providerRetired, providerAuthorityRevision);
+    notify(ordinaryRetired, 0);
   }
-  collectDetachedNodes(retired);
+  queueRetirementAcknowledgements(retired);
 
   if (!complete) {
     retirementScanOffset = end;
@@ -283,49 +317,60 @@ void FrontendSession::collectRescanRetirements() {
   }
 
   retirementScanOffset = 0;
-  if (retirementRetryNeeded) {
-    retirementRetryNeeded = false;
-    return;
-  }
   rescanRetirementPending = false;
   retirementScanGenerationKnown = false;
 }
 
-void FrontendSession::collectDetachedNodes(
+void FrontendSession::queueRetirementAcknowledgements(
     std::span<const nodegraph::NodeRef> nodes) {
   for (const nodegraph::NodeRef &node : nodes) {
-    // The graph callback above runs on Qt-main and must destroy/clear any
-    // QWidget attachment before its removal can be acknowledged to worker.
     if (!node)
       continue;
-    if (node->uiAttachment() != nullptr) {
-      requireRescanRetirementCollection();
-      retirementRetryNeeded = true;
-      continue;
-    }
-    if (pendingDetachAcknowledgementIndex.insert(node.get()).second)
-      pendingDetachAcknowledgements.emplace_back(node);
+    queueNodeAcknowledgement({node, nodegraph::NodeActionKind::UiDetached});
   }
 }
 
-void FrontendSession::flushDetachAcknowledgements() {
+void FrontendSession::queueNodeAcknowledgement(nodegraph::NodeAction action) {
+  if (!action.target)
+    return;
+  const std::uint8_t kind =
+      action.kind == nodegraph::NodeActionKind::UiDetached ? 2 : 1;
+  const auto [position, inserted] =
+      pendingNodeAcknowledgementKinds.try_emplace(action.target.get(), 0);
+  const std::uint8_t previous = position->second;
+  if ((previous & kind) != 0)
+    return;
+  position->second |= kind;
+  try {
+    pendingNodeAcknowledgements.push_back(std::move(action));
+  } catch (...) {
+    if (inserted)
+      pendingNodeAcknowledgementKinds.erase(position);
+    else
+      position->second = previous;
+    throw;
+  }
+}
+
+void FrontendSession::flushNodeAcknowledgements() {
   constexpr std::size_t MaximumAcknowledgementsPerPass = 64;
   std::size_t processed = 0;
-  while (!pendingDetachAcknowledgements.empty() &&
+  while (!pendingNodeAcknowledgements.empty() &&
          processed < MaximumAcknowledgementsPerPass) {
-    if (pendingDetachAcknowledgements.back()->uiAttachment() != nullptr) {
-      requireRescanRetirementCollection();
-      return;
-    }
-    nodegraph::Node *const target = pendingDetachAcknowledgements.back().get();
-    nodegraph::NodeAction action;
-    action.target = pendingDetachAcknowledgements.back();
-    action.kind = nodegraph::NodeActionKind::UiDetached;
+    nodegraph::NodeAction &action = pendingNodeAcknowledgements.back();
+    nodegraph::Node *const target = action.target.get();
+    const std::uint8_t kind =
+        action.kind == nodegraph::NodeActionKind::UiDetached ? 2 : 1;
     const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
     if (!nodegraph::deliveryGuaranteed(status))
       return;
-    pendingDetachAcknowledgements.pop_back();
-    pendingDetachAcknowledgementIndex.erase(target);
+    pendingNodeAcknowledgements.pop_back();
+    if (auto pending = pendingNodeAcknowledgementKinds.find(target);
+        pending != pendingNodeAcknowledgementKinds.end()) {
+      pending->second &= static_cast<std::uint8_t>(~kind);
+      if (pending->second == 0)
+        pendingNodeAcknowledgementKinds.erase(pending);
+    }
     ++processed;
   }
 }

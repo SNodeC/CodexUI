@@ -147,11 +147,6 @@ export class PromptCoordinator {
         if (!pending || (pending.state !== "inFlight" && pending.state !== "queued")) return false;
         pending.state = "failed"; pending.error = error; return true;
     }
-    requeue(threadId: string, id: number): boolean {
-        const pending = this.find(threadId, id);
-        if (!pending || pending.state !== "inFlight") return false;
-        pending.state = "queued"; pending.admissionAtStart = false; return true;
-    }
     failQueued(threadId: string, error: string): number {
         let count = 0;
         for (const pending of this.byThread.get(threadId) ?? []) if (pending.state === "queued") {

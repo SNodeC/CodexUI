@@ -100,14 +100,10 @@ public:
   [[nodiscard]] ChannelSendStatus selectThread(const NodeRef &thread);
 
   [[nodiscard]] ChannelSendStatus
-  resolveInteraction(const ProtocolRequestId &requestId, bool accepted,
-                     std::string error = {});
-  [[nodiscard]] ChannelSendStatus resolveInteraction(const NodeRef &interaction,
-                                                     bool accepted,
-                                                     std::string error = {});
+  resolveInteraction(const NodeRef &interaction);
   [[nodiscard]] ChannelSendStatus
-  rejectInteractionResponse(const NodeRef &interaction,
-                            Value::Object authoredResponse, std::string error);
+  failInteractionResponse(const NodeRef &interaction, std::string error,
+                          std::optional<Value::Object> authoredResponse = {});
 
   // RuntimeAction::CreateThread uses the explicit payload shape
   // {threadStart: Object, turnStart: Object, requestedName: String}.
@@ -142,7 +138,7 @@ public:
   [[nodiscard]] ChannelSendStatus
   promptMaterialized(const NodeRef &localPrompt);
 
-  // Qt has already cleared the opaque attachment and destroyed its QWidget.
+  // Qt has observed the removal and every older queued graph callback.
   // Releasing this recovery pin is deliberately revision-neutral.
   [[nodiscard]] ChannelSendStatus acknowledgeUiDetached(NodeRef node);
 
@@ -183,8 +179,8 @@ private:
   takeNextPrompt(NodeGraph::WriteAccess &write, const NodeRef &thread);
   [[nodiscard]] NodeRef activeTurn(NodeGraph::WriteAccess &write,
                                    const NodeRef &thread) const;
-  void resetProviderDerived(NodeGraph::WriteAccess &write,
-                            std::string_view reason);
+  [[nodiscard]] std::uint64_t
+  resetProviderDerived(NodeGraph::WriteAccess &write, std::string_view reason);
   [[nodiscard]] std::int64_t
   advancePromptActivity(NodeGraph::WriteAccess &write, const NodeRef &thread,
                         std::int64_t proposedActivityAt);

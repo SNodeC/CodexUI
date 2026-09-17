@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -83,6 +84,17 @@ private:
 
   Storage storage_;
 };
+
+[[nodiscard]] const Value *valueMember(const Value::Object &object,
+                                       std::string_view key) noexcept;
+[[nodiscard]] std::string exactStringFromValue(const Value *value);
+[[nodiscard]] std::string scalarTextFromValue(const Value *value);
+[[nodiscard]] bool boolFromValue(const Value *value,
+                                 bool fallback = false) noexcept;
+[[nodiscard]] std::optional<std::int64_t>
+signedIntegerFromValue(const Value *value) noexcept;
+[[nodiscard]] std::optional<std::uint64_t>
+unsignedIntegerFromValue(const Value *value) noexcept;
 
 } // namespace codexui::nodegraph
 

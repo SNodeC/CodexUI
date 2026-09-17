@@ -18,6 +18,8 @@ struct GraphChanged final {
   std::vector<NodeRef> affected;
   std::vector<NodeRef> removed;
   bool rescanRequired = false;
+  std::vector<ChildListChange> childListsChanged;
+  std::uint64_t providerAuthorityRevision = 0;
 
   bool operator==(const GraphChanged &) const = default;
 };

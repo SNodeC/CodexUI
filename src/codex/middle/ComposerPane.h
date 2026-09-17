@@ -4,6 +4,7 @@
 #define CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H
 
 #include "codex/AttachmentDraft.h"
+#include "codex/TurnSettingsPolicy.h"
 
 #include <QWidget>
 
@@ -44,6 +45,7 @@ public:
   };
 
   explicit ComposerPane(QWidget *anchor);
+  ~ComposerPane() override;
 
   void setActions(Actions actions);
   void setExtraOverlayHeightAction(std::function<void(int)> action);
@@ -52,12 +54,14 @@ public:
   attachments() const noexcept;
   void setAttentionVisible(bool visible);
   void setAttentionRequest(QString title, QString detail, bool directAccept,
-                           QString acceptLabel);
-  void setAttentionEnabled(bool enabled);
-  void setAttentionActionEnabled(bool enabled, bool reviewEnabled);
+                           QString acceptLabel, bool directReject,
+                           QString rejectLabel, bool replacesTarget);
+  void setAttentionActionEnabled(bool acceptEnabled, bool rejectEnabled,
+                                 bool reviewEnabled);
   void setActiveTurn(bool active);
   void setCanSubmit(bool canSubmit);
   void setSettingsEnabled(bool enabled);
+  void setTurnSettingsContext(TurnSettingsContext context);
   void clearDraft();
   void synchronizeGeometry();
 
@@ -69,8 +73,8 @@ public:
   [[nodiscard]] codexui::ExpandingPromptEditor *promptEditor() const noexcept {
     return promptEditor_;
   }
-  [[nodiscard]] TurnSettingsWidget *turnSettings() const noexcept {
-    return turnSettings_;
+  [[nodiscard]] TurnSettingsPolicy &turnSettings() noexcept {
+    return turnSettingsPolicy_;
   }
 
 protected:
@@ -92,6 +96,7 @@ private:
   QPushButton *attentionRejectButton_ = nullptr;
   QPushButton *attentionAcceptButton_ = nullptr;
   QPushButton *attentionReviewButton_ = nullptr;
+  TurnSettingsPolicy turnSettingsPolicy_;
   TurnSettingsWidget *turnSettings_ = nullptr;
   QFrame *composer_ = nullptr;
   QFrame *attachmentPanel_ = nullptr;

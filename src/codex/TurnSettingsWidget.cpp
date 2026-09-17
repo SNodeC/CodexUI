@@ -5,6 +5,7 @@
 #include "codex/FileSelectionDialog.h"
 #include "codex/ui/UiStyle.h"
 
+#include <QByteArray>
 #include <QComboBox>
 #include <QDir>
 #include <QFrame>
@@ -13,94 +14,66 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
-#include <QPaintEvent>
-#include <QPushButton>
 #include <QSignalBlocker>
 #include <QStyle>
-#include <QStyleOptionButton>
-#include <QStyleOptionComboBox>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
-#include <algorithm>
-#include <ranges>
+#include <array>
+#include <initializer_list>
+#include <utility>
 
 namespace codexui::codex {
 namespace {
 
-constexpr auto DefaultValue = "default";
 constexpr int SettingControlHeight = 32;
 constexpr int SettingLabelSpacing = 5;
-
-class CompactComboBox final : public QComboBox {
-protected:
-  void paintEvent(QPaintEvent *event) override {
-    QComboBox::paintEvent(event);
-
-    QStyleOptionComboBox option;
-    initStyleOption(&option);
-    const QRect indicator = style()->subControlRect(
-        QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxArrow, this);
-    UiStyle::drawChevron(
-        this, indicator, option.state & QStyle::State_Enabled,
-        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
-  }
-};
-
-class ChevronMenuButton final : public QPushButton {
-public:
-  using QPushButton::QPushButton;
-
-protected:
-  void paintEvent(QPaintEvent *event) override {
-    QPushButton::paintEvent(event);
-    QStyleOptionButton option;
-    initStyleOption(&option);
-    const QRect contents =
-        style()->subElementRect(QStyle::SE_PushButtonContents, &option, this);
-    const int indicatorWidth =
-        style()->pixelMetric(QStyle::PM_MenuButtonIndicator, &option, this);
-    QRect indicator(contents.right() - std::max(12, indicatorWidth),
-                    contents.top(), std::max(12, indicatorWidth),
-                    contents.height());
-    UiStyle::drawChevron(
-        this, indicator, option.state & QStyle::State_Enabled,
-        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
-  }
-};
+constexpr int TransientChoiceRole = Qt::UserRole + 1;
 
 QString text(const std::string &value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
 
-std::string stringValue(const nlohmann::json &object, const char *key) {
-  if (!object.is_object())
-    return {};
-  const auto iterator = object.find(key);
-  return iterator != object.end() && iterator->is_string()
-             ? iterator->get<std::string>()
-             : std::string{};
+std::string utf8(const QString &value) {
+  const QByteArray encoded = value.toUtf8();
+  return {encoded.constData(), static_cast<std::size_t>(encoded.size())};
 }
 
-void addChoice(QComboBox *combo, const QString &label, const QString &value) {
-  if (combo->findData(value) < 0)
-    combo->addItem(label, value);
+void addChoice(QComboBox *combo, const QString &label, const QString &value,
+               const QString &description = {}) {
+  combo->addItem(label, value);
+  if (!description.isEmpty())
+    combo->setItemData(combo->count() - 1, description, Qt::ToolTipRole);
+}
+
+void addChoices(
+    QComboBox *combo,
+    std::initializer_list<std::pair<const char *, const char *>> choices) {
+  for (const auto &[label, value] : choices)
+    addChoice(combo, QString::fromLatin1(label), QString::fromLatin1(value));
 }
 
 void selectValue(QComboBox *combo, const QString &value,
                  const QString &fallback = {}) {
+  const QSignalBlocker blocker(combo);
+  for (int candidate = combo->count() - 1; candidate >= 0; --candidate) {
+    if (combo->itemData(candidate, TransientChoiceRole).toBool() &&
+        combo->itemData(candidate) != value)
+      combo->removeItem(candidate);
+  }
   int index = combo->findData(value);
   if (index < 0) {
     combo->addItem(
         fallback.isEmpty() ? UiStyle::humanizeLabel(value) : fallback, value);
     index = combo->count() - 1;
+    combo->setItemData(index, true, TransientChoiceRole);
   }
   combo->setCurrentIndex(index);
 }
 
 QComboBox *compactCombo(const char *name) {
-  auto *combo = new CompactComboBox;
+  auto *combo = new UiStyle::ChevronComboBox;
   combo->setObjectName(QString::fromLatin1(name));
   combo->setProperty("codexChevron", true);
   combo->setFixedHeight(SettingControlHeight);
@@ -120,7 +93,7 @@ QWidget *labelled(const QString &caption, QWidget *control,
   const int labelHeight = label->fontMetrics().height();
   label->setFixedHeight(labelHeight);
   label->setBuddy(buddy ? buddy : control);
-  control->setAccessibleName(caption);
+  (buddy ? buddy : control)->setAccessibleName(caption);
   layout->addWidget(label);
   layout->addWidget(control);
   surface->setFixedHeight(labelHeight + SettingLabelSpacing +
@@ -129,52 +102,11 @@ QWidget *labelled(const QString &caption, QWidget *control,
   return surface;
 }
 
-nlohmann::json canonicalSandbox(const nlohmann::json &canonical) {
-  if (!canonical.is_object())
-    return nullptr;
-  if (canonical.contains("sandboxPolicy"))
-    return canonical["sandboxPolicy"];
-  if (canonical.contains("sandbox"))
-    return canonical["sandbox"];
-  return nullptr;
-}
-
-QString sandboxKey(const nlohmann::json &value) {
-  std::string key;
-  if (value.is_string())
-    key = value.get<std::string>();
-  else
-    key = stringValue(value, "type");
-  if (key == "readOnly")
-    return QStringLiteral("read-only");
-  if (key == "workspaceWrite")
-    return QStringLiteral("workspace-write");
-  if (key == "dangerFullAccess")
-    return QStringLiteral("danger-full-access");
-  if (key == "externalSandbox")
-    return QStringLiteral("external");
-  return key.empty() ? QString::fromLatin1(DefaultValue) : text(key);
-}
-
-bool sandboxNetworkEnabled(const nlohmann::json &value) {
-  const QString access = sandboxKey(value);
-  if (access == QStringLiteral("danger-full-access"))
-    return true;
-  if (value.is_object()) {
-    const auto member = value.find("networkAccess");
-    if (member != value.end()) {
-      if (member->is_boolean())
-        return member->get<bool>();
-      if (member->is_string())
-        return member->get<std::string>() == "enabled";
-    }
-  }
-  return false;
-}
-
-QString optionalString(const nlohmann::json &object, const char *key) {
-  const std::string value = stringValue(object, key);
-  return value.empty() ? QString::fromLatin1(DefaultValue) : text(value);
+void addSetting(QGridLayout *layout, const QString &caption, QWidget *control,
+                int row, int column, QWidget *buddy = nullptr,
+                int columnSpan = 1) {
+  layout->addWidget(labelled(caption, control, buddy), row, column, 1,
+                    columnSpan);
 }
 
 QString permissionProfileLabel(const QString &id) {
@@ -190,7 +122,9 @@ QString permissionProfileLabel(const QString &id) {
 
 } // namespace
 
-TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
+TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
+                                       QWidget *parent)
+    : QWidget(parent), settings(policy) {
   setObjectName(QStringLiteral("codexTurnSettings"));
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   auto *root = new QGridLayout(this);
@@ -198,11 +132,19 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   root->setHorizontalSpacing(8);
   root->setVerticalSpacing(8);
 
-  model = compactCombo("codexModel");
-  model->setEditable(true);
-  effort = compactCombo("codexEffort");
-  sandbox = compactCombo("codexSandbox");
-  network = compactCombo("codexNetwork");
+  combos = {compactCombo("codexModel"),
+            compactCombo("codexEffort"),
+            compactCombo("codexPersonality"),
+            compactCombo("codexSandbox"),
+            compactCombo("codexNetwork"),
+            compactCombo("codexApproval"),
+            compactCombo("codexReviewer"),
+            nullptr,
+            compactCombo("codexPermissionProfile"),
+            compactCombo("codexServiceTier"),
+            compactCombo("codexSummary"),
+            compactCombo("codexCollaboration")};
+  combo(TurnSettingField::Model)->setEditable(true);
   cwd = new QLineEdit;
   cwd->setObjectName(QStringLiteral("codexWorkspace"));
   cwd->setFixedHeight(SettingControlHeight);
@@ -219,117 +161,99 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   browseWorkspace->setFixedSize(SettingControlHeight, SettingControlHeight);
   workspaceLayout->addWidget(cwd, 1);
   workspaceLayout->addWidget(browseWorkspace);
-  approval = compactCombo("codexApproval");
-  personality = compactCombo("codexPersonality");
-  more = new ChevronMenuButton(QStringLiteral("More"));
+  more = new UiStyle::ChevronToolButton;
+  more->setObjectName(QStringLiteral("codexMoreSettings"));
+  more->setText(QStringLiteral("More"));
   more->setProperty("codexChevron", true);
+  more->setPopupMode(QToolButton::InstantPopup);
+  more->setToolButtonStyle(Qt::ToolButtonTextOnly);
   more->setFixedHeight(SettingControlHeight);
 
-  root->addWidget(labelled(QStringLiteral("Model"), model), 0, 0);
-  root->addWidget(labelled(QStringLiteral("Reasoning"), effort), 0, 1);
-  root->addWidget(labelled(QStringLiteral("Access"), sandbox), 0, 2);
-  root->addWidget(labelled(QStringLiteral("Network"), network), 0, 3);
-  root->addWidget(labelled(QStringLiteral("Workspace"), workspacePicker, cwd),
-                  1, 0);
-  root->addWidget(labelled(QStringLiteral("Approval"), approval), 1, 1);
-  root->addWidget(labelled(QStringLiteral("Style"), personality), 1, 2);
-  root->addWidget(labelled(QStringLiteral("Additional"), more), 1, 3);
+  addSetting(root, QStringLiteral("Model"), combo(TurnSettingField::Model), 0,
+             0);
+  addSetting(root, QStringLiteral("Reasoning"), combo(TurnSettingField::Effort),
+             0, 1);
+  addSetting(root, QStringLiteral("Access"), combo(TurnSettingField::Sandbox), 0,
+             2);
+  addSetting(root, QStringLiteral("Network"), combo(TurnSettingField::Network),
+             0, 3);
+  addSetting(root, QStringLiteral("Workspace"), workspacePicker, 1, 0, cwd);
+  addSetting(root, QStringLiteral("Approval"), combo(TurnSettingField::Approval),
+             1, 1);
+  addSetting(root, QStringLiteral("Style"), combo(TurnSettingField::Personality),
+             1, 2);
+  addSetting(root, QStringLiteral("Additional"), more, 1, 3);
   for (int column = 0; column < 4; ++column)
     root->setColumnStretch(column, 1);
 
-  moreMenu = new QMenu(this);
+  auto *moreMenu = new QMenu(this);
   auto *moreContents = new QWidget;
   moreContents->setMinimumWidth(470);
   auto *moreLayout = new QGridLayout(moreContents);
   moreLayout->setContentsMargins(14, 12, 14, 12);
   moreLayout->setHorizontalSpacing(8);
   moreLayout->setVerticalSpacing(8);
-  permissionProfile = compactCombo("codexPermissionProfile");
-  reviewer = compactCombo("codexReviewer");
-  serviceTier = compactCombo("codexServiceTier");
-  serviceTier->setEditable(true);
-  summary = compactCombo("codexSummary");
-  collaboration = compactCombo("codexCollaboration");
-  moreLayout->addWidget(
-      labelled(QStringLiteral("Permission profile"), permissionProfile), 0, 0);
-  moreLayout->addWidget(labelled(QStringLiteral("Approval reviewer"), reviewer),
-                        0, 1);
-  moreLayout->addWidget(labelled(QStringLiteral("Service tier"), serviceTier),
-                        1, 0);
-  moreLayout->addWidget(labelled(QStringLiteral("Reasoning summary"), summary),
-                        1, 1);
-  moreLayout->addWidget(
-      labelled(QStringLiteral("Collaboration mode"), collaboration), 2, 0, 1,
-      2);
+  addSetting(moreLayout, QStringLiteral("Permission profile"),
+             combo(TurnSettingField::PermissionProfile), 0, 0);
+  addSetting(moreLayout, QStringLiteral("Approval reviewer"),
+             combo(TurnSettingField::Reviewer), 0, 1);
+  addSetting(moreLayout, QStringLiteral("Service tier"),
+             combo(TurnSettingField::ServiceTier), 1, 0);
+  addSetting(moreLayout, QStringLiteral("Reasoning summary"),
+             combo(TurnSettingField::Summary), 1, 1);
+  addSetting(moreLayout, QStringLiteral("Collaboration mode"),
+             combo(TurnSettingField::Collaboration), 2, 0, nullptr, 2);
   auto *moreAction = new QWidgetAction(moreMenu);
   moreAction->setDefaultWidget(moreContents);
   moreMenu->addAction(moreAction);
   more->setMenu(moreMenu);
 
-  addChoice(effort, QStringLiteral("Thread default"), DefaultValue);
-  for (const char *value :
-       {"minimal", "low", "medium", "high", "xhigh", "ultra"})
-    addChoice(effort, UiStyle::humanizeLabel(QString::fromLatin1(value)),
-              QString::fromLatin1(value));
-  addChoice(sandbox, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(sandbox, QStringLiteral("Workspace"),
-            QStringLiteral("workspace-write"));
-  addChoice(sandbox, QStringLiteral("Read only"), QStringLiteral("read-only"));
-  addChoice(sandbox, QStringLiteral("Full access"),
-            QStringLiteral("danger-full-access"));
-  addChoice(sandbox, QStringLiteral("External"), QStringLiteral("external"));
-  addChoice(network, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(network, QStringLiteral("Restricted"),
-            QStringLiteral("restricted"));
-  addChoice(network, QStringLiteral("Enabled"), QStringLiteral("enabled"));
-  addChoice(approval, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(approval, QStringLiteral("On request"),
-            QStringLiteral("on-request"));
-  addChoice(approval, QStringLiteral("Untrusted"), QStringLiteral("untrusted"));
-  addChoice(approval, QStringLiteral("Never"), QStringLiteral("never"));
-  addChoice(personality, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(personality, QStringLiteral("None"), QStringLiteral("none"));
-  addChoice(personality, QStringLiteral("Friendly"),
-            QStringLiteral("friendly"));
-  addChoice(personality, QStringLiteral("Pragmatic"),
-            QStringLiteral("pragmatic"));
-  addChoice(reviewer, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(reviewer, QStringLiteral("User"), QStringLiteral("user"));
-  addChoice(reviewer, QStringLiteral("Auto review"),
-            QStringLiteral("auto_review"));
-  addChoice(reviewer, QStringLiteral("Guardian"),
-            QStringLiteral("guardian_subagent"));
-  addChoice(serviceTier, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(summary, QStringLiteral("Thread default"), DefaultValue);
-  addChoice(summary, QStringLiteral("Auto"), QStringLiteral("auto"));
-  addChoice(summary, QStringLiteral("Concise"), QStringLiteral("concise"));
-  addChoice(summary, QStringLiteral("Detailed"), QStringLiteral("detailed"));
-  addChoice(summary, QStringLiteral("None"), QStringLiteral("none"));
-  addChoice(collaboration, QStringLiteral("Code"), QStringLiteral("default"));
-  addChoice(collaboration, QStringLiteral("Plan"), QStringLiteral("plan"));
-  addChoice(permissionProfile, QStringLiteral("Thread default"), DefaultValue);
+  addChoices(combo(TurnSettingField::Sandbox),
+             {{"Thread default", DefaultTurnSetting},
+              {"Workspace", "workspace-write"},
+              {"Read only", "read-only"},
+              {"Full access", "danger-full-access"},
+              {"External", "external"}});
+  addChoices(combo(TurnSettingField::Network),
+             {{"Thread default", DefaultTurnSetting},
+              {"Restricted", "restricted"},
+              {"Enabled", "enabled"}});
+  addChoices(combo(TurnSettingField::Approval),
+             {{"Thread default", DefaultTurnSetting},
+              {"On request", "on-request"},
+              {"Untrusted", "untrusted"},
+              {"Never", "never"}});
+  addChoices(combo(TurnSettingField::Personality),
+             {{"Thread default", DefaultTurnSetting},
+              {"None", "none"},
+              {"Friendly", "friendly"},
+              {"Pragmatic", "pragmatic"}});
+  addChoices(combo(TurnSettingField::Reviewer),
+             {{"Thread default", DefaultTurnSetting},
+              {"User", "user"},
+              {"Auto review", "auto_review"},
+              {"Guardian", "guardian_subagent"}});
+  addChoices(combo(TurnSettingField::Summary),
+             {{"Thread default", DefaultTurnSetting},
+              {"Auto", "auto"},
+              {"Concise", "concise"},
+              {"Detailed", "detailed"},
+              {"None", "none"}});
+  addChoices(combo(TurnSettingField::Collaboration),
+             {{"Code", DefaultTurnSetting}, {"Plan", "plan"}});
 
-  const auto connectCombo = [this](QComboBox *combo, Field field) {
-    connect(combo, &QComboBox::currentIndexChanged, this,
-            [this, field] { markTouched(field); });
-  };
-  connectCombo(model, Field::Model);
-  connect(model->lineEdit(), &QLineEdit::textEdited, this,
-          [this] { markTouched(Field::Model); });
-  connectCombo(effort, Field::Effort);
-  connectCombo(personality, Field::Personality);
-  connectCombo(sandbox, Field::Sandbox);
-  connectCombo(network, Field::Network);
-  connectCombo(approval, Field::Approval);
-  connectCombo(reviewer, Field::Reviewer);
-  connectCombo(permissionProfile, Field::PermissionProfile);
-  connectCombo(serviceTier, Field::ServiceTier);
-  connect(serviceTier->lineEdit(), &QLineEdit::textEdited, this,
-          [this] { markTouched(Field::ServiceTier); });
-  connectCombo(summary, Field::Summary);
-  connectCombo(collaboration, Field::Collaboration);
+  for (std::size_t index = 0; index < combos.size(); ++index) {
+    if (!combos[index])
+      continue;
+    connect(combos[index], &QComboBox::currentIndexChanged, this,
+            [this, field = static_cast<TurnSettingField>(index)] {
+              markTouched(field);
+            });
+  }
+  connect(combo(TurnSettingField::Model)->lineEdit(), &QLineEdit::textEdited,
+          this, [this] { markTouched(TurnSettingField::Model); });
   connect(cwd, &QLineEdit::textEdited, this,
-          [this] { markTouched(Field::Workspace); });
+          [this] { markTouched(TurnSettingField::Workspace); });
   connect(browseWorkspace, &QToolButton::clicked, this, [this] {
     const QString initialDirectory =
         cwd->text().trimmed().isEmpty()
@@ -337,573 +261,170 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
             : QDir::fromNativeSeparators(cwd->text().trimmed());
     FileSelectionDialog dialog(FileSelectionDialog::Mode::Workspace,
                                initialDirectory, {}, this);
-    if (dialog.exec() == QDialog::Accepted)
-      setWorkspace(dialog.selectedDirectory());
+    if (dialog.exec() == QDialog::Accepted) {
+      cwd->setText(QDir::toNativeSeparators(dialog.selectedDirectory()));
+      settings.change(TurnSettingField::Workspace, utf8(cwd->text()));
+      refreshMoreIndicator();
+    }
   });
-  connect(model, &QComboBox::currentIndexChanged, this,
-          [this] { refreshModelOptions(); });
-  connect(sandbox, &QComboBox::currentIndexChanged, this,
-          [this] { refreshAccessCompatibility(); });
-  connect(permissionProfile, &QComboBox::currentIndexChanged, this,
-          [this] { refreshAccessCompatibility(); });
+
+  refreshModels();
+  refreshPermissionProfiles();
+  render();
 }
 
-void TurnSettingsWidget::setContext(std::string identity,
-                                    const nlohmann::json &canonical,
-                                    const nlohmann::json &models,
-                                    const nlohmann::json &permissionProfiles,
-                                    std::uint64_t settingsRevision,
-                                    const nlohmann::json &settingsUpdate) {
-  modelCatalog = models.is_array() ? models : nlohmann::json::array();
-  static_cast<void>(applyCanonicalContext(std::move(identity), canonical,
-                                          settingsRevision, settingsUpdate));
-  refreshModels(modelCatalog);
-  refreshPermissionProfiles(permissionProfiles);
-  refreshModelOptions();
-  refreshAccessCompatibility();
-  refreshMoreIndicator();
-}
-
-void TurnSettingsWidget::setCanonicalContext(
-    std::string identity, const nlohmann::json &canonical,
-    std::uint64_t settingsRevision, const nlohmann::json &settingsUpdate) {
-  const bool identityChanged = contextIdentity != identity;
-  const auto differs = [this, &canonical](const char *name) {
-    return canonicalContext.value(name, nlohmann::json(nullptr)) !=
-           canonical.value(name, nlohmann::json(nullptr));
-  };
-  const bool modelChanged = identityChanged || differs("model");
-  const bool accessChanged = identityChanged || differs("sandbox") ||
-                             differs("sandboxPolicy") ||
-                             differs("activePermissionProfile");
-  if (!applyCanonicalContext(std::move(identity), canonical, settingsRevision,
-                             settingsUpdate))
+void TurnSettingsWidget::setContext(TurnSettingsContext context) {
+  const bool modelsChanged = settings.context().models != context.models;
+  const bool profilesChanged =
+      settings.context().permissionProfiles != context.permissionProfiles;
+  const bool valuesChanged = settings.setContext(std::move(context));
+  if (!valuesChanged && !modelsChanged && !profilesChanged)
     return;
-  if (modelChanged)
-    refreshModelOptions();
-  if (accessChanged)
-    refreshAccessCompatibility();
-  refreshMoreIndicator();
+  if (modelsChanged)
+    refreshModels();
+  if (profilesChanged)
+    refreshPermissionProfiles();
+  render();
 }
 
-void TurnSettingsWidget::setModelCatalog(const nlohmann::json &models) {
-  modelCatalog = models.is_array() ? models : nlohmann::json::array();
-  refreshModels(modelCatalog);
+void TurnSettingsWidget::markTouched(TurnSettingField field) {
+  QComboBox *control = combo(field);
+  QString selected;
+  if (field == TurnSettingField::Workspace)
+    selected = cwd->text();
+  else if (control->isEditable() &&
+           (control->currentIndex() < 0 ||
+            control->currentText() !=
+                control->itemText(control->currentIndex())))
+    selected = control->currentText().trimmed();
+  else
+    selected = control->currentData().toString();
+  settings.change(field, utf8(selected));
+  if (field == TurnSettingField::Workspace)
+    refreshMoreIndicator();
+  else
+    render();
+}
+
+void TurnSettingsWidget::render() {
+  const TurnSettingValues &values = settings.values();
+  for (const TurnSettingField field :
+       {TurnSettingField::Model, TurnSettingField::Sandbox,
+        TurnSettingField::Network, TurnSettingField::Approval,
+        TurnSettingField::Reviewer, TurnSettingField::Summary,
+        TurnSettingField::Collaboration}) {
+    const QString value = text(values[field]);
+    selectValue(combo(field), value,
+                value == DefaultTurnSetting ? QStringLiteral("Thread default")
+                                            : QString{});
+  }
+  const QString profile = text(values[TurnSettingField::PermissionProfile]);
+  selectValue(combo(TurnSettingField::PermissionProfile), profile,
+              profile == DefaultTurnSetting ? QStringLiteral("Thread default")
+                                            : permissionProfileLabel(profile));
+  cwd->setText(
+      QDir::toNativeSeparators(text(values[TurnSettingField::Workspace])));
   refreshModelOptions();
-  refreshMoreIndicator();
-}
-
-void TurnSettingsWidget::setPermissionProfileCatalog(
-    const nlohmann::json &permissionProfiles) {
-  refreshPermissionProfiles(permissionProfiles);
   refreshAccessCompatibility();
   refreshMoreIndicator();
 }
 
-bool TurnSettingsWidget::applyCanonicalContext(
-    std::string identity, const nlohmann::json &canonical,
-    std::uint64_t settingsRevision, const nlohmann::json &settingsUpdate) {
-  const bool changed = contextIdentity != identity;
-  contextIdentity = std::move(identity);
-  std::array<bool, static_cast<std::size_t>(Field::Count)> fields{};
-  if (changed) {
-    fields.fill(true);
-  } else {
-    const auto differs = [this, &canonical](const char *name) {
-      return canonicalContext.value(name, nlohmann::json(nullptr)) !=
-             canonical.value(name, nlohmann::json(nullptr));
-    };
-    const auto received = [&settingsUpdate,
-                           authoritative = canonicalSettingsRevision !=
-                                           settingsRevision](const char *name) {
-      return authoritative && settingsUpdate.is_object() &&
-             settingsUpdate.contains(name);
-    };
-    fields[static_cast<std::size_t>(Field::Model)] =
-        differs("model") || received("model");
-    fields[static_cast<std::size_t>(Field::Effort)] =
-        differs("effort") || differs("reasoningEffort") || received("effort") ||
-        received("reasoningEffort");
-    fields[static_cast<std::size_t>(Field::Personality)] =
-        differs("personality") || received("personality");
-    const bool sandboxChanged =
-        differs("sandbox") || differs("sandboxPolicy") || received("sandbox") ||
-        received("sandboxPolicy");
-    fields[static_cast<std::size_t>(Field::Sandbox)] = sandboxChanged;
-    fields[static_cast<std::size_t>(Field::Network)] = sandboxChanged;
-    fields[static_cast<std::size_t>(Field::Approval)] =
-        differs("approvalPolicy") || received("approvalPolicy");
-    fields[static_cast<std::size_t>(Field::Reviewer)] =
-        differs("approvalsReviewer") || received("approvalsReviewer");
-    fields[static_cast<std::size_t>(Field::Workspace)] =
-        differs("cwd") || received("cwd");
-    fields[static_cast<std::size_t>(Field::PermissionProfile)] =
-        differs("activePermissionProfile") ||
-        received("activePermissionProfile");
-    fields[static_cast<std::size_t>(Field::ServiceTier)] =
-        differs("serviceTier") || received("serviceTier");
-    fields[static_cast<std::size_t>(Field::Summary)] =
-        differs("summary") || received("summary");
-    fields[static_cast<std::size_t>(Field::Collaboration)] =
-        differs("collaborationMode") || received("collaborationMode");
-  }
-  for (std::size_t index = 0; index < fields.size(); ++index)
-    if (fields[index])
-      touchedFields[index] = false;
-  refreshFromCanonical(canonical, fields);
-  canonicalContext = canonical;
-  canonicalSettingsRevision = settingsRevision;
-  return std::ranges::any_of(fields, [](bool refresh) { return refresh; });
-}
-
-void TurnSettingsWidget::setControlsEnabled(bool enabled) {
-  if (isEnabled() != enabled)
-    setEnabled(enabled);
-  const QString tip =
-      enabled ? QString{}
-              : QStringLiteral("Settings apply when starting a turn");
-  if (toolTip() != tip)
-    setToolTip(tip);
-}
-
-void TurnSettingsWidget::setWorkspace(QString path) {
-  cwd->setText(QDir::toNativeSeparators(std::move(path)));
-  markTouched(Field::Workspace);
-}
-
-std::string TurnSettingsWidget::workspace(const std::string &fallback) const {
-  const QString selected = cwd->text().trimmed();
-  return selected.isEmpty() ? fallback : selected.toStdString();
-}
-
-nlohmann::json TurnSettingsWidget::threadStartOptions() const {
-  nlohmann::json result = nlohmann::json::object();
-  const auto copyChoice = [this, &result](Field field, const char *name,
-                                          const QComboBox *combo) {
-    if (!touched(field))
-      return;
-    const QString selected = value(combo);
-    result[name] = selected == DefaultValue
-                       ? nlohmann::json(nullptr)
-                       : nlohmann::json(selected.toStdString());
-  };
-  copyChoice(Field::Model, "model", model);
-  copyChoice(Field::Approval, "approvalPolicy", approval);
-  copyChoice(Field::Reviewer, "approvalsReviewer", reviewer);
-  copyChoice(Field::Personality, "personality", personality);
-  copyChoice(Field::ServiceTier, "serviceTier", serviceTier);
-  if (touched(Field::Workspace))
-    result["cwd"] = cwd->text().trimmed().isEmpty()
-                        ? nlohmann::json(nullptr)
-                        : nlohmann::json(cwd->text().trimmed().toStdString());
-  const QString selectedProfile = value(permissionProfile);
-  if (touched(Field::PermissionProfile))
-    result["permissions"] = selectedProfile == DefaultValue
-                                ? nlohmann::json(nullptr)
-                                : nlohmann::json(selectedProfile.toStdString());
-  if (selectedProfile == DefaultValue && touched(Field::Sandbox)) {
-    const QString selected = value(sandbox);
-    result["sandbox"] = selected == DefaultValue || selected == "external"
-                            ? nlohmann::json(nullptr)
-                            : nlohmann::json(selected.toStdString());
-  }
-  return result;
-}
-
-nlohmann::json TurnSettingsWidget::turnStartOptions() const {
-  nlohmann::json result = nlohmann::json::object();
-  const auto copyChoice = [this, &result](Field field, const char *name,
-                                          const QComboBox *combo) {
-    if (!touched(field))
-      return;
-    const QString selected = value(combo);
-    result[name] = selected == DefaultValue
-                       ? nlohmann::json(nullptr)
-                       : nlohmann::json(selected.toStdString());
-  };
-  copyChoice(Field::Model, "model", model);
-  copyChoice(Field::Effort, "effort", effort);
-  copyChoice(Field::Personality, "personality", personality);
-  copyChoice(Field::Approval, "approvalPolicy", approval);
-  copyChoice(Field::Reviewer, "approvalsReviewer", reviewer);
-  copyChoice(Field::ServiceTier, "serviceTier", serviceTier);
-  copyChoice(Field::Summary, "summary", summary);
-  if (touched(Field::Workspace))
-    result["cwd"] = cwd->text().trimmed().isEmpty()
-                        ? nlohmann::json(nullptr)
-                        : nlohmann::json(cwd->text().trimmed().toStdString());
-  const QString selectedProfile = value(permissionProfile);
-  if (touched(Field::PermissionProfile))
-    result["permissions"] = selectedProfile == DefaultValue
-                                ? nlohmann::json(nullptr)
-                                : nlohmann::json(selectedProfile.toStdString());
-  if (selectedProfile == DefaultValue &&
-      (touched(Field::Sandbox) || touched(Field::Network))) {
-    result["sandboxPolicy"] = sandboxPolicy();
-  }
-  const nlohmann::json mode = collaborationMode();
-  if (!mode.is_null())
-    result["collaborationMode"] = mode;
-  return result;
-}
-
-void TurnSettingsWidget::markTouched(Field field) {
-  touchedFields[static_cast<std::size_t>(field)] = true;
-  if ((field == Field::Sandbox || field == Field::Network) &&
-      value(permissionProfile) != DefaultValue) {
-    const QSignalBlocker blocker(permissionProfile);
-    selectValue(permissionProfile, QString::fromLatin1(DefaultValue),
-                QStringLiteral("Thread default"));
-    touchedFields[static_cast<std::size_t>(Field::PermissionProfile)] = false;
-  } else if (field == Field::PermissionProfile &&
-             value(permissionProfile) != DefaultValue) {
-    touchedFields[static_cast<std::size_t>(Field::Sandbox)] = false;
-    touchedFields[static_cast<std::size_t>(Field::Network)] = false;
-  }
-  refreshMoreIndicator();
-}
-
-void TurnSettingsWidget::refreshFromCanonical(
-    const nlohmann::json &canonical,
-    const std::array<bool, static_cast<std::size_t>(Field::Count)> &fields) {
-  const auto refresh = [&fields](Field field) {
-    return fields[static_cast<std::size_t>(field)];
-  };
-  const QSignalBlocker modelBlocker(model);
-  const QSignalBlocker effortBlocker(effort);
-  const QSignalBlocker personalityBlocker(personality);
-  const QSignalBlocker sandboxBlocker(sandbox);
-  const QSignalBlocker networkBlocker(network);
-  const QSignalBlocker approvalBlocker(approval);
-  const QSignalBlocker reviewerBlocker(reviewer);
-  const QSignalBlocker cwdBlocker(cwd);
-  const QSignalBlocker permissionBlocker(permissionProfile);
-  const QSignalBlocker tierBlocker(serviceTier);
-  const QSignalBlocker summaryBlocker(summary);
-  const QSignalBlocker collaborationBlocker(collaboration);
-
-  if (refresh(Field::Model))
-    selectValue(model, optionalString(canonical, "model"),
-                QStringLiteral("Thread default"));
-  if (refresh(Field::Effort)) {
-    QString canonicalEffort = optionalString(canonical, "reasoningEffort");
-    if (canonicalEffort == DefaultValue)
-      canonicalEffort = optionalString(canonical, "effort");
-    selectValue(effort, canonicalEffort, QStringLiteral("Thread default"));
-  }
-  if (refresh(Field::Personality))
-    selectValue(personality, optionalString(canonical, "personality"),
-                QStringLiteral("Thread default"));
-  if (refresh(Field::Sandbox))
-    selectValue(sandbox, sandboxKey(canonicalSandbox(canonical)),
-                QStringLiteral("Thread default"));
-  if (refresh(Field::Network)) {
-    const nlohmann::json nativeSandbox = canonicalSandbox(canonical);
-    selectValue(network, sandboxKey(nativeSandbox) == DefaultValue
-                             ? QString::fromLatin1(DefaultValue)
-                         : sandboxNetworkEnabled(nativeSandbox)
-                             ? QStringLiteral("enabled")
-                             : QStringLiteral("restricted"));
-  }
-  if (refresh(Field::Approval)) {
-    const std::string nativeApproval = stringValue(canonical, "approvalPolicy");
-    selectValue(approval,
-                nativeApproval.empty() ? QString::fromLatin1(DefaultValue)
-                                       : text(nativeApproval),
-                nativeApproval.empty() ? QStringLiteral("Thread default")
-                                       : QStringLiteral("Current policy"));
-  }
-  if (refresh(Field::Reviewer))
-    selectValue(reviewer, optionalString(canonical, "approvalsReviewer"),
-                QStringLiteral("Thread default"));
-  if (refresh(Field::Workspace))
-    cwd->setText(text(stringValue(canonical, "cwd")));
-  if (refresh(Field::PermissionProfile)) {
-    QString activeProfile = QString::fromLatin1(DefaultValue);
-    const nlohmann::json profile =
-        canonical.value("activePermissionProfile", nlohmann::json::object());
-    if (profile.is_object() && profile.contains("id") &&
-        profile["id"].is_string())
-      activeProfile = text(profile["id"].get<std::string>());
-    selectValue(permissionProfile, activeProfile,
-                permissionProfileLabel(activeProfile));
-  }
-  if (refresh(Field::ServiceTier))
-    selectValue(serviceTier, optionalString(canonical, "serviceTier"),
-                QStringLiteral("Thread default"));
-  if (refresh(Field::Summary))
-    selectValue(summary, optionalString(canonical, "summary"),
-                QStringLiteral("Thread default"));
-  if (refresh(Field::Collaboration)) {
-    const nlohmann::json mode =
-        canonical.value("collaborationMode", nlohmann::json::object());
-    selectValue(collaboration, mode.is_object() && mode.contains("mode") &&
-                                       mode["mode"].is_string()
-                                   ? text(mode["mode"].get<std::string>())
-                                   : QStringLiteral("default"));
-  }
-}
-
-void TurnSettingsWidget::refreshModels(const nlohmann::json &models) {
-  const QString selected = model->currentData().toString();
-  const QString edited = model->currentText().trimmed();
-  const bool custom =
-      model->isEditable() &&
-      (model->currentIndex() < 0 ||
-       model->currentText() != model->itemText(model->currentIndex()));
+void TurnSettingsWidget::refreshModels() {
+  QComboBox *model = combo(TurnSettingField::Model);
   const QSignalBlocker blocker(model);
   model->clear();
-  addChoice(model, QStringLiteral("Thread default"), DefaultValue);
-  if (models.is_array()) {
-    for (const auto &entry : models) {
-      if (!entry.is_object() || entry.value("hidden", false))
-        continue;
-      std::string id = stringValue(entry, "model");
-      if (id.empty())
-        id = stringValue(entry, "id");
-      if (id.empty())
-        continue;
-      const std::string display = stringValue(entry, "displayName");
-      addChoice(model, display.empty() ? text(id) : text(display), text(id));
-    }
-  }
-  selectValue(model, selected.isEmpty() ? QString::fromLatin1(DefaultValue)
-                                        : selected);
-  if (custom && !edited.isEmpty())
-    model->setEditText(edited);
+  addChoice(model, QStringLiteral("Thread default"), DefaultTurnSetting);
+  for (const TurnSettingModel &entry : settings.context().models)
+    addChoice(model, text(entry.choice.label), text(entry.choice.value),
+              text(entry.choice.description));
 }
 
 void TurnSettingsWidget::refreshModelOptions() {
-  const QString selected = value(effort);
-  const QString modelId = model->currentIndex() >= 0
-                              ? model->currentData().toString()
-                              : model->currentText().trimmed();
-  const nlohmann::json *definition = nullptr;
-  if (modelCatalog.is_array()) {
-    const auto match =
-        std::find_if(modelCatalog.begin(), modelCatalog.end(),
-                     [&modelId](const nlohmann::json &entry) {
-                       return text(stringValue(entry, "model")) == modelId ||
-                              text(stringValue(entry, "id")) == modelId;
-                     });
-    if (match != modelCatalog.end())
-      definition = &*match;
-  }
-  const QSignalBlocker blocker(effort);
-  effort->clear();
-  QString defaultLabel = QStringLiteral("Thread default");
-  if (definition) {
-    const std::string defaultEffort =
-        stringValue(*definition, "defaultReasoningEffort");
-    if (!defaultEffort.empty())
-      defaultLabel = UiStyle::humanizeLabel(text(defaultEffort)) +
-                     QStringLiteral(" - default");
-  }
-  addChoice(effort, defaultLabel, DefaultValue);
-  const nlohmann::json supported =
-      definition ? definition->value("supportedReasoningEfforts",
-                                     nlohmann::json::array())
-                 : nlohmann::json::array();
-  if (supported.is_array() && !supported.empty()) {
-    for (const auto &option : supported) {
-      const std::string key = stringValue(option, "reasoningEffort");
-      if (!key.empty())
-        addChoice(effort, UiStyle::humanizeLabel(text(key)), text(key));
-    }
-  } else {
-    for (const char *key :
-         {"minimal", "low", "medium", "high", "xhigh", "ultra"})
-      addChoice(effort, UiStyle::humanizeLabel(QString::fromLatin1(key)),
-                QString::fromLatin1(key));
-  }
-  const QString requestedEffort =
-      selected.isEmpty() ? QString::fromLatin1(DefaultValue) : selected;
-  const bool constrained = supported.is_array() && !supported.empty();
-  selectValue(effort, constrained && effort->findData(requestedEffort) < 0
-                          ? QString::fromLatin1(DefaultValue)
-                          : requestedEffort);
+  const TurnSettingValues &values = settings.values();
+  const TurnSettingModel *definition = settings.selectedModel();
 
-  const QString selectedTier = value(serviceTier);
+  QComboBox *effort = combo(TurnSettingField::Effort);
+  const QSignalBlocker effortBlocker(effort);
+  effort->clear();
+  QString defaultEffort = QStringLiteral("Thread default");
+  if (definition && !definition->defaultReasoningEffort.empty())
+    defaultEffort =
+        UiStyle::humanizeLabel(text(definition->defaultReasoningEffort)) +
+        QStringLiteral(" - default");
+  addChoice(effort, defaultEffort, DefaultTurnSetting);
+  if (definition && !definition->reasoningEfforts.empty()) {
+    for (const std::string &entry : definition->reasoningEfforts)
+      addChoice(effort, UiStyle::humanizeLabel(text(entry)), text(entry));
+  }
+  selectValue(effort, text(values[TurnSettingField::Effort]));
+
+  QComboBox *serviceTier = combo(TurnSettingField::ServiceTier);
   const QSignalBlocker tierBlocker(serviceTier);
   serviceTier->clear();
-  QString defaultTierLabel = QStringLiteral("Thread default");
+  QString defaultTier = QStringLiteral("Thread default");
+  if (definition && !definition->defaultServiceTier.empty())
+    defaultTier +=
+        QStringLiteral(" (%1)").arg(text(definition->defaultServiceTier));
+  addChoice(serviceTier, defaultTier, DefaultTurnSetting);
   if (definition) {
-    const std::string defaultTier =
-        stringValue(*definition, "defaultServiceTier");
-    if (!defaultTier.empty())
-      defaultTierLabel += QStringLiteral(" (%1)").arg(text(defaultTier));
+    for (const TurnSettingChoice &entry : definition->serviceTiers)
+      addChoice(serviceTier,
+                entry.label.empty() ? UiStyle::humanizeLabel(text(entry.value))
+                                    : text(entry.label),
+                text(entry.value), text(entry.description));
   }
-  addChoice(serviceTier, defaultTierLabel, DefaultValue);
-  if (definition) {
-    const nlohmann::json tiers =
-        definition->value("serviceTiers", nlohmann::json::array());
-    if (tiers.is_array()) {
-      for (const auto &tier : tiers) {
-        const std::string id = stringValue(tier, "id");
-        if (id.empty())
-          continue;
-        const std::string name = stringValue(tier, "name");
-        addChoice(serviceTier, name.empty() ? text(id) : text(name), text(id));
-        const int index = serviceTier->findData(text(id));
-        if (index >= 0)
-          serviceTier->setItemData(
-              index, text(stringValue(tier, "description")), Qt::ToolTipRole);
-      }
-    }
-    const nlohmann::json legacyTiers =
-        definition->value("additionalSpeedTiers", nlohmann::json::array());
-    if (legacyTiers.is_array()) {
-      for (const auto &tier : legacyTiers) {
-        if (tier.is_string())
-          addChoice(serviceTier,
-                    UiStyle::humanizeLabel(text(tier.get<std::string>())),
-                    text(tier.get<std::string>()));
-      }
-    }
-  }
-  const QString requestedTier =
-      selectedTier.isEmpty() ? QString::fromLatin1(DefaultValue) : selectedTier;
-  if (serviceTier->findData(requestedTier) >= 0)
-    selectValue(serviceTier, requestedTier);
-  else
-    serviceTier->setEditText(requestedTier);
+  const QString selectedTier = text(values[TurnSettingField::ServiceTier]);
+  selectValue(serviceTier, selectedTier);
 
-  const bool supportsPersonality =
-      !definition || definition->value("supportsPersonality", true);
-  personality->setEnabled(supportsPersonality);
+  QComboBox *personality = combo(TurnSettingField::Personality);
+  const bool personalitySupported = settings.personalityEnabled();
+  personality->setEnabled(personalitySupported);
   personality->setToolTip(
-      supportsPersonality
+      personalitySupported
           ? QString{}
           : QStringLiteral(
                 "The selected model does not support style choices"));
-  if (!supportsPersonality && value(personality) != DefaultValue) {
-    const QSignalBlocker personalityBlocker(personality);
-    selectValue(personality, QString::fromLatin1(DefaultValue));
-  }
+  selectValue(personality,
+              text(settings.values()[TurnSettingField::Personality]));
 }
 
-void TurnSettingsWidget::refreshPermissionProfiles(
-    const nlohmann::json &profiles) {
-  const QString selected = value(permissionProfile);
+void TurnSettingsWidget::refreshPermissionProfiles() {
+  QComboBox *permissionProfile = combo(TurnSettingField::PermissionProfile);
   const QSignalBlocker blocker(permissionProfile);
   permissionProfile->clear();
-  addChoice(permissionProfile, QStringLiteral("Thread default"), DefaultValue);
-  nlohmann::json entries = profiles;
-  if (profiles.is_object())
-    entries = profiles.value("data", nlohmann::json::array());
-  if (entries.is_array()) {
-    for (const auto &entry : entries) {
-      const std::string id = stringValue(entry, "id");
-      if (id.empty() || !entry.value("allowed", true))
-        continue;
-      const QString profileId = text(id);
-      addChoice(permissionProfile, permissionProfileLabel(profileId),
-                profileId);
-      const int index = permissionProfile->findData(profileId);
-      if (index >= 0)
-        permissionProfile->setItemData(
-            index, text(stringValue(entry, "description")), Qt::ToolTipRole);
-    }
+  addChoice(permissionProfile, QStringLiteral("Thread default"),
+            DefaultTurnSetting);
+  for (const TurnSettingChoice &entry : settings.context().permissionProfiles) {
+    const QString id = text(entry.value);
+    addChoice(permissionProfile,
+              entry.label.empty() ? permissionProfileLabel(id)
+                                  : text(entry.label),
+              id, text(entry.description));
   }
-  const QString selectedProfile =
-      selected.isEmpty() ? QString::fromLatin1(DefaultValue) : selected;
-  selectValue(permissionProfile, selectedProfile,
-              selectedProfile == DefaultValue
-                  ? QStringLiteral("Thread default")
-                  : permissionProfileLabel(selectedProfile));
 }
 
 void TurnSettingsWidget::refreshAccessCompatibility() {
-  sandbox->setEnabled(true);
-  network->setEnabled(value(sandbox) != "danger-full-access" &&
-                      value(sandbox) != DefaultValue);
-  if (value(sandbox) == "danger-full-access") {
-    const QSignalBlocker blocker(network);
-    selectValue(network, QStringLiteral("enabled"));
-  } else if (value(sandbox) == DefaultValue) {
-    const QSignalBlocker blocker(network);
-    selectValue(network, QString::fromLatin1(DefaultValue));
-  }
-  sandbox->setToolTip({});
+  QComboBox *network = combo(TurnSettingField::Network);
+  const std::string &access = settings.values()[TurnSettingField::Sandbox];
+  network->setEnabled(settings.networkEnabled());
   network->setToolTip(
-      value(sandbox) == "danger-full-access"
+      access == "danger-full-access"
           ? QStringLiteral("Full access already includes network access")
-      : value(sandbox) == DefaultValue
+      : access == DefaultTurnSetting
           ? QStringLiteral("Select an access mode before network access")
           : QString{});
 }
 
 void TurnSettingsWidget::refreshMoreIndicator() {
-  const bool changed = touched(Field::PermissionProfile) ||
-                       touched(Field::Reviewer) ||
-                       touched(Field::ServiceTier) || touched(Field::Summary) ||
-                       touched(Field::Collaboration);
-  more->setProperty("changed", changed);
-  more->style()->unpolish(more);
-  more->style()->polish(more);
-  more->update();
-}
-
-bool TurnSettingsWidget::touched(Field field) const noexcept {
-  return touchedFields[static_cast<std::size_t>(field)];
-}
-
-QString TurnSettingsWidget::value(const QComboBox *combo) const {
-  if (combo->isEditable()) {
-    const int index = combo->currentIndex();
-    if (index < 0 || combo->currentText() != combo->itemText(index))
-      return combo->currentText().trimmed();
-  }
-  return combo->currentData().toString();
-}
-
-nlohmann::json TurnSettingsWidget::sandboxPolicy() const {
-  const QString access = value(sandbox);
-  if (access == DefaultValue)
-    return nullptr;
-  if (access == "danger-full-access")
-    return {{"type", "dangerFullAccess"}};
-  if (access == "external")
-    return {{"type", "externalSandbox"},
-            {"networkAccess",
-             value(network) == "enabled" ? "enabled" : "restricted"}};
-  if (access == "read-only")
-    return {{"type", "readOnly"},
-            {"networkAccess", value(network) == "enabled"}};
-  return {{"type", "workspaceWrite"},
-          {"writableRoots", nlohmann::json::array()},
-          {"networkAccess", value(network) == "enabled"},
-          {"excludeTmpdirEnvVar", false},
-          {"excludeSlashTmp", false}};
-}
-
-nlohmann::json TurnSettingsWidget::collaborationMode() const {
-  QString selectedModel = value(model);
-  if (selectedModel == DefaultValue && modelCatalog.is_array()) {
-    const auto defaultModel = std::find_if(
-        modelCatalog.begin(), modelCatalog.end(),
-        [](const nlohmann::json &entry) {
-          return entry.is_object() && entry.value("isDefault", false);
-        });
-    if (defaultModel != modelCatalog.end()) {
-      std::string modelId = stringValue(*defaultModel, "model");
-      if (modelId.empty())
-        modelId = stringValue(*defaultModel, "id");
-      selectedModel = text(modelId);
-    }
-  }
-  if (selectedModel.isEmpty() || selectedModel == DefaultValue)
-    return nullptr;
-
-  const QString selectedEffort = value(effort);
-  nlohmann::json settings{{"model", selectedModel.toStdString()},
-                          {"developer_instructions", nullptr}};
-  if (selectedEffort == DefaultValue)
-    settings["reasoning_effort"] = nullptr;
-  else if (!selectedEffort.isEmpty())
-    settings["reasoning_effort"] = selectedEffort.toStdString();
-  return {{"mode", value(collaboration).toStdString()},
-          {"settings", std::move(settings)}};
+  const bool changed = settings.touched(TurnSettingField::PermissionProfile) ||
+                       settings.touched(TurnSettingField::Reviewer) ||
+                       settings.touched(TurnSettingField::ServiceTier) ||
+                       settings.touched(TurnSettingField::Summary) ||
+                       settings.touched(TurnSettingField::Collaboration);
+  const QString caption =
+      changed ? QStringLiteral("More •") : QStringLiteral("More");
+  if (more->text() != caption)
+    more->setText(caption);
 }
 
 } // namespace codexui::codex

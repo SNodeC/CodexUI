@@ -3,18 +3,18 @@ import test from "node:test";
 
 import {
     PromptCoordinator, cardKeys, findCard, indexAuthoritativeItems, projectConversation,
-    promptWithFileLinks, stableKey, terminalOutputHasVisibleText, trimTrailingEmptyLines,
+    promptWithFileLinks, stableKey, statusFromValue, terminalOutputHasVisibleText, trimTrailingEmptyLines,
 } from "../dist/index.js";
 
-function item(id, raw) { return {id, raw, domains: new Map()}; }
+function item(id, raw) { return {id, status: statusFromValue(raw.status), raw, domains: new Map()}; }
 function baseThread(id) {
     const thread = {
-        id, title: "", preview: "", cwd: "", status: "", commandCwds: [], changedPaths: [],
-        turnOrder: ["turn-1"], turns: new Map(), raw: {}, domains: new Map(), latestSettingsUpdate: {},
-        settingsRevision: 0, agentOrder: [], agents: new Map(), childThreadOrder: [], archived: false,
+        id, title: "", preview: "", cwd: "", status: statusFromValue(""),
+        turnOrder: ["turn-1"], turns: new Map(), raw: {}, domains: new Map(), settingStamps: new Map(),
+        agentOrder: [], agents: new Map(), childThreadOrder: [], archived: false,
     };
     thread.turns.set("turn-1", {
-        id: "turn-1", status: "completed", itemOrder: ["user-old", "answer-old"], items: new Map([
+        id: "turn-1", status: statusFromValue("completed"), itemOrder: ["user-old", "answer-old"], items: new Map([
             ["user-old", item("user-old", {type: "userMessage", content: [{type: "text", text: "old prompt"}]})],
             ["answer-old", item("answer-old", {type: "agentMessage", phase: "final_answer", text: "old answer"})],
         ]), plan: {}, raw: {}, domains: new Map(),
@@ -23,7 +23,7 @@ function baseThread(id) {
 }
 function addTurn(thread, id, status = "inProgress") {
     thread.turnOrder.push(id);
-    thread.turns.set(id, {id, status, itemOrder: [], items: new Map(), plan: {}, raw: {}, domains: new Map()});
+    thread.turns.set(id, {id, status: statusFromValue(status), itemOrder: [], items: new Map(), plan: {}, raw: {}, domains: new Map()});
 }
 function append(thread, turnId, id, raw) {
     const turn = thread.turns.get(turnId); turn.itemOrder.push(id); turn.items.set(id, item(id, raw));
@@ -40,7 +40,7 @@ function sectionRoot(section) {
     return section.cards.find(card => stableKey(card.key) === rootKey);
 }
 
-test("C++ canonical grouping, payload projection, and history limit", () => {
+test("canonical grouping, payload projection, and history limit", () => {
     const thread = baseThread("thread-a");
     addTurn(thread, "turn-2");
     append(thread, "turn-2", "command", {type: "commandExecution", command: "true", status: "completed", aggregatedOutput: " \n\t\x1b[0m"});
@@ -54,7 +54,8 @@ test("C++ canonical grouping, payload projection, and history limit", () => {
     assert.equal(snapshot.sections[1].cards.length, 3);
     assert.equal(snapshot.sections[1].cards[0].payload.output, "");
     assert.deepEqual(snapshot.sections[1].cards[1].payload.changes[0], {path: "src/card.cpp", kind: "update", additions: 3, deletions: 1});
-    assert.deepEqual(snapshot.sections[1].cards[2].payload, {path: "/tmp/generated.png", status: "completed", revisedPrompt: "proposal"});
+    assert.deepEqual(snapshot.sections[1].cards[2].payload, {path: "/tmp/generated.png", revisedPrompt: "proposal"});
+    assert.equal(snapshot.sections[1].cards[2].status.semantic, "completed");
     assert.notEqual(stableKey(snapshot.sections[0].cards[0].key), stableKey(snapshot.sections[0].cards[1].key));
     const limited = projectConversation(thread, [], 1, 10);
     assert.equal(limited.hasMore, true);
@@ -62,7 +63,18 @@ test("C++ canonical grouping, payload projection, and history limit", () => {
     assert.equal(keys(limited).length, 1);
 });
 
-test("C++ prompt queue isolation and callback-only acknowledgement", () => {
+test("agent receiver projection keeps only non-empty string identities", () => {
+    const thread = cleanThread("receiver-contract");
+    addTurn(thread, "turn-agent");
+    append(thread, "turn-agent", "agent", {
+        type: "collabAgentToolCall", tool: "spawn_agent",
+        receiverThreadIds: ["", 7, "worker"],
+    });
+    const snapshot = projectConversation(thread, [], 80, 10);
+    assert.deepEqual(snapshot.sections[0].cards[0].payload.receivers, ["worker"]);
+});
+
+test("prompt queue isolation and callback-only acknowledgement", () => {
     const first = baseThread("thread-a");
     const second = baseThread("thread-b");
     const prompts = new PromptCoordinator();
@@ -93,7 +105,7 @@ test("C++ prompt queue isolation and callback-only acknowledgement", () => {
     assert.equal(findCard(compacted, localKey).kind, "userMessage");
 });
 
-test("C++ first response order remains at the local prompt admission boundary", () => {
+test("first response order remains at the local prompt admission boundary", () => {
     const thread = baseThread("thread-reasoning-first");
     thread.turnOrder = [];
     thread.turns.clear();
@@ -124,7 +136,7 @@ test("C++ first response order remains at the local prompt admission boundary", 
     assert.equal(findCard(blue, {kind: "prompt", submissionId: promptId}).kind, "userMessage");
 });
 
-test("C++ duplicate prompts bind in admission order and share one turn section", () => {
+test("duplicate prompts bind in admission order and share one turn section", () => {
     const thread = baseThread("duplicates");
     const prompts = new PromptCoordinator();
     const first = prompts.admit(thread.id, "repeat", [], {}, thread, undefined, 1000);
@@ -248,7 +260,7 @@ test("the first authoritative user message is the unique root after restart with
     assert.equal(snapshot.hasMore, false);
 });
 
-test("C++ terminal text and canonical attachment links", () => {
+test("terminal text and canonical attachment links", () => {
     assert.equal(terminalOutputHasVisibleText(""), false);
     assert.equal(terminalOutputHasVisibleText(" \n\t"), false);
     assert.equal(terminalOutputHasVisibleText("\x1b[0m\x1b]0;title\x07"), false);

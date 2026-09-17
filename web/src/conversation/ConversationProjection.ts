@@ -1,10 +1,13 @@
-import type {ItemPresentation, ThreadPresentation} from "../presentation/PresentationModel.js";
+import type {ItemPresentation, ThreadPresentation, TurnPresentation} from "../presentation/PresentationModel.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
+import type {JsonObject} from "../presentation/PresentationProtocol.js";
+import {UnknownStatus, effectivePlanStepStatus, statusFromValue} from "../presentation/PresentationStatus.js";
+import type {PresentationStatus} from "../presentation/PresentationStatus.js";
 import {AuthoritativeHistoryPageSize, PendingAnimationDelayMilliseconds, terminalOutputHasVisibleText} from "./MiddleTypes.js";
 import type {
     AgentActivityData, AgentMessageData, AuthoritativeItemKey, CardKey, CardKind, CardPayload,
     CommandExecutionData, ConversationSnapshot, FileChangeData, FileChangesData, GenericActivityData,
-    ImageGenerationData, LocalPromptData, ReasoningData, UserMessageData, VisibleCardData,
+    ImageGenerationData, LocalPromptData, PlanData, ReasoningData, UserMessageData, VisibleCardData,
 } from "./MiddleTypes.js";
 import {
     authoritativePosition, indexAuthoritativeItems, localCardVisible,
@@ -16,10 +19,6 @@ export const DefaultAuthoritativeItemLimit = AuthoritativeHistoryPageSize;
 function integerValue(object: unknown, key: string): number | undefined {
     const value = isObject(object) ? object[key] : undefined;
     return typeof value === "number" && Number.isInteger(value) ? value : undefined;
-}
-function statusValue(item: unknown): string {
-    const status = member(item, "status");
-    return typeof status === "string" ? status : stringMember(status, "type");
 }
 function messageText(item: unknown): string {
     const type = stringMember(item, "type");
@@ -60,14 +59,40 @@ function withTruncationNotice(value: string, omitted: number, subject: string, m
     const notice = `Earlier ${subject} was truncated (${omitted} bytes omitted).`;
     return markdown ? `> ${notice}\n\n${value}` : `[${notice}]\n${value}`;
 }
-function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPresentation, visualKey: CardKey): VisibleCardData {
+
+function projectPlan(plan: JsonObject, turnStatus: PresentationStatus,
+    threadStatus: PresentationStatus): PlanData {
+    const steps = Array.isArray(plan.steps) ? plan.steps : [];
+    return {explanation: stringMember(plan, "explanation"), steps: steps.flatMap(step => {
+        const text = stringMember(step, "step") || stringMember(step, "text");
+        return text === "" ? [] : [{text, status: effectivePlanStepStatus(
+            statusFromValue(member(step, "status")), turnStatus, threadStatus)}];
+    }), legacyText: ""};
+}
+
+export function projectTurnPlan(turn: TurnPresentation, threadStatus: PresentationStatus): PlanData | undefined {
+    if (Object.keys(turn.plan).length > 0) return projectPlan(turn.plan, turn.status, threadStatus);
+    for (let index = turn.itemOrder.length - 1; index >= 0; --index) {
+        const item = turn.items.get(turn.itemOrder[index]!);
+        if (!item || stringMember(item.raw, "type") !== "plan") continue;
+        return {explanation: "", steps: [], legacyText: withTruncationNotice(
+            messageText(item.raw), omittedTextBytes(item, "text"), "plan text", true)};
+    }
+    return undefined;
+}
+
+function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPresentation,
+    visualKey: CardKey): VisibleCardData {
     const item = presentation.raw;
     const type = stringMember(item, "type");
     let kind: CardKind = "genericActivity";
-    let payload: CardPayload = {type, status: statusValue(item), raw: structuredClone(item)} satisfies GenericActivityData;
+    let status = statusFromValue(member(item, "status"));
+    let payload: CardPayload = {type, raw: structuredClone(item)} satisfies GenericActivityData;
     if (type === "userMessage") {
+        status = UnknownStatus;
         kind = "userMessage"; payload = {text: messageText(item), imagePaths: messageImagePaths(item)} satisfies UserMessageData;
     } else if (type === "agentMessage") {
+        status = UnknownStatus;
         kind = "agentMessage";
         payload = {text: withTruncationNotice(messageText(item), omittedTextBytes(presentation, "text"), "Codex response", true),
             finalAnswer: stringMember(item, "phase") === "final_answer"} satisfies AgentMessageData;
@@ -79,16 +104,16 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
         const exitCode = integerValue(item, "exitCode");
         const durationMilliseconds = integerValue(item, "durationMs") ?? integerValue(item, "duration_ms");
         payload = {
-            command: stringMember(item, "command"), output, status: stringMember(item, "status"), cwd: stringMember(item, "cwd"),
+            command: stringMember(item, "command"), output, cwd: stringMember(item, "cwd"),
             ...(exitCode !== undefined ? {exitCode} : {}),
             ...(durationMilliseconds !== undefined ? {durationMilliseconds} : {}),
         } satisfies CommandExecutionData;
     } else if (type === "collabAgentToolCall" || type === "subAgentActivity") {
         kind = "agentActivity";
         payload = {
-            tool: stringMember(item, "tool"), status: stringMember(item, "status"), kind: stringMember(item, "kind"),
+            tool: stringMember(item, "tool"), kind: stringMember(item, "kind"),
             prompt: stringMember(item, "prompt"), resultText: stringMember(item, "resultText"),
-            receivers: stringList(member(item, "receiverThreadIds", [])), model: stringMember(item, "model"),
+            receivers: stringList(member(item, "receiverThreadIds", [])).filter(Boolean), model: stringMember(item, "model"),
             reasoningEffort: stringMember(item, "reasoningEffort"), childThreadId: stringMember(item, "agentThreadId"),
             agentPath: stringMember(item, "agentPath"), senderThreadId: stringMember(item, "senderThreadId"),
         } satisfies AgentActivityData;
@@ -104,19 +129,20 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
             const [additions, deletions] = unifiedDiffCounts(diff);
             return {path: stringMember(change, "path"), kind: stringMember(change, "kind"), additions, deletions};
         }) : [];
-        payload = {status: stringMember(item, "status"), changes} satisfies FileChangesData;
+        payload = {changes} satisfies FileChangesData;
     } else if (type === "imageGeneration" || type === "imageView") {
         kind = "imageGeneration";
+        if (type === "imageView") status = statusFromValue("completed");
         payload = {
             path: stringMember(item, "path") || stringMember(item, "savedPath") || stringMember(item, "saved_path"),
-            status: type === "imageView" ? "completed" : stringMember(item, "status"),
             revisedPrompt: stringMember(item, "revisedPrompt") || stringMember(item, "revised_prompt"),
         } satisfies ImageGenerationData;
     } else if (type === "plan" && messageText(item) !== "") {
         kind = "plan"; payload = {explanation: "", steps: [], legacyText: withTruncationNotice(
             messageText(item), omittedTextBytes(presentation, "text"), "plan text", true)};
     }
-    return {key: visualKey, kind, threadId: identity.threadId, turnId: identity.turnId, itemId: identity.itemId, payload};
+    return {key: visualKey, kind, threadId: identity.threadId, turnId: identity.turnId, itemId: identity.itemId,
+        payload, status};
 }
 function sectionComponent(prefix: string, threadId: string, suffix: string): string {
     return `${prefix}${threadId.length}:${threadId}${suffix.length}:${suffix}`;
@@ -203,7 +229,7 @@ export function projectConversation(
             ? materialized === turnRootPosition : submission.startsTurn;
         nodes.push({position, tieBreaker: submission.admissionOrdinal, sectionKey, turnId, turnRoot, card: {
             key: {kind: "prompt", submissionId: submission.id}, kind: "localPrompt", threadId: authoritativeItems.threadId,
-            turnId, itemId: "", payload,
+            turnId, itemId: "", payload, status: UnknownStatus,
         }});
     }
     nodes.sort((left, right) => left.position - right.position || left.tieBreaker - right.tieBreaker);

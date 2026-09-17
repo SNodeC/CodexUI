@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -45,9 +46,7 @@ public:
   };
 
   enum class StructuralChangeResult {
-    Missing,
-    Invalid,
-    Duplicate,
+    Rejected,
     Unchanged,
     Changed,
   };
@@ -69,20 +68,28 @@ public:
     bool lastInTurn = false;
     bool presented = true;
     bool activeTurn = false;
-    // Local prompts and roots retained only as a turn owner do not consume the
-    // bounded authoritative history activity window.
-    bool historyActivity = true;
 
     bool operator==(const Row &) const = default;
   };
 
-  struct HistoryTrim {
-    int row = -1;
-    int count = 0;
-    std::vector<std::string> removedStableKeys;
-    bool pinnedRoot = false;
-    std::string sectionKey;
-    std::size_t hiddenIncrement = 0;
+  struct StructuralDeltaPlan {
+    struct Operation {
+      enum class Kind { Remove, Place, ReplaceRoot };
+
+      Kind kind = Kind::Place;
+      std::size_t deltaIndex = 0;
+      std::size_t removalIndex = 0;
+      int source = -1;
+      int destination = -1;
+      bool tailAppend = false;
+      bool changed = true;
+      std::string oldStableKey;
+      std::string stableKey;
+      std::string oldSection;
+      std::string section;
+    };
+
+    std::vector<Operation> operations;
   };
 
   explicit ConversationItemModel(QObject *parent = nullptr);
@@ -97,28 +104,23 @@ public:
 
   // Complete replacement is explicit and is reserved for a different thread
   // or a genuine full rescan where no narrower operation is correct.
-  [[nodiscard]] bool replaceConversation(ConversationSnapshot snapshot);
-  // A history page is a same-thread superset that retains every existing row
-  // in order. It inserts only the missing ranges and updates changed row facts.
-  [[nodiscard]] bool prependHistoryPage(ConversationSnapshot snapshot);
-  // Preserves the established direct ConversationView API. Shell graph
-  // routing never uses this whole-snapshot ordered diff as a delta fallback.
-  [[nodiscard]] bool reconcile(ConversationSnapshot snapshot);
+  [[nodiscard]] StructuralChangeResult
+  replaceConversation(ConversationSnapshot snapshot);
+  // Reconciles authoritative ordering with exact inserts, moves, removals, and
+  // row updates. History uses the same mechanism with a different view anchor.
+  [[nodiscard]] StructuralChangeResult reconcile(ConversationSnapshot snapshot);
+  [[nodiscard]] CardUpdateResult
+  cardUpdateResult(const VisibleCardData &card) const;
   [[nodiscard]] CardUpdateResult updateCard(VisibleCardData card);
-  [[nodiscard]] StructuralChangeResult
-  insertCard(int row, ConversationRowPlacement placement);
-  [[nodiscard]] StructuralChangeResult
-  removeTarget(const nodegraph::NodeRef &target);
-  // destinationRow is the row's final logical position after the move.
-  [[nodiscard]] StructuralChangeResult
-  moveTarget(const nodegraph::NodeRef &target, int destinationRow,
-             ConversationRowPlacement placement);
-  [[nodiscard]] bool appendTail(ConversationTailCard tail);
-  [[nodiscard]] HistoryTrim trimHistoryTo(std::size_t activityLimit);
-  [[nodiscard]] bool setActiveTurn(int row, bool active);
-  void setHistoryChrome(std::size_t hiddenAuthoritativeItemCount,
-                        bool providerHasMore);
+  [[nodiscard]] std::optional<StructuralDeltaPlan>
+  planStructuralDelta(std::span<const ConversationRowChange> rows,
+                      std::span<const nodegraph::NodeRef> removals) const;
+  [[nodiscard]] std::optional<StructuralDeltaPlan>
+  applyStructuralDelta(std::vector<ConversationRowChange> &rows,
+                       std::span<const nodegraph::NodeRef> removals);
+  [[nodiscard]] bool setProviderHasMore(bool providerHasMore) noexcept;
   [[nodiscard]] bool setVisibility(Visibility visibility);
+  [[nodiscard]] bool isPresented(const VisibleCardData &card) const noexcept;
 
   [[nodiscard]] const Row *row(int row) const noexcept;
   [[nodiscard]] const VisibleCardData *card(int row) const noexcept;
@@ -127,12 +129,6 @@ public:
   indexForTarget(const nodegraph::NodeRef &target) const;
   [[nodiscard]] const std::string &threadId() const noexcept {
     return threadId_;
-  }
-  [[nodiscard]] std::size_t hiddenAuthoritativeItemCount() const noexcept {
-    return hiddenAuthoritativeItemCount_;
-  }
-  [[nodiscard]] std::size_t historyActivityCount() const noexcept {
-    return historyActivityCount_;
   }
   [[nodiscard]] bool hasMore() const noexcept { return hasMore_; }
 
@@ -166,14 +162,14 @@ private:
   [[nodiscard]] std::vector<Row> flatten(ConversationSnapshot &&snapshot) const;
   [[nodiscard]] bool rowsAreUnique(const std::vector<Row> &rows) const;
   [[nodiscard]] Row rowFromPlacement(ConversationRowPlacement placement) const;
-  [[nodiscard]] bool sectionPlacementIsValid(int row,
-                                             const Row &candidate) const;
   [[nodiscard]] SectionStructure
   sectionStructure(const std::string &sectionKey) const;
   void refreshSectionStructure(const std::string &sectionKey,
                                const SectionStructure &before,
-                               const std::string &changedKey);
-  [[nodiscard]] bool isPresented(const VisibleCardData &card) const noexcept;
+                               std::span<const std::string> changedKeys);
+  void commitStructuralDelta(StructuralDeltaPlan &plan,
+                             std::vector<ConversationRowChange> &rows,
+                             std::span<const nodegraph::NodeRef> removals);
   void rebuildIndexes();
   [[nodiscard]] RowNode *nodeAt(std::size_t row) const noexcept;
   [[nodiscard]] std::optional<int> rowOf(const RowNode *node) const noexcept;
@@ -185,9 +181,8 @@ private:
   static void updateNode(RowNode *node) noexcept;
   static std::pair<std::unique_ptr<RowNode>, std::unique_ptr<RowNode>>
   splitRows(std::unique_ptr<RowNode> root, std::size_t leftCount);
-  static std::unique_ptr<RowNode>
-  mergeRows(std::unique_ptr<RowNode> left,
-            std::unique_ptr<RowNode> right);
+  static std::unique_ptr<RowNode> mergeRows(std::unique_ptr<RowNode> left,
+                                            std::unique_ptr<RowNode> right);
   static RowNode *previousNode(RowNode *node) noexcept;
   static RowNode *nextNode(RowNode *node) noexcept;
   void addSectionIdentity(RowNode *node);
@@ -200,10 +195,8 @@ private:
   std::unordered_map<std::string, RowNode *> stableRows_;
   std::unordered_map<const nodegraph::Node *, RowNode *> targetRows_;
   std::unordered_map<std::string, SectionIndex> sectionRows_;
-  std::size_t historyActivityCount_ = 0;
   std::uint64_t priorityState_ = 0x9e3779b97f4a7c15ULL;
   std::string threadId_;
-  std::size_t hiddenAuthoritativeItemCount_ = 0;
   bool hasMore_ = false;
   Visibility visibility_;
 };

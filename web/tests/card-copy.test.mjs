@@ -5,11 +5,12 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 
 import {Card, InspectorAgentCard, cardCopyContent, userMessageMarkdownText} from "../dist/app/App.js";
+import {statusFromValue} from "../dist/index.js";
 
-function itemCard(kind, itemId, payload) {
+function itemCard(kind, itemId, payload, status = "") {
     return {
         key: {kind: "item", threadId: "thread", turnId: "turn", itemId},
-        kind, threadId: "thread", turnId: "turn", itemId, payload,
+        kind, threadId: "thread", turnId: "turn", itemId, payload, status: statusFromValue(status),
     };
 }
 
@@ -27,15 +28,15 @@ test("card copy payloads preserve Markdown and structured source", () => {
     });
 
     const command = itemCard("commandExecution", "command", {
-        command: "printf test\n\n", output: "line\n\n", status: "completed", cwd: "", exitCode: 0,
-    });
+        command: "printf test\n\n", output: "line\n\n", cwd: "", exitCode: 0,
+    }, "completed");
     assert.deepEqual(cardCopyContent(command), {
         text: "printf test\n\nline", markdown: false,
     });
 
     const files = itemCard("fileChanges", "files", {
-        status: "completed", changes: [{path: "src/card.cpp", kind: "update", additions: 2, deletions: 1}],
-    });
+        changes: [{path: "src/card.cpp", kind: "update", additions: 2, deletions: 1}],
+    }, "completed");
     assert.deepEqual(cardCopyContent(files), {
         text: "src/card.cpp  ·  Update  +2 −1", markdown: false,
     });
@@ -186,9 +187,9 @@ test("authoritative messages render safe GitHub Markdown without fetching embedd
 
 test("typed activity cards retain complete metadata and bounded diagnostics", () => {
     const command = itemCard("commandExecution", "command", {
-        command: "printf test\n\n", output: "done\n\n", status: "completed", cwd: "/workspace", exitCode: 0,
+        command: "printf test\n\n", output: "done\n\n", cwd: "/workspace", exitCode: 0,
         durationMilliseconds: 1500,
-    });
+    }, "completed");
     const commandMarkup = renderToStaticMarkup(createElement(Card, {
         card: command, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
@@ -200,10 +201,10 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     assert.doesNotMatch(commandMarkup, /done\n\n/u);
 
     const agent = itemCard("agentActivity", "agent", {
-        tool: "spawn_agent", status: "completed", kind: "", prompt: "Inspect this", resultText: "**Done**",
+        tool: "spawn_agent", kind: "", prompt: "Inspect this", resultText: "**Done**",
         receivers: ["worker"], model: "gpt-test", reasoningEffort: "medium", childThreadId: "child",
         agentPath: "root/worker", senderThreadId: "root",
-    });
+    }, "completed");
     const agentMarkup = renderToStaticMarkup(createElement(Card, {
         card: agent, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
@@ -212,10 +213,10 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     assert.match(agentMarkup, /card-phase status success">completed/u);
     assert.match(agentMarkup, /<strong>Done<\/strong>/u);
 
-    const files = itemCard("fileChanges", "files", {status: "completed", changes: [
+    const files = itemCard("fileChanges", "files", {changes: [
         {path: "one.cpp", kind: "update", additions: 2, deletions: 1},
         {path: "two.cpp", kind: "create", additions: 3, deletions: 0},
-    ]});
+    ]}, "completed");
     const filesMarkup = renderToStaticMarkup(createElement(Card, {
         card: files, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
@@ -224,8 +225,8 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     assert.doesNotMatch(filesMarkup, /completed  \|  2 paths/u);
 
     const image = itemCard("imageGeneration", "image", {
-        path: "/tmp/generated.png", status: "completed", revisedPrompt: "A generated image",
-    });
+        path: "/tmp/generated.png", revisedPrompt: "A generated image",
+    }, "completed");
     const imageMarkup = renderToStaticMarkup(createElement(Card, {
         card: image, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
@@ -240,7 +241,7 @@ test("Inspector agent cards start collapsed with canonical heading actions", () 
     const markup = renderToStaticMarkup(createElement(InspectorAgentCard, {
         id: "agent-one",
         agent: {
-            id: "agent-one", status: "completed", childThreadId: "child-one",
+            id: "agent-one", itemId: "", ownerTurnId: "", status: statusFromValue("completed"), childThreadId: "child-one",
             raw: {agentPath: "/root/agent-one", resultText: "retained result"},
         },
     }));

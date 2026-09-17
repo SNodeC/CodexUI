@@ -13,9 +13,9 @@ namespace codexui::codex {
 
 class PendingRequestDialog final {
 public:
-  [[nodiscard]] static std::optional<PendingRequestResponse>
+  [[nodiscard]] static std::optional<PendingRequestSubmission>
   present(const PendingRequestDescriptor &request, QWidget *parent,
-          const PendingRequestResponse *initialResponse = nullptr);
+          const PendingRequestSubmission *initialSubmission = nullptr);
 };
 
 } // namespace codexui::codex

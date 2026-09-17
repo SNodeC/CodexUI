@@ -8,29 +8,24 @@
 #include <QRect>
 #include <QString>
 #include <QStringView>
+#include <QTextBrowser>
+#include <QToolButton>
 
 #include <string_view>
 
+class QFocusEvent;
+class QEvent;
+class QLabel;
+class QMimeData;
+class QPaintEvent;
 class QTextDocument;
+class QTimer;
+class QVariantAnimation;
+class QWidget;
 
-namespace codexui::codex::middle::presentation {
+namespace codexui::codex::middle {
 
-struct CardHeaderMetrics final {
-  // The delegate-painted Codex Update header is the established optical
-  // reference for both passive and materialized cards.
-  static constexpr int LineHeight = 24;
-  static constexpr int HorizontalInset = 12;
-  static constexpr int StatusWidth = 145;
-  static constexpr int CopyInkLeftFromRight = 43;
-  static constexpr int StatusToCopyInkGap = 17;
-  static constexpr int RichStatusTrailingMargin = 12;
-  static constexpr int CopyControlWidth = 16;
-  static constexpr int DisclosureControlWidth = 14;
-  static constexpr int CopyDisclosureSpacing = 4;
-};
-
-[[nodiscard]] QRect cardDisclosureIndicator(const QRect &control,
-                                            bool expanded);
+namespace presentation {
 
 struct MarkdownTailState {
   qsizetype sourceOffset = -1;
@@ -41,15 +36,111 @@ struct MarkdownTailState {
   }
 };
 
-// Pure display-value helpers shared by the passive delegate and the rich card
-// editor. They own no state and do not decide which renderer a row uses.
-[[nodiscard]] QString statusLabel(std::string_view status);
+} // namespace presentation
+
+// The one native Markdown widget used by every surface that presents Markdown.
+// It retains the canonical source for copy/reconciliation and owns the sole Qt
+// document update and height-for-width policy.
+class MarkdownTextView final : public QTextBrowser {
+  Q_OBJECT
+
+public:
+  explicit MarkdownTextView(const QString &markdown, int initialWidth = 0,
+                            QWidget *parent = nullptr,
+                            bool preserveSoftLineBreaks = false);
+
+  bool setContent(const QString &markdown);
+  void invalidateGeometryEnvironment();
+  [[nodiscard]] const QString &markdownSource() const noexcept;
+  [[nodiscard]] presentation::MarkdownTailState markdownTailState() const;
+  [[nodiscard]] int heightForWidth(int width) const override;
+  [[nodiscard]] QSize sizeHint() const override;
+  [[nodiscard]] QSize minimumSizeHint() const override;
+
+protected:
+  [[nodiscard]] QMimeData *createMimeDataFromSelection() const override;
+
+private:
+  void configureDocument();
+  void refreshPreferredHeight(int documentWidth) const;
+
+  QString markdown_;
+  QString renderedMarkdown_;
+  presentation::MarkdownTailState markdownTail_;
+  bool preserveSoftLineBreaks_ = false;
+  mutable int preferredDocumentWidth_ = 0;
+  mutable int preferredHeight_ = 0;
+};
+
+namespace presentation {
+
+struct CardHeaderMetrics final {
+  // Keep the Codex Update header aligned with the card header controls.
+  static constexpr int LineHeight = 24;
+  static constexpr int RichStatusTrailingMargin = 12;
+  static constexpr int CopyControlWidth = 16;
+  static constexpr int DisclosureControlWidth = 14;
+  static constexpr int CopyDisclosureSpacing = 4;
+};
+
+class CopyButton final : public QToolButton {
+public:
+  explicit CopyButton(QString accessibleName, QWidget *parent = nullptr);
+  void copyText(const QString &text, bool markdown);
+
+protected:
+  void changeEvent(QEvent *event) override;
+  void focusInEvent(QFocusEvent *event) override;
+  void focusOutEvent(QFocusEvent *event) override;
+  void paintEvent(QPaintEvent *event) override;
+
+private:
+  void showCopiedFeedback();
+  void finishFeedback();
+
+  QVariantAnimation *morph_ = nullptr;
+  QTimer *hold_ = nullptr;
+  qreal morphProgress_ = 0.0;
+  bool returningToCopy_ = false;
+  bool feedbackActive_ = false;
+  bool keyboardFocusVisible_ = false;
+};
+
+class DisclosureButton final : public QToolButton {
+public:
+  DisclosureButton(QString expandAccessibleName, QString collapseAccessibleName,
+                   QWidget *parent = nullptr);
+
+  void setExpanded(bool expanded);
+  [[nodiscard]] bool isExpanded() const noexcept { return expanded_; }
+
+protected:
+  void paintEvent(QPaintEvent *event) override;
+
+private:
+  QString expandAccessibleName_;
+  QString collapseAccessibleName_;
+  bool expanded_ = false;
+};
+
+// Pure display-value helpers shared by conversation presentation surfaces.
+// They own no state.
+[[nodiscard]] QString statusLabel(const UiStatus &status);
+// Apply the shared semantic tone without QObject-property style invalidation.
+// Empty status is represented by an empty, hidden label on every surface.
+void setLabelTone(QLabel &label, std::string_view tone);
+void applyStatusLabel(QLabel &label, const UiStatus &status);
+// Qt 6.6 emits accessibility events even for identical property assignments.
+// Keep the supported-version contract silent for semantic no-ops.
+void setAccessibleNameIfChanged(QWidget &widget, QString name);
+void setAccessibleDescriptionIfChanged(QWidget &widget, QString description);
 // User-authored prompt newlines are intentional visual line breaks. Preserve
 // them in the Markdown presentation without changing the canonical source
 // retained for copy or protocol reconciliation.
 [[nodiscard]] QString userMessageMarkdown(QStringView source);
 [[nodiscard]] QString planMarkdown(const PlanData &plan);
-[[nodiscard]] QString agentMetadata(const AgentActivityData &activity);
+[[nodiscard]] QString agentMetadata(const AgentActivityData &activity,
+                                    const UiStatus &status);
 [[nodiscard]] QString fileChangesText(const FileChangesData &changes);
 [[nodiscard]] QString genericActivityTitle(const GenericActivityData &activity);
 [[nodiscard]] QString
@@ -60,13 +151,17 @@ boundedGenericActivityDetail(const GenericActivityData &activity);
 // dialect while replacing only that tail when it is independently reparsable.
 void replaceMarkdownDocument(QTextDocument &document, const QString &markdown,
                              MarkdownTailState &tailState);
-[[nodiscard]] MarkdownTailState
-markdownTailState(const QTextDocument &document, QStringView markdown);
+[[nodiscard]] MarkdownTailState markdownTailState(const QTextDocument &document,
+                                                  QStringView markdown);
+[[nodiscard]] bool
+markdownAppendTailIsIndependent(QStringView next,
+                                const MarkdownTailState &tailState);
 [[nodiscard]] bool appendMarkdownDocument(QTextDocument &document,
                                           QStringView previous,
                                           QStringView next,
                                           MarkdownTailState &tailState);
 
-} // namespace codexui::codex::middle::presentation
+} // namespace presentation
+} // namespace codexui::codex::middle
 
 #endif // CODEXUI_CODEX_MIDDLE_CONVERSATIONPRESENTATION_H

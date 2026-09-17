@@ -7,8 +7,10 @@
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/ThreadPane.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QAbstractScrollArea>
+#include <QApplication>
 #include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
@@ -19,6 +21,7 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
@@ -52,8 +55,8 @@ QPixmap presentationIconPixmap(PresentationIcon kind, QColor color) {
   QPainter painter(&pixmap);
   painter.setRenderHint(QPainter::Antialiasing);
   painter.setBrush(Qt::NoBrush);
-  painter.setPen(QPen(std::move(color), 1.5, Qt::SolidLine, Qt::RoundCap,
-                      Qt::RoundJoin));
+  painter.setPen(
+      QPen(std::move(color), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
   if (kind == PresentationIcon::Reasoning) {
     painter.drawEllipse(QRectF(4.0, 2.0, 8.0, 8.0));
@@ -108,24 +111,15 @@ QPixmap presentationIconPixmap(PresentationIcon kind, QColor color) {
 QIcon presentationIcon(PresentationIcon kind) {
   QIcon icon;
   icon.addPixmap(presentationIconPixmap(
-                     kind, QColor(QStringLiteral("#667085"))),
+                     kind, QColor(QString::fromLatin1(UiStyle::secondary))),
                  QIcon::Normal, QIcon::Off);
   icon.addPixmap(presentationIconPixmap(
-                     kind, QColor(QStringLiteral("#1d2633"))),
+                     kind, QColor(QString::fromLatin1(UiStyle::primary))),
                  QIcon::Normal, QIcon::On);
   return icon;
 }
 
-QLabel *makeLabel(QString value, const char *kind = "body") {
-  auto *label = new QLabel(std::move(value));
-  label->setProperty("kind", kind);
-  label->setTextFormat(Qt::PlainText);
-  label->setWordWrap(true);
-  label->setMinimumWidth(0);
-  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-  return label;
-}
+using UiStyle::makeLabel;
 
 QFrame *divider(const char *name = nullptr) {
   auto *line = new QFrame;
@@ -172,8 +166,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
 
   conversationRegion = new QFrame;
   conversationRegion->setObjectName(QStringLiteral("conversation"));
-  conversationRegion->setStyleSheet(
-      QStringLiteral("QFrame#conversation{background:#f6f8fb;}"));
   conversationRegion->setMinimumWidth(480);
   auto *center = new QVBoxLayout(conversationRegion);
   center->setContentsMargins(10, 14, 10, 12);
@@ -181,15 +173,14 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   auto *context = new QHBoxLayout;
   context->setContentsMargins(14, 0, 14, 0);
   context->addStrut(24);
-  auto *sectionTitle =
-      makeLabel(QStringLiteral("CONVERSATION"), "panelHeader");
+  auto *sectionTitle = makeLabel(QStringLiteral("CONVERSATION"), "panelHeader");
   sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
   sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   context->addWidget(sectionTitle);
   context->addStretch();
   const QSettings settings;
   const auto presentationToggle = [&context](QString objectName,
-                                              PresentationIcon icon) {
+                                             PresentationIcon icon) {
     auto *button = new QToolButton;
     button->setObjectName(std::move(objectName));
     button->setProperty("kind", "presentationToggle");
@@ -200,28 +191,28 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
     context->addWidget(button);
     return button;
   };
-  reasoningVisibility = presentationToggle(
-      QStringLiteral("conversationReasoningToggle"),
-      PresentationIcon::Reasoning);
+  reasoningVisibility =
+      presentationToggle(QStringLiteral("conversationReasoningToggle"),
+                         PresentationIcon::Reasoning);
   reasoningVisibility->setChecked(
       settings.value(ShowReasoningKey, false).toBool());
   updateVisibility = presentationToggle(
       QStringLiteral("conversationUpdatesToggle"), PresentationIcon::Updates);
   updateVisibility->setChecked(
       settings.value(ShowCodexUpdatesKey, true).toBool());
-  commandInitialFolding = presentationToggle(
-      QStringLiteral("conversationCommandFoldingToggle"),
-      PresentationIcon::Command);
+  commandInitialFolding =
+      presentationToggle(QStringLiteral("conversationCommandFoldingToggle"),
+                         PresentationIcon::Command);
   commandInitialFolding->setChecked(
       settings.value(CommandsInitiallyExpandedKey, true).toBool());
-  imageInitialFolding = presentationToggle(
-      QStringLiteral("conversationImageFoldingToggle"),
-      PresentationIcon::Image);
+  imageInitialFolding =
+      presentationToggle(QStringLiteral("conversationImageFoldingToggle"),
+                         PresentationIcon::Image);
   imageInitialFolding->setChecked(
       settings.value(ImagesInitiallyExpandedKey, true).toBool());
-  fileChangesInitialFolding = presentationToggle(
-      QStringLiteral("conversationFileChangesFoldingToggle"),
-      PresentationIcon::FileChanges);
+  fileChangesInitialFolding =
+      presentationToggle(QStringLiteral("conversationFileChangesFoldingToggle"),
+                         PresentationIcon::FileChanges);
   fileChangesInitialFolding->setChecked(
       settings.value(FileChangesInitiallyExpandedKey, false).toBool());
   const auto persistPresentation = [this](const char *key, bool checked) {
@@ -265,8 +256,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationTitle->setSizePolicy(QSizePolicy::Minimum,
                                    QSizePolicy::Preferred);
   conversationMetadata = makeLabel({}, "meta");
-  conversationMetadata->setObjectName(
-      QStringLiteral("conversationMetadata"));
+  conversationMetadata->setObjectName(QStringLiteral("conversationMetadata"));
   conversationMetadata->setWordWrap(false);
   conversationTrailingMetadata = makeLabel({}, "meta");
   conversationTrailingMetadata->setObjectName(
@@ -358,33 +348,31 @@ void MiddleRegionWidget::applyConversationPresentationOptions() {
   const bool expandCommands = commandInitialFolding->isChecked();
   const bool expandImages = imageInitialFolding->isChecked();
   const bool expandFileChanges = fileChangesInitialFolding->isChecked();
-  reasoningVisibility->setToolTip(showReasoning
-                                      ? QStringLiteral("Hide reasoning cards")
-                                      : QStringLiteral("Show reasoning cards"));
-  updateVisibility->setToolTip(showUpdates
-                                   ? QStringLiteral("Hide Codex update cards")
-                                   : QStringLiteral("Show Codex update cards"));
-  commandInitialFolding->setToolTip(
-      expandCommands ? QStringLiteral("New command cards start expanded")
-                     : QStringLiteral("New command cards start collapsed"));
-  imageInitialFolding->setToolTip(
-      expandImages ? QStringLiteral("New image cards start expanded")
-                   : QStringLiteral("New image cards start collapsed"));
-  fileChangesInitialFolding->setToolTip(
-      expandFileChanges
-          ? QStringLiteral("New file changes cards start expanded")
-          : QStringLiteral("New file changes cards start collapsed"));
-  reasoningVisibility->setAccessibleName(reasoningVisibility->toolTip());
-  updateVisibility->setAccessibleName(updateVisibility->toolTip());
-  commandInitialFolding->setAccessibleName(
-      commandInitialFolding->toolTip());
-  imageInitialFolding->setAccessibleName(imageInitialFolding->toolTip());
-  fileChangesInitialFolding->setAccessibleName(
-      fileChangesInitialFolding->toolTip());
+  const auto describe = [](QToolButton &button, QString value) {
+    if (button.toolTip() != value)
+      button.setToolTip(value);
+    presentation::setAccessibleNameIfChanged(button, std::move(value));
+  };
+  describe(*reasoningVisibility, showReasoning
+                                            ? QStringLiteral("Hide reasoning cards")
+                                            : QStringLiteral("Show reasoning cards"));
+  describe(*updateVisibility, showUpdates
+                                         ? QStringLiteral("Hide Codex update cards")
+                                         : QStringLiteral("Show Codex update cards"));
+  describe(*commandInitialFolding,
+           expandCommands ? QStringLiteral("New command cards start expanded")
+                          : QStringLiteral("New command cards start collapsed"));
+  describe(*imageInitialFolding,
+           expandImages ? QStringLiteral("New image cards start expanded")
+                        : QStringLiteral("New image cards start collapsed"));
+  describe(*fileChangesInitialFolding,
+           expandFileChanges
+               ? QStringLiteral("New file changes cards start expanded")
+               : QStringLiteral("New file changes cards start collapsed"));
   if (conversationView)
-    conversationView->setPresentationOptions(
-        {showReasoning, showUpdates, expandCommands, expandImages,
-         expandFileChanges});
+    conversationView->setPresentationOptions({showReasoning, showUpdates,
+                                              expandCommands, expandImages,
+                                              expandFileChanges});
 }
 
 ThreadPane &MiddleRegionWidget::threads() const noexcept { return *threadPane; }
@@ -455,13 +443,13 @@ void MiddleRegionWidget::alignThreadHeadingBaselines() {
   conversationTrailingMetadata->ensurePolished();
   conversationStateSeparator->ensurePolished();
   conversationState->ensurePolished();
-  const int offset = std::max(
-      0, conversationTitle->fontMetrics().ascent() -
-             conversationMetadata->fontMetrics().ascent());
+  const int offset =
+      std::max(0, conversationTitle->fontMetrics().ascent() -
+                      conversationMetadata->fontMetrics().ascent());
   conversationMetadata->setContentsMargins(0, offset, 0, 0);
-  const int trailingOffset = std::max(
-      0, conversationTitle->fontMetrics().ascent() -
-             conversationTrailingMetadata->fontMetrics().ascent());
+  const int trailingOffset =
+      std::max(0, conversationTitle->fontMetrics().ascent() -
+                      conversationTrailingMetadata->fontMetrics().ascent());
   conversationTrailingMetadata->setContentsMargins(0, trailingOffset, 0, 0);
   conversationStateSeparator->setContentsMargins(0, trailingOffset, 0, 0);
   conversationState->setContentsMargins(0, trailingOffset, 0, 0);
@@ -520,84 +508,121 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
   auto *target = qobject_cast<QWidget *>(watched);
   if (!target)
     return false;
-  // Native delivery from ConversationView to its scrollbar must finish at
-  // that scrollbar. Re-routing it would recursively re-enter applyWheel().
-  if (conversationView->dispatchingNativeWheel())
-    return false;
+  if (scrollGestureRoute_ == ScrollGestureRoute::Dispatching) {
+    QAbstractScrollArea *const owner = scrollGestureArea_.data();
+    const bool withinOwner =
+        owner && (target == owner || owner->isAncestorOf(target));
+    if (!withinOwner)
+      event->accept();
+    return !withinOwner;
+  }
+  auto *wheel = static_cast<QWheelEvent *>(event);
+  if (wheel->phase() == Qt::ScrollBegin) {
+    scrollGestureRoute_ = ScrollGestureRoute::Inactive;
+    scrollGestureArea_.clear();
+  }
   const bool inCenter =
       target == conversationRegion || conversationRegion->isAncestorOf(target);
   const bool onHandle =
       target == splitter->handle(1) || target == splitter->handle(2);
-  if (!inCenter && !onHandle)
+  const bool continuing = wheel->phase() != Qt::NoScrollPhase &&
+                          scrollGestureRoute_ != ScrollGestureRoute::Inactive;
+  if (!inCenter && !onHandle && !continuing)
     return false;
 
-  auto *wheel = static_cast<QWheelEvent *>(event);
-  if (inCenter &&
-      (target == composerPane || composerPane->isAncestorOf(target))) {
-    // Scrollable composer children receive their own native event. If they
-    // decline it at a boundary, the first non-scrollable composer ancestor
-    // consumes the propagated event instead of leaking it to Conversation.
-    for (QWidget *ancestor = target; ancestor && ancestor != composerPane;
+  const bool inComposer = inCenter && (target == composerPane ||
+                                       composerPane->isAncestorOf(target));
+  const bool inConversation =
+      inCenter &&
+      (target == conversationView || target == conversationView->viewport() ||
+       conversationView->isAncestorOf(target));
+  const auto scrollAreaBefore = [](QWidget *from, QWidget *stop) {
+    for (QWidget *ancestor = from; ancestor && ancestor != stop;
          ancestor = ancestor->parentWidget())
-      if (qobject_cast<QAbstractScrollArea *>(ancestor))
-        return false;
+      if (auto *area = qobject_cast<QAbstractScrollArea *>(ancestor))
+        return area;
+    return static_cast<QAbstractScrollArea *>(nullptr);
+  };
+  QAbstractScrollArea *const currentArea =
+      inComposer       ? scrollAreaBefore(target, composerPane)
+      : inConversation ? scrollAreaBefore(target, conversationView)
+                       : nullptr;
+  const auto dispatch = [this, wheel](QAbstractScrollArea *owner) {
     wheel->accept();
+    if (!owner || !owner->viewport())
+      return true;
+    const QScopedValueRollback route(scrollGestureRoute_,
+                                     ScrollGestureRoute::Dispatching);
+    const QScopedValueRollback area(scrollGestureArea_,
+                                    QPointer<QAbstractScrollArea>(owner));
+    QWidget *const receiver = owner->viewport();
+    const QPointF local = receiver->mapFromGlobal(wheel->globalPosition());
+    QWheelEvent forwarded(local, wheel->globalPosition(), wheel->pixelDelta(),
+                          wheel->angleDelta(), wheel->buttons(),
+                          wheel->modifiers(), wheel->phase(), wheel->inverted(),
+                          wheel->source(), wheel->pointingDevice());
+    forwarded.setTimestamp(wheel->timestamp());
+    static_cast<void>(QApplication::sendEvent(receiver, &forwarded));
     return true;
+  };
+
+  const int intent = verticalIntent(wheel);
+  if (wheel->phase() == Qt::NoScrollPhase) {
+    if (inComposer) {
+      if (currentArea)
+        return dispatch(currentArea);
+      event->accept();
+      return true;
+    }
+    if (currentArea && canConsume(currentArea, intent))
+      return dispatch(currentArea);
+    return dispatch(conversationView);
   }
-  if (inCenter) {
-    if (target == conversationView || target == conversationView->viewport() ||
-        conversationView->isAncestorOf(target)) {
-      // Cards and the outer viewport naturally route to ConversationView;
-      // nested editors below are handled by the edge test.
-      for (QWidget *ancestor = target; ancestor && ancestor != conversationView;
-           ancestor = ancestor->parentWidget()) {
-        if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor);
-            nested && nested != conversationView) {
-          if (auto *outputView = dynamic_cast<CommandOutputView *>(nested)) {
-            if (outputView->retainsWheelGesture(wheel))
-              return false;
-            break;
-          }
-          if (auto *commandView =
-                  dynamic_cast<ContentSizedTextView *>(nested)) {
-            if (commandView->retainsWheelGesture(wheel))
-              return false;
-            break;
-          }
-          if (canConsume(nested, verticalIntent(wheel)))
-            return false;
-          break;
-        }
-      }
-      if (target == conversationView || target == conversationView->viewport())
-        return false;
+
+  if (wheel->phase() == Qt::ScrollBegin ||
+      scrollGestureRoute_ == ScrollGestureRoute::Inactive) {
+    scrollGestureArea_ = currentArea;
+    if (inComposer) {
+      scrollGestureRoute_ = ScrollGestureRoute::Native;
+    } else if (currentArea) {
+      scrollGestureRoute_ = ScrollGestureRoute::AwaitingNested;
     } else {
-      for (QWidget *ancestor = target;
-           ancestor && ancestor != conversationRegion;
-           ancestor = ancestor->parentWidget()) {
-        if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor)) {
-          if (auto *outputView = dynamic_cast<CommandOutputView *>(nested)) {
-            if (outputView->retainsWheelGesture(wheel))
-              return false;
-            break;
-          }
-          if (auto *commandView =
-                  dynamic_cast<ContentSizedTextView *>(nested)) {
-            if (commandView->retainsWheelGesture(wheel))
-              return false;
-            break;
-          }
-          if (canConsume(nested, verticalIntent(wheel)))
-            return false;
-          break;
-        }
-      }
+      scrollGestureArea_ = conversationView;
+      scrollGestureRoute_ = ScrollGestureRoute::Conversation;
     }
   }
-  const bool consumed = conversationView->forwardWheelEvent(wheel);
-  if (consumed)
+
+  if (intent != 0 &&
+      scrollGestureRoute_ == ScrollGestureRoute::AwaitingNested) {
+    if (!scrollGestureArea_) {
+      scrollGestureRoute_ = ScrollGestureRoute::Native;
+    } else if (canConsume(scrollGestureArea_, intent)) {
+      scrollGestureRoute_ = ScrollGestureRoute::Native;
+    } else {
+      scrollGestureArea_ = conversationView;
+      scrollGestureRoute_ = ScrollGestureRoute::Conversation;
+    }
+  }
+
+  switch (scrollGestureRoute_) {
+  case ScrollGestureRoute::AwaitingNested:
     event->accept();
-  return consumed;
+    break;
+  case ScrollGestureRoute::Native:
+  case ScrollGestureRoute::Conversation:
+    static_cast<void>(dispatch(scrollGestureArea_));
+    break;
+  case ScrollGestureRoute::Dispatching:
+  case ScrollGestureRoute::Inactive:
+    event->accept();
+    break;
+  }
+
+  if (wheel->phase() == Qt::ScrollEnd) {
+    scrollGestureRoute_ = ScrollGestureRoute::Inactive;
+    scrollGestureArea_.clear();
+  }
+  return true;
 }
 
 } // namespace codexui::codex::middle

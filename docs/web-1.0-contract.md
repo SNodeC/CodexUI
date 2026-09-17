@@ -126,8 +126,9 @@ The TypeScript implementation must preserve the browser's existing rules for
 stable IDs, merge/replace/remove authority, generation retirement, unknown
 events, incomplete reconstruction, child-thread ownership, and ordered items.
 Browser tests exercise that pipeline. Native tests independently exercise the
-native application's single shared `NodeGraph`; parity is measured at
-observable behavior rather than a shared normalizer or presentation frame.
+native application's single shared `NodeGraph`. Independent tests establish
+frontend-local behavior; cross-frontend agreement requires a shared fixture or
+differential output executed by both implementations.
 
 Equality is judged by observable behavior and state transitions, not source
 structure or pixel identity. For the same ordered inputs, native and web must
@@ -230,13 +231,14 @@ web implementation.
 | Multi-client routing, provider generation, controller policy, request ownership | `codex-bridge` |
 | JSON-RPC callbacks and connection snapshot | TypeScript frontend SDK |
 | Normalized threads, turns, items, plans, agents, requests, and telemetry | Web presentation model |
-| Selected thread/tab, drafts, folding, scroll anchors, focus, transient menus | React application |
+| Exact thread-presentation identity, selected thread, settings drafts, card/tree folding, scroll anchors | Browser frontend session |
+| Inspector tab, focus, transient menus, and authored Composer form state | React application |
 
 State never appears in two owners in the same layer. Components receive typed
 projections and commands; they do not parse app-server methods or retain a
 second copy of normalized domain collections.
 
-## Delivery commits and equality gates
+## Delivery commits and verification gates
 
 1. **Contract and parity**: this document fixes scope, ownership, repository
    boundaries, and frontend structure.
@@ -257,17 +259,18 @@ second copy of normalized domain collections.
 9. **Release**: production packaging, documentation, complete native and web
    suites, and the version 1.0 checklist.
 
-Every implementation commit must be independently reviewable and must add the
-focused equality proof for the behavior it introduces. Depending on the layer,
-that proof is one or more of:
+Every implementation commit must be independently reviewable and must add
+focused verification for the behavior it introduces. Depending on the layer,
+that evidence is one or more of:
 
 - the same JSON fixture corpus executed by C++ and TypeScript;
-- equivalent C++ and TypeScript request/lifecycle scenario tests;
+- frontend-local C++ and TypeScript request/lifecycle scenario tests, which do
+  not by themselves prove cross-frontend equality;
 - visible-projection snapshots derived from the same normalized state;
-- browser interaction tests that assert the corresponding native behavior
-  contract rather than only DOM structure.
+- browser interaction tests that assert the browser contract rather than only
+  DOM structure; these remain frontend-local evidence.
 
-A commit is not complete while its focused equality test, the accumulated web
+A commit is not complete while its focused verification, the accumulated web
 suite, or the repository's complete native suite fails. Cross-repository
 contract changes pin compatible revisions and test both sides before either
 dependency is advanced.

@@ -25,8 +25,6 @@ public:
   ConversationHeightIndex(const ConversationHeightIndex &) = delete;
   ConversationHeightIndex &operator=(const ConversationHeightIndex &) = delete;
 
-  void clear() noexcept;
-  void reset(std::size_t count, int estimatedHeight);
   void assign(std::span<const int> heights);
   void insert(std::size_t row, std::span<const int> heights);
   void remove(std::size_t row, std::size_t count);
@@ -41,6 +39,10 @@ public:
   [[nodiscard]] qint64 bottom(std::size_t row) const noexcept;
   [[nodiscard]] qint64 totalHeight() const noexcept;
   [[nodiscard]] std::size_t rowAt(qint64 contentY) const noexcept;
+  [[nodiscard]] std::size_t
+  nextRowWithExtent(std::size_t row) const noexcept;
+  [[nodiscard]] std::size_t
+  previousRowWithExtent(std::size_t row) const noexcept;
 
   [[nodiscard]] std::size_t lastLookupSteps() const noexcept {
     return lastLookupSteps_;

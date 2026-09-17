@@ -1,12 +1,12 @@
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
+import type {PresentationStatus} from "../presentation/PresentationStatus.js";
 
 export const PendingAnimationDelayMilliseconds = 1000;
 export const AuthoritativeHistoryPageSize = 80;
 
 export interface AuthoritativeItemKey {kind: "item"; threadId: string; turnId: string; itemId: string}
 export interface LocalPromptKey {kind: "prompt"; submissionId: number}
-export interface TurnPlanKey {kind: "plan"; threadId: string; turnId: string}
-export type CardKey = AuthoritativeItemKey | LocalPromptKey | TurnPlanKey;
+export type CardKey = AuthoritativeItemKey | LocalPromptKey;
 export type PromptState = "queued" | "inFlight" | "accepted" | "failed";
 export type CardKind = "userMessage" | "agentMessage" | "commandExecution" | "agentActivity"
     | "reasoning" | "fileChanges" | "imageGeneration" | "plan" | "genericActivity" | "localPrompt";
@@ -14,19 +14,19 @@ export type CardKind = "userMessage" | "agentMessage" | "commandExecution" | "ag
 export interface UserMessageData {text: string; imagePaths: string[]}
 export interface AgentMessageData {text: string; finalAnswer: boolean}
 export interface CommandExecutionData {
-    command: string; output: string; status: string; cwd: string; exitCode?: number; durationMilliseconds?: number;
+    command: string; output: string; cwd: string; exitCode?: number; durationMilliseconds?: number;
 }
 export interface AgentActivityData {
-    tool: string; status: string; kind: string; prompt: string; resultText: string; receivers: string[];
+    tool: string; kind: string; prompt: string; resultText: string; receivers: string[];
     model: string; reasoningEffort: string; childThreadId: string; agentPath: string; senderThreadId: string;
 }
 export interface ReasoningData {summary: string}
 export interface FileChangeData {path: string; kind: string; additions?: number; deletions?: number}
-export interface FileChangesData {status: string; changes: FileChangeData[]}
-export interface ImageGenerationData {path: string; status: string; revisedPrompt: string}
-export interface PlanStepData {text: string; status: string}
+export interface FileChangesData {changes: FileChangeData[]}
+export interface ImageGenerationData {path: string; revisedPrompt: string}
+export interface PlanStepData {text: string; status: PresentationStatus}
 export interface PlanData {explanation: string; steps: PlanStepData[]; legacyText: string}
-export interface GenericActivityData {type: string; status: string; raw: JsonObject}
+export interface GenericActivityData {type: string; raw: JsonObject}
 export interface LocalPromptData {
     submissionId: number; prompt: string; state: PromptState; showPendingAnimation: boolean;
     error: string; imagePaths: string[];
@@ -35,6 +35,7 @@ export type CardPayload = UserMessageData | AgentMessageData | CommandExecutionD
     | ReasoningData | FileChangesData | ImageGenerationData | PlanData | GenericActivityData | LocalPromptData;
 export interface VisibleCardData {
     key: CardKey; kind: CardKind; threadId: string; turnId: string; itemId: string; payload: CardPayload;
+    status: PresentationStatus;
 }
 export interface TurnSection {key: string; turnId: string; cards: VisibleCardData[]; rootCardKey?: CardKey}
 export interface ConversationSnapshot {
@@ -45,7 +46,6 @@ export interface ConversationSnapshot {
 function component(value: string): string { return `${value.length}:${value}`; }
 export function stableKey(key: CardKey): string {
     if (key.kind === "item") return `item:${component(key.threadId)}${component(key.turnId)}${component(key.itemId)}`;
-    if (key.kind === "plan") return `plan:${component(key.threadId)}${component(key.turnId)}`;
     return `prompt:${key.submissionId}`;
 }
 

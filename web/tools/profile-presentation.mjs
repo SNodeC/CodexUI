@@ -1,6 +1,7 @@
+import assert from "node:assert/strict";
 import {performance} from "node:perf_hooks";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
-import {event, result} from "../dist/index.js";
+import {ConversationViewportState, event, result} from "../dist/index.js";
 
 const turns = Array.from({length: 100}, (_, turn) => ({
     id: `turn-${turn}`, status: turn === 99 ? "inProgress" : "completed",
@@ -30,13 +31,29 @@ for (let sequence = 2; sequence < 2_002; ++sequence) model.applyEvent(event(
     {threadId: "profile", turnId: "turn-99", itemId: "item-99-99"},
 ));
 const streamMilliseconds = performance.now() - started;
+
+const presentationState = new ConversationViewportState();
+started = performance.now();
+for (let index = 0; index < 10_000; ++index)
+    presentationState.bind(`presentation-${index}`, {});
+for (let index = 0; index < 10_000; ++index)
+    presentationState.retire(`presentation-${index}`);
+const presentationChurnMilliseconds = performance.now() - started;
+assert.equal(presentationState.retainedPresentationCount(), 0);
 session.dispose();
 
-process.stdout.write(`${JSON.stringify({
+const measurements = {
     authoritativeItems: 10_000,
     visibleCards: projection.sections.reduce((count, section) => count + section.cards.length, 0),
     streamedDeltas: 2_000,
+    presentationLifetimes: 10_000,
     hydrateMilliseconds: Number(hydrateMilliseconds.toFixed(2)),
     projectMilliseconds: Number(projectMilliseconds.toFixed(2)),
     streamMilliseconds: Number(streamMilliseconds.toFixed(2)),
-}, null, 2)}\n`);
+    presentationChurnMilliseconds: Number(presentationChurnMilliseconds.toFixed(2)),
+};
+const limits = {hydrateMilliseconds: 47, projectMilliseconds: 45, streamMilliseconds: 4,
+    presentationChurnMilliseconds: 20};
+for (const [name, limit] of Object.entries(limits))
+    assert(measurements[name] <= limit, `${name} ${measurements[name]} ms exceeds ${limit} ms`);
+process.stdout.write(`${JSON.stringify({...measurements, limits}, null, 2)}\n`);

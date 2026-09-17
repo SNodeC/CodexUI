@@ -63,14 +63,20 @@ test("responsive shell exposes only the panes that fit and accessible drawer tri
 
 test("thread hierarchy exposes selected tree-item semantics", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
-    session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [{
-        id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"},
-        createdAt: 5, updatedAt: 10, recencyAt: 9,
-    }]}, "replace"));
-    session.selectThread("thread-1");
+    session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [
+        {id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"},
+            createdAt: 5, updatedAt: 10, recencyAt: 9},
+        {id: "thread-2", parentThreadId: "thread-1", preview: "Accessible child", status: {type: "idle"}},
+    ]}, "replace"));
+    const parentPresentation = session.threadVisualKey("thread-1");
+    session.viewportState.setThreadExpanded("thread-1", parentPresentation, true);
+    session.selectThread("thread-1", parentPresentation);
     const markup = renderToStaticMarkup(createElement(App, {session}));
     assert.match(markup, /class="thread-list" role="tree" aria-label="Threads"/u);
-    assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
+    assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true" aria-posinset="1" aria-setsize="1"/u);
+    assert.match(markup, /role="treeitem" aria-level="2" aria-selected="false" aria-posinset="1" aria-setsize="1"/u);
+    assert.doesNotMatch(markup, /role="group"/u,
+        "all exact thread rows share one keyed React parent across reparenting");
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, Workspace: \/workspace, Status: completed, Recent turn: [^,]+, Created: [^,]+, Last activity: /u);
     assert.match(markup, /<strong>Accessible thread<\/strong><\/button>/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);

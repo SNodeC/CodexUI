@@ -4,6 +4,7 @@
 #include "codex/nodegraph/ProtocolCatalog.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -55,6 +56,23 @@ const Value *objectField(const Value::Object *object, std::string_view key) {
   return found == object->end() ? nullptr : &found->second;
 }
 
+std::uint64_t unsignedField(const Value::Object *object, std::string_view key) {
+  const Value *value = objectField(object, key);
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr)
+    return *number;
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr;
+      number && *number >= 0)
+    return static_cast<std::uint64_t>(*number);
+  return 0;
+}
+
+std::uint64_t
+settingAcknowledgedAt(const std::shared_ptr<const NodeState> &state,
+                      std::string_view setting) {
+  const Value *value = field(state, "settingsAcknowledgements");
+  return unsignedField(value ? value->asObject() : nullptr, setting);
+}
+
 std::vector<std::string> canonicalIds(const std::vector<NodeRef> &nodes) {
   std::vector<std::string> result;
   result.reserve(nodes.size());
@@ -70,6 +88,17 @@ std::vector<std::string> protocolIds(const NodeGraph::ReadAccess &read,
   for (const NodeRef &node : nodes)
     result.emplace_back(protocolCanonicalId(*read.state(node), node));
   return result;
+}
+
+NodeRef candidateSource(const InspectorAgentSelector &selector,
+                        std::size_t field) {
+  if (field >= selector.candidates.size() ||
+      selector.candidates[field].empty())
+    return {};
+  const std::size_t contributor = *selector.candidates[field].rbegin() / 2;
+  return contributor < selector.contributors.size()
+             ? selector.contributors[contributor]
+             : NodeRef{};
 }
 
 NodeRef findTurn(const NodeGraph::ReadAccess &read, std::string_view threadId,
@@ -97,6 +126,22 @@ NodeRef findProtocolNode(const NodeGraph::ReadAccess &read, NodeKind kind,
       return node;
   }
   return {};
+}
+
+ApplyResult applyCorrelatedResult(ProtocolUpdater &updater,
+                                  DecodedMessage result,
+                                  Value::Object requestPayload = {}) {
+  static std::uint64_t generatedRequestId = 0;
+  if (!result.requestId)
+    result.requestId = ProtocolRequestId("test-correlated-result:" +
+                                         std::to_string(++generatedRequestId));
+  const ApplyResult request =
+      updater.apply({DecodedMessageKind::ClientRequest, result.method,
+                     result.requestId, std::move(requestPayload)});
+  require(request.primary && request.primary->id().kind == NodeKind::Operation,
+          "a result fixture admits its operation before delivering the result");
+  result.expectedNode = request.primary;
+  return updater.apply(std::move(result));
 }
 
 void catalogIsComplete() {
@@ -210,10 +255,13 @@ void everyKnownMethodDispatches() {
     }
     if (descriptor.direction == ProtocolDirection::ServerNotification &&
         descriptor.method == "serverRequest/resolved") {
-      static_cast<void>(updater.apply(
-          {DecodedMessageKind::ServerRequest,
-           "item/commandExecution/requestApproval", ProtocolRequestId(9000),
-           Value::Object{{"threadId", Value("thread-" + suffix)}}}));
+      message.expectedNode =
+          updater
+              .apply({DecodedMessageKind::ServerRequest,
+                      "item/commandExecution/requestApproval",
+                      ProtocolRequestId(9000),
+                      Value::Object{{"threadId", Value("thread-" + suffix)}}})
+              .primary;
     }
 
     const std::uint64_t before = graph.publishedRevision();
@@ -263,7 +311,7 @@ void everyKnownMethodDispatches() {
           "every server request retains its payload and target relation");
       read.reset();
       const NodeRef interaction = result.primary;
-      static_cast<void>(updater.resolveInteraction(interaction, true));
+      static_cast<void>(updater.resolveInteraction(interaction));
       read = graph.tryRead();
       require(!read->find(interaction->id()),
               "every reverse interaction resolves by exact NodeRef");
@@ -660,6 +708,32 @@ void activeTurnRelationTracksLifecycle() {
             "turn start records the current active turn directly");
   }
 
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "thread/status/changed", std::nullopt,
+                     Value::Object{{"threadId", Value("active-thread")},
+                                   {"status", Value("active")}}}));
+  for (const std::string_view method :
+       {"thread/archived", "thread/unarchived"}) {
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, std::string(method),
+         std::nullopt, Value::Object{{"threadId", Value("active-thread")}}}));
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    const NodeRef turn = findTurn(*read, "active-thread", "active-turn");
+    const auto state = read->state(thread);
+    const Value *status = field(state, "status");
+    const Value *archived = field(state, "archived");
+    require(thread && turn && state->status == NodeStatus::Running && status &&
+                status->asString() && *status->asString() == "active" &&
+                archived && archived->asBool() &&
+                *archived->asBool() == (method == "thread/archived") &&
+                read->related(thread, RelationKind::ActiveTurn) ==
+                    std::vector<NodeRef>{turn},
+            "archive lifecycle changes visibility without replacing status "
+            "or active-turn authority");
+  }
+
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/status/changed",
        std::nullopt,
@@ -742,7 +816,8 @@ void activeTurnRelationTracksLifecycle() {
   }
   Value::Array replacementTurns{Value(Value::Object{
       {"id", Value("replacement-turn")}, {"status", Value("completed")}})};
-  const ApplyResult replacement = updater.apply(
+  const ApplyResult replacement = applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/read",
        ProtocolRequestId("active-thread-replacement"),
        Value::Object{
@@ -754,7 +829,7 @@ void activeTurnRelationTracksLifecycle() {
     const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
     require(thread && staleActive &&
                 !findTurn(*read, "active-thread", "stale-active") &&
-                read->removed(staleActive) &&
+                !read->live(staleActive) &&
                 std::ranges::find(replacement.change.removed, staleActive) !=
                     replacement.change.removed.end() &&
                 read->related(thread, RelationKind::ActiveTurn).empty(),
@@ -764,9 +839,121 @@ void activeTurnRelationTracksLifecycle() {
 }
 
 void effectiveThreadSettingsConvergeAcrossWireShapes() {
+  {
+    NodeGraph precedenceGraph;
+    ProtocolUpdater precedenceUpdater(precedenceGraph);
+    static_cast<void>(applyCorrelatedResult(
+        precedenceUpdater,
+        {DecodedMessageKind::ClientResult, "thread/resume",
+         ProtocolRequestId("settings-precedence"),
+         Value::Object{{"thread", Value(Value::Object{
+                                      {"id", Value("settings-precedence")},
+                                      {"model", Value("nested-model")},
+                                      {"reasoningEffort", Value("low")}})},
+                       {"model", Value("top-level-model")},
+                       {"effort", Value("high")}}}));
+    auto read = precedenceGraph.tryRead();
+    const NodeRef thread =
+        read->find({NodeKind::Thread, "settings-precedence"});
+    const auto state = read->state(thread);
+    require(thread && field(state, "model") &&
+                *field(state, "model")->asString() == "top-level-model" &&
+                field(state, "effort") &&
+                *field(state, "effort")->asString() == "high" &&
+                !field(state, "reasoningEffort"),
+            "thread resume wrapper settings override conflicting nested "
+            "thread settings");
+  }
+
+  {
+    NodeGraph aliasGraph;
+    ProtocolUpdater aliasUpdater(aliasGraph);
+    static_cast<void>(applyCorrelatedResult(
+        aliasUpdater,
+        {DecodedMessageKind::ClientResult, "thread/resume",
+         ProtocolRequestId("settings-alias-no-op"),
+         Value::Object{
+             {"thread", Value(Value::Object{{"id", Value("settings-alias-no-op")}})},
+             {"reasoningEffort", Value("medium")}}}));
+    static_cast<void>(aliasUpdater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+         std::nullopt,
+         Value::Object{{"threadId", Value("settings-alias-no-op")},
+                       {"threadSettings", Value(Value::Object{{"model", Value("gpt")}})}},
+         {}, std::int64_t{40}}));
+    static_cast<void>(aliasUpdater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+         std::nullopt,
+         Value::Object{{"threadId", Value("settings-alias-no-op")},
+                       {"threadSettings",
+                        Value(Value::Object{{"effort", Value("medium")}})}},
+         {}, std::int64_t{50}}));
+    static_cast<void>(aliasUpdater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+         std::nullopt,
+         Value::Object{
+             {"threadId", Value("settings-alias-no-op")},
+             {"threadSettings", Value(Value::Object{
+                                    {"reasoningEffort", Value("medium")}})}},
+         {}, std::int64_t{60}}));
+    auto read = aliasGraph.tryRead();
+    const auto state = read->state(
+        read->find({NodeKind::Thread, "settings-alias-no-op"}));
+    require(field(state, "reasoningEffort") && !field(state, "effort") &&
+                field(state, "localActivityAt") &&
+                *field(state, "localActivityAt")->asInt64() == 40,
+            "equivalent alias migrations advance acknowledgement but not "
+            "activity");
+  }
+
+  for (const std::string_view method :
+       {std::string_view("thread/start"), std::string_view("thread/resume"),
+        std::string_view("thread/fork")}) {
+    NodeGraph staleGraph;
+    ProtocolUpdater staleUpdater(staleGraph);
+    const std::string threadId = "stale-" + std::string(method.substr(7));
+    const ProtocolRequestId requestId(threadId);
+    const ApplyResult request = staleUpdater.apply(
+        {DecodedMessageKind::ClientRequest, std::string(method), requestId,
+         Value::Object{{"threadId", Value(threadId)}}});
+    static_cast<void>(staleUpdater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+         std::nullopt,
+         Value::Object{
+             {"threadId", Value(threadId)},
+             {"threadSettings",
+              Value(Value::Object{{"model", Value("notified-model")},
+                                  {"reasoningEffort", Value("high")}})}}}));
+    static_cast<void>(staleUpdater.apply(
+        {DecodedMessageKind::ClientResult, std::string(method), requestId,
+         Value::Object{{"thread", Value(Value::Object{
+                                      {"id", Value(threadId)},
+                                      {"name", Value("result name")},
+                                      {"model", Value("nested-stale-model")},
+                                      {"effort", Value("low")}})},
+                       {"model", Value("wrapper-stale-model")},
+                       {"effort", Value("medium")},
+                       {"serviceTier", Value("result-tier")}},
+         request.primary}));
+    auto read = staleGraph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, threadId});
+    const auto state = read->state(thread);
+    require(thread && field(state, "model") &&
+                *field(state, "model")->asString() == "notified-model" &&
+                field(state, "reasoningEffort") &&
+                *field(state, "reasoningEffort")->asString() == "high" &&
+                !field(state, "effort") && field(state, "serviceTier") &&
+                *field(state, "serviceTier")->asString() == "result-tier" &&
+                field(state, "name") &&
+                *field(state, "name")->asString() == "result name",
+            std::string(method) +
+                " result preserves settings notified after dispatch");
+  }
+
   NodeGraph graph;
   ProtocolUpdater updater(graph);
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/resume",
        ProtocolRequestId("settings-resume"),
        Value::Object{
@@ -804,8 +991,11 @@ void effectiveThreadSettingsConvergeAcrossWireShapes() {
             Value(Value::Object{{"model", Value("gpt-next")},
                                 {"effort", Value("medium")},
                                 {"sandboxPolicy", Value("readOnly")},
-                                {"personality", Value("friendly")}})}}}));
+                                {"personality", Value("friendly")},
+                                {"futureSetting", Value("retained")}})}},
+       {}, std::int64_t{40}}));
   std::uint64_t firstSettingsRevision = 0;
+  std::uint64_t firstModelAcknowledgement = 0;
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
@@ -813,6 +1003,10 @@ void effectiveThreadSettingsConvergeAcrossWireShapes() {
     const Value *revision = field(state, "settingsRevision");
     firstSettingsRevision =
         revision && revision->asUInt64() ? *revision->asUInt64() : 0;
+    firstModelAcknowledgement = settingAcknowledgedAt(state, "model");
+    const Value *acknowledgements = field(state, "settingsAcknowledgements");
+    const Value::Object *acknowledgementObject =
+        acknowledgements ? acknowledgements->asObject() : nullptr;
     require(field(state, "model") &&
                 *field(state, "model")->asString() == "gpt-next" &&
                 field(state, "effort") &&
@@ -820,8 +1014,14 @@ void effectiveThreadSettingsConvergeAcrossWireShapes() {
                 !field(state, "reasoningEffort") &&
                 field(state, "sandboxPolicy") &&
                 *field(state, "sandboxPolicy")->asString() == "readOnly" &&
-                !field(state, "sandbox") && firstSettingsRevision != 0,
-            "modern settings merge sparsely and retire stale legacy aliases");
+                !field(state, "sandbox") && field(state, "futureSetting") &&
+                *field(state, "futureSetting")->asString() == "retained" &&
+                firstSettingsRevision != 0 && firstModelAcknowledgement != 0 &&
+                acknowledgementObject && acknowledgementObject->size() == 4 &&
+                field(state, "localActivityAt") &&
+                *field(state, "localActivityAt")->asInt64() == 40,
+            "modern settings merge sparsely, retire stale aliases, retain "
+            "forward fields, and bound acknowledgement concepts");
   }
 
   static_cast<void>(updater.apply(
@@ -835,19 +1035,217 @@ void effectiveThreadSettingsConvergeAcrossWireShapes() {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
     const auto state = read->state(thread);
-    const Value *latest = field(state, "latestSettingsUpdate");
-    const Value::Object *latestObject = latest ? latest->asObject() : nullptr;
     const Value *revision = field(state, "settingsRevision");
     require(field(state, "model") &&
                 *field(state, "model")->asString() == "gpt-next" &&
-                !field(state, "personality") && latestObject &&
-                latestObject->size() == 1 &&
-                latestObject->contains("personality") &&
-                latestObject->at("personality").isNull() && revision &&
-                revision->asUInt64() &&
+                !field(state, "personality") &&
+                settingAcknowledgedAt(state, "personality") >
+                    firstSettingsRevision &&
+                settingAcknowledgedAt(state, "model") ==
+                    firstModelAcknowledgement &&
+                revision && revision->asUInt64() &&
                 *revision->asUInt64() > firstSettingsRevision,
-            "sparse settings retain prior facts, merge explicit null, retain "
-            "the latest patch, and advance a settings-only revision");
+            "sparse settings retain prior facts and acknowledgement epochs "
+            "while merging explicit null");
+  }
+
+  std::uint64_t equalAcknowledgementRevision = 0;
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("settings-thread")},
+           {"threadSettings",
+            Value(Value::Object{{"model", Value("gpt-next")}})}},
+       {}, std::int64_t{50}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    const Value *revision = field(state, "settingsRevision");
+    equalAcknowledgementRevision =
+        revision && revision->asUInt64() ? *revision->asUInt64() : 0;
+    require(equalAcknowledgementRevision > firstSettingsRevision &&
+                settingAcknowledgedAt(state, "model") >
+                    firstModelAcknowledgement &&
+                field(state, "localActivityAt") &&
+                *field(state, "localActivityAt")->asInt64() == 40,
+            "an equal-value settings notification advances its cumulative "
+            "acknowledgement epoch without advancing conversation activity");
+  }
+
+  static_cast<void>(applyCorrelatedResult(
+      updater,
+      {DecodedMessageKind::ClientResult, "thread/list",
+       ProtocolRequestId("unchanged-settings-list"),
+       Value::Object{{"data", Value(Value::Array{Value(Value::Object{
+                                  {"id", Value("settings-thread")},
+                                  {"model", Value("gpt-next")},
+                                  {"effort", Value("medium")},
+                                  {"sandboxPolicy", Value("readOnly")}})})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    const Value *revision = field(state, "settingsRevision");
+    require(revision && revision->asUInt64() &&
+                *revision->asUInt64() == equalAcknowledgementRevision &&
+                settingAcknowledgedAt(state, "model") ==
+                    equalAcknowledgementRevision,
+            "an unchanged list snapshot neither advances settings authority "
+            "nor erases a provider acknowledgement");
+  }
+
+  static_cast<void>(applyCorrelatedResult(
+      updater,
+      {DecodedMessageKind::ClientResult, "thread/list",
+       ProtocolRequestId("changed-settings-list"),
+       Value::Object{{"data", Value(Value::Array{Value(Value::Object{
+                                  {"id", Value("settings-thread")},
+                                  {"serviceTier", Value("flex")}})})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    const Value *revision = field(state, "settingsRevision");
+    require(field(state, "serviceTier") &&
+                *field(state, "serviceTier")->asString() == "flex" &&
+                revision && revision->asUInt64() &&
+                *revision->asUInt64() > equalAcknowledgementRevision &&
+                settingAcknowledgedAt(state, "model") ==
+                    equalAcknowledgementRevision &&
+                settingAcknowledgedAt(state, "serviceTier") == 0,
+            "a changed setting nested in a thread/list row advances the "
+            "effective authority without impersonating an acknowledgement");
+  }
+
+  const ProtocolRequestId staleListId("stale-settings-list");
+  const ApplyResult staleListRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/list", staleListId, {}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("settings-thread")},
+                     {"threadSettings",
+                      Value(Value::Object{{"effort", Value("medium")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("settings-thread")},
+                     {"threadSettings",
+                      Value(Value::Object{{"summary", Value("concise")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/list", staleListId,
+       Value::Object{{"data", Value(Value::Array{Value(Value::Object{
+                                  {"id", Value("settings-thread")},
+                                  {"effort", Value("high")},
+                                  {"serviceTier", Value("priority")}})})}},
+       staleListRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    require(field(state, "effort") &&
+                *field(state, "effort")->asString() == "medium" &&
+                field(state, "summary") &&
+                *field(state, "summary")->asString() == "concise" &&
+                field(state, "serviceTier") &&
+                *field(state, "serviceTier")->asString() == "priority" &&
+                settingAcknowledgedAt(state, "effort") != 0 &&
+                settingAcknowledgedAt(state, "summary") != 0,
+            "a delayed thread/list snapshot preserves coalesced "
+            "acknowledgements while accepting unrelated settings");
+  }
+
+  const ProtocolRequestId staleReadId("stale-settings-read");
+  const ApplyResult staleReadRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", staleReadId,
+       Value::Object{{"threadId", Value("settings-thread")}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("settings-thread")},
+                     {"threadSettings",
+                      Value(Value::Object{
+                          {"reasoningEffort", Value("low")},
+                          {"sandboxPolicy", Value("dangerFullAccess")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", staleReadId,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("settings-thread")},
+                                          {"effort", Value("high")},
+                                          {"sandbox", Value("readOnly")}})}},
+       staleReadRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    require(field(state, "reasoningEffort") &&
+                *field(state, "reasoningEffort")->asString() == "low" &&
+                !field(state, "effort") && field(state, "sandboxPolicy") &&
+                *field(state, "sandboxPolicy")->asString() ==
+                    "dangerFullAccess" &&
+                !field(state, "sandbox"),
+            "a delayed read cannot overwrite either spelling of a setting "
+            "alias changed after its request");
+  }
+
+  const ProtocolRequestId acceptedReadId("accepted-settings-read");
+  const ApplyResult acceptedReadRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", acceptedReadId,
+       Value::Object{{"threadId", Value("settings-thread")}}});
+  const ApplyResult acceptedRead = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", acceptedReadId,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("settings-thread")},
+                                    {"effort", Value("medium")},
+                                    {"sandbox", Value("workspaceWrite")}})}},
+       acceptedReadRequest.primary});
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    const Value *revision = field(state, "settingsRevision");
+    require(field(state, "effort") &&
+                *field(state, "effort")->asString() == "medium" &&
+                !field(state, "reasoningEffort") && field(state, "sandbox") &&
+                *field(state, "sandbox")->asString() == "workspaceWrite" &&
+                !field(state, "sandboxPolicy") && revision &&
+                revision->asUInt64() &&
+                *revision->asUInt64() == acceptedRead.change.revision,
+            "an accepted read updates each setting concept once, retires its "
+            "prior aliases, and publishes one settings revision");
+  }
+
+  const ProtocolRequestId equalReadId("equal-settings-read");
+  const ApplyResult equalReadRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", equalReadId,
+       Value::Object{{"threadId", Value("settings-thread")}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{
+           {"threadId", Value("settings-thread")},
+           {"threadSettings",
+            Value(Value::Object{{"effort", Value("medium")},
+                                {"sandbox", Value("workspaceWrite")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", equalReadId,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("settings-thread")},
+                                    {"reasoningEffort", Value("high")},
+                                    {"sandboxPolicy", Value("readOnly")}})}},
+       equalReadRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    require(field(state, "effort") &&
+                *field(state, "effort")->asString() == "medium" &&
+                !field(state, "reasoningEffort") && field(state, "sandbox") &&
+                *field(state, "sandbox")->asString() == "workspaceWrite" &&
+                !field(state, "sandboxPolicy"),
+            "a delayed read cannot overwrite an equal-value authoritative "
+            "update whose field revision did not move");
   }
 }
 
@@ -868,7 +1266,7 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
       Value(Value::Object{
           {"turnId", Value("items-turn")},
           {"item", Value(Value::Object{{"id", Value("older-item")},
-                                       {"type", Value("agentMessage")}})}})};
+                                       {"type", Value("userMessage")}})}})};
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ClientResult, "thread/items/list", firstId,
        Value::Object{{"data", Value(std::move(firstPage))},
@@ -877,10 +1275,14 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
   {
     auto read = graph.tryRead();
     const NodeRef turn = findTurn(*read, "items-thread", "items-turn");
+    const NodeRef older =
+        findItem(*read, "items-thread", "items-turn", "older-item");
     const auto state = read->state(turn);
     require(turn &&
                 protocolIds(*read, read->children(turn)) ==
                     std::vector<std::string>{"older-item", "newer-item"} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{older} &&
                 field(state, "itemsHistoryHasMore") &&
                 *field(state, "itemsHistoryHasMore")->asBool() &&
                 field(state, "itemsHistoryNextCursor") &&
@@ -900,7 +1302,7 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
   Value::Array secondPage{Value(Value::Object{
       {"turnId", Value("items-turn")},
       {"item", Value(Value::Object{{"id", Value("oldest-item")},
-                                   {"type", Value("agentMessage")}})}})};
+                                   {"type", Value("userMessage")}})}})};
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ClientResult, "thread/items/list", secondId,
        Value::Object{{"data", Value(std::move(secondPage))},
@@ -910,10 +1312,14 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
   {
     auto read = graph.tryRead();
     const NodeRef turn = findTurn(*read, "items-thread", "items-turn");
+    const NodeRef oldest =
+        findItem(*read, "items-thread", "items-turn", "oldest-item");
     const auto state = read->state(turn);
     require(protocolIds(*read, read->children(turn)) ==
                     std::vector<std::string>{"oldest-item", "older-item",
                                              "newer-item"} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{oldest} &&
                 field(state, "itemsHistoryHasMore") &&
                 !*field(state, "itemsHistoryHasMore")->asBool() &&
                 !field(state, "itemsHistoryNextCursor") &&
@@ -922,6 +1328,48 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
                     "newer-page",
             "later item pages prepend without rebuilding or duplicating the "
             "current turn order");
+  }
+
+  const ProtocolRequestId delayedId("items-page-delayed");
+  const ApplyResult delayedRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/items/list", delayedId,
+       Value::Object{{"threadId", Value("items-thread")},
+                     {"turnId", Value("items-turn")},
+                     {"cursor", Value("delayed-page")},
+                     {"sortDirection", Value("desc")}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{
+           {"threadId", Value("items-thread")},
+           {"turnId", Value("items-turn")},
+           {"completedAtMs", Value(std::uint64_t{90})},
+           {"item", Value(Value::Object{{"id", Value("newer-item")},
+                                        {"type", Value("agentMessage")},
+                                        {"text", Value("newer live text")}})}}}));
+  Value::Array delayedPage{Value(Value::Object{
+      {"turnId", Value("items-turn")},
+      {"item", Value(Value::Object{{"id", Value("newer-item")},
+                                   {"type", Value("agentMessage")},
+                                   {"status", Value("inProgress")},
+                                   {"text", Value("stale page text")}})}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/items/list", delayedId,
+       Value::Object{{"data", Value(std::move(delayedPage))},
+                     {"nextCursor", Value(nullptr)}},
+       delayedRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef item =
+        findItem(*read, "items-thread", "items-turn", "newer-item");
+    const auto state = read->state(item);
+    const Value *completedAt = field(state, "completedAtMs");
+    require(item && state->status == NodeStatus::Completed &&
+                field(state, "text") && field(state, "text")->asString() &&
+                *field(state, "text")->asString() == "newer live text" &&
+                completedAt && completedAt->asUInt64() &&
+                *completedAt->asUInt64() == 90,
+            "a delayed item page cannot overwrite post-request lifecycle "
+            "fields or status");
   }
 }
 
@@ -944,9 +1392,9 @@ void rootOrderAndThreadHierarchyAreExplicit() {
                           {"parentThreadId", Value(nullptr)}}),
       Value(Value::Object{{"id", Value("provider-b")}}),
       Value(Value::Object{{"id", Value("provider-a")}})};
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientResult, "thread/list", listId,
-                     Value::Object{{"data", Value(std::move(listed))}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "thread/list", listId,
+                Value::Object{{"data", Value(std::move(listed))}}}));
 
   {
     auto read = graph.tryRead();
@@ -969,7 +1417,8 @@ void rootOrderAndThreadHierarchyAreExplicit() {
             "parentThreadId creates direct structural and owner relations");
   }
 
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/fork",
        ProtocolRequestId("fork-result"),
        Value::Object{
@@ -1134,7 +1583,7 @@ void agentChildAggregatesTrackEveryReferencingItem() {
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
     const auto roots = read->related(runtime, RelationKind::RootThread);
-    require(firstItem && read->removed(firstItem) &&
+    require(firstItem && !read->live(firstItem) &&
                 !read->find(firstItem->id()) && ownerThread && secondItem &&
                 read->find(secondItem->id()) == secondItem && sharedChild &&
                 replacementChild &&
@@ -1192,7 +1641,7 @@ void agentChildAggregatesTrackEveryReferencingItem() {
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
     const auto roots = read->related(runtime, RelationKind::RootThread);
-    require(secondItem && read->removed(secondItem) &&
+    require(secondItem && !read->live(secondItem) &&
                 !read->find(secondItem->id()) && ownerThread &&
                 replacementChild &&
                 read->related(ownerThread, RelationKind::AgentChildThread)
@@ -1205,6 +1654,82 @@ void agentChildAggregatesTrackEveryReferencingItem() {
   }
 }
 
+void inspectorIndexFollowsProtocolIngestionOrder() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  for (const std::string_view threadId : {"indexed-provider-owner",
+                                          "indexed-provider-child"})
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+         Value::Object{{"thread", Value(Value::Object{
+                                      {"id", Value(threadId)}})}}}));
+  const auto ingest = [&](std::string itemId, std::string type,
+                          Value::Object fields, std::string threadId,
+                          std::string turnId) {
+    fields.emplace("id", Value(std::move(itemId)));
+    fields.emplace("type", Value(std::move(type)));
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+         Value::Object{{"threadId", Value(std::move(threadId))},
+                       {"turnId", Value(std::move(turnId))},
+                       {"item", Value(std::move(fields))}}}));
+  };
+  ingest("indexed-provider-start", "subAgentActivity",
+         {{"kind", Value("started")},
+          {"agentThreadId", Value("indexed-provider-child")},
+          {"prompt", Value("started")}},
+         "indexed-provider-owner", "indexed-provider-turn");
+
+  NodeRef owner;
+  const InspectorAgentSelector *selectorStorage = nullptr;
+  std::uint64_t orderRevision = 0;
+  {
+    auto read = graph.tryRead();
+    owner = read->find({NodeKind::Thread, "indexed-provider-owner"});
+    const InspectorThreadIndex *index = read->inspectorIndex(owner);
+    require(index && index->agents.size() == 1,
+            "provider-ingested Agent item reaches the Inspector index when "
+            "parenting precedes type merge");
+    if (index && index->agents.size() == 1) {
+      selectorStorage = &index->agents.front();
+      orderRevision = index->agentOrderRevision;
+    }
+  }
+
+  ingest("indexed-provider-progress", "subAgentActivity",
+         {{"kind", Value("progress")},
+          {"agentThreadId", Value("indexed-provider-child")},
+          {"prompt", Value("progress")}},
+         "indexed-provider-owner", "indexed-provider-turn");
+  ingest("indexed-provider-plan", "plan", {{"text", Value("provider plan")}},
+         "indexed-provider-owner", "indexed-provider-turn");
+  ingest("indexed-provider-message", "agentMessage",
+         {{"text", Value("provider result")}}, "indexed-provider-child",
+         "indexed-provider-child-turn");
+
+  auto read = graph.tryRead();
+  const InspectorThreadIndex *ownerIndex = read->inspectorIndex(owner);
+  const NodeRef child =
+      read->find({NodeKind::Thread, "indexed-provider-child"});
+  const InspectorThreadIndex *childIndex = read->inspectorIndex(child);
+  const NodeRef plan = findItem(*read, "indexed-provider-owner",
+                                "indexed-provider-turn",
+                                "indexed-provider-plan");
+  const NodeRef message = findItem(*read, "indexed-provider-child",
+                                   "indexed-provider-child-turn",
+                                   "indexed-provider-message");
+  require(ownerIndex && ownerIndex->agents.size() == 1 &&
+              &ownerIndex->agents.front() == selectorStorage &&
+              ownerIndex->agents.front().contributors.size() == 2 &&
+              candidateSource(ownerIndex->agents.front(), 4) ==
+                  ownerIndex->agents.front().contributors.back() &&
+              ownerIndex->agentOrderRevision == orderRevision &&
+              ownerIndex->planSource == plan && childIndex &&
+              childIndex->latestAgentMessage() == message,
+          "provider tail ingestion patches exact selectors while late-typed "
+          "Plan and agentMessage items remain indexed");
+}
+
 void forkRelationsFollowTheCurrentSource() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -1214,7 +1739,8 @@ void forkRelationsFollowTheCurrentSource() {
         {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
          Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
   }
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/fork",
        ProtocolRequestId("initial-fork"),
        Value::Object{
@@ -1331,10 +1857,10 @@ void semanticDeltasAndHydratedOrderStayCurrent() {
                {"id", Value("turn-one")},
                {"items", Value(Value::Array{Value(Value::Object{
                              {"id", Value("item-three")}})})}})})}};
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientResult, "thread/read",
-                     ProtocolRequestId("hydrate-order"),
-                     Value::Object{{"thread", Value(std::move(hydrated))}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "thread/read",
+                ProtocolRequestId("hydrate-order"),
+                Value::Object{{"thread", Value(std::move(hydrated))}}}));
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "semantic-thread"});
@@ -1419,6 +1945,20 @@ void realtimeNotificationsMaintainOneCurrentSession() {
                               {"id", Value("stream-item")},
                               {"realtimeSessionId", Value("session-one")},
                               {"text", Value("authoritative transcript")}})}}));
+  static_cast<void>(notify(
+      "thread/realtime/item/started",
+      Value::Object{{"threadId", Value("realtime-thread")},
+                    {"item", Value(Value::Object{
+                                 {"id", Value("future-item")},
+                                 {"realtimeSessionId", Value("session-one")},
+                                 {"status", Value("futureProviderState")}})}}));
+  static_cast<void>(notify(
+      "thread/realtime/item/completed",
+      Value::Object{{"threadId", Value("realtime-thread")},
+                    {"item", Value(Value::Object{
+                                 {"id", Value("future-item")},
+                                 {"realtimeSessionId", Value("session-one")},
+                                 {"status", Value("futureProviderState")}})}}));
   static_cast<void>(notify("thread/realtime/closed",
                            Value::Object{{"threadId", Value("realtime-thread")},
                                          {"reason", Value("remote close")}}));
@@ -1426,6 +1966,7 @@ void realtimeNotificationsMaintainOneCurrentSession() {
   NodeRef session;
   NodeRef streamItem;
   NodeRef rawItem;
+  NodeRef futureItem;
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "realtime-thread"});
@@ -1441,9 +1982,12 @@ void realtimeNotificationsMaintainOneCurrentSession() {
         streamItem = child;
       else if (id == "raw-item")
         rawItem = child;
+      else if (id == "future-item")
+        futureItem = child;
     }
     const auto sessionState = read->state(session);
     const auto itemState = read->state(streamItem);
+    const auto futureState = read->state(futureItem);
     const Value *transcripts = field(sessionState, "transcripts");
     const Value *completion = field(sessionState, "transcriptCompleted");
     const Value *errors = field(sessionState, "errors");
@@ -1454,6 +1998,13 @@ void realtimeNotificationsMaintainOneCurrentSession() {
             *field(itemState, "transcript")->asString() == "hello world" &&
             audio && audio->asArray() && audio->asArray()->size() == 2,
         "realtime items retain identity, transcript, audio, and completion");
+    require(futureItem && futureState &&
+                futureState->status == NodeStatus::Unknown &&
+                field(futureState, "status") &&
+                *field(futureState, "status")->asString() ==
+                    "futureProviderState",
+            "realtime lifecycle fallback preserves an explicit forward "
+            "status in typed and raw state");
     require(
         transcripts && transcripts->asObject() &&
             transcripts->find("assistant") &&
@@ -1615,12 +2166,19 @@ void hookRunsKeepNestedIdentityAndCurrentOwnership() {
       "hook/completed",
       Value::Object{{"threadId", Value("hook-thread")},
                     {"run", Value(Value::Object{
+                                {"id", Value("hook-run-forward")},
+                                {"status", Value("futureProviderState")}})}}));
+  static_cast<void>(notify(
+      "hook/completed",
+      Value::Object{{"threadId", Value("hook-thread")},
+                    {"run", Value(Value::Object{
                                 {"id", Value("hook-run-c")},
                                 {"completedAt", Value(std::int64_t{200})}})}}));
   {
     auto read = graph.tryRead();
     const NodeRef blocked = read->find({NodeKind::Hook, "hook-run-b"});
     const NodeRef completed = read->find({NodeKind::Hook, "hook-run-c"});
+    const NodeRef forward = read->find({NodeKind::Hook, "hook-run-forward"});
     require(
         blocked == second &&
             read->state(blocked)->status == NodeStatus::Failed && completed &&
@@ -1629,6 +2187,11 @@ void hookRunsKeepNestedIdentityAndCurrentOwnership() {
             *field(read->state(completed), "status")->asString() == "completed",
         "hook terminal status is normalized while the raw current status "
         "remains available on the node");
+    require(forward && read->state(forward)->status == NodeStatus::Unknown &&
+                field(read->state(forward), "status") &&
+                *field(read->state(forward), "status")->asString() ==
+                    "futureProviderState",
+            "hook lifecycle fallback preserves an explicit forward status");
   }
 
   const std::uint64_t beforeInvalid = graph.publishedRevision();
@@ -1718,8 +2281,13 @@ void graphRelationsInvalidationAndIncarnationsAreExplicit() {
   Value::Object collabItem{
       {"id", Value("collab-item")},
       {"type", Value("collabAgentToolCall")},
+      {"agentThreadId", Value(std::uint64_t{8})},
       {"receiverThreadIds",
-       Value(Value::Array{Value("receiver-a"), Value("receiver-b")})}};
+       Value(Value::Array{Value("receiver-a"), Value(std::uint64_t{7}),
+                          Value(""), Value("receiver-b")})},
+      {"agentsStates",
+       Value(Value::Object{{"state-only", Value(Value::Object{
+                                                   {"status", Value("running")}})}})}};
   Value::Object thread{
       {"id", Value("related-thread")},
       {"projectId", Value("project-a")},
@@ -1739,16 +2307,17 @@ void graphRelationsInvalidationAndIncarnationsAreExplicit() {
     const NodeRef section = read->find({NodeKind::ThreadSection, "section-a"});
     const NodeRef receiverA = read->find({NodeKind::Thread, "receiver-a"});
     const NodeRef receiverB = read->find({NodeKind::Thread, "receiver-b"});
+    const NodeRef stateOnly = read->find({NodeKind::Thread, "state-only"});
     require(read->related(owner, RelationKind::ProjectMembership) ==
                     std::vector<NodeRef>{project} &&
                 read->related(owner, RelationKind::SectionMembership) ==
                     std::vector<NodeRef>{section},
             "thread descriptors populate direct project and section relations");
     require(read->related(item, RelationKind::AgentChildThread) ==
-                    std::vector<NodeRef>{receiverA, receiverB} &&
+                    std::vector<NodeRef>{receiverA, receiverB, stateOnly} &&
                 read->related(owner, RelationKind::AgentChildThread) ==
-                    std::vector<NodeRef>{receiverA, receiverB},
-            "all receiverThreadIds populate stable child-thread relations");
+                    std::vector<NodeRef>{receiverA, receiverB, stateOnly},
+            "all reported agent IDs populate stable child-thread relations");
   }
 
   static_cast<void>(notify(
@@ -1760,11 +2329,13 @@ void graphRelationsInvalidationAndIncarnationsAreExplicit() {
            Value(Value::Object{{"id", Value("collab-item")},
                                {"type", Value("collabAgentToolCall")},
                                {"receiverThreadIds",
-                                Value(Value::Array{Value("receiver-b")})}})}}));
+                                Value(Value::Array{Value("receiver-b")})},
+                               {"agentsStates", Value(Value::Object{})}})}}));
   static_cast<void>(notify("thread/project/updated",
                            Value::Object{{"threadId", Value("related-thread")},
                                          {"projectId", Value("project-b")}}));
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/section/move", std::nullopt,
        Value::Object{{"threadId", Value("related-thread")},
                      {"sectionId", Value("section-b")}}}));
@@ -1818,7 +2389,8 @@ void graphRelationsInvalidationAndIncarnationsAreExplicit() {
   static_cast<void>(notify("thread/project/updated",
                            Value::Object{{"threadId", Value("related-thread")},
                                          {"projectId", Value(nullptr)}}));
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/section/move", std::nullopt,
        Value::Object{{"threadId", Value("related-thread")},
                      {"sectionId", Value(nullptr)}}}));
@@ -1867,13 +2439,13 @@ void promptMaterializationDoesNotAcknowledgeDelivery() {
   require(read->related(authoritative, RelationKind::PromptMaterialization) ==
               std::vector<NodeRef>{local},
           "authoritative prompt identity is related to its local node");
-  require(read->related(read->parent(authoritative),
-                        RelationKind::TurnRootItem) ==
-                  std::vector<NodeRef>{authoritative} &&
-              read->related(read->parent(local), RelationKind::TurnRootItem) ==
-                  std::vector<NodeRef>{local},
-          "inbound materialization roots the provider Turn without changing "
-          "the still-unacknowledged optimistic Turn ownership");
+  require(
+      read->related(read->parent(authoritative), RelationKind::TurnRootItem) ==
+              std::vector<NodeRef>{authoritative} &&
+          read->related(read->parent(local), RelationKind::TurnRootItem) ==
+              std::vector<NodeRef>{local},
+      "inbound materialization roots the provider Turn without changing "
+      "the still-unacknowledged optimistic Turn ownership");
   require(localState->status == NodeStatus::Running &&
               field(localState, "dispatchState") &&
               *field(localState, "dispatchState")->asString() ==
@@ -1881,7 +2453,7 @@ void promptMaterializationDoesNotAcknowledgeDelivery() {
           "inbound materialization alone never acknowledges outbound delivery");
 }
 
-void steeringMaterializationKeepsTheSubmittedSlot() {
+void steeringMaterializationKeepsProviderOrderAndVisualIdentity() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
   NodeRef local;
@@ -1891,12 +2463,11 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
     auto write = graph.write();
     NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
     NodeRef thread = write.upsert({NodeKind::Thread, "steering-thread"});
-    NodeRef turn = write.upsert(
-        scopedTurnNodeId("steering-thread", "steering-turn"));
+    NodeRef turn =
+        write.upsert(scopedTurnNodeId("steering-thread", "steering-turn"));
     write.setField(turn, "protocolId", Value("steering-turn"));
     write.setField(turn, "protocolThreadId", Value("steering-thread"));
-    root = write.upsert(
-        scopedItemNodeId(turn->id(), "opening-prompt"));
+    root = write.upsert(scopedItemNodeId(turn->id(), "opening-prompt"));
     write.setField(root, "protocolId", Value("opening-prompt"));
     write.setField(root, "type", Value("userMessage"));
     local = write.upsert({NodeKind::Item, "local-steering"});
@@ -1905,8 +2476,8 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
     write.setField(local, "submissionId", Value(std::uint64_t{77}));
     write.setField(local, "clientUserMessageId", Value("steering-client"));
     write.setField(local, "startsTurn", Value(false));
-    intervening = write.upsert(
-        scopedItemNodeId(turn->id(), "intervening-activity"));
+    intervening =
+        write.upsert(scopedItemNodeId(turn->id(), "intervening-activity"));
     write.setField(intervening, "protocolId", Value("intervening-activity"));
     write.setField(intervening, "type", Value("agentMessage"));
     write.setParent(thread, turn);
@@ -1920,36 +2491,30 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
 
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
-       Value::Object{{"threadId", Value("steering-thread")},
-                     {"turnId", Value("steering-turn")},
-                     {"item", Value(Value::Object{
-                                  {"id", Value("provider-steering")},
-                                  {"type", Value("userMessage")},
-                                  {"clientId", Value("steering-client")},
-                                  {"text", Value("Steer here")}})}}}));
+       Value::Object{
+           {"threadId", Value("steering-thread")},
+           {"turnId", Value("steering-turn")},
+           {"item", Value(Value::Object{{"id", Value("provider-steering")},
+                                        {"type", Value("userMessage")},
+                                        {"clientId", Value("steering-client")},
+                                        {"text", Value("Steer here")}})}}}));
 
   auto read = graph.tryRead();
-  const NodeRef turn =
-      findTurn(*read, "steering-thread", "steering-turn");
+  const NodeRef turn = findTurn(*read, "steering-thread", "steering-turn");
   const NodeRef authoritative =
-      findItem(*read, "steering-thread", "steering-turn",
-               "provider-steering");
+      findItem(*read, "steering-thread", "steering-turn", "provider-steering");
   const auto ordered = read->children(turn);
   const auto localPosition = std::ranges::find(ordered, local);
-  const auto authoritativePosition =
-      std::ranges::find(ordered, authoritative);
+  const auto authoritativePosition = std::ranges::find(ordered, authoritative);
   const auto interveningPosition = std::ranges::find(ordered, intervening);
   const auto authoritativeState = read->state(authoritative);
-  const Value *submission =
-      field(authoritativeState, "localSubmissionId");
+  const Value *submission = field(authoritativeState, "localSubmissionId");
   require(authoritative && submission && submission->asUInt64() &&
-              *submission->asUInt64() == 77 &&
-              localPosition != ordered.end() &&
-              authoritativePosition == std::next(localPosition) &&
+              *submission->asUInt64() == 77 && localPosition != ordered.end() &&
               interveningPosition != ordered.end() &&
-              authoritativePosition < interveningPosition,
-          "a correlated steering item retains the submitted local slot and "
-          "its stable visual identity ahead of later activity");
+              authoritativePosition == std::next(interveningPosition),
+          "a correlated steering item retains only its stable visual identity "
+          "without changing provider arrival order");
   read.reset();
 
   Value::Array replacementItems{
@@ -1963,13 +2528,13 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
                           {"type", Value("userMessage")},
                           {"clientId", Value("steering-client")},
                           {"text", Value("Steer here")}})};
-  Value::Object replacementTurn{
-      {"id", Value("steering-turn")},
-      {"items", Value(std::move(replacementItems))}};
+  Value::Object replacementTurn{{"id", Value("steering-turn")},
+                                {"items", Value(std::move(replacementItems))}};
   Value::Object replacementThread{
       {"id", Value("steering-thread")},
       {"turns", Value(Value::Array{Value(std::move(replacementTurn))})}};
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/read",
        ProtocolRequestId("steering-replacement"),
        Value::Object{{"thread", Value(std::move(replacementThread))}}}));
@@ -1979,15 +2544,14 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
     read = graph.tryRead();
     const NodeRef replacementTurn =
         findTurn(*read, "steering-thread", "steering-turn");
-    replacementActivity =
-        findItem(*read, "steering-thread", "steering-turn",
-                 "replacement-activity");
+    replacementActivity = findItem(*read, "steering-thread", "steering-turn",
+                                   "replacement-activity");
     const auto replacementOrder = read->children(replacementTurn);
     require(replacementOrder ==
-                std::vector<NodeRef>{root, local, authoritative, intervening,
-                                     replacementActivity},
-            "a full provider turn replacement cannot move a steering prompt "
-            "or its authoritative identity behind later activity");
+                std::vector<NodeRef>{root, intervening, replacementActivity,
+                                     authoritative, local},
+            "a full provider turn replacement did not retain provider order "
+            "ahead of the private optimistic row");
   }
   read.reset();
 
@@ -2013,27 +2577,157 @@ void steeringMaterializationKeepsTheSubmittedSlot() {
       {"items", Value(std::move(retiredReplacementItems))}};
   Value::Object retiredReplacementThread{
       {"id", Value("steering-thread")},
-      {"turns",
-       Value(Value::Array{Value(std::move(retiredReplacementTurn))})}};
-  static_cast<void>(updater.apply(
+      {"turns", Value(Value::Array{Value(std::move(retiredReplacementTurn))})}};
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/read",
        ProtocolRequestId("retired-steering-replacement"),
-       Value::Object{
-           {"thread", Value(std::move(retiredReplacementThread))}}}));
+       Value::Object{{"thread", Value(std::move(retiredReplacementThread))}}}));
   {
     read = graph.tryRead();
     const NodeRef replacementTurn =
         findTurn(*read, "steering-thread", "steering-turn");
-    const NodeRef postRetirement =
-        findItem(*read, "steering-thread", "steering-turn",
-                 "post-retirement-activity");
+    const NodeRef postRetirement = findItem(
+        *read, "steering-thread", "steering-turn", "post-retirement-activity");
     const auto replacementOrder = read->children(replacementTurn);
+    const Value *retainedSubmission =
+        field(read->state(authoritative), "localSubmissionId");
     require(replacementOrder ==
-                std::vector<NodeRef>{root, authoritative, intervening,
-                                     replacementActivity, postRetirement},
-            "retiring the local prompt cannot release its authoritative You "
-            "card to a later provider-arrival slot");
+                std::vector<NodeRef>{root, intervening, replacementActivity,
+                                     postRetirement, authoritative} &&
+                retainedSubmission && retainedSubmission->asUInt64() &&
+                *retainedSubmission->asUInt64() == 77,
+            "retiring the local prompt changed provider order or discarded "
+            "its stable presentation identity");
   }
+}
+
+void providerReplacementDerivesRootFromProviderOrder() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto readThread = [](std::string requestId,
+                             std::array<std::string, 3> order) {
+    Value::Array items;
+    items.reserve(order.size());
+    for (const std::string &id : order) {
+      const std::string type =
+          id == "activity" ? "agentMessage" : "userMessage";
+      items.emplace_back(
+          Value::Object{{"id", Value(id)}, {"type", Value(type)}});
+    }
+    return DecodedMessage{
+        DecodedMessageKind::ClientResult, "thread/read",
+        ProtocolRequestId(std::move(requestId)),
+        Value::Object{
+            {"thread",
+             Value(Value::Object{
+                 {"id", Value("stable-root-thread")},
+                 {"turns", Value(Value::Array{Value(Value::Object{
+                               {"id", Value("stable-root-turn")},
+                               {"items", Value(std::move(items))}})})}})}}};
+  };
+
+  static_cast<void>(applyCorrelatedResult(
+      updater,
+      readThread("stable-root-initial", {"opening", "steering", "activity"})));
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef opening;
+  NodeRef steering;
+  NodeRef activity;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({NodeKind::Thread, "stable-root-thread"});
+    turn = findTurn(*read, "stable-root-thread", "stable-root-turn");
+    opening =
+        findItem(*read, "stable-root-thread", "stable-root-turn", "opening");
+    steering =
+        findItem(*read, "stable-root-thread", "stable-root-turn", "steering");
+    activity =
+        findItem(*read, "stable-root-thread", "stable-root-turn", "activity");
+    require(read->children(turn) ==
+                    std::vector<NodeRef>{opening, steering, activity} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{opening},
+            "the initial opening prompt was not the canonical Turn root");
+  }
+
+  const ApplyResult reordered = applyCorrelatedResult(
+      updater,
+      readThread("stable-root-reordered", {"steering", "opening", "activity"}));
+  auto read = graph.tryRead();
+  require(read->children(turn) ==
+                  std::vector<NodeRef>{steering, opening, activity} &&
+              read->related(turn, RelationKind::TurnRootItem) ==
+                  std::vector<NodeRef>{steering},
+          "prior local history overrode provider order or Turn ownership");
+  require(
+      read->live(opening) && read->live(steering) && read->live(activity) &&
+          reordered.change.removed.size() == 1 &&
+          reordered.change.removed.front()->id().kind == NodeKind::Operation,
+      "a provider reorder retired live content");
+}
+
+void providerReplacementKeepsOnlyAnExplicitLocalRootFallback() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  NodeRef turn;
+  NodeRef local;
+  {
+    auto write = graph.write();
+    NodeRef thread =
+        write.upsert({NodeKind::Thread, "local-root-snapshot"});
+    turn = write.upsert(
+        scopedTurnNodeId("local-root-snapshot", "local-root-turn"));
+    write.setField(turn, "protocolId", Value("local-root-turn"));
+    write.setField(turn, "protocolThreadId", Value("local-root-snapshot"));
+    NodeState promptState;
+    promptState.status = NodeStatus::Running;
+    promptState.fields = {{"type", Value("localPrompt")},
+                          {"local", Value(true)},
+                          {"startsTurn", Value(true)}};
+    local = write.upsert({NodeKind::Item, "local-root-prompt"},
+                         std::move(promptState));
+    write.setParent(thread, turn);
+    write.setParent(turn, local);
+    write.relate(turn, RelationKind::TurnRootItem, local);
+    static_cast<void>(write.finish());
+  }
+
+  const auto snapshot = [](std::string requestId, Value::Array items) {
+    return DecodedMessage{
+        DecodedMessageKind::ClientResult, "thread/read",
+        ProtocolRequestId(std::move(requestId)),
+        Value::Object{{"thread",
+                       Value(Value::Object{
+                           {"id", Value("local-root-snapshot")},
+                           {"turns", Value(Value::Array{Value(Value::Object{
+                                         {"id", Value("local-root-turn")},
+                                         {"items", Value(std::move(items))}})})}})}}};
+  };
+  static_cast<void>(
+      applyCorrelatedResult(updater, snapshot("local-root-empty", {})));
+  {
+    auto read = graph.tryRead();
+    require(read->children(turn) == std::vector<NodeRef>{local} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{local},
+            "an empty provider snapshot cleared its explicit optimistic root");
+  }
+
+  Value::Array providerItems{Value(Value::Object{
+      {"id", Value("provider-root")}, {"type", Value("userMessage")}})};
+  static_cast<void>(applyCorrelatedResult(
+      updater,
+      snapshot("local-root-authoritative", std::move(providerItems))));
+  auto read = graph.tryRead();
+  const NodeRef authoritative = findItem(
+      *read, "local-root-snapshot", "local-root-turn", "provider-root");
+  require(read->children(turn) ==
+                  std::vector<NodeRef>{authoritative, local} &&
+              read->related(turn, RelationKind::TurnRootItem) ==
+                  std::vector<NodeRef>{authoritative},
+          "an optimistic root overrode the current provider root");
 }
 
 void turnRootsAndPagedHistoryStayExplicit() {
@@ -2050,7 +2744,8 @@ void turnRootsAndPagedHistoryStayExplicit() {
   }
   completeItems.emplace_back(Value::Object{{"id", Value("later-steering")},
                                            {"type", Value("userMessage")}});
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "thread/read",
        ProtocolRequestId("complete-history"),
        Value::Object{
@@ -2070,14 +2765,10 @@ void turnRootsAndPagedHistoryStayExplicit() {
     const NodeRef turn = findTurn(*read, "history-thread", "long-turn");
     openingPrompt =
         findItem(*read, "history-thread", "long-turn", "opening-prompt");
-    const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
     require(turn && openingPrompt &&
                 read->related(turn, RelationKind::TurnRootItem) ==
                     std::vector<NodeRef>{openingPrompt},
             "a turn directly relates to its authoritative opening prompt");
-    require(loaded && loaded->asUInt64() && *loaded->asUInt64() == 84,
-            "thread history records the complete loaded item count for local "
-            "windowing");
     threadRevision = read->changedRevision(thread);
   }
   const ApplyResult streamUpdate =
@@ -2090,14 +2781,11 @@ void turnRootsAndPagedHistoryStayExplicit() {
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "history-thread"});
-    const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
-    require(read->changedRevision(thread) > threadRevision && loaded &&
-                loaded->asUInt64() && *loaded->asUInt64() == 84 &&
+    require(read->changedRevision(thread) > threadRevision &&
                 std::ranges::find(streamUpdate.change.affected, thread) ==
                     streamUpdate.change.affected.end(),
             "an existing-item stream advances its aggregate correlation "
-            "revision without recomputing history metadata or scheduling a "
-            "thread-row render");
+            "revision without scheduling a thread-row render");
   }
 
   Value::Array retainedSuffix{
@@ -2110,10 +2798,10 @@ void turnRootsAndPagedHistoryStayExplicit() {
   Value::Object suffixThread{
       {"id", Value("history-thread")},
       {"turns", Value(Value::Array{Value(std::move(suffixTurn))})}};
-  const ApplyResult suffixReplacement = updater.apply(
-      {DecodedMessageKind::ClientResult, "thread/read",
-       ProtocolRequestId("suffix-history"),
-       Value::Object{{"thread", Value(std::move(suffixThread))}}});
+  const ApplyResult suffixReplacement = applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "thread/read",
+                ProtocolRequestId("suffix-history"),
+                Value::Object{{"thread", Value(std::move(suffixThread))}}});
   NodeRef retainedTurn;
   NodeRef steering;
   NodeRef latest;
@@ -2123,20 +2811,17 @@ void turnRootsAndPagedHistoryStayExplicit() {
     retainedTurn = findTurn(*read, "history-thread", "long-turn");
     steering = findItem(*read, "history-thread", "long-turn", "later-steering");
     latest = findItem(*read, "history-thread", "long-turn", "latest-activity");
-    const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
     require(read->children(retainedTurn) ==
                     std::vector<NodeRef>{steering, latest} &&
                 read->related(retainedTurn, RelationKind::TurnRootItem) ==
                     std::vector<NodeRef>{steering} &&
                 !read->find(openingPrompt->id()) &&
-                read->removed(openingPrompt) &&
+                !read->live(openingPrompt) &&
                 std::ranges::find(suffixReplacement.change.removed,
                                   openingPrompt) !=
                     suffixReplacement.change.removed.end(),
             "an authoritative suffix retires its omitted provider items and "
             "selects the first retained user message as the current root");
-    require(loaded && loaded->asUInt64() && *loaded->asUInt64() == 2,
-            "loaded history count includes only current authoritative items");
   }
 
   const ApplyResult removedHistory = updater.apply(
@@ -2177,7 +2862,6 @@ void turnRootsAndPagedHistoryStayExplicit() {
     const auto state = read->state(thread);
     const Value *hasMore = field(state, "historyHasMore");
     const Value *cursor = field(state, "historyNextCursor");
-    const Value *loaded = field(state, "historyLoadedItemCount");
     require(thread && turn && root &&
                 read->related(turn, RelationKind::TurnRootItem) ==
                     std::vector<NodeRef>{root},
@@ -2189,17 +2873,15 @@ void turnRootsAndPagedHistoryStayExplicit() {
             "a turns/list result uses its correlated request scope then "
             "retires the completed operation");
     require(hasMore && hasMore->asBool() && *hasMore->asBool() && cursor &&
-                cursor->asString() && *cursor->asString() == "older-page" &&
-                loaded && loaded->asUInt64() && *loaded->asUInt64() == 2,
-            "a turns page exposes provider continuation and loaded history "
-            "size on its thread");
+                cursor->asString() && *cursor->asString() == "older-page",
+            "a turns page exposes provider continuation on its thread");
   }
 
   const ProtocolRequestId lastPage("turn-page-2");
-  static_cast<void>(updater.apply(
+  const ApplyResult lastPageRequest = updater.apply(
       {DecodedMessageKind::ClientRequest, "thread/turns/list", lastPage,
        Value::Object{{"threadId", Value("paged-thread")},
-                     {"cursor", Value("older-page")}}}));
+                     {"cursor", Value("older-page")}}});
   Value::Array olderTurns{Value(Value::Object{
       {"id", Value("older-turn")},
       {"items",
@@ -2208,20 +2890,206 @@ void turnRootsAndPagedHistoryStayExplicit() {
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ClientResult, "thread/turns/list", lastPage,
        Value::Object{{"data", Value(std::move(olderTurns))},
-                     {"nextCursor", Value(nullptr)}}}));
+                     {"nextCursor", Value(nullptr)}},
+       lastPageRequest.primary}));
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "paged-thread"});
     const auto state = read->state(thread);
     const Value *hasMore = field(state, "historyHasMore");
-    const Value *loaded = field(state, "historyLoadedItemCount");
     require(protocolIds(*read, read->children(thread)) ==
-                    std::vector<std::string>{"older-turn", "newer-turn"} &&
+                std::vector<std::string>{"older-turn", "newer-turn"} &&
                 hasMore && hasMore->asBool() && !*hasMore->asBool() &&
-                !field(state, "historyNextCursor") && loaded &&
-                loaded->asUInt64() && *loaded->asUInt64() == 3,
+                !field(state, "historyNextCursor"),
             "the final turns page clears provider continuation while "
             "retaining accumulated chronological history");
+  }
+
+   NodeGraph delayedGraph;
+  ProtocolUpdater delayedUpdater(delayedGraph);
+  const auto delayedTurn = [](std::string includedText) {
+    return Value(Value::Object{
+        {"id", Value("turn")},
+        {"items", Value(Value::Array{
+                      Value(Value::Object{{"id", Value("opening")},
+                                          {"type", Value("userMessage")}}),
+                      Value(Value::Object{
+                          {"id", Value("included")},
+                          {"type", Value("agentMessage")},
+                          {"text", Value(std::move(includedText))}})})}});
+  };
+  Value::Object delayedThread{
+      {"id", Value("delayed-page")},
+      {"turns", Value(Value::Array{delayedTurn("initial")})}};
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(std::move(delayedThread))}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("delayed-page")},
+           {"turnId", Value("turn")},
+           {"startedAtMs", Value(std::uint64_t{10})},
+           {"item", Value(Value::Object{{"id", Value("stale")},
+                                        {"type", Value("agentMessage")},
+                                        {"text", Value("pre-request")}})}}}));
+  const ProtocolRequestId delayedPageId("delayed-turn-page");
+  const ApplyResult delayedRequest = delayedUpdater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/turns/list", delayedPageId,
+       Value::Object{{"threadId", Value("delayed-page")}}});
+  const ApplyResult staleDelta =
+      delayedUpdater.apply({DecodedMessageKind::ServerNotification,
+                            "item/agentMessage/delta", std::nullopt,
+                            Value::Object{{"threadId", Value("delayed-page")},
+                                          {"turnId", Value("turn")},
+                                          {"itemId", Value("stale")},
+                                          {"delta", Value(" changed later")}}});
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/plan/delta", std::nullopt,
+       Value::Object{{"threadId", Value("delayed-page")},
+                     {"turnId", Value("turn")},
+                     {"itemId", Value("placeholder")},
+                     {"delta", Value("incomplete")}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("delayed-page")},
+           {"turnId", Value("turn")},
+           {"item", Value(Value::Object{{"id", Value("status-only")},
+                                        {"type", Value("agentMessage")},
+                                        {"status", Value("inProgress")}})}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("delayed-page")},
+           {"turnId", Value("turn")},
+           {"startedAtMs", Value("not-an-integer")},
+           {"item", Value(Value::Object{{"id", Value("bad-timestamp")},
+                                        {"type", Value("agentMessage")}})}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{{"threadId", Value("delayed-page")},
+                     {"turnId", Value("turn")},
+                     {"startedAtMs", Value(std::uint64_t{15})},
+                     {"item", Value(Value::Object{
+                                  {"id", Value("bad-type")},
+                                  {"type", Value(std::uint64_t{7})}})}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("delayed-page")},
+           {"turnId", Value("turn")},
+           {"startedAtMs", Value(std::uint64_t{20})},
+           {"item", Value(Value::Object{{"id", Value("started")},
+                                        {"type", Value("agentMessage")},
+                                        {"status", Value("futureStatus")},
+                                        {"text", Value("active work")}})}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{{"threadId", Value("delayed-page")},
+                     {"turnId", Value("turn")},
+                     {"completedAtMs", Value(std::uint64_t{30})},
+                     {"item", Value(Value::Object{
+                                  {"id", Value("completed")},
+                                  {"type", Value("userMessage")},
+                                  {"text", Value("newer authority")}})}}}));
+  static_cast<void>(delayedUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{{"threadId", Value("delayed-page")},
+                     {"turnId", Value("turn")},
+                     {"completedAtMs", Value(std::uint64_t{40})},
+                     {"item", Value(Value::Object{
+                                  {"id", Value("included")},
+                                  {"type", Value("agentMessage")},
+                                  {"text", Value("newer included")}})}}}));
+  NodeRef stale;
+  NodeRef placeholder;
+  NodeRef statusOnly;
+  NodeRef badTimestamp;
+  NodeRef badType;
+  NodeRef started;
+  NodeRef completed;
+  NodeRef included;
+  {
+    auto read = delayedGraph.tryRead();
+    stale = findItem(*read, "delayed-page", "turn", "stale");
+    placeholder = findItem(*read, "delayed-page", "turn", "placeholder");
+    statusOnly = findItem(*read, "delayed-page", "turn", "status-only");
+    badTimestamp = findItem(*read, "delayed-page", "turn", "bad-timestamp");
+    badType = findItem(*read, "delayed-page", "turn", "bad-type");
+    started = findItem(*read, "delayed-page", "turn", "started");
+    completed = findItem(*read, "delayed-page", "turn", "completed");
+    included = findItem(*read, "delayed-page", "turn", "included");
+    require(stale && placeholder && statusOnly && badTimestamp && badType &&
+                started && completed && included &&
+                read->changedRevision(stale) == staleDelta.change.revision &&
+                read->fieldChangedRevision(stale, "startedAtMs") <=
+                    delayedRequest.change.revision &&
+                read->fieldChangedRevision(started, "startedAtMs") >
+                    delayedRequest.change.revision &&
+                read->statusChangedRevision(statusOnly) >
+                    delayedRequest.change.revision &&
+                read->fieldChangedRevision(statusOnly, "startedAtMs") == 0 &&
+                read->fieldChangedRevision(badTimestamp, "startedAtMs") >
+                    delayedRequest.change.revision &&
+                read->fieldChangedRevision(badType, "startedAtMs") >
+                    delayedRequest.change.revision &&
+                read->fieldChangedRevision(completed, "completedAtMs") >
+                    delayedRequest.change.revision,
+            "the delayed-page fixture distinguishes later deltas from newer "
+            "provider lifecycle authority");
+  }
+  const ApplyResult delayedResult = delayedUpdater.apply(
+      {DecodedMessageKind::ClientResult, "thread/turns/list", delayedPageId,
+       Value::Object{
+           {"data", Value(Value::Array{delayedTurn("stale snapshot")})}},
+       delayedRequest.primary});
+  {
+    auto read = delayedGraph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "delayed-page"});
+    const NodeRef turn = findTurn(*read, "delayed-page", "turn");
+    const NodeRef opening = findItem(*read, "delayed-page", "turn", "opening");
+    const Value *startedAt = field(read->state(started), "startedAtMs");
+    const Value *completedAt = field(read->state(completed), "completedAtMs");
+    require(thread && turn && opening && included && stale && placeholder &&
+                statusOnly && badTimestamp && badType && started && completed &&
+                read->find(started->id()) == started &&
+                read->find(completed->id()) == completed &&
+                !read->find(stale->id()) && !read->find(placeholder->id()) &&
+                !read->find(statusOnly->id()) && !read->live(stale) &&
+                !read->find(badTimestamp->id()) && !read->find(badType->id()) &&
+                !read->live(placeholder) && !read->live(statusOnly) &&
+                !read->live(badTimestamp) && !read->live(badType) &&
+                read->children(turn) == std::vector<NodeRef>{opening, included,
+                                                             started,
+                                                             completed} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{opening} &&
+                read->state(included)->status == NodeStatus::Completed &&
+                read->state(started)->status == NodeStatus::Unknown &&
+                read->state(completed)->status == NodeStatus::Completed &&
+                startedAt && startedAt->asUInt64() &&
+                *startedAt->asUInt64() == 20 && completedAt &&
+                completedAt->asUInt64() && *completedAt->asUInt64() == 30 &&
+                field(read->state(included), "text") &&
+                *field(read->state(included), "text")->asString() ==
+                    "newer included" &&
+                std::ranges::find(delayedResult.change.removed, stale) !=
+                    delayedResult.change.removed.end() &&
+                std::ranges::find(delayedResult.change.removed, placeholder) !=
+                    delayedResult.change.removed.end() &&
+                std::ranges::find(delayedResult.change.removed, statusOnly) !=
+                    delayedResult.change.removed.end() &&
+                std::ranges::find(delayedResult.change.removed, badTimestamp) !=
+                    delayedResult.change.removed.end() &&
+                std::ranges::find(delayedResult.change.removed, badType) !=
+                    delayedResult.change.removed.end() &&
+                std::ranges::find(delayedResult.change.removed, started) ==
+                    delayedResult.change.removed.end() &&
+                std::ranges::find(delayedResult.change.removed, completed) ==
+                    delayedResult.change.removed.end(),
+            "a delayed turn page preserves only newer authoritative lifecycle "
+            "items and included field updates");
   }
 }
 
@@ -2252,6 +3120,8 @@ void resultsAndListsCorrelate() {
                      operation});
   require(result.change.revision == request.change.revision + 1,
           "correlated result is one later atomic revision");
+  require(result.primary == operation,
+          "a correlated result reports the exact Operation it accepted");
   {
     auto read = graph.tryRead();
     require(!read->find({NodeKind::Operation, requestId.canonical()}) &&
@@ -2276,6 +3146,7 @@ void resultsAndListsCorrelate() {
     auto read = graph.tryRead();
     NodeRef failed = read->find({NodeKind::Operation, failedId.canonical()});
     require(!failed && failedRequest.primary &&
+                failedResult.primary == failedRequest.primary &&
                 std::ranges::find(failedResult.change.removed,
                                   failedRequest.primary) !=
                     failedResult.change.removed.end(),
@@ -2297,25 +3168,22 @@ void lateResultsCannotRecreateDeletedTargets() {
           "an addressed rename request exposes its pending operation");
   {
     auto read = graph.tryRead();
-    require(read->find({NodeKind::Thread, "deleted-target"}) &&
-                read->related(request.primary, RelationKind::OperationTarget) ==
-                    std::vector<NodeRef>{
-                        read->find({NodeKind::Thread, "deleted-target"})},
+    const NodeRef target = read->find({NodeKind::Thread, "deleted-target"});
+    require(target && read->related(target, RelationKind::PendingOperation) ==
+                          std::vector<NodeRef>{request.primary},
             "an addressed rename records its original operation target");
   }
 
-  static_cast<void>(updater.apply(
+  const ApplyResult deleted = updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
-       Value::Object{{"threadId", Value("deleted-target")}}}));
+       Value::Object{{"threadId", Value("deleted-target")}}});
   {
     auto read = graph.tryRead();
-    require(
-        !read->find({NodeKind::Thread, "deleted-target"}) &&
-            read->find(request.primary->id()) == request.primary &&
-            read->related(request.primary, RelationKind::OperationTarget)
-                .empty(),
-        "deleting the rename target unlinks it while retaining the in-flight "
-        "operation for correlation");
+    require(!read->find({NodeKind::Thread, "deleted-target"}) &&
+                !read->find(request.primary->id()) &&
+                std::ranges::find(deleted.change.removed, request.primary) !=
+                    deleted.change.removed.end(),
+            "deleting the rename target retires its in-flight operation");
   }
 
   const ApplyResult late =
@@ -2324,11 +3192,10 @@ void lateResultsCannotRecreateDeletedTargets() {
   {
     auto read = graph.tryRead();
     require(!read->find({NodeKind::Thread, "deleted-target"}) &&
-                !read->find(request.primary->id()) &&
-                std::ranges::find(late.change.removed, request.primary) !=
-                    late.change.removed.end(),
-            "a late mutation result retires without recreating its deleted "
-            "original target");
+                !read->find(request.primary->id()) && !late.primary &&
+                late.change.empty(),
+            "a late mutation result is inert after its target-owned operation "
+            "was retired");
   }
 }
 
@@ -2358,14 +3225,13 @@ void exactRequestTargetsOverridePayloadAddressingAndLifetime() {
     auto read = graph.tryRead();
     const NodeId decoyTurn =
         scopedTurnNodeId("exact-target", "payload-decoy-turn");
-    require(
-        admitted.primary && exactTarget &&
-            read->related(admitted.primary, RelationKind::OperationTarget) ==
-                std::vector<NodeRef>{exactTarget} &&
-            !read->find(decoyTurn) &&
-            !read->find(scopedItemNodeId(decoyTurn, "payload-decoy-item")),
-        "a client request retains its exact action NodeRef instead of "
-        "reconstructing a more-specific target from payload fields");
+    require(admitted.primary && exactTarget &&
+                read->related(exactTarget, RelationKind::PendingOperation) ==
+                    std::vector<NodeRef>{admitted.primary} &&
+                !read->find(decoyTurn) &&
+                !read->find(scopedItemNodeId(decoyTurn, "payload-decoy-item")),
+            "a client request retains its exact action NodeRef instead of "
+            "reconstructing a more-specific target from payload fields");
   }
 
   static_cast<void>(updater.apply(
@@ -2382,18 +3248,18 @@ void exactRequestTargetsOverridePayloadAddressingAndLifetime() {
            {"thread", Value(Value::Object{{"id", Value("exact-target")},
                                           {"name", Value("Late stale")},
                                           {"turns", Value(Value::Array{})}})}},
-       admitted.primary});
+       admitted.primary, std::int64_t{999999}});
   {
     auto read = graph.tryRead();
     const NodeRef replacement = read->find({NodeKind::Thread, "exact-target"});
     const Value *name =
         replacement ? field(read->state(replacement), "name") : nullptr;
     require(replacement && replacement != exactTarget &&
-                read->removed(exactTarget) && name && name->asString() &&
+                !read->live(exactTarget) && name && name->asString() &&
                 *name->asString() == "Replacement" &&
-                !read->find(admitted.primary->id()) &&
-                std::ranges::find(late.change.removed, admitted.primary) !=
-                    late.change.removed.end(),
+                !read->find(admitted.primary->id()) && !late.primary &&
+                !field(read->state(replacement), "localActivityAt") &&
+                late.change.empty(),
             "removing an exact target prevents its late response from "
             "mutating a replacement node with the same canonical id");
   }
@@ -2565,10 +3431,11 @@ void accountFacetsConvergeAndRateLimitPatchesStaySparse() {
             "current fields remain intact");
   }
 
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientResult, "account/usage/read",
-                     std::nullopt, Value::Object{{"usage", Value(7)}}}));
-  static_cast<void>(updater.apply(
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "account/usage/read",
+                std::nullopt, Value::Object{{"usage", Value(7)}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater,
       {DecodedMessageKind::ClientResult, "account/workspaceMessages/read",
        std::nullopt, Value::Object{{"messages", Value(Value::Array{})}}}));
   {
@@ -2623,21 +3490,21 @@ void successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate() {
                                    "app/list/updated",
                                    std::nullopt,
                                    {}}));
-  static_cast<void>(updater.apply(
-      {DecodedMessageKind::ClientResult, "skills/list", std::nullopt,
-       Value::Object{{"data", Value(Value::Array{Value("skill")})}}}));
-  static_cast<void>(updater.apply(
-      {DecodedMessageKind::ClientResult, "app/list", std::nullopt,
-       Value::Object{{"data", Value(Value::Array{Value("app")})}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "skills/list", std::nullopt,
+                Value::Object{{"data", Value(Value::Array{Value("skill")})}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "app/list", std::nullopt,
+                Value::Object{{"data", Value(Value::Array{Value("app")})}}}));
 
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "project/changed", std::nullopt,
        Value::Object{{"projectId", Value("project-refresh")}}}));
-  static_cast<void>(updater.apply(
-      {DecodedMessageKind::ClientResult, "project/read", std::nullopt,
-       Value::Object{
-           {"project", Value(Value::Object{{"id", Value("project-refresh")},
-                                           {"name", Value("Current")}})}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "project/read", std::nullopt,
+                Value::Object{{"project", Value(Value::Object{
+                                              {"id", Value("project-refresh")},
+                                              {"name", Value("Current")}})}}}));
 
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/queue/changed",
@@ -2684,8 +3551,9 @@ void successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate() {
   const Value::Object firstConfig{
       {"config", Value(Value::Object{{"model", Value("old-model")}})},
       {"origins", Value(Value::Object{})}};
-  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
-                                   "config/read", std::nullopt, firstConfig}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "config/read", std::nullopt,
+                firstConfig}));
   NodeRef configuration;
   {
     auto read = graph.tryRead();
@@ -2720,9 +3588,9 @@ void successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate() {
   const Value::Object refreshedConfig{
       {"config", Value(Value::Object{{"model", Value("new-model")}})},
       {"origins", Value(Value::Object{})}};
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientResult, "config/read",
-                     std::nullopt, refreshedConfig}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "config/read", std::nullopt,
+                refreshedConfig}));
   {
     auto read = graph.tryRead();
     const NodeRef current =
@@ -2765,8 +3633,9 @@ void catalogResultsMaterializeNaturalEntityKinds() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
   const auto result = [&](std::string method, Value::Object payload) {
-    return updater.apply({DecodedMessageKind::ClientResult, std::move(method),
-                          std::nullopt, std::move(payload)});
+    return applyCorrelatedResult(updater, {DecodedMessageKind::ClientResult,
+                                           std::move(method), std::nullopt,
+                                           std::move(payload)});
   };
 
   static_cast<void>(result(
@@ -3039,7 +3908,8 @@ void reusedWireIdsRequireExactCurrentNodes() {
        first.primary});
   {
     auto read = graph.tryRead();
-    require(late.change.empty() && late.change.revision == beforeLate &&
+    require(!late.primary && late.change.empty() &&
+                late.change.revision == beforeLate &&
                 read->find({NodeKind::Operation, reused.canonical()}) ==
                     second.primary &&
                 !read->find({NodeKind::Thread, "late-thread"}),
@@ -3057,9 +3927,23 @@ void reusedWireIdsRequireExactCurrentNodes() {
     auto read = graph.tryRead();
     require(read->find({NodeKind::Thread, "current-thread"}) &&
                 !read->find({NodeKind::Operation, reused.canonical()}) &&
+                current.primary == second.primary &&
                 std::ranges::find(current.change.removed, second.primary) !=
                     current.change.removed.end(),
             "the exact current operation accepts its result and is pruned");
+  }
+  const std::uint64_t beforeUncorrelatedResult = graph.publishedRevision();
+  const ApplyResult uncorrelatedResult = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/list", reused,
+       Value::Object{{"data", Value(Value::Array{Value(Value::Object{
+                                  {"id", Value("uncorrelated")}})})}}});
+  {
+    auto read = graph.tryRead();
+    require(
+        uncorrelatedResult.change.empty() &&
+            uncorrelatedResult.change.revision == beforeUncorrelatedResult &&
+            !read->find({NodeKind::Thread, "uncorrelated"}),
+        "a result without its admitted operation cannot update graph state");
   }
 
   const ProtocolRequestId interactionId("reused-interaction");
@@ -3078,21 +3962,31 @@ void reusedWireIdsRequireExactCurrentNodes() {
                   newInteraction.change.removed.end(),
           "reusing a server-request id creates a distinct Interaction "
           "NodeRef");
-  const GraphChange staleResolution =
-      updater.resolveInteraction(oldInteraction.primary, true);
+  const ApplyResult uncorrelatedResolution = updater.apply(
+      {DecodedMessageKind::ServerNotification, "serverRequest/resolved",
+       std::nullopt,
+       Value::Object{{"requestId", Value("reused-interaction")}}});
+  const ApplyResult staleResolution = updater.apply(
+      {DecodedMessageKind::ServerNotification, "serverRequest/resolved",
+       std::nullopt, Value::Object{{"requestId", Value("reused-interaction")}},
+       oldInteraction.primary});
   {
     auto read = graph.tryRead();
     require(
-        staleResolution.empty() &&
+        uncorrelatedResolution.change.empty() &&
+            staleResolution.change.empty() &&
             read->find({NodeKind::Interaction, interactionId.canonical()}) ==
                 newInteraction.primary,
-        "an exact response for the retired interaction cannot resolve its "
-        "replacement");
+        "neither an uncorrelated response nor an exact response for a retired "
+        "interaction can resolve its replacement");
   }
-  const GraphChange exactResolution =
-      updater.resolveInteraction(newInteraction.primary, true);
-  require(std::ranges::find(exactResolution.removed, newInteraction.primary) !=
-              exactResolution.removed.end(),
+  const ApplyResult exactResolution = updater.apply(
+      {DecodedMessageKind::ServerNotification, "serverRequest/resolved",
+       std::nullopt, Value::Object{{"requestId", Value("reused-interaction")}},
+       newInteraction.primary});
+  require(std::ranges::find(exactResolution.change.removed,
+                            newInteraction.primary) !=
+              exactResolution.change.removed.end(),
           "the exact current interaction resolves normally");
 }
 
@@ -3404,15 +4298,8 @@ void interactionsAndRemovalKeepLifetime() {
     require(turn && thread && read->parent(targets.front()) == turn &&
                 read->parent(turn) == thread,
             "interaction targets retain their addressed containment chain");
-    require(
-        read->related(thread, RelationKind::PendingInteraction) ==
-                std::vector<NodeRef>{interaction} &&
-            field(read->state(thread), "pendingInteractionCount") &&
-            field(read->state(thread), "pendingInteractionCount")->asUInt64() &&
-            *field(read->state(thread), "pendingInteractionCount")
-                    ->asUInt64() == 1,
-        "the addressed thread directly indexes and counts its pending "
-        "interaction");
+    require(read->related(thread, RelationKind::PendingInteraction).empty(),
+            "thread ancestry does not duplicate pending membership");
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(runtime &&
                 read->related(runtime, RelationKind::PendingInteraction) ==
@@ -3421,7 +4308,7 @@ void interactionsAndRemovalKeepLifetime() {
   }
 
   GraphChange rejected =
-      updater.resolveInteraction(interactionId, false, "bridge rejected");
+      updater.failInteractionResponse(interaction, "bridge rejected");
   require(!rejected.empty(), "rejected response updates interaction state");
   {
     auto read = graph.tryRead();
@@ -3429,22 +4316,16 @@ void interactionsAndRemovalKeepLifetime() {
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(read->state(interaction)->status == NodeStatus::Failed,
             "rejected response remains visibly failed");
-    require(
-        thread &&
-            read->related(thread, RelationKind::PendingInteraction) ==
-                std::vector<NodeRef>{interaction} &&
-            field(read->state(thread), "pendingInteractionCount") &&
-            field(read->state(thread), "pendingInteractionCount")->asUInt64() &&
-            *field(read->state(thread), "pendingInteractionCount")
-                    ->asUInt64() == 1,
-        "a rejected response remains counted as unresolved thread attention");
+    require(thread &&
+                read->related(thread, RelationKind::PendingInteraction).empty(),
+            "failed attention remains derived from its exact target ancestry");
     require(runtime &&
                 read->related(runtime, RelationKind::PendingInteraction) ==
                     std::vector<NodeRef>{interaction},
             "a rejected response remains in the runtime interaction set");
   }
 
-  GraphChange accepted = updater.resolveInteraction(interactionId, true);
+  GraphChange accepted = updater.resolveInteraction(interaction);
   require(accepted.removed.size() == 1 &&
               accepted.removed.front() == interaction,
           "accepted response removes and notifies with the same NodeRef");
@@ -3452,43 +4333,38 @@ void interactionsAndRemovalKeepLifetime() {
     auto read = graph.tryRead();
     require(!read->find({NodeKind::Interaction, interactionId.canonical()}),
             "resolved interaction leaves canonical indexes");
-    require(read->retiredNodes().size() == 1,
+    require(read->retiredCount() == 1,
             "removed interaction stays reachable for Qt detachment");
     const NodeRef thread = read->find({NodeKind::Thread, "thread-approval"});
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(
         thread && runtime &&
             read->related(thread, RelationKind::PendingInteraction).empty() &&
-            read->related(runtime, RelationKind::PendingInteraction).empty() &&
-            field(read->state(thread), "pendingInteractionCount") &&
-            field(read->state(thread), "pendingInteractionCount")->asUInt64() &&
-            *field(read->state(thread), "pendingInteractionCount")
-                    ->asUInt64() == 0,
-        "interaction removal unlinks both direct pending indexes and keeps "
-        "the derived count current");
+            read->related(runtime, RelationKind::PendingInteraction).empty(),
+        "interaction removal unlinks the sole runtime pending index");
   }
 
   const ProtocolRequestId externallyResolvedId("approval-externally-resolved");
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ServerRequest,
-                     "item/fileChange/requestApproval", externallyResolvedId,
-                     Value::Object{{"threadId", Value("thread-approval")}}}));
+  const NodeRef externallyResolved =
+      updater
+          .apply({DecodedMessageKind::ServerRequest,
+                  "item/fileChange/requestApproval", externallyResolvedId,
+                  Value::Object{{"threadId", Value("thread-approval")}}})
+          .primary;
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "serverRequest/resolved",
        std::nullopt,
-       Value::Object{{"requestId", Value("approval-externally-resolved")}}}));
+       Value::Object{{"requestId", Value("approval-externally-resolved")}},
+       externallyResolved}));
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "thread-approval"});
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
-    const Value *count = field(read->state(thread), "pendingInteractionCount");
     require(
-        thread && runtime && count && count->asUInt64() &&
-            *count->asUInt64() == 0 &&
+        thread && runtime &&
             read->related(thread, RelationKind::PendingInteraction).empty() &&
             read->related(runtime, RelationKind::PendingInteraction).empty(),
-        "provider-side request resolution clears the same indexes and "
-        "cached thread attention count");
+        "provider-side request resolution clears the sole pending index");
   }
 }
 
@@ -3560,10 +4436,10 @@ void lifecycleFactsAndRemovalPreserveThreadHierarchy() {
                           {"parentThreadId", Value("lifecycle-parent")}}),
       Value(Value::Object{{"id", Value("lifecycle-grandchild")},
                           {"parentThreadId", Value("lifecycle-child")}})};
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientResult, "thread/list",
-                     ProtocolRequestId("lifecycle-list"),
-                     Value::Object{{"data", Value(std::move(threads))}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater, {DecodedMessageKind::ClientResult, "thread/list",
+                ProtocolRequestId("lifecycle-list"),
+                Value::Object{{"data", Value(std::move(threads))}}}));
 
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/archived", std::nullopt,
@@ -3619,8 +4495,7 @@ void childReadCannotEraseSpawnOwnershipOrDisplaceRoot() {
   ProtocolUpdater updater(graph);
   for (const std::string_view id : {"selected-root", "selected-child"})
     static_cast<void>(updater.apply(
-        {DecodedMessageKind::ServerNotification, "thread/started",
-         std::nullopt,
+        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
          Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
@@ -3633,17 +4508,16 @@ void childReadCannotEraseSpawnOwnershipOrDisplaceRoot() {
                         {"agentThreadId", Value("selected-child")}})}}}));
 
   const ProtocolRequestId readId("selected-child-read");
-  const ApplyResult request = updater.apply(
-      {DecodedMessageKind::ClientRequest, "thread/read", readId,
-       Value::Object{{"threadId", Value("selected-child")}}});
-  Value::Object childSnapshot{
-      {"id", Value("selected-child")},
-      {"parentThreadId", Value(nullptr)},
-      {"turns", Value(Value::Array{})}};
-  static_cast<void>(updater.apply(
-      {DecodedMessageKind::ClientResult, "thread/read", readId,
-       Value::Object{{"thread", Value(std::move(childSnapshot))}},
-       request.primary}));
+  const ApplyResult request =
+      updater.apply({DecodedMessageKind::ClientRequest, "thread/read", readId,
+                     Value::Object{{"threadId", Value("selected-child")}}});
+  Value::Object childSnapshot{{"id", Value("selected-child")},
+                              {"parentThreadId", Value(nullptr)},
+                              {"turns", Value(Value::Array{})}};
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "thread/read", readId,
+                     Value::Object{{"thread", Value(std::move(childSnapshot))}},
+                     request.primary}));
 
   auto read = graph.tryRead();
   const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
@@ -3688,11 +4562,11 @@ void deletionUnlinksWholeGraph() {
       "lifecycle");
   {
     auto read = graph.tryRead();
-    require(read->removed(removed), "removed node is marked removed");
+    require(!read->live(removed), "removed node is no longer live");
     require(read->children(removed).empty(),
             "removed thread is unlinked from child turns");
     NodeRef turn = findTurn(*read, "delete-thread", "delete-turn");
-    require(!turn && read->removed(removedTurn),
+    require(!turn && !read->live(removedTurn),
             "contained turns are removed rather than retained as orphans");
   }
 }
@@ -3748,6 +4622,103 @@ void largeThreadDeletionIsNearLinear() {
       << '\n';
 }
 
+void smallHistoryPagesIgnoreUnrelatedGraphCardinality() {
+  constexpr std::size_t Repetitions = 128;
+  const auto measure = [](std::size_t itemCount) {
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    NodeRef thread;
+    NodeRef turn;
+    NodeRef item;
+    NodeRef unrelatedTurn;
+    NodeRef firstUnrelated;
+    NodeRef lastUnrelated;
+    {
+      auto write = graph.write();
+      thread = write.upsert({NodeKind::Thread, "page-count-thread"});
+      turn = write.upsert(
+          scopedTurnNodeId("page-count-thread", "overlapping-turn"));
+      write.setParent(thread, turn);
+      NodeState itemState;
+      itemState.fields = {{"type", Value("agentMessage")},
+                          {"protocolId", Value("overlapping-item")}};
+      item = write.upsert(scopedItemNodeId(turn->id(), "overlapping-item"),
+                          std::move(itemState));
+      write.replaceChildren(turn, std::array{item});
+      const NodeRef unrelatedThread =
+          write.upsert({NodeKind::Thread, "unrelated-thread"});
+      unrelatedTurn =
+          write.upsert(scopedTurnNodeId("unrelated-thread", "unrelated-turn"));
+      write.setParent(unrelatedThread, unrelatedTurn);
+      std::vector<NodeRef> items;
+      items.reserve(itemCount);
+      for (std::size_t index = 0; index < itemCount; ++index) {
+        NodeState state;
+        state.fields = {{"type", Value("agentMessage")},
+                        {"protocolId", Value(std::to_string(index))}};
+        items.push_back(write.upsert(
+            scopedItemNodeId(unrelatedTurn->id(), std::to_string(index)),
+            std::move(state)));
+      }
+      firstUnrelated = items.front();
+      lastUnrelated = items.back();
+      write.replaceChildren(unrelatedTurn, items);
+      static_cast<void>(write.finish());
+    }
+
+    std::size_t requestNumber = 0;
+    const auto applySmallPage = [&] {
+      const ProtocolRequestId requestId(
+          "page-count:" + std::to_string(itemCount) + ':' +
+          std::to_string(++requestNumber));
+      const ApplyResult request = updater.apply(
+          {DecodedMessageKind::ClientRequest, "thread/turns/list", requestId,
+           Value::Object{{"threadId", Value("page-count-thread")}}});
+      if (!request.primary)
+        return false;
+      Value::Object overlappingTurn{
+          {"id", Value("overlapping-turn")},
+          {"items", Value(Value::Array{Value(
+                        Value::Object{{"id", Value("overlapping-item")},
+                                      {"type", Value("agentMessage")}})})}};
+      const ApplyResult result = updater.apply(
+          {DecodedMessageKind::ClientResult, "thread/turns/list", requestId,
+           Value::Object{
+               {"data", Value(Value::Array{Value(std::move(overlappingTurn))})},
+               {"nextCursor", Value(nullptr)}},
+           request.primary});
+      return result.primary == request.primary;
+    };
+    bool valid = applySmallPage();
+    const auto started = std::chrono::steady_clock::now();
+    for (std::size_t repetition = 0; repetition < Repetitions; ++repetition)
+      valid = applySmallPage() && valid;
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    auto read = graph.tryRead();
+    valid = valid && read &&
+            read->children(turn) == std::vector<NodeRef>{item} &&
+            read->childCount(unrelatedTurn) == itemCount &&
+            read->live(firstUnrelated) && read->live(lastUnrelated);
+    return std::pair{valid, elapsed};
+  };
+
+  const auto [smallValid, smallElapsed] = measure(1000);
+  const auto [largeValid, largeElapsed] = measure(10000);
+  require(smallValid && largeValid &&
+              largeElapsed <= smallElapsed * 4 + std::chrono::milliseconds(10),
+          "small history-page work is independent of unrelated graph Item "
+          "cardinality");
+  std::cout
+      << "small-history-page ns (1000 / 10000 unrelated): "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(smallElapsed)
+             .count()
+      << " / "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(largeElapsed)
+             .count()
+      << '\n';
+}
+
 void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -3757,6 +4728,19 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
        Value::Object{
            {"thread", Value(Value::Object{{"id", Value("merging-read-thread")},
                                           {"cwd", Value("/old/cwd")}})}}}));
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("merging-read-thread")},
+           {"turn", Value(Value::Object{{"id", Value("stale-empty-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  NodeRef staleEmptyTurn;
+  {
+    auto read = graph.tryRead();
+    staleEmptyTurn =
+        findTurn(*read, "merging-read-thread", "stale-empty-turn");
+  }
 
   const ProtocolRequestId mergingReadId("merging-thread-read");
   const ApplyResult mergingRequest = updater.apply(
@@ -3777,6 +4761,43 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
                      {"turnId", Value("live-turn")},
                      {"itemId", Value("live-plan")},
                      {"delta", Value("live plan text")}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("merging-read-thread")},
+           {"turnId", Value("live-turn")},
+           {"startedAtMs", Value(std::uint64_t{50})},
+           {"item", Value(Value::Object{{"id", Value("live-admission")},
+                                        {"type", Value("agentMessage")},
+                                        {"text", Value("new live item")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{{"threadId", Value("merging-read-thread")},
+                     {"turnId", Value("new-live-turn")},
+                     {"completedAtMs", Value(std::uint64_t{60})},
+                     {"item", Value(Value::Object{
+                                  {"id", Value("new-you")},
+                                  {"type", Value("userMessage")},
+                                  {"text", Value("new authored text")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("merging-read-thread")},
+           {"turn", Value(Value::Object{{"id", Value("empty-live-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  NodeRef liveAdmission;
+  NodeRef newLiveTurn;
+  NodeRef newYou;
+  NodeRef emptyLiveTurn;
+  {
+    auto read = graph.tryRead();
+    liveAdmission =
+        findItem(*read, "merging-read-thread", "live-turn", "live-admission");
+    newLiveTurn = findTurn(*read, "merging-read-thread", "new-live-turn");
+    newYou = findItem(*read, "merging-read-thread", "new-live-turn", "new-you");
+    emptyLiveTurn =
+        findTurn(*read, "merging-read-thread", "empty-live-turn");
+  }
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/name/updated",
        std::nullopt,
@@ -3819,10 +4840,38 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
     const Value *cwd = field(read->state(thread), "cwd");
     const Value *type = field(read->state(livePlan), "type");
     require(!read->find(mergingRequest.primary->id()) && thread && liveTurn &&
-                livePlan && snapshotTurn &&
+                livePlan && liveAdmission && newLiveTurn && newYou &&
+                snapshotTurn &&
                 protocolIds(*read, read->children(thread)) ==
-                    std::vector<std::string>{"snapshot-turn", "live-turn"} &&
-                read->children(liveTurn) == std::vector<NodeRef>{livePlan} &&
+                    std::vector<std::string>{"snapshot-turn", "live-turn",
+                                             "new-live-turn",
+                                             "empty-live-turn"} &&
+                read->children(liveTurn) ==
+                    std::vector<NodeRef>{livePlan, liveAdmission} &&
+                read->find(liveAdmission->id()) == liveAdmission &&
+                read->state(liveAdmission)->status == NodeStatus::Running &&
+                read->find(newLiveTurn->id()) == newLiveTurn &&
+                read->find(newYou->id()) == newYou &&
+                read->parent(newYou) == newLiveTurn &&
+                emptyLiveTurn &&
+                read->find(emptyLiveTurn->id()) == emptyLiveTurn &&
+                read->children(emptyLiveTurn).empty() &&
+                read->state(emptyLiveTurn)->status == NodeStatus::Running &&
+                staleEmptyTurn && !read->find(staleEmptyTurn->id()) &&
+                !read->live(staleEmptyTurn) &&
+                read->related(newLiveTurn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{newYou} &&
+                read->state(newYou)->status == NodeStatus::Completed &&
+                std::ranges::find(merged.change.removed, liveAdmission) ==
+                    merged.change.removed.end() &&
+                std::ranges::find(merged.change.removed, newLiveTurn) ==
+                    merged.change.removed.end() &&
+                std::ranges::find(merged.change.removed, newYou) ==
+                    merged.change.removed.end() &&
+                std::ranges::find(merged.change.removed, emptyLiveTurn) ==
+                    merged.change.removed.end() &&
+                std::ranges::find(merged.change.removed, staleEmptyTurn) !=
+                    merged.change.removed.end() &&
                 text && text->asString() &&
                 *text->asString() == "live plan text" && type &&
                 type->asString() && *type->asString() == "plan" &&
@@ -3890,8 +4939,8 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
     require(thread && freshTurn && replacedTurn && replacedItem &&
                 read->children(thread) == std::vector<NodeRef>{freshTurn} &&
                 !findTurn(*read, "replacing-read-thread", "old-turn") &&
-                !read->find(replacedItem->id()) &&
-                read->removed(replacedTurn) && read->removed(replacedItem) &&
+                !read->find(replacedItem->id()) && !read->live(replacedTurn) &&
+                !read->live(replacedItem) &&
                 std::ranges::find(replaced.change.removed, replacedTurn) !=
                     replaced.change.removed.end() &&
                 name && name->asString() &&
@@ -3904,8 +4953,8 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   ProtocolUpdater omittedDeltaUpdater(omittedDeltaGraph);
   static_cast<void>(omittedDeltaUpdater.apply(
       {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
-       Value::Object{{"thread", Value(Value::Object{
-                                          {"id", Value("omitted-delta")}})}}}));
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("omitted-delta")}})}}}));
   const ProtocolRequestId omittedDeltaReadId("omitted-delta-read");
   const ApplyResult omittedDeltaRequest = omittedDeltaUpdater.apply(
       {DecodedMessageKind::ClientRequest, "thread/read", omittedDeltaReadId,
@@ -3920,27 +4969,23 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   NodeRef omittedDeltaItem;
   {
     auto read = omittedDeltaGraph.tryRead();
-    omittedDeltaTurn =
-        findTurn(*read, "omitted-delta", "omitted-delta-turn");
+    omittedDeltaTurn = findTurn(*read, "omitted-delta", "omitted-delta-turn");
     omittedDeltaItem = findItem(*read, "omitted-delta", "omitted-delta-turn",
                                 "omitted-delta-item");
   }
   const ApplyResult omittedDeltaResult = omittedDeltaUpdater.apply(
-      {DecodedMessageKind::ClientResult,
-       "thread/read",
-       omittedDeltaReadId,
-       Value::Object{{"thread",
-                      Value(Value::Object{
-                          {"id", Value("omitted-delta")},
-                          {"turns", Value(Value::Array{})}})}},
+      {DecodedMessageKind::ClientResult, "thread/read", omittedDeltaReadId,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("omitted-delta")},
+                                          {"turns", Value(Value::Array{})}})}},
        omittedDeltaRequest.primary});
   {
     auto read = omittedDeltaGraph.tryRead();
     require(omittedDeltaTurn && omittedDeltaItem &&
                 !read->find(omittedDeltaTurn->id()) &&
                 !read->find(omittedDeltaItem->id()) &&
-                read->removed(omittedDeltaTurn) &&
-                read->removed(omittedDeltaItem) &&
+                !read->live(omittedDeltaTurn) &&
+                !read->live(omittedDeltaItem) &&
                 std::ranges::find(omittedDeltaResult.change.removed,
                                   omittedDeltaItem) !=
                     omittedDeltaResult.change.removed.end(),
@@ -3966,8 +5011,8 @@ void chosenNameOverlaySurvivesUntilMatchingAcknowledgement() {
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
        Value::Object{{"thread", Value(Value::Object{
-                                          {"id", Value("named-thread")},
-                                          {"name", Value("Provider default")}})}}}));
+                                    {"id", Value("named-thread")},
+                                    {"name", Value("Provider default")}})}}}));
   static_cast<void>(updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/name/updated",
        std::nullopt,
@@ -3983,11 +5028,11 @@ void chosenNameOverlaySurvivesUntilMatchingAcknowledgement() {
             "name overlay");
   }
 
-  static_cast<void>(updater.apply(
-      {DecodedMessageKind::ServerNotification, "thread/name/updated",
-       std::nullopt,
-       Value::Object{{"threadId", Value("named-thread")},
-                     {"threadName", Value("Chosen name")}}}));
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "thread/name/updated", std::nullopt,
+                     Value::Object{{"threadId", Value("named-thread")},
+                                   {"threadName", Value("Chosen name")}}}));
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "named-thread"});
@@ -4080,8 +5125,8 @@ void authoritativeReplacementRetiresItemsAndPreservesLocalTail() {
   require(threadNode && retainedTurn && omittedItem && omittedTurn &&
               omittedChild && !read->find(omittedItem->id()) &&
               !read->find(omittedTurn->id()) &&
-              !read->find(omittedChild->id()) && read->removed(omittedItem) &&
-              read->removed(omittedTurn) && read->removed(omittedChild) &&
+              !read->find(omittedChild->id()) && !read->live(omittedItem) &&
+              !read->live(omittedTurn) && !read->live(omittedChild) &&
               std::ranges::find(replacement.change.removed, omittedItem) !=
                   replacement.change.removed.end(),
           "authoritative replacement retires omitted provider items and whole "
@@ -4139,6 +5184,20 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
       {DecodedMessageKind::ClientRequest, "thread/rollback", rollbackId,
        Value::Object{{"threadId", Value("history-mutation")},
                      {"numTurns", Value(std::uint64_t{1})}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("history-mutation")},
+           {"turnId", Value("turn-2")},
+           {"startedAtMs", Value(std::uint64_t{100})},
+           {"item", Value(Value::Object{{"id", Value("post-rollback-request")},
+                                        {"type", Value("agentMessage")}})}}}));
+  NodeRef postRollbackRequest;
+  {
+    auto read = graph.tryRead();
+    postRollbackRequest =
+        findItem(*read, "history-mutation", "turn-2", "post-rollback-request");
+  }
   const ApplyResult rolledBack = updater.apply(
       {DecodedMessageKind::ClientResult, "thread/rollback", rollbackId,
        Value::Object{
@@ -4156,21 +5215,25 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
         read->find({NodeKind::Thread, "history-mutation"});
     firstTurn = findTurn(*read, "history-mutation", "turn-1");
     secondTurn = findTurn(*read, "history-mutation", "turn-2");
-    require(threadNode && firstTurn && secondTurn &&
-                protocolIds(*read, read->children(threadNode)) ==
-                    std::vector<std::string>{"turn-1", "turn-2"} &&
-                !read->find(removedTurn->id()) &&
-                !read->find(removedItem->id()) &&
-                !read->find(removedRetainedTurnItem->id()) &&
-                read->removed(removedTurn) && read->removed(removedItem) &&
-                read->removed(removedRetainedTurnItem) &&
-                std::ranges::find(rolledBack.change.removed, removedTurn) !=
-                    rolledBack.change.removed.end() &&
-                std::ranges::find(rolledBack.change.removed,
-                                  removedRetainedTurnItem) !=
-                    rolledBack.change.removed.end(),
-            "successful rollback replaces returned history and retires every "
-            "superseded turn and item");
+    require(
+        threadNode && firstTurn && secondTurn && postRollbackRequest &&
+            protocolIds(*read, read->children(threadNode)) ==
+                std::vector<std::string>{"turn-1", "turn-2"} &&
+            !read->find(removedTurn->id()) && !read->find(removedItem->id()) &&
+            !read->find(removedRetainedTurnItem->id()) &&
+            !read->find(postRollbackRequest->id()) &&
+            !read->live(removedTurn) && !read->live(removedItem) &&
+            !read->live(removedRetainedTurnItem) &&
+            !read->live(postRollbackRequest) &&
+            std::ranges::find(rolledBack.change.removed, removedTurn) !=
+                rolledBack.change.removed.end() &&
+            std::ranges::find(rolledBack.change.removed,
+                              removedRetainedTurnItem) !=
+                rolledBack.change.removed.end() &&
+            std::ranges::find(rolledBack.change.removed, postRollbackRequest) !=
+                rolledBack.change.removed.end(),
+        "successful rollback replaces returned history and retires every "
+        "superseded turn and item");
   }
 
   const ProtocolRequestId revertId("revert-history");
@@ -4179,34 +5242,52 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
        Value::Object{{"threadId", Value("history-mutation")},
                      {"beforeTurnId", Value("turn-2")}}});
   static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{
+           {"threadId", Value("history-mutation")},
+           {"turnId", Value("turn-2")},
+           {"completedAtMs", Value(std::uint64_t{110})},
+           {"item", Value(Value::Object{{"id", Value("post-revert-request")},
+                                        {"type", Value("agentMessage")}})}}}));
+  NodeRef postRevertRequest;
+  {
+    auto read = graph.tryRead();
+    postRevertRequest =
+        findItem(*read, "history-mutation", "turn-2", "post-revert-request");
+  }
+  const ApplyResult reverted = updater.apply(
       {DecodedMessageKind::ClientResult, "thread/revert", revertId,
        Value::Object{
            {"thread", Value(Value::Object{{"id", Value("history-mutation")},
                                           {"turns", Value(Value::Array{})}})},
            {"turnsBackwardsCursor", Value("retained-prefix-cursor")},
            {"itemsBackwardsCursor", Value("retained-items-cursor")}},
-       revertRequest.primary}));
+       revertRequest.primary});
   {
     auto read = graph.tryRead();
     const NodeRef threadNode =
         read->find({NodeKind::Thread, "history-mutation"});
     const auto state = threadNode ? read->state(threadNode) : nullptr;
-    require(threadNode && read->children(threadNode).empty() &&
-                !read->find(firstTurn->id()) && !read->find(secondTurn->id()) &&
-                read->removed(firstTurn) && read->removed(secondTurn) &&
-                field(state, "historyHasMore") &&
-                field(state, "historyHasMore")->asBool() &&
-                *field(state, "historyHasMore")->asBool() &&
-                field(state, "historyNextCursor") &&
-                field(state, "historyNextCursor")->asString() &&
-                *field(state, "historyNextCursor")->asString() ==
-                    "retained-prefix-cursor" &&
-                field(state, "itemsHistoryBackwardsCursor") &&
-                field(state, "itemsHistoryBackwardsCursor")->asString() &&
-                *field(state, "itemsHistoryBackwardsCursor")->asString() ==
-                    "retained-items-cursor",
-            "successful paginated revert unlinks cached history and exposes "
-            "only authoritative reload cursors");
+    require(
+        threadNode && postRevertRequest && read->children(threadNode).empty() &&
+            !read->find(firstTurn->id()) && !read->find(secondTurn->id()) &&
+            !read->find(postRevertRequest->id()) && !read->live(firstTurn) &&
+            !read->live(secondTurn) && !read->live(postRevertRequest) &&
+            std::ranges::find(reverted.change.removed, postRevertRequest) !=
+                reverted.change.removed.end() &&
+            field(state, "historyHasMore") &&
+            field(state, "historyHasMore")->asBool() &&
+            *field(state, "historyHasMore")->asBool() &&
+            field(state, "historyNextCursor") &&
+            field(state, "historyNextCursor")->asString() &&
+            *field(state, "historyNextCursor")->asString() ==
+                "retained-prefix-cursor" &&
+            field(state, "itemsHistoryBackwardsCursor") &&
+            field(state, "itemsHistoryBackwardsCursor")->asString() &&
+            *field(state, "itemsHistoryBackwardsCursor")->asString() ==
+                "retained-items-cursor",
+        "successful paginated revert unlinks cached history and exposes "
+        "only authoritative reload cursors");
   }
 }
 
@@ -4223,6 +5304,7 @@ int main() {
   threadItemPagesMaintainScopedContainmentAndOrder();
   scopedProviderIdentityCannotCrossParents();
   rootOrderAndThreadHierarchyAreExplicit();
+  inspectorIndexFollowsProtocolIngestionOrder();
   agentChildAggregatesTrackEveryReferencingItem();
   forkRelationsFollowTheCurrentSource();
   semanticDeltasAndHydratedOrderStayCurrent();
@@ -4230,7 +5312,9 @@ int main() {
   hookRunsKeepNestedIdentityAndCurrentOwnership();
   graphRelationsInvalidationAndIncarnationsAreExplicit();
   promptMaterializationDoesNotAcknowledgeDelivery();
-  steeringMaterializationKeepsTheSubmittedSlot();
+  steeringMaterializationKeepsProviderOrderAndVisualIdentity();
+  providerReplacementDerivesRootFromProviderOrder();
+  providerReplacementKeepsOnlyAnExplicitLocalRootFallback();
   turnRootsAndPagedHistoryStayExplicit();
   resultsAndListsCorrelate();
   lateResultsCannotRecreateDeletedTargets();
@@ -4249,6 +5333,7 @@ int main() {
   childReadCannotEraseSpawnOwnershipOrDisplaceRoot();
   deletionUnlinksWholeGraph();
   largeThreadDeletionIsNearLinear();
+  smallHistoryPagesIgnoreUnrelatedGraphCardinality();
   correlatedThreadReadsPreserveOnlyInterveningLiveState();
   chosenNameOverlaySurvivesUntilMatchingAcknowledgement();
   authoritativeReplacementRetiresItemsAndPreservesLocalTail();

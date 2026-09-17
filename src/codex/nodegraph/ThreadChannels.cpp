@@ -47,9 +47,15 @@ ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
   if (change.empty())
     return ChannelSendStatus::Accepted;
   const std::uint64_t revision = change.revision;
+  if (change.providerAuthorityRevision != 0)
+    pendingProviderAuthorityRevision_.store(change.providerAuthorityRevision,
+                                            std::memory_order_release);
   if (change.affected.size() > MaximumDirectGraphReferences ||
       change.removed.size() >
-          MaximumDirectGraphReferences - change.affected.size()) {
+          MaximumDirectGraphReferences - change.affected.size() ||
+      change.childListsChanged.size() >
+          MaximumDirectGraphReferences - change.affected.size() -
+              change.removed.size()) {
     requireRescan(revision);
     return wakeWorkerToQt(true);
   }
@@ -60,7 +66,9 @@ ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
   }
   WorkerToQtMessage message(std::in_place_type<GraphChanged>,
                             GraphChanged{revision, std::move(change.affected),
-                                         std::move(change.removed), false});
+                                         std::move(change.removed), false,
+                                         std::move(change.childListsChanged),
+                                         change.providerAuthorityRevision});
   if (workerToQt_.tryPush(std::move(message)))
     return wakeWorkerToQt(false);
 
@@ -95,19 +103,37 @@ EventFd::DrainResult ThreadChannels::drainWorkerToQtWake() const noexcept {
 }
 
 bool ThreadChannels::tryReceiveForQt(WorkerToQtMessage &message) {
+  const auto receiveQueued = [this, &message] {
+    if (!workerToQt_.tryPop(message))
+      return false;
+    if (const GraphChanged *change = std::get_if<GraphChanged>(&message);
+        change && change->providerAuthorityRevision != 0) {
+      std::uint64_t pending = pendingProviderAuthorityRevision_.load(
+          std::memory_order_acquire);
+      while (pending != 0 && pending <= change->providerAuthorityRevision &&
+             !pendingProviderAuthorityRevision_.compare_exchange_weak(
+                 pending, 0, std::memory_order_acq_rel,
+                 std::memory_order_acquire)) {
+      }
+    }
+    return true;
+  };
   if (queuedTurnAfterRescan_) {
     queuedTurnAfterRescan_ = false;
-    if (workerToQt_.tryPop(message))
+    if (receiveQueued())
       return true;
   }
   const std::uint64_t revision =
       rescanRevision_.exchange(0, std::memory_order_acq_rel);
   if (revision != 0) {
     queuedTurnAfterRescan_ = true;
-    message = GraphChanged{revision, {}, {}, true};
+    message = GraphChanged{
+        revision, {}, {}, true, {},
+        pendingProviderAuthorityRevision_.exchange(
+            0, std::memory_order_acq_rel)};
     return true;
   }
-  return workerToQt_.tryPop(message);
+  return receiveQueued();
 }
 
 ChannelSendStatus ThreadChannels::sendNodeAction(NodeAction &action) {

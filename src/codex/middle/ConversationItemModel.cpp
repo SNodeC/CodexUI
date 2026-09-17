@@ -114,11 +114,10 @@ QString accessibleCardText(const VisibleCardData &card) {
               boundedAccessibleText(payload.path));
         if constexpr (std::is_same_v<Payload, PlanData>) {
           QString lines;
-          bool complete = appendAccessibleLine(lines, payload.explanation,
-                                               false);
+          bool complete =
+              appendAccessibleLine(lines, payload.explanation, false);
           for (const PlanStepData &step : payload.steps) {
-            if (!complete ||
-                !appendAccessibleLine(lines, step.text, true)) {
+            if (!complete || !appendAccessibleLine(lines, step.text, true)) {
               complete = false;
               break;
             }
@@ -143,11 +142,26 @@ QString accessibleCardText(const VisibleCardData &card) {
   return detail.isEmpty() ? label : label + QStringLiteral("\n") + detail;
 }
 
-bool compatible(const VisibleCardData &before,
-                const VisibleCardData &after) noexcept {
-  return before.key == after.key &&
-         (before.kind == after.kind || (before.kind == CardKind::LocalPrompt &&
-                                        after.kind == CardKind::UserMessage));
+bool structurallyCompatible(const CardKey &beforeKey, CardKind beforeKind,
+                            const nodegraph::NodeRef &beforeTarget,
+                            const VisibleCardData &after) noexcept {
+  return beforeKey == after.key &&
+         ((beforeKind == after.kind && beforeTarget == after.target) ||
+          (beforeKind == CardKind::LocalPrompt &&
+           after.kind == CardKind::UserMessage));
+}
+
+bool validSectionPlacement(bool turnRoot, bool nested,
+                           std::size_t remainingSectionRows, bool remainingRoot,
+                           bool previousInSection,
+                           bool nextInSection) noexcept {
+  if (turnRoot && nested)
+    return false;
+  if (remainingSectionRows != 0 && !previousInSection && !nextInSection)
+    return false;
+  if (turnRoot)
+    return !remainingRoot;
+  return true;
 }
 
 } // namespace
@@ -225,17 +239,15 @@ QHash<int, QByteArray> ConversationItemModel::roleNames() const {
       {ActiveTurnRole, "activeTurn"},   {PresentationRole, "presentation"}};
 }
 
-bool ConversationItemModel::replaceConversation(ConversationSnapshot snapshot) {
+ConversationItemModel::StructuralChangeResult
+ConversationItemModel::replaceConversation(ConversationSnapshot snapshot) {
   const std::string nextThreadId = snapshot.threadId;
-  const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
   const bool nextHasMore = snapshot.hasMore;
   std::vector<Row> desired = flatten(std::move(snapshot));
   if (!rowsAreUnique(desired))
-    return false;
+    return StructuralChangeResult::Rejected;
 
-  bool identical = nextThreadId == threadId_ &&
-                   nextHiddenCount == hiddenAuthoritativeItemCount_ &&
-                   nextHasMore == hasMore_ &&
+  bool identical = nextThreadId == threadId_ && nextHasMore == hasMore_ &&
                    desired.size() == nodeCount(rows_);
   for (std::size_t position = 0; identical && position < desired.size();
        ++position) {
@@ -243,102 +255,31 @@ bool ConversationItemModel::replaceConversation(ConversationSnapshot snapshot) {
     identical = current && current->value == desired[position];
   }
   if (identical)
-    return false;
+    return StructuralChangeResult::Unchanged;
 
   beginResetModel();
   clearRows();
   for (Row &row : desired)
     insertRow(nodeCount(rows_), std::move(row));
   threadId_ = nextThreadId;
-  hiddenAuthoritativeItemCount_ = nextHiddenCount;
   hasMore_ = nextHasMore;
   rebuildIndexes();
   endResetModel();
   incrementProperty("modelResetCount");
   incrementProperty("modelReplacementCount");
-  return true;
+  return StructuralChangeResult::Changed;
 }
 
-bool ConversationItemModel::prependHistoryPage(ConversationSnapshot snapshot) {
-  if (snapshot.threadId != threadId_)
-    return false;
-  const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
-  const bool nextHasMore = snapshot.hasMore;
-  std::vector<Row> desired = flatten(std::move(snapshot));
-  if (!rowsAreUnique(desired) || desired.size() < nodeCount(rows_))
-    return false;
-
-  std::size_t retained = 0;
-  for (const Row &candidate : desired) {
-    const RowNode *current = nodeAt(retained);
-    if (current && candidate.stableKey == current->value.stableKey) {
-      ++retained;
-      continue;
-    }
-    if (stableRows_.contains(candidate.stableKey))
-      return false;
-  }
-  if (retained != nodeCount(rows_))
-    return false;
-
-  bool changed = nextHiddenCount != hiddenAuthoritativeItemCount_ ||
-                 nextHasMore != hasMore_;
-  std::size_t desiredPosition = 0;
-  std::size_t modelPosition = 0;
-  while (desiredPosition < desired.size()) {
-    const RowNode *current = nodeAt(modelPosition);
-    if (current && desired[desiredPosition].stableKey ==
-                       current->value.stableKey) {
-      if (current->value != desired[desiredPosition]) {
-        updateRow(static_cast<int>(modelPosition),
-                  std::move(desired[desiredPosition]));
-        changed = true;
-      }
-      ++desiredPosition;
-      ++modelPosition;
-      continue;
-    }
-
-    const std::size_t firstDesired = desiredPosition;
-    while (
-        desiredPosition < desired.size() &&
-        !([&] {
-          const RowNode *retainedRow = nodeAt(modelPosition);
-          return retainedRow && desired[desiredPosition].stableKey ==
-                                    retainedRow->value.stableKey;
-        })())
-      ++desiredPosition;
-    const std::size_t count = desiredPosition - firstDesired;
-    const int firstRow = static_cast<int>(modelPosition);
-    const int lastRow = static_cast<int>(modelPosition + count - 1);
-    beginInsertRows({}, firstRow, lastRow);
-    for (std::size_t inserted = firstDesired; inserted < desiredPosition;
-         ++inserted)
-      insertRow(modelPosition++, std::move(desired[inserted]));
-    endInsertRows();
-    incrementProperty("modelInsertCount");
-    changed = true;
-  }
-
-  hiddenAuthoritativeItemCount_ = nextHiddenCount;
-  hasMore_ = nextHasMore;
-  if (changed)
-    incrementProperty("modelHistoryPrependCount");
-  return changed;
-}
-
-bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
+ConversationItemModel::StructuralChangeResult
+ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
   if (snapshot.threadId != threadId_)
     return replaceConversation(std::move(snapshot));
-  const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
   const bool nextHasMore = snapshot.hasMore;
   std::vector<Row> desired = flatten(std::move(snapshot));
   if (!rowsAreUnique(desired))
-    return false;
+    return StructuralChangeResult::Rejected;
 
-  const bool chromeChanged = nextHiddenCount != hiddenAuthoritativeItemCount_ ||
-                             nextHasMore != hasMore_;
-  hiddenAuthoritativeItemCount_ = nextHiddenCount;
+  const bool chromeChanged = nextHasMore != hasMore_;
   hasMore_ = nextHasMore;
   std::unordered_set<std::string> desiredKeys;
   desiredKeys.reserve(desired.size());
@@ -382,8 +323,7 @@ bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
       beginInsertRows({}, static_cast<int>(position),
                       static_cast<int>(position + count - 1));
       for (std::size_t inserted = 0; inserted < count; ++inserted)
-        insertRow(position + inserted,
-                  std::move(desired[position + inserted]));
+        insertRow(position + inserted, std::move(desired[position + inserted]));
       endInsertRows();
       std::fill(inserted.begin() + static_cast<std::ptrdiff_t>(position),
                 inserted.begin() +
@@ -395,8 +335,7 @@ bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
       continue;
     }
 
-    beginMoveRows({}, *source, *source, {},
-                  static_cast<int>(position));
+    beginMoveRows({}, *source, *source, {}, static_cast<int>(position));
     std::unique_ptr<RowNode> moved = takeRow(static_cast<std::size_t>(*source));
     insertRow(position, std::move(moved->value));
     endMoveRows();
@@ -413,11 +352,12 @@ bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
     updateRow(static_cast<int>(position), std::move(desired[position]));
     changed = true;
   }
-  return changed;
+  return changed ? StructuralChangeResult::Changed
+                 : StructuralChangeResult::Unchanged;
 }
 
 ConversationItemModel::CardUpdateResult
-ConversationItemModel::updateCard(VisibleCardData card) {
+ConversationItemModel::cardUpdateResult(const VisibleCardData &card) const {
   const std::string key = stableKey(card.key);
   const auto found = stableRows_.find(key);
   if (found == stableRows_.end())
@@ -425,11 +365,25 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   const std::optional<int> modelRow = rowOf(found->second);
   if (!modelRow)
     return CardUpdateResult::Missing;
-  Row &current = found->second->value;
-  if (!compatible(current.card, card))
+  const Row &current = found->second->value;
+  if (current.card.key != card.key || current.card.kind != card.kind ||
+      current.card.target != card.target)
     return CardUpdateResult::Incompatible;
   if (current.card == card)
     return CardUpdateResult::Unchanged;
+  return CardUpdateResult::Changed;
+}
+
+ConversationItemModel::CardUpdateResult
+ConversationItemModel::updateCard(VisibleCardData card) {
+  const CardUpdateResult admission = cardUpdateResult(card);
+  if (admission != CardUpdateResult::Changed)
+    return admission;
+
+  const std::string key = stableKey(card.key);
+  const auto found = stableRows_.find(key);
+  const std::optional<int> modelRow = rowOf(found->second);
+  Row &current = found->second->value;
 
   Row replacement;
   replacement.card = std::move(card);
@@ -441,265 +395,613 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   replacement.lastInTurn = current.lastInTurn;
   replacement.presented = isPresented(replacement.card);
   replacement.activeTurn = current.activeTurn;
-  replacement.historyActivity = current.historyActivity;
   updateRow(*modelRow, std::move(replacement));
   return CardUpdateResult::Changed;
 }
 
-ConversationItemModel::StructuralChangeResult
-ConversationItemModel::insertCard(int rowIndex,
-                                  ConversationRowPlacement placement) {
-  Row candidate = rowFromPlacement(std::move(placement));
-  if (candidate.card.threadId != threadId_ || candidate.stableKey.empty() ||
-      !sectionPlacementIsValid(rowIndex, candidate))
-    return StructuralChangeResult::Invalid;
-  if (stableRows_.contains(candidate.stableKey) ||
-      (candidate.card.target &&
-       targetRows_.contains(candidate.card.target.get())))
-    return StructuralChangeResult::Duplicate;
-  const SectionStructure before = sectionStructure(candidate.sectionKey);
-  const std::string changedKey = candidate.stableKey;
-
-  const bool previousInSection =
-      rowIndex > 0 &&
-      row(rowIndex - 1)->sectionKey == candidate.sectionKey;
-  const bool nextInSection =
-      rowIndex < rowCount() &&
-      row(rowIndex)->sectionKey == candidate.sectionKey;
-  candidate.firstInTurn = !previousInSection;
-  candidate.lastInTurn = !nextInSection;
-
-  beginInsertRows({}, rowIndex, rowIndex);
-  RowNode *inserted = insertRow(static_cast<std::size_t>(rowIndex),
-                                std::move(candidate));
-  endInsertRows();
-  incrementProperty("modelInsertCount");
-  incrementProperty("modelExactInsertCount");
-  refreshSectionStructure(inserted->value.sectionKey, before, changedKey);
-  return StructuralChangeResult::Changed;
-}
-
-ConversationItemModel::StructuralChangeResult
-ConversationItemModel::removeTarget(const nodegraph::NodeRef &target) {
-  const QModelIndex targetIndex = indexForTarget(target);
-  if (!targetIndex.isValid())
-    return StructuralChangeResult::Missing;
-  const int rowIndex = targetIndex.row();
-  const std::string sectionKey = row(rowIndex)->sectionKey;
-  const std::string changedKey = row(rowIndex)->stableKey;
-  const SectionStructure before = sectionStructure(sectionKey);
-
-  beginRemoveRows({}, rowIndex, rowIndex);
-  (void)takeRow(static_cast<std::size_t>(rowIndex));
-  endRemoveRows();
-  incrementProperty("modelRemoveCount");
-  incrementProperty("modelExactRemoveCount");
-  refreshSectionStructure(sectionKey, before, changedKey);
-  return StructuralChangeResult::Changed;
-}
-
-ConversationItemModel::StructuralChangeResult
-ConversationItemModel::moveTarget(const nodegraph::NodeRef &target,
-                                  int destinationRow,
-                                  ConversationRowPlacement placement) {
-  const QModelIndex targetIndex = indexForTarget(target);
-  if (!targetIndex.isValid())
-    return StructuralChangeResult::Missing;
-  if (destinationRow < 0 || destinationRow >= rowCount() ||
-      placement.card.threadId != threadId_ || placement.card.target != target ||
-      placement.sectionKey.empty())
-    return StructuralChangeResult::Invalid;
-
-  const int sourceRow = targetIndex.row();
-  const Row &current = targetRows_.at(target.get())->value;
-  const std::string changedKey = current.stableKey;
-  const SectionStructure oldBefore = sectionStructure(current.sectionKey);
-  Row replacement = rowFromPlacement(std::move(placement));
-  if (replacement.stableKey != current.stableKey ||
-      !compatible(current.card, replacement.card) ||
-      (replacement.turnRoot && replacement.nested))
-    return StructuralChangeResult::Invalid;
-
-  const auto rowAfterRemoval = [&](int position) -> const RowNode * {
-    if (position < 0 || position >= rowCount() - 1)
-      return nullptr;
-    const int original = position < sourceRow ? position : position + 1;
-    return nodeAt(static_cast<std::size_t>(original));
+std::optional<ConversationItemModel::StructuralDeltaPlan>
+ConversationItemModel::planStructuralDelta(
+    std::span<const ConversationRowChange> rows,
+    std::span<const nodegraph::NodeRef> removals) const {
+  struct VirtualRow {
+    CardKey key;
+    CardKind kind = CardKind::GenericActivity;
+    nodegraph::NodeRef target;
+    std::string stableKey;
+    std::string sectionKey;
+    bool turnRoot = false;
+    bool nested = false;
   };
-  const RowNode *previous = rowAfterRemoval(destinationRow - 1);
-  const RowNode *next = rowAfterRemoval(destinationRow);
-  const bool previousInSection =
-      previous && previous->value.sectionKey == replacement.sectionKey;
-  const bool nextInSection =
-      next && next->value.sectionKey == replacement.sectionKey;
-  const auto section = sectionRows_.find(replacement.sectionKey);
-  const std::size_t remainingSectionRows =
-      section == sectionRows_.end()
-          ? 0
-          : section->second.count -
-                static_cast<std::size_t>(current.sectionKey ==
-                                         replacement.sectionKey);
-  const bool remainingRoot =
-      section != sectionRows_.end() && section->second.root &&
-      section->second.root != targetRows_.at(target.get());
-  if ((remainingSectionRows != 0 && !previousInSection && !nextInSection) ||
-      (replacement.turnRoot && (remainingRoot || previousInSection)) ||
-      (!replacement.turnRoot && nextInSection && next->value.turnRoot))
-    return StructuralChangeResult::Invalid;
+  struct VirtualSequence {
+    struct Segment {
+      std::size_t originalFirst = 0;
+      std::size_t originalCount = 0;
+      std::optional<VirtualRow> value;
 
-  const std::string oldSection = current.sectionKey;
-  const SectionStructure newBefore =
-      replacement.sectionKey == oldSection
-          ? oldBefore
-          : sectionStructure(replacement.sectionKey);
-  const bool movedRows = sourceRow != destinationRow;
-  if (movedRows) {
-    const int destinationChild =
-        destinationRow > sourceRow ? destinationRow + 1 : destinationRow;
-    beginMoveRows({}, sourceRow, sourceRow, {}, destinationChild);
-    std::unique_ptr<RowNode> moved =
-        takeRow(static_cast<std::size_t>(sourceRow));
-    insertRow(static_cast<std::size_t>(destinationRow),
-              std::move(moved->value));
-    endMoveRows();
-    incrementProperty("modelMoveCount");
-  }
+      [[nodiscard]] std::size_t size() const noexcept {
+        return value ? 1 : originalCount;
+      }
+    };
 
-  Row &moved = nodeAt(static_cast<std::size_t>(destinationRow))->value;
-  replacement.firstInTurn = moved.firstInTurn;
-  replacement.lastInTurn = moved.lastInTurn;
-  const bool presentationChanged = moved != replacement;
-  if (presentationChanged)
-    updateRow(destinationRow, std::move(replacement));
-  if (sourceRow == destinationRow && !presentationChanged)
-    return StructuralChangeResult::Unchanged;
-
-  refreshSectionStructure(oldSection, oldBefore, changedKey);
-  const std::string newSection = row(destinationRow)->sectionKey;
-  if (newSection != oldSection)
-    refreshSectionStructure(newSection, newBefore, changedKey);
-  incrementProperty(movedRows ? "modelExactMoveCount"
-                              : "modelExactPlacementUpdateCount");
-  return StructuralChangeResult::Changed;
-}
-
-bool ConversationItemModel::appendTail(ConversationTailCard tail) {
-  if (tail.card.threadId != threadId_ || tail.sectionKey.empty())
-    return false;
-  const std::string key = stableKey(tail.card.key);
-  if (key.empty() || stableRows_.contains(key))
-    return false;
-
-  const bool startsSection =
-      rowCount() == 0 || row(rowCount() - 1)->sectionKey != tail.sectionKey;
-  if ((!startsSection && tail.turnRoot) || (startsSection && tail.nested))
-    return false;
-
-  if (rowCount() != 0 && !startsSection) {
-    Row &previous = nodeAt(static_cast<std::size_t>(rowCount() - 1))->value;
-    previous.lastInTurn = false;
-    emit dataChanged(index(rowCount() - 1), index(rowCount() - 1),
-                     {LastInTurnRole});
-    incrementProperty("modelDataChangeCount");
-  }
-
-  Row row;
-  row.card = std::move(tail.card);
-  row.stableKey = key;
-  row.sectionKey = std::move(tail.sectionKey);
-  row.turnRoot = tail.turnRoot;
-  row.nested = tail.nested;
-  row.firstInTurn = startsSection;
-  row.lastInTurn = true;
-  row.presented = isPresented(row.card);
-  row.activeTurn = tail.turnRoot && tail.activeTurn;
-  row.historyActivity = tail.historyActivity;
-
-  const int insertedRow = rowCount();
-  beginInsertRows({}, insertedRow, insertedRow);
-  insertRow(static_cast<std::size_t>(insertedRow), std::move(row));
-  endInsertRows();
-  incrementProperty("modelInsertCount");
-  incrementProperty("modelTailAppendCount");
-  return true;
-}
-
-ConversationItemModel::HistoryTrim
-ConversationItemModel::trimHistoryTo(std::size_t activityLimit) {
-  HistoryTrim result;
-  if (historyActivityCount_ <= activityLimit || rowCount() == 0)
-    return result;
-
-  Row &first = nodeAt(0)->value;
-  result.sectionKey = first.sectionKey;
-  if (first.historyActivity && first.turnRoot && rowCount() > 1 &&
-      row(1)->sectionKey == first.sectionKey) {
-    first.historyActivity = false;
-    --historyActivityCount_;
-    result.pinnedRoot = true;
-    result.sectionKey = first.sectionKey;
-    incrementProperty("modelHistoryRootPins");
-    return result;
-  }
-
-  // Pending/recovery prompts are protected independently of the history
-  // suffix. If one is the complete leading section, leave the window one row
-  // over budget until its authoritative acknowledgement or a complete
-  // reconciliation can place it without changing optimistic ordering.
-  if (!first.historyActivity &&
-      (!first.turnRoot || rowCount() == 1 ||
-       row(1)->sectionKey != first.sectionKey))
-    return result;
-
-  int removeCount = 1;
-  int removeRow = 0;
-  if (!first.historyActivity && first.turnRoot && rowCount() > 1 &&
-      row(1)->sectionKey == first.sectionKey) {
-    result.sectionKey = first.sectionKey;
-    if (rowCount() > 2 && row(2)->sectionKey == first.sectionKey) {
-      // Retain the pinned owner at logical row zero while dropping the oldest
-      // nested activity. The order-statistic tree removes that one row without
-      // changing the identity nodes of the retained suffix.
-      removeRow = 1;
-    } else {
-      removeCount = 2;
+    explicit VirtualSequence(const ConversationItemModel &source)
+        : source(source) {
+      if (source.rowCount() != 0)
+        segments.push_back(
+            {0, static_cast<std::size_t>(source.rowCount()), std::nullopt});
     }
+
+    [[nodiscard]] static VirtualRow project(const Row &row) {
+      return {row.card.key,   row.card.kind, row.card.target, row.stableKey,
+              row.sectionKey, row.turnRoot,  row.nested};
+    }
+
+    [[nodiscard]] int size() const noexcept {
+      std::size_t result = 0;
+      for (const Segment &segment : segments)
+        result += segment.size();
+      return static_cast<int>(result);
+    }
+
+    [[nodiscard]] std::optional<VirtualRow> at(int position) const {
+      if (position < 0)
+        return std::nullopt;
+      std::size_t offset = static_cast<std::size_t>(position);
+      for (const Segment &segment : segments) {
+        if (offset >= segment.size()) {
+          offset -= segment.size();
+          continue;
+        }
+        if (segment.value)
+          return *segment.value;
+        const Row *row =
+            source.row(static_cast<int>(segment.originalFirst + offset));
+        return row ? std::optional<VirtualRow>(project(*row)) : std::nullopt;
+      }
+      return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<int>
+    locateStable(const std::string &key) const {
+      int position = 0;
+      for (const Segment &segment : segments) {
+        if (segment.value && segment.value->stableKey == key)
+          return position;
+        position += static_cast<int>(segment.size());
+      }
+      const QModelIndex original = source.indexForStableKey(key);
+      return original.isValid() ? locateOriginal(original.row()) : std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<int>
+    locateTarget(const nodegraph::NodeRef &target) const {
+      if (!target)
+        return std::nullopt;
+      int position = 0;
+      for (const Segment &segment : segments) {
+        if (segment.value && segment.value->target == target)
+          return position;
+        position += static_cast<int>(segment.size());
+      }
+      const QModelIndex original = source.indexForTarget(target);
+      return original.isValid() ? locateOriginal(original.row()) : std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<VirtualRow> erase(int position) {
+      const std::optional<VirtualRow> removed = at(position);
+      if (!removed)
+        return std::nullopt;
+      const std::size_t first = splitAt(static_cast<std::size_t>(position));
+      const std::size_t after = splitAt(static_cast<std::size_t>(position + 1));
+      segments.erase(segments.begin() + static_cast<std::ptrdiff_t>(first),
+                     segments.begin() + static_cast<std::ptrdiff_t>(after));
+      return removed;
+    }
+
+    void insert(int position, VirtualRow row) {
+      const std::size_t at = splitAt(static_cast<std::size_t>(position));
+      segments.insert(segments.begin() + static_cast<std::ptrdiff_t>(at),
+                      Segment{0, 0, std::move(row)});
+    }
+
+  private:
+    [[nodiscard]] std::optional<int> locateOriginal(int original) const {
+      int position = 0;
+      for (const Segment &segment : segments) {
+        if (!segment.value &&
+            original >= static_cast<int>(segment.originalFirst) &&
+            original <
+                static_cast<int>(segment.originalFirst + segment.originalCount))
+          return position + original - static_cast<int>(segment.originalFirst);
+        position += static_cast<int>(segment.size());
+      }
+      return std::nullopt;
+    }
+
+    std::size_t splitAt(std::size_t position) {
+      std::size_t offset = 0;
+      for (std::size_t index = 0; index < segments.size(); ++index) {
+        Segment &segment = segments[index];
+        if (position == offset)
+          return index;
+        if (position < offset + segment.size()) {
+          const std::size_t leftCount = position - offset;
+          Segment right{segment.originalFirst + leftCount,
+                        segment.originalCount - leftCount, std::nullopt};
+          segment.originalCount = leftCount;
+          segments.insert(segments.begin() +
+                              static_cast<std::ptrdiff_t>(index + 1),
+                          std::move(right));
+          return index + 1;
+        }
+        offset += segment.size();
+      }
+      return segments.size();
+    }
+
+    const ConversationItemModel &source;
+    std::vector<Segment> segments;
+  } sequence(*this);
+
+  struct VirtualSection {
+    std::size_t count = 0;
+    bool hasRoot = false;
+    std::string firstKey;
+  };
+  std::unordered_map<std::string, VirtualSection> sections;
+  const auto section = [&](const std::string &key) -> VirtualSection & {
+    if (const auto found = sections.find(key); found != sections.end())
+      return found->second;
+    VirtualSection value;
+    if (const auto found = sectionRows_.find(key);
+        found != sectionRows_.end()) {
+      value.count = found->second.count;
+      value.hasRoot = found->second.root != nullptr;
+      if (found->second.first)
+        value.firstKey = found->second.first->value.stableKey;
+    }
+    return sections.emplace(key, value).first->second;
+  };
+  const auto removeVirtual = [&](int position) {
+    const std::optional<VirtualRow> removed = sequence.erase(position);
+    if (!removed)
+      return false;
+    VirtualSection &owner = section(removed->sectionKey);
+    if (owner.count == 0)
+      return false;
+    --owner.count;
+    if (removed->turnRoot)
+      owner.hasRoot = false;
+    if (owner.firstKey == removed->stableKey) {
+      const std::optional<VirtualRow> next = sequence.at(position);
+      owner.firstKey = next && next->sectionKey == removed->sectionKey
+                           ? next->stableKey
+                           : std::string{};
+    }
+    return true;
+  };
+  const auto insertVirtual = [&](int position, VirtualRow row) {
+    VirtualSection &owner = section(row.sectionKey);
+    const std::optional<int> first = sequence.locateStable(owner.firstKey);
+    if (owner.count == 0 || (first && position <= *first))
+      owner.firstKey = row.stableKey;
+    ++owner.count;
+    owner.hasRoot = owner.hasRoot || row.turnRoot;
+    sequence.insert(position, std::move(row));
+  };
+
+  std::unordered_map<std::string, std::size_t> desiredRows;
+  std::unordered_set<const nodegraph::Node *> desiredTargets;
+  std::unordered_set<const nodegraph::Node *> removedTargets;
+  desiredRows.reserve(rows.size());
+  desiredTargets.reserve(rows.size());
+  removedTargets.reserve(removals.size());
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    const ConversationRowChange &change = rows[index];
+    const VisibleCardData &card = change.placement.card;
+    const std::string key = stableKey(card.key);
+    if (key.empty() || card.threadId != threadId_ ||
+        change.placement.sectionKey.empty() ||
+        !desiredRows.emplace(key, index).second ||
+        (card.target && !desiredTargets.insert(card.target.get()).second))
+      return std::nullopt;
+  }
+  for (const nodegraph::NodeRef &target : removals) {
+    if (!target || !removedTargets.insert(target.get()).second ||
+        desiredTargets.contains(target.get()))
+      return std::nullopt;
   }
 
-  for (int offset = 0; offset < removeCount; ++offset) {
-    const Row &removed = *row(removeRow + offset);
-    result.removedStableKeys.push_back(removed.stableKey);
-    if (removed.historyActivity)
-      ++result.hiddenIncrement;
-  }
-  result.row = removeRow;
-  result.count = removeCount;
+  StructuralDeltaPlan result;
+  std::vector<bool> settled(rows.size(), false);
+  std::vector<bool> replacedRoots(removals.size(), false);
+  for (std::size_t removalIndex = 0; removalIndex < removals.size();
+       ++removalIndex) {
+    const std::optional<int> position =
+        sequence.locateTarget(removals[removalIndex]);
+    const std::optional<VirtualRow> current =
+        position ? sequence.at(*position) : std::nullopt;
+    if (!current || !current->turnRoot ||
+        section(current->sectionKey).count < 2)
+      continue;
 
-  beginRemoveRows({}, removeRow, removeRow + removeCount - 1);
-  for (int offset = 0; offset < removeCount; ++offset)
-    (void)takeRow(static_cast<std::size_t>(removeRow));
-  endRemoveRows();
-  incrementProperty("modelRemoveCount");
-  incrementProperty("modelBoundedFrontTrimCount");
+    std::optional<std::size_t> replacementIndex;
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      const ConversationRowPlacement &placement = rows[index].placement;
+      const std::string key = stableKey(placement.card.key);
+      if (settled[index] || !placement.turnRoot || placement.nested ||
+          placement.sectionKey != current->sectionKey ||
+          key == current->stableKey || sequence.locateStable(key) ||
+          sequence.locateTarget(placement.card.target))
+        continue;
+      if (replacementIndex) {
+        replacementIndex.reset();
+        break;
+      }
+      replacementIndex = index;
+    }
+    if (!replacementIndex)
+      continue;
+
+    const ConversationRowPlacement &placement =
+        rows[*replacementIndex].placement;
+    VirtualRow replacement{placement.card.key,
+                           placement.card.kind,
+                           placement.card.target,
+                           stableKey(placement.card.key),
+                           placement.sectionKey,
+                           true,
+                           false};
+    if (!removeVirtual(*position))
+      return std::nullopt;
+    insertVirtual(*position, std::move(replacement));
+
+    StructuralDeltaPlan::Operation operation;
+    operation.kind = StructuralDeltaPlan::Operation::Kind::ReplaceRoot;
+    operation.deltaIndex = *replacementIndex;
+    operation.removalIndex = removalIndex;
+    operation.source = *position;
+    operation.destination = *position;
+    operation.oldStableKey = current->stableKey;
+    operation.stableKey = stableKey(placement.card.key);
+    operation.oldSection = current->sectionKey;
+    operation.section = placement.sectionKey;
+    result.operations.push_back(std::move(operation));
+    settled[*replacementIndex] = true;
+    replacedRoots[removalIndex] = true;
+  }
+
+  for (std::size_t index = 0; index < removals.size(); ++index) {
+    if (replacedRoots[index])
+      continue;
+    const std::optional<int> position = sequence.locateTarget(removals[index]);
+    const std::optional<VirtualRow> current =
+        position ? sequence.at(*position) : std::nullopt;
+    if (!current)
+      continue;
+    const auto desired = desiredRows.find(current->stableKey);
+    const bool replaced =
+        desired != desiredRows.end() &&
+        rows[desired->second].placement.card.target != removals[index];
+    if (replaced)
+      continue;
+    if (!removeVirtual(*position))
+      return std::nullopt;
+    StructuralDeltaPlan::Operation operation;
+    operation.kind = StructuralDeltaPlan::Operation::Kind::Remove;
+    operation.removalIndex = index;
+    operation.source = *position;
+    operation.oldStableKey = current->stableKey;
+    operation.oldSection = current->sectionKey;
+    result.operations.push_back(std::move(operation));
+  }
+
+  for (std::size_t attempt = 0; attempt < 2 * rows.size(); ++attempt) {
+    const std::size_t index =
+        attempt < rows.size() ? attempt : 2 * rows.size() - attempt - 1;
+    if (settled[index])
+      continue;
+    const ConversationRowChange &change = rows[index];
+    const VisibleCardData &card = change.placement.card;
+    const std::string key = stableKey(card.key);
+    const std::optional<int> stable = sequence.locateStable(key);
+    const std::optional<int> target = sequence.locateTarget(card.target);
+    if (stable && target && *stable != *target)
+      return std::nullopt;
+    if (!stable && target)
+      return std::nullopt;
+
+    const int source = stable ? *stable : -1;
+    const std::optional<VirtualRow> current =
+        source >= 0 ? sequence.at(source) : std::nullopt;
+    if (current && (!current->target ||
+                    !structurallyCompatible(current->key, current->kind,
+                                            current->target, card)))
+      return std::nullopt;
+    const bool materializesLocalPrompt =
+        current && current->kind == CardKind::LocalPrompt &&
+        card.kind == CardKind::UserMessage;
+    if (current && !materializesLocalPrompt &&
+        (current->turnRoot != change.placement.turnRoot ||
+         (current->turnRoot &&
+          current->sectionKey != change.placement.sectionKey)))
+      return std::nullopt;
+
+    const auto pending = [&](const std::optional<CardKey> &neighbor) {
+      if (!neighbor)
+        return false;
+      const auto found = desiredRows.find(stableKey(*neighbor));
+      return found != desiredRows.end() && !settled[found->second];
+    };
+    const std::optional<int> previous =
+        change.previousCardKey && !pending(change.previousCardKey)
+            ? sequence.locateStable(stableKey(*change.previousCardKey))
+            : std::nullopt;
+    const std::optional<int> next =
+        change.nextCardKey && !pending(change.nextCardKey)
+            ? sequence.locateStable(stableKey(*change.nextCardKey))
+            : std::nullopt;
+    const bool connected = source >= 0 || previous || next ||
+                           !change.nextCardKey || sequence.size() == 0;
+    if (!connected)
+      continue;
+
+    int destination = -1;
+    if (!change.previousCardKey) {
+      destination = 0;
+    } else if (!change.nextCardKey) {
+      destination = sequence.size() - static_cast<int>(source >= 0);
+    } else if (previous && *previous != source) {
+      destination = *previous + 1;
+      if (source >= 0 && source < destination)
+        --destination;
+    } else if (next && *next != source) {
+      destination = *next;
+      if (source >= 0 && source < destination)
+        --destination;
+    }
+    if (destination < 0) {
+      if (sequence.size() == 0)
+        destination = 0;
+      else
+        continue;
+    }
+
+    if (source >= 0 && !removeVirtual(source))
+      return std::nullopt;
+    if (destination < 0 || destination > sequence.size() ||
+        sequence.locateStable(key) || sequence.locateTarget(card.target))
+      return std::nullopt;
+
+    VirtualRow replacement{card.key,
+                           card.kind,
+                           card.target,
+                           key,
+                           change.placement.sectionKey,
+                           change.placement.turnRoot,
+                           change.placement.nested};
+    const std::optional<VirtualRow> previousRow = sequence.at(destination - 1);
+    const std::optional<VirtualRow> nextRow = sequence.at(destination);
+    const VirtualSection &owner = section(replacement.sectionKey);
+    const bool previousInSection =
+        previousRow && previousRow->sectionKey == replacement.sectionKey;
+    const bool nextInSection =
+        nextRow && nextRow->sectionKey == replacement.sectionKey;
+    const bool exactTail =
+        source < 0 && !change.nextCardKey && destination == sequence.size();
+    const bool valid =
+        validSectionPlacement(replacement.turnRoot, replacement.nested,
+                              owner.count, owner.hasRoot, previousInSection,
+                              nextInSection);
+    if (!valid)
+      return std::nullopt;
+    if (current && current->turnRoot && source != destination)
+      return std::nullopt;
+    insertVirtual(destination, std::move(replacement));
+    StructuralDeltaPlan::Operation operation;
+    operation.kind = StructuralDeltaPlan::Operation::Kind::Place;
+    operation.deltaIndex = index;
+    operation.source = source;
+    operation.destination = destination;
+    operation.tailAppend = exactTail;
+    operation.oldStableKey = current ? current->stableKey : std::string{};
+    operation.stableKey = key;
+    operation.oldSection = current ? current->sectionKey : std::string{};
+    operation.section = change.placement.sectionKey;
+    result.operations.push_back(std::move(operation));
+    settled[index] = true;
+  }
+
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    if (!settled[index])
+      return std::nullopt;
+  }
+
+  for (const StructuralDeltaPlan::Operation &operation : result.operations) {
+    if (operation.kind == StructuralDeltaPlan::Operation::Kind::Remove)
+      continue;
+    const ConversationRowChange &change = rows[operation.deltaIndex];
+    const std::optional<int> position =
+        sequence.locateStable(stableKey(change.placement.card.key));
+    if (!position)
+      return std::nullopt;
+    if ((!change.previousCardKey && *position != 0) ||
+        (!change.nextCardKey && *position != sequence.size() - 1))
+      return std::nullopt;
+    const auto adjacent = [&](const std::optional<CardKey> &neighbor,
+                              int offset) {
+      if (!neighbor)
+        return true;
+      const std::string neighborKey = stableKey(*neighbor);
+      const std::optional<int> neighborPosition =
+          sequence.locateStable(neighborKey);
+      return neighborPosition &&
+             *neighborPosition + offset == *position;
+    };
+    if (!adjacent(change.previousCardKey, 1) ||
+        !adjacent(change.nextCardKey, -1))
+      return std::nullopt;
+  }
+
   return result;
 }
 
-bool ConversationItemModel::setActiveTurn(int rowIndex, bool active) {
-  RowNode *node = rowIndex >= 0 ? nodeAt(static_cast<std::size_t>(rowIndex))
-                                : nullptr;
-  Row *value = node ? &node->value : nullptr;
-  if (!value || !value->turnRoot || value->activeTurn == active)
-    return false;
-  value->activeTurn = active;
-  emit dataChanged(index(rowIndex), index(rowIndex), {ActiveTurnRole});
-  incrementProperty("modelDataChangeCount");
-  return true;
+std::optional<ConversationItemModel::StructuralDeltaPlan>
+ConversationItemModel::applyStructuralDelta(
+    std::vector<ConversationRowChange> &rows,
+    std::span<const nodegraph::NodeRef> removals) {
+  std::optional<StructuralDeltaPlan> plan = planStructuralDelta(rows, removals);
+  if (!plan)
+    return std::nullopt;
+  commitStructuralDelta(*plan, rows, removals);
+  return plan;
 }
 
-void ConversationItemModel::setHistoryChrome(
-    std::size_t hiddenAuthoritativeItemCount, bool providerHasMore) {
-  hiddenAuthoritativeItemCount_ = hiddenAuthoritativeItemCount;
-  hasMore_ = hiddenAuthoritativeItemCount != 0 || providerHasMore;
+void ConversationItemModel::commitStructuralDelta(
+    StructuralDeltaPlan &plan, std::vector<ConversationRowChange> &rows,
+    std::span<const nodegraph::NodeRef> removals) {
+  struct SectionChange {
+    SectionStructure before;
+    std::vector<std::string> changedKeys;
+  };
+  std::unordered_map<std::string, SectionChange> changedSections;
+  const auto touch = [this, &changedSections](const std::string &section,
+                                              const std::string &key) {
+    if (section.empty())
+      return;
+    auto [found, inserted] = changedSections.try_emplace(section);
+    if (inserted)
+      found->second.before = sectionStructure(section);
+    if (!key.empty() && std::ranges::find(found->second.changedKeys, key) ==
+                            found->second.changedKeys.end())
+      found->second.changedKeys.push_back(key);
+  };
+
+  for (StructuralDeltaPlan::Operation &operation : plan.operations) {
+    if (operation.kind == StructuralDeltaPlan::Operation::Kind::ReplaceRoot) {
+      const QModelIndex sourceIndex =
+          indexForTarget(removals[operation.removalIndex]);
+      Q_ASSERT(sourceIndex.isValid() && sourceIndex.row() == operation.source);
+      const Row *current = row(sourceIndex.row());
+      Q_ASSERT(current && current->turnRoot &&
+               current->sectionKey == operation.oldSection);
+      touch(operation.oldSection, operation.oldStableKey);
+      touch(operation.section, operation.stableKey);
+
+      Row replacement =
+          rowFromPlacement(std::move(rows[operation.deltaIndex].placement));
+      const bool finalFirstInTurn = current->firstInTurn;
+      replacement.lastInTurn = current->lastInTurn;
+      const bool finalActive = replacement.activeTurn;
+      replacement.turnRoot = false;
+      replacement.nested = true;
+      replacement.firstInTurn = false;
+      replacement.activeTurn = false;
+
+      const int insertedRow = sourceIndex.row() + 1;
+      beginInsertRows({}, insertedRow, insertedRow);
+      insertRow(static_cast<std::size_t>(insertedRow), std::move(replacement));
+      endInsertRows();
+      incrementProperty("modelInsertCount");
+      incrementProperty("modelExactInsertCount");
+
+      beginRemoveRows({}, sourceIndex.row(), sourceIndex.row());
+      (void)takeRow(static_cast<std::size_t>(sourceIndex.row()));
+      RowNode *promoted = nodeAt(static_cast<std::size_t>(sourceIndex.row()));
+      Q_ASSERT(promoted && promoted->value.stableKey == operation.stableKey);
+      removeSectionIdentity(promoted);
+      promoted->value.turnRoot = true;
+      promoted->value.nested = false;
+      promoted->value.firstInTurn = finalFirstInTurn;
+      promoted->value.activeTurn = finalActive;
+      addSectionIdentity(promoted);
+      endRemoveRows();
+      incrementProperty("modelRemoveCount");
+      incrementProperty("modelExactRemoveCount");
+      emit dataChanged(
+          index(sourceIndex.row()), index(sourceIndex.row()),
+          {TurnRootRole, NestedCardRole, FirstInTurnRole, ActiveTurnRole});
+      incrementProperty("modelDataChangeCount");
+      continue;
+    }
+
+    if (operation.kind == StructuralDeltaPlan::Operation::Kind::Remove) {
+      const QModelIndex sourceIndex =
+          indexForTarget(removals[operation.removalIndex]);
+      Q_ASSERT(sourceIndex.isValid() && sourceIndex.row() == operation.source);
+      touch(operation.oldSection, operation.oldStableKey);
+      beginRemoveRows({}, sourceIndex.row(), sourceIndex.row());
+      (void)takeRow(static_cast<std::size_t>(sourceIndex.row()));
+      endRemoveRows();
+      incrementProperty("modelRemoveCount");
+      incrementProperty("modelExactRemoveCount");
+      continue;
+    }
+
+    Row replacement =
+        rowFromPlacement(std::move(rows[operation.deltaIndex].placement));
+    if (operation.source < 0) {
+      touch(operation.section, operation.stableKey);
+      const Row *previous = row(operation.destination - 1);
+      const Row *next = row(operation.destination);
+      replacement.firstInTurn =
+          !previous || previous->sectionKey != replacement.sectionKey;
+      replacement.lastInTurn =
+          !next || next->sectionKey != replacement.sectionKey;
+      beginInsertRows({}, operation.destination, operation.destination);
+      insertRow(static_cast<std::size_t>(operation.destination),
+                std::move(replacement));
+      endInsertRows();
+      incrementProperty("modelInsertCount");
+      incrementProperty(operation.tailAppend ? "modelTailAppendCount"
+                                             : "modelExactInsertCount");
+      continue;
+    }
+
+    const QModelIndex sourceIndex = indexForStableKey(operation.oldStableKey);
+    Q_ASSERT(sourceIndex.isValid() && sourceIndex.row() == operation.source);
+    const Row *current = row(sourceIndex.row());
+    Q_ASSERT(current);
+    replacement.firstInTurn = current->firstInTurn;
+    replacement.lastInTurn = current->lastInTurn;
+    const bool movedRows = operation.source != operation.destination;
+    const bool presentationChanged = *current != replacement;
+    operation.changed = movedRows || presentationChanged;
+    if (!operation.changed)
+      continue;
+    touch(operation.oldSection, operation.oldStableKey);
+    touch(operation.section, operation.stableKey);
+    if (movedRows) {
+      const int destinationChild = operation.destination > operation.source
+                                       ? operation.destination + 1
+                                       : operation.destination;
+      beginMoveRows({}, operation.source, operation.source, {},
+                    destinationChild);
+      std::unique_ptr<RowNode> moved =
+          takeRow(static_cast<std::size_t>(operation.source));
+      insertRow(static_cast<std::size_t>(operation.destination),
+                std::move(moved->value));
+      endMoveRows();
+      incrementProperty("modelMoveCount");
+    }
+
+    Row &moved = nodeAt(static_cast<std::size_t>(operation.destination))->value;
+    replacement.firstInTurn = moved.firstInTurn;
+    replacement.lastInTurn = moved.lastInTurn;
+    if (presentationChanged || movedRows)
+      updateRow(operation.destination, std::move(replacement));
+    incrementProperty(movedRows ? "modelExactMoveCount"
+                                : "modelExactPlacementUpdateCount");
+  }
+
+  for (auto &[section, change] : changedSections)
+    refreshSectionStructure(section, change.before, change.changedKeys);
+}
+
+bool ConversationItemModel::setProviderHasMore(bool providerHasMore) noexcept {
+  if (hasMore_ == providerHasMore)
+    return false;
+  hasMore_ = providerHasMore;
+  return true;
 }
 
 bool ConversationItemModel::setVisibility(Visibility visibility) {
@@ -713,8 +1015,7 @@ bool ConversationItemModel::setVisibility(Visibility visibility) {
     const bool presented = isPresented(current.card);
     if (presented == current.presented) {
       if (first >= 0) {
-        emit dataChanged(index(first), index(position - 1),
-                         {PresentedRole});
+        emit dataChanged(index(first), index(position - 1), {PresentedRole});
         incrementProperty("modelDataChangeCount");
         first = -1;
       }
@@ -778,36 +1079,44 @@ ConversationItemModel::flatten(ConversationSnapshot &&snapshot) const {
     std::optional<std::string> root;
     if (section.rootCardKey)
       root = stableKey(*section.rootCardKey);
-    const bool representedRoot =
-        root && std::ranges::any_of(section.cards, [&](const auto &card) {
+    const auto representedRoot =
+        root ? std::ranges::find_if(section.cards, [&](const auto &card) {
           return stableKey(card.key) == *root;
-        });
+        }) : section.cards.end();
+    const std::optional<std::size_t> rootPosition =
+        representedRoot == section.cards.end()
+            ? std::nullopt
+            : std::optional<std::size_t>{static_cast<std::size_t>(
+                  std::distance(section.cards.begin(), representedRoot))};
     for (std::size_t position = 0; position < section.cards.size();
          ++position) {
       VisibleCardData card = std::move(section.cards[position]);
       const std::string key = stableKey(card.key);
-      const bool turnRoot = representedRoot && key == *root;
+      const bool turnRoot = rootPosition && position == *rootPosition;
       result.push_back(Row{std::move(card), key, section.key, turnRoot,
-                           representedRoot && !turnRoot, position == 0,
-                           position + 1 == section.cards.size(), false, false,
-                           false});
+                           isNestedTurnCard(rootPosition, position),
+                           position == 0,
+                           position + 1 == section.cards.size(), false, false});
       Row &row = result.back();
       row.presented = isPresented(row.card);
       row.activeTurn = turnRoot && snapshot.activeTurnId &&
                        row.card.turnId == *snapshot.activeTurnId;
-      row.historyActivity = row.card.kind != CardKind::LocalPrompt &&
-                            !(turnRoot && section.rootPinned);
     }
   }
   return result;
 }
 
 bool ConversationItemModel::rowsAreUnique(const std::vector<Row> &rows) const {
-  std::unordered_set<std::string> unique;
-  unique.reserve(rows.size());
-  for (const Row &row : rows)
-    if (row.stableKey.empty() || !unique.insert(row.stableKey).second)
+  std::unordered_set<std::string> stableKeys;
+  std::unordered_set<const nodegraph::Node *> targets;
+  stableKeys.reserve(rows.size());
+  targets.reserve(rows.size());
+  for (const Row &row : rows) {
+    if (row.stableKey.empty() || !stableKeys.insert(row.stableKey).second)
       return false;
+    if (row.card.target && !targets.insert(row.card.target.get()).second)
+      return false;
+  }
   return true;
 }
 
@@ -821,33 +1130,7 @@ ConversationItemModel::Row ConversationItemModel::rowFromPlacement(
   result.nested = placement.nested;
   result.presented = isPresented(result.card);
   result.activeTurn = placement.turnRoot && placement.activeTurn;
-  result.historyActivity = placement.historyActivity;
   return result;
-}
-
-bool ConversationItemModel::sectionPlacementIsValid(
-    int rowIndex, const Row &candidate) const {
-  if (rowIndex < 0 || rowIndex > rowCount() || candidate.sectionKey.empty() ||
-      (candidate.turnRoot && candidate.nested))
-    return false;
-
-  const RowNode *previous =
-      rowIndex > 0 ? nodeAt(static_cast<std::size_t>(rowIndex - 1)) : nullptr;
-  const RowNode *next = rowIndex < rowCount()
-                            ? nodeAt(static_cast<std::size_t>(rowIndex))
-                            : nullptr;
-  const bool previousInSection =
-      previous && previous->value.sectionKey == candidate.sectionKey;
-  const bool nextInSection =
-      next && next->value.sectionKey == candidate.sectionKey;
-  const auto found = sectionRows_.find(candidate.sectionKey);
-  if (found != sectionRows_.end() &&
-      !previousInSection && !nextInSection)
-    return false;
-  if (candidate.turnRoot)
-    return (found == sectionRows_.end() || !found->second.root) &&
-           !previousInSection;
-  return !nextInSection || !next->value.turnRoot;
 }
 
 ConversationItemModel::SectionStructure
@@ -867,7 +1150,7 @@ ConversationItemModel::sectionStructure(const std::string &sectionKey) const {
 
 void ConversationItemModel::refreshSectionStructure(
     const std::string &sectionKey, const SectionStructure &before,
-    const std::string &changedKey) {
+    std::span<const std::string> changedKeys) {
   if (sectionKey.empty())
     return;
   const auto found = sectionRows_.find(sectionKey);
@@ -875,6 +1158,8 @@ void ConversationItemModel::refreshSectionStructure(
     return;
 
   const SectionStructure after = sectionStructure(sectionKey);
+  const std::optional<int> rootPosition =
+      found->second.root ? rowOf(found->second.root) : std::nullopt;
   std::vector<RowNode *> affected;
   affected.reserve(7);
   const auto retain = [this, &affected](const std::string &key) {
@@ -891,9 +1176,10 @@ void ConversationItemModel::refreshSectionStructure(
   retain(after.first);
   retain(after.last);
   retain(after.root);
-  retain(changedKey);
+  for (const std::string &key : changedKeys)
+    retain(key);
 
-  if (before.root != after.root) {
+  if (before.root.empty() != after.root.empty()) {
     affected.clear();
     RowNode *node = found->second.first;
     while (node && node->value.sectionKey == sectionKey) {
@@ -911,7 +1197,10 @@ void ConversationItemModel::refreshSectionStructure(
     QList<int> roles;
     const bool firstInTurn = node == found->second.first;
     const bool lastInTurn = node == found->second.last;
-    const bool nested = found->second.root && node != found->second.root;
+    const bool nested =
+        rootPosition && isNestedTurnCard(
+                            static_cast<std::size_t>(*rootPosition),
+                            static_cast<std::size_t>(*rowPosition));
     if (current.firstInTurn != firstInTurn) {
       current.firstInTurn = firstInTurn;
       roles.push_back(FirstInTurnRole);
@@ -951,7 +1240,6 @@ void ConversationItemModel::rebuildIndexes() {
   sectionRows_.clear();
   stableRows_.reserve(nodeCount(rows_));
   targetRows_.reserve(nodeCount(rows_));
-  historyActivityCount_ = 0;
   std::vector<RowNode *> pending;
   RowNode *current = rows_.get();
   while (current || !pending.empty()) {
@@ -964,8 +1252,6 @@ void ConversationItemModel::rebuildIndexes() {
     stableRows_.emplace(current->value.stableKey, current);
     if (current->value.card.target)
       targetRows_.emplace(current->value.card.target.get(), current);
-    if (current->value.historyActivity)
-      ++historyActivityCount_;
     addSectionIdentity(current);
     current = current->right.get();
   }
@@ -1015,8 +1301,6 @@ ConversationItemModel::insertRow(std::size_t row, Row value) {
   stableRows_.insert_or_assign(result->value.stableKey, result);
   if (result->value.card.target)
     targetRows_.insert_or_assign(result->value.card.target.get(), result);
-  if (result->value.historyActivity)
-    ++historyActivityCount_;
   addSectionIdentity(result);
   return result;
 }
@@ -1033,8 +1317,6 @@ ConversationItemModel::takeRow(std::size_t row) {
   if (!removed)
     return {};
   eraseRowIdentity(removed->value);
-  if (removed->value.historyActivity)
-    --historyActivityCount_;
   removed->parent = nullptr;
   return removed;
 }
@@ -1043,7 +1325,6 @@ void ConversationItemModel::clearRows() noexcept {
   stableRows_.clear();
   targetRows_.clear();
   sectionRows_.clear();
-  historyActivityCount_ = 0;
   rows_.reset();
 }
 
@@ -1182,9 +1463,9 @@ void ConversationItemModel::removeSectionIdentity(RowNode *node) {
   if (section.root == node)
     section.root = nullptr;
   if (section.first == node)
-    section.first =
-        next && next->value.sectionKey == node->value.sectionKey ? next
-                                                                 : nullptr;
+    section.first = next && next->value.sectionKey == node->value.sectionKey
+                        ? next
+                        : nullptr;
   if (section.last == node)
     section.last =
         previous && previous->value.sectionKey == node->value.sectionKey
@@ -1198,8 +1479,7 @@ void ConversationItemModel::removeSectionIdentity(RowNode *node) {
   }
   if (section.member == node) {
     RowNode *replacement = previous;
-    if (!replacement ||
-        replacement->value.sectionKey != node->value.sectionKey)
+    if (!replacement || replacement->value.sectionKey != node->value.sectionKey)
       replacement = next;
     section.member = replacement;
   }
@@ -1265,7 +1545,7 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
   if (before.activeTurn != replacement.activeTurn)
     roles.push_back(ActiveTurnRole);
   if (before.card.payload != replacement.card.payload ||
-      before.card.activeWork != replacement.card.activeWork) {
+      before.card.status != replacement.card.status) {
     roles.push_back(PresentationRole);
     roles.push_back(Qt::AccessibleTextRole);
   }
@@ -1274,7 +1554,6 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
   const bool oldTurnRoot = before.turnRoot;
   const nodegraph::Node *oldTarget =
       before.card.target ? before.card.target.get() : nullptr;
-  const bool oldHistoryActivity = before.historyActivity;
   if (oldSectionKey != replacement.sectionKey ||
       oldTurnRoot != replacement.turnRoot)
     removeSectionIdentity(node);
@@ -1288,16 +1567,11 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
   const nodegraph::Node *newTarget =
       before.card.target ? before.card.target.get() : nullptr;
   if (oldTarget != newTarget) {
-    if (oldTarget)
-      targetRows_.erase(oldTarget);
+    const auto old = targetRows_.find(oldTarget);
+    if (old != targetRows_.end() && old->second == node)
+      targetRows_.erase(old);
     if (newTarget)
       targetRows_.insert_or_assign(newTarget, node);
-  }
-  if (oldHistoryActivity != before.historyActivity) {
-    if (before.historyActivity)
-      ++historyActivityCount_;
-    else
-      --historyActivityCount_;
   }
   if (roles.empty())
     return;

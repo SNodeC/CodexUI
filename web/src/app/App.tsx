@@ -1,23 +1,25 @@
-import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
+import {memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-    ConversationViewportState, DefaultSetting, anchoredScrollTop, changeSettingDraft, canonicalThreadSettings, classifyStatus, displayStatus,
+    UnknownStatus, anchoredScrollTop, changeSettingDraft, displayStatus,
+    fixedSettingChoices, humanizeProtocolLabel as humanize,
     foldedCardScrollTop, nestedScrollConsumes,
-    pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, stableKey,
-    settingDraftFor, settingPromptOptions, trimTrailingEmptyLines,
+    pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
+    isEmptyStatus, isWorkingStatus, projectTurnPlan, settingDraftFor, settingPresentation, settingPromptOptions, statusTone,
+    statusToken, trimTrailingEmptyLines, turnSettingCatalog,
 } from "../index.js";
-import type {ConversationViewportAnchor, PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions, ThreadPresentation} from "../index.js";
+import type {ConversationViewportAnchor, PendingRequestPresentation, SettingCatalog, SettingDraft, SettingField, SettingPresentation, ThreadPresentation} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
+import {DraftThreadId} from "./BrowserFrontendSession.js";
 import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
 import type {AgentPresentation} from "../presentation/PresentationModel.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
-import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -67,6 +69,8 @@ interface DrawerPaneProps {
     onClose?: () => void;
 }
 
+interface ThreadPresentationTarget {threadId: string; presentationKey: string}
+
 export function runThreadPaneNavigation(navigate: () => void, onClose?: () => void): void {
     navigate();
     onClose?.();
@@ -87,7 +91,7 @@ function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "
 }
 
 function CopyIcon({checked}: {checked: boolean}) {
-    return <svg viewBox="0 0 16 16" aria-hidden="true"><g className="copy-glyph"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></g><path className="check-glyph" d="m2.5 8 3.25 3.25L13.5 3.5" data-visible={checked ? "true" : "false"}/></svg>;
+    return <svg viewBox="0 0 16 16" aria-hidden="true"><g className="copy-glyph"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></g><path className="check-glyph" d="m3 8 3.25 3.25L14 3.5" data-visible={checked ? "true" : "false"}/></svg>;
 }
 
 function FoldIcon({collapsed}: {collapsed: boolean}) {
@@ -140,20 +144,20 @@ function persistConversationPresentation(options: ConversationPresentationOption
 
 function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
 
-function effectivePlanStepStatus(stepStatus: string, turnStatus: string, threadStatus: string): string {
-    if (classifyStatus(stepStatus).kind !== "active") return stepStatus;
-    let outcome = classifyStatus(turnStatus).kind;
-    if (!["completed", "failed", "interrupted"].includes(outcome)) outcome = classifyStatus(threadStatus).kind;
-    return outcome === "completed" ? "completed" : outcome === "failed" ? "failed" : outcome === "interrupted" ? "interrupted" : stepStatus;
-}
+const ThreadSortControl = memo(function ThreadSortControl({value, onChange}: {value: ThreadSortCriterion;
+    onChange: (value: ThreadSortCriterion) => void}) {
+    return <label className="thread-sort"><span>Sort</span><select aria-label="Thread sort order" value={value}
+        onChange={event => onChange(event.target.value as ThreadSortCriterion)}>
+        <option value="alphanumeric">Alphanumeric</option><option value="created">Created</option>
+        <option value="recent">Recent</option></select></label>;
+});
 
-function ThreadPane({session, revision, onRequestNewThread, onRequestForkWithOptions, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number; onRequestNewThread: () => void; onRequestForkWithOptions: (threadId: string) => void} & DrawerPaneProps) {
-    void revision;
+function ThreadPane({session, onRequestNewThread, onRequestForkWithOptions, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; onRequestNewThread: () => void; onRequestForkWithOptions: (target: ThreadPresentationTarget) => void} & DrawerPaneProps) {
     const snapshot = session.getSnapshot();
-    const selected = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
-    const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+    const selected = snapshot.selectedThreadId;
+    const [, forceDisclosureState] = useState(0);
     const [sortCriterion, setSortCriterion] = useState<ThreadSortCriterion>("recent");
-    const [contextMenu, setContextMenu] = useState<{threadId: string; x: number; y: number; trigger: HTMLElement} | null>(null);
+    const [contextMenu, setContextMenu] = useState<ThreadPresentationTarget & {x: number; y: number; trigger: HTMLElement} | null>(null);
     const contextMenuRef = useRef<HTMLDivElement>(null);
     const requestMoreNearEnd = (list: HTMLDivElement) => {
         if (list.scrollHeight - list.scrollTop - list.clientHeight <= Math.max(48, list.clientHeight / 2))
@@ -181,9 +185,11 @@ function ThreadPane({session, revision, onRequestNewThread, onRequestForkWithOpt
         document.addEventListener("keydown", keyDown);
         return () => { cancelAnimationFrame(frame); document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", keyDown); };
     }, [contextMenu]);
-    const openContextMenu = (threadId: string, x: number, y: number, trigger: HTMLElement) =>
-        setContextMenu({threadId, x, y, trigger});
-    const contextThread = contextMenu ? session.model.thread(contextMenu.threadId) : undefined;
+    const openContextMenu = (threadId: string, presentationKey: string, x: number, y: number, trigger: HTMLElement) =>
+        setContextMenu({threadId, presentationKey, x, y, trigger});
+    const contextThread = contextMenu && session.threadVisualKey(contextMenu.threadId) === contextMenu.presentationKey
+        ? session.model.thread(contextMenu.threadId) : undefined;
+    useEffect(() => { if (contextMenu && !contextThread) setContextMenu(null); }, [contextMenu, contextThread]);
     const connection = session.model.connection();
     const providerReady = connection.connected && connection.providerState === "ready";
     const invokeContextAction = (action: () => void) => { setContextMenu(null); action(); };
@@ -198,45 +204,66 @@ function ThreadPane({session, revision, onRequestNewThread, onRequestForkWithOpt
                 : (current <= 0 ? buttons.length : current) - 1;
         buttons[index]?.focus();
     };
-    const toggle = (id: string) => setExpanded(current => {
-        const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
-    });
-    const renderThread = (id: string, depth: number): ReactNode => {
+    const toggle = (threadId: string, presentationKey: string, expanded: boolean) => {
+        if (session.viewportState.setThreadExpanded(threadId, presentationKey, !expanded))
+            forceDisclosureState(revision => revision + 1);
+    };
+    const visibleRows: {id: string; presentationKey: string; depth: number; position: number;
+        setSize: number; expanded: boolean}[] = [];
+    const appendVisibleRows = (ids: readonly string[], depth: number) => {
+        const present = ids.filter(id => session.model.thread(id) || id === DraftThreadId && snapshot.newThreadDraft);
+        for (let index = 0; index < present.length; ++index) {
+            const id = present[index]!;
+            const presentationKey = session.threadVisualKey(id);
+            const thread = session.model.thread(id);
+            const expanded = session.viewportState.threadExpanded(id, presentationKey);
+            visibleRows.push({id, presentationKey, depth, position: index + 1, setSize: present.length, expanded});
+            if (thread && expanded) appendVisibleRows(thread.childThreadOrder, depth + 1);
+        }
+    };
+    appendVisibleRows([
+        ...(snapshot.newThreadDraft ? [DraftThreadId] : []), ...session.threadOrder(sortCriterion),
+    ], 0);
+    const renderThread = ({id, presentationKey, depth, position, setSize, expanded}: (typeof visibleRows)[number]): ReactNode => {
         const thread = session.model.thread(id);
-        const optimistic = snapshot.optimisticThreads.find(candidate => candidate.id === id);
-        if (!thread && !optimistic) return null;
-        const status = classifyStatus(thread?.status ?? "");
+        const draft = id === DraftThreadId ? snapshot.newThreadDraft : undefined;
+        if (!thread && !draft) return null;
+        const draftSubmissions = draft ? session.prompts.submissions(id) : [];
+        const draftActive = draftSubmissions.some(value => value.state === "queued" || value.state === "inFlight");
+        const draftFailed = !draftActive && draftSubmissions.some(value => value.state === "failed");
+        const status = thread?.status ?? UnknownStatus;
         const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
         const promptAnimating = session.threadPromptAnimating(id);
-        const optimisticClass = optimistic?.state === "failed" ? " optimistic-failed"
+        const optimisticClass = draftFailed ? " optimistic-failed"
             : promptAnimating ? " prompt-awaiting"
-                : optimistic ? ` optimistic-${optimistic.state}` : "";
-        const title = optimistic?.title || thread?.title || id;
-        const detail = optimistic ? optimistic.state === "failed" ? "not created" : optimistic.state === "confirmed" ? "created" : "creating" : thread?.cwd || thread?.preview || id;
-        const statusText = optimistic ? detail : displayStatus(thread?.status ?? "");
+                : draft ? " optimistic-awaiting" : "";
+        const title = draft?.name || thread?.title || (draft ? "New thread" : id);
+        const detail = draft ? draftFailed ? "not created" : "creating" : thread?.cwd || thread?.preview || id;
+        const statusText = draft ? detail : displayStatus(status);
         const parentId = session.model.childOwnership(id)?.parentThreadId;
         const recentAt = session.threadRecentAt(id);
-        const hoverDetails = [title, `Workspace: ${thread?.cwd || optimistic?.cwd || "Unknown"}`,
+        const hoverDetails = [title, `Workspace: ${thread?.cwd || draft?.workspace || "Unknown"}`,
             `Status: ${statusText}`,
             `Recent turn: ${recentAt === undefined ? "Unknown" : threadTimestampText(recentAt)}`,
             `Created: ${thread?.createdAt === undefined ? "Unknown" : threadTimestampText(thread.createdAt)}`,
             `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : threadTimestampText(thread.lastActivityAt)}`,
             ...(parentId ? [`Parent: ${session.model.thread(parentId)?.title || parentId}`] : [])];
         const accessibleDetails = hoverDetails.join(", ");
-        return <div key={session.threadVisualKey(id)} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
-            aria-expanded={hasChildren ? expanded.has(id) : undefined} aria-label={accessibleDetails} title={hoverDetails.join("\n")}>
-            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextMenu?.threadId === id ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
-                onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, event.clientX, event.clientY, event.currentTarget); }}>
-                <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
+        const contextOpen = contextMenu?.threadId === id && contextMenu.presentationKey === presentationKey;
+        return <div key={presentationKey} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
+            aria-posinset={position} aria-setsize={setSize} aria-expanded={hasChildren ? expanded : undefined}
+            aria-label={accessibleDetails} title={hoverDetails.join("\n")}>
+            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextOpen ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
+                onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, presentationKey, event.clientX, event.clientY, event.currentTarget); }}>
+                <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded ? "⌄" : "›") : ""}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
-                    aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
-                    <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><strong>{title}</strong>
+                    aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id, presentationKey), onClose)}>
+                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : statusTone(status) || "muted"} /><strong>{title}</strong>
                 </button>
                 {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
-                    aria-haspopup="menu" aria-expanded={contextMenu?.threadId === id}
-                    onClick={event => { event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContextMenu(id, bounds.right, bounds.bottom, event.currentTarget); }}>•••</button>}
+                    aria-haspopup="menu" aria-expanded={contextOpen}
+                    onClick={event => { event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContextMenu(id, presentationKey, bounds.right, bounds.bottom, event.currentTarget); }}>•••</button>}
             </div>
-            {thread && hasChildren && expanded.has(id) && <div role="group">{thread.childThreadOrder.map(child => renderThread(child, depth + 1))}</div>}
         </div>;
     };
     return <aside ref={paneRef} className={`thread-pane${drawer ? " responsive-drawer drawer-left" : ""}`} id={drawer ? "thread-pane" : undefined}
@@ -244,24 +271,18 @@ function ThreadPane({session, revision, onRequestNewThread, onRequestForkWithOpt
         <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
             <div className="pane-heading-actions"><button className="icon-button" onClick={onRequestNewThread} title="New thread" aria-label="New thread">＋</button>
                 {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
-        <label className="thread-sort"><span>Sort</span><select aria-label="Thread sort order" value={sortCriterion}
-            onChange={event => setSortCriterion(event.target.value as ThreadSortCriterion)}>
-            <option value="alphanumeric">Alphanumeric</option>
-            <option value="created">Created</option>
-            <option value="recent">Recent</option>
-        </select></label>
+        <ThreadSortControl value={sortCriterion} onChange={setSortCriterion} />
         <div className="thread-list" role="tree" aria-label="Threads"
             onScroll={event => requestMoreNearEnd(event.currentTarget)}>
-            {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
-            {session.threadOrder(sortCriterion).filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
+            {visibleRows.map(renderThread)}
         </div>
         {contextThread && contextMenu && <div ref={contextMenuRef} className="thread-context-menu" role="menu" aria-label={`Actions for ${contextThread.title || contextThread.id}`} onKeyDown={navigateContextMenu}>
-            <button role="menuitem" disabled={!providerReady} onClick={() => invokeContextAction(() => session.reloadThread(contextThread.id))}>Reload</button>
-            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.rename", contextThread.id)} onClick={() => invokeContextAction(() => { const name = window.prompt("Thread name", contextThread.title); if (name?.trim()) session.renameThread(contextThread.id, name.trim()); })}>Rename</button>
-            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id))}>Quick fork</button>
-            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id)} onClick={() => invokeContextAction(() => onRequestForkWithOptions(contextThread.id))}>Fork with options…</button>
-            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.archive", contextThread.id)} onClick={() => invokeContextAction(() => session.archiveThread(contextThread.id, contextThread.archived))}>{contextThread.archived ? "Unarchive" : "Archive"}</button>
-            <button role="menuitem" className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", contextThread.id)} onClick={() => invokeContextAction(() => { if (window.confirm(`Delete “${contextThread.title || contextThread.id}”?`)) session.deleteThread(contextThread.id); })}>Delete</button>
+            <button role="menuitem" disabled={!providerReady} onClick={() => invokeContextAction(() => session.reloadThread(contextThread.id, contextMenu.presentationKey))}>Reload</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.rename", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => { const name = window.prompt("Thread name", contextThread.title); if (name?.trim()) session.renameThread(contextThread.id, name.trim(), contextMenu.presentationKey); })}>Rename</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id, undefined, contextMenu.presentationKey))}>Quick fork</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => onRequestForkWithOptions({threadId: contextThread.id, presentationKey: contextMenu.presentationKey}))}>Fork with options…</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.archive", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => session.archiveThread(contextThread.id, contextThread.archived, contextMenu.presentationKey))}>{contextThread.archived ? "Unarchive" : "Archive"}</button>
+            <button role="menuitem" className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => { if (window.confirm(`Delete “${contextThread.title || contextThread.id}”?`)) session.deleteThread(contextThread.id, contextMenu.presentationKey); })}>Delete</button>
         </div>}
     </aside>;
 }
@@ -355,7 +376,7 @@ function planMarkdown(plan: PlanData): string {
     const rows = plan.explanation ? [plan.explanation] : [];
     if (plan.steps.length > 0 && rows.length > 0) rows.push("");
     for (const step of plan.steps) {
-        const marker = step.status === "completed" ? "✓" : step.status === "inProgress" ? "◉" : "○";
+        const marker = step.status.semantic === "completed" ? "✓" : step.status.semantic === "running" ? "◉" : "○";
         rows.push(`${marker} ${step.text}  `);
     }
     return rows.join("\n");
@@ -380,8 +401,8 @@ function commandMetadata(command: CommandExecutionData): string {
     return values.filter(Boolean).join("  |  ");
 }
 
-function agentMetadata(activity: AgentActivityData): string {
-    return [activity.tool, !activity.status && activity.kind ? displayStatus(activity.kind) : "", activity.receivers.join(", "), activity.model,
+function agentMetadata(activity: AgentActivityData, status: VisibleCardData["status"]): string {
+    return [activity.tool, isEmptyStatus(status) ? activity.kind : "", activity.receivers.join(", "), activity.model,
         activity.reasoningEffort, activity.childThreadId ? `thread ${activity.childThreadId}` : "",
         activity.agentPath, activity.senderThreadId ? `sender ${activity.senderThreadId}` : ""]
         .filter(Boolean).join("  |  ");
@@ -479,8 +500,10 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     let title = humanize(card.kind);
     let body: ReactNode;
     let cardVariant = "";
-    let phaseClass = "";
-    let phaseLabel = "";
+    const presentsStatus = ["commandExecution", "agentActivity", "fileChanges", "imageGeneration", "genericActivity"]
+        .includes(card.kind) && !isEmptyStatus(card.status);
+    let phaseClass = presentsStatus ? `status ${statusTone(card.status)}` : "";
+    let phaseLabel = presentsStatus ? displayStatus(card.status) : "";
     if (card.kind === "userMessage") {
         const data = card.payload as UserMessageData; title = "You"; phaseLabel = nestedCard ? "steering" : "";
         body = <><SafeMarkdown text={userMessageMarkdownText(data.text)} /><ImageRibbon paths={data.imagePaths} /></>;
@@ -494,38 +517,35 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as ReasoningData; title = "Reasoning";
         body = data.summary ? <SafeMarkdown text={data.summary} /> : active ? <div className="activity-line"><i />Working…</div> : null;
     } else if (card.kind === "commandExecution") {
-        const data = card.payload as CommandExecutionData; title = "Command execution"; phaseLabel = displayStatus(data.status); phaseClass = `status ${classifyStatus(data.status).tone}`;
+        const data = card.payload as CommandExecutionData; title = "Command execution";
         const metadata = commandMetadata(data);
         body = <><ScrollableCode className="command-line" label="Command" text={trimTrailingEmptyLines(data.command)} />
             {data.output && <ScrollableCode className="command-output" label="Command output" text={trimTrailingEmptyLines(data.output)} />}
             {metadata && <small className="card-status">{metadata}</small>}</>;
     } else if (card.kind === "fileChanges") {
-        const data = card.payload as FileChangesData; title = "File changes"; phaseLabel = displayStatus(data.status); phaseClass = `status ${classifyStatus(data.status).tone}`;
+        const data = card.payload as FileChangesData; title = "File changes";
         body = <><div className="file-list">{data.changes.map(change => <div key={`${change.path}:${change.kind}`}>
             <span>{change.path}</span><small>{humanize(change.kind)} {change.additions !== undefined && <b className="plus">+{change.additions}</b>} {change.deletions !== undefined && <b className="minus">−{change.deletions}</b>}</small>
         </div>)}</div><small className="card-status">{fileChangeMetadata(data)}</small></>;
     } else if (card.kind === "agentActivity") {
-        const data = card.payload as AgentActivityData; title = "Agent activity"; phaseLabel = data.status ? displayStatus(data.status) : ""; phaseClass = data.status ? `status ${classifyStatus(data.status).tone}` : "";
-        const metadata = agentMetadata(data);
+        const data = card.payload as AgentActivityData; title = "Agent activity";
+        const metadata = agentMetadata(data, card.status);
         body = <>{metadata && <small className="card-status">{metadata}</small>}
             {data.prompt && <div className="card-text">{data.prompt}</div>}{data.resultText && <SafeMarkdown text={data.resultText} />}</>;
     } else if (card.kind === "imageGeneration") {
-        const data = card.payload as ImageGenerationData; title = data.status || data.revisedPrompt ? "Generated image" : "Image"; phaseLabel = data.status ? displayStatus(data.status) : ""; phaseClass = data.status ? `status ${classifyStatus(data.status).tone}` : "";
+        const data = card.payload as ImageGenerationData; title = !isEmptyStatus(card.status) || data.revisedPrompt ? "Generated image" : "Image";
         body = <>{data.revisedPrompt && <div className="card-text">{data.revisedPrompt}</div>}<ImageRibbon paths={data.path ? [data.path] : []} /></>;
     } else if (card.kind === "plan") {
         const data = card.payload as PlanData; title = "Plan"; body = <SafeMarkdown text={planMarkdown(data)} />;
     } else {
         const data = card.payload as GenericActivityData; title = data.type ? humanize(data.type) : "Activity";
-        phaseLabel = data.status ? displayStatus(data.status) : "";
-        phaseClass = data.status ? `status ${classifyStatus(data.status).tone}` : "";
         body = <pre className="generic-activity-data">{boundedGenericActivity(data.raw)}</pre>;
     }
     const copyContent = cardCopyContent(card);
     const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "plan", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
     const activeTurn = active && turnContainer && (card.kind === "localPrompt" || card.kind === "userMessage");
-    const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
-        && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
+    const activeWork = isWorkingStatus(card.status);
     const delayedPending = card.kind === "localPrompt" && (card.payload as LocalPromptData).showPendingAnimation;
     return <article className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
@@ -533,7 +553,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
 }
 
 interface PendingConversationGeometry {
-    threadId: string;
+    presentationKey: string;
     following: boolean;
     anchor: ConversationViewportAnchor | undefined;
     fold?: {cardKey: string; collapsed: boolean; previousTitleTop: number};
@@ -571,46 +591,45 @@ export function ThreadLoadingSurface({spinning}: {spinning: boolean}) {
     </div>;
 }
 
-function Conversation({session, revision, paneControls}: {session: BrowserFrontendSession; revision: number; paneControls?: ReactNode}) {
+function Conversation({session, paneControls}: {session: BrowserFrontendSession; paneControls?: ReactNode}) {
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
-    const projectionId = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
-    const viewport = useRef(new ConversationViewportState()).current;
+    const projectionId = snapshot.selectedThreadId;
+    const presentationKey = session.threadVisualKey(projectionId);
+    const viewport = session.viewportState;
     const authoritativeCount = thread?.turnOrder.reduce((count, id) =>
         count + (thread.turns.get(id)?.itemOrder.length ?? 0), 0) ?? 0;
-    const limit = viewport.effectiveLimit(projectionId, authoritativeCount);
+    const limit = viewport.effectiveLimit(projectionId, presentationKey, authoritativeCount);
     const conversation = session.conversation(limit);
     const pane = useRef<HTMLElement>(null);
     const scroll = useRef<HTMLDivElement>(null);
     const composerDock = useRef<HTMLDivElement>(null);
-    const previousThread = useRef(projectionId);
-    const renderedRevision = useRef(revision);
+    const previousPresentation = useRef(presentationKey);
     const pendingGeometry = useRef<PendingConversationGeometry>();
-    const folding = useRef(new Map<string, boolean>());
     const [cardStateRevision, forceCardState] = useState(0);
-    const displayedProjection = useRef(projectionId);
+    const displayedPresentation = useRef(presentationKey);
     const transitionGeneration = useRef(0);
     const [spinnerProjection, setSpinnerProjection] = useState("");
-    const threadTransitionActive = snapshot.selectedThreadId !== ""
-        && (snapshot.selectedThreadLoading || displayedProjection.current !== projectionId);
+    const threadTransitionActive = projectionId !== "" && projectionId !== DraftThreadId
+        && (snapshot.selectedThreadLoading || displayedPresentation.current !== presentationKey);
     useEffect(() => {
         const generation = ++transitionGeneration.current;
         if (!threadTransitionActive) {
-            displayedProjection.current = projectionId;
+            displayedPresentation.current = presentationKey;
             setSpinnerProjection("");
             return;
         }
         let spinnerTimer: ReturnType<typeof setTimeout> | undefined;
         let revealFrame: number | undefined;
         if (snapshot.selectedThreadLoading) {
-            setSpinnerProjection(current => current === projectionId ? current : "");
+            setSpinnerProjection(current => current === presentationKey ? current : "");
             spinnerTimer = setTimeout(() => {
-                if (transitionGeneration.current === generation) setSpinnerProjection(projectionId);
+                if (transitionGeneration.current === generation) setSpinnerProjection(presentationKey);
             }, ThreadLoadingSpinnerDelayMilliseconds);
         } else {
             revealFrame = requestAnimationFrame(() => {
                 if (transitionGeneration.current !== generation) return;
-                displayedProjection.current = projectionId;
+                displayedPresentation.current = presentationKey;
                 setSpinnerProjection("");
                 forceCardState(value => value + 1);
             });
@@ -619,31 +638,32 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
             if (spinnerTimer !== undefined) clearTimeout(spinnerTimer);
             if (revealFrame !== undefined) cancelAnimationFrame(revealFrame);
         };
-    }, [projectionId, snapshot.selectedThreadLoading, threadTransitionActive]);
+    }, [presentationKey, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
-    const drafts = useRef(new Map<string, string>());
-    const draftRevision = useRef(snapshot.newThreadDraftRevision);
-    if (draftRevision.current !== snapshot.newThreadDraftRevision) {
-        drafts.current.clear();
-        draftRevision.current = snapshot.newThreadDraftRevision;
-    }
-    const settingsDrafts = useRef(new Map<string, SettingDraft>()).current;
-    const [, forceSettingsState] = useState(0);
-    const canonicalSettings = canonicalThreadSettings(thread?.raw ?? (snapshot.newThreadDraft?.workspace
-        ? {cwd: snapshot.newThreadDraft.workspace} : {}), thread?.domains.get("thread.settings.changed"));
-    const settingsRevision = thread?.settingsRevision ?? 0;
-    const settingsDraft = settingDraftFor(settingsDrafts, projectionId, canonicalSettings, settingsRevision);
-    const settingsOptions = settingPromptOptions(settingsDraft, session.model.modelCatalog());
+    const draftGeneration = session.composerVisualKey();
+    const settingsDrafts = session.settingDrafts;
+    const [settingsStateRevision, forceSettingsState] = useState(0);
+    const settingsIdentity = presentationKey;
+    const catalogSource = session.model.turnSettingsCatalogs();
+    const settingsCatalog = useMemo(() => turnSettingCatalog(catalogSource),
+        [catalogSource.models, catalogSource.permissionProfiles]);
+    const newThreadWorkspace = snapshot.newThreadDraft?.workspace ?? "";
+    const canonicalSettings = useMemo(() => thread?.raw ?? (newThreadWorkspace ? {cwd: newThreadWorkspace} : {}),
+        [thread?.raw, newThreadWorkspace]);
+    const [settingsDraft, settingsProjection, settingsOptions] = useMemo(() => {
+        const draft = settingDraftFor(settingsDrafts, settingsIdentity, canonicalSettings,
+            settingsCatalog, thread?.settingStamps);
+        return [draft, settingPresentation(draft, settingsCatalog), settingPromptOptions(draft, settingsCatalog)];
+    }, [canonicalSettings, settingsCatalog, settingsDrafts, settingsIdentity, settingsStateRevision,
+        thread?.settingStamps]);
     useBrowserLayoutEffect(() => {
         const element = scroll.current;
         if (!element) return;
-        const saved = viewport.scroll(projectionId);
-        const revisionChanged = renderedRevision.current !== revision;
-        renderedRevision.current = revision;
-        const switchedThread = previousThread.current !== projectionId;
-        const transaction = pendingGeometry.current?.threadId === projectionId ? pendingGeometry.current : undefined;
-        if (switchedThread) {
-            previousThread.current = projectionId;
+        const saved = viewport.scroll(projectionId, presentationKey);
+        const switchedPresentation = previousPresentation.current !== presentationKey;
+        const transaction = pendingGeometry.current?.presentationKey === presentationKey ? pendingGeometry.current : undefined;
+        if (switchedPresentation) {
+            previousPresentation.current = presentationKey;
             pendingGeometry.current = undefined;
             if (saved.following) element.scrollTop = element.scrollHeight;
             else restoreConversationAnchor(element, saved.anchor, saved.scrollTop);
@@ -661,38 +681,40 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
             }
         } else if (transaction?.following || (!transaction && saved.following)) {
             element.scrollTop = element.scrollHeight;
-        } else if (transaction || revisionChanged) {
+        } else {
             restoreConversationAnchor(element, transaction?.anchor ?? saved.anchor, saved.scrollTop);
         }
         const following = transaction?.fold ? false : transaction?.following ?? saved.following;
-        viewport.updateScroll(projectionId, element.scrollTop, following, conversationAnchor(element));
+        viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, conversationAnchor(element));
         if (transaction) pendingGeometry.current = undefined;
-    }, [revision, projectionId, cardStateRevision, presentation, viewport]);
+    }, [snapshot.revision, projectionId, presentationKey, cardStateRevision, presentation, viewport]);
     useBrowserLayoutEffect(() => {
         const dock = composerDock.current; const owner = pane.current;
         if (!dock || !owner || typeof ResizeObserver === "undefined") return;
         let previousHeight = 0;
         const observer = new ResizeObserver(() => {
+            if (session.threadVisualKey(projectionId) !== presentationKey) return;
             const element = scroll.current; const height = Math.ceil(dock.getBoundingClientRect().height);
             if (height === previousHeight) return;
-            const saved = viewport.scroll(projectionId);
+            const saved = viewport.scroll(projectionId, presentationKey);
             const anchor = element ? conversationAnchor(element) ?? saved.anchor : saved.anchor;
             owner.style.setProperty("--composer-overlay-height", `${height}px`);
             if (element && previousHeight !== 0) {
                 if (height > previousHeight && saved.following) element.scrollTop = element.scrollHeight;
                 else restoreConversationAnchor(element, anchor, saved.scrollTop);
-                viewport.updateScroll(projectionId, element.scrollTop, saved.following, conversationAnchor(element));
+                viewport.updateScroll(projectionId, presentationKey, element.scrollTop, saved.following,
+                    conversationAnchor(element));
             }
             previousHeight = height;
         });
         observer.observe(dock);
         return () => observer.disconnect();
-    }, [projectionId, viewport]);
+    }, [projectionId, presentationKey, viewport]);
     const pauseForRelayout = () => {
         if (!scroll.current) return;
         const anchor = conversationAnchor(scroll.current);
-        pendingGeometry.current = {threadId: projectionId, following: false, anchor};
-        viewport.updateScroll(projectionId, scroll.current.scrollTop, false, anchor);
+        pendingGeometry.current = {presentationKey, following: false, anchor};
+        viewport.updateScroll(projectionId, presentationKey, scroll.current.scrollTop, false, anchor);
     };
     const updatePresentation = (change: Partial<ConversationPresentationOptions>) => setPresentation(current => {
         if (change.showReasoning !== undefined || change.showCodexUpdates !== undefined) pauseForRelayout();
@@ -704,13 +726,11 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         return (card.payload as AgentMessageData).finalAnswer || presentation.showCodexUpdates;
     };
     const cardCollapsed = (card: VisibleCardData, key: string) => {
-        if (!folding.current.has(key))
-            folding.current.set(key,
-                (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)
-                || (card.kind === "imageGeneration" && !presentation.imagesInitiallyExpanded)
-                || (card.kind === "reasoning" && Boolean((card.payload as ReasoningData).summary))
-                || ["fileChanges", "agentActivity", "plan", "genericActivity"].includes(card.kind));
-        return folding.current.get(key) ?? false;
+        const initiallyCollapsed = (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)
+            || (card.kind === "imageGeneration" && !presentation.imagesInitiallyExpanded)
+            || (card.kind === "reasoning" && Boolean((card.payload as ReasoningData).summary))
+            || ["fileChanges", "agentActivity", "plan", "genericActivity"].includes(card.kind);
+        return viewport.cardCollapsed(projectionId, presentationKey, key, initiallyCollapsed);
     };
     const toggleCard = (key: string, collapsed: boolean) => {
         const element = scroll.current; const card = element ? cardForKey(element, key) : undefined;
@@ -718,11 +738,12 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         if (element && header) {
             const previousTitleTop = header.getBoundingClientRect().top - element.getBoundingClientRect().top;
             const anchor = conversationAnchor(element);
-            pendingGeometry.current = {threadId: projectionId, following: false, anchor,
+            pendingGeometry.current = {presentationKey, following: false, anchor,
                 fold: {cardKey: key, collapsed: !collapsed, previousTitleTop}};
-            viewport.updateScroll(projectionId, element.scrollTop, false, anchor);
+            viewport.updateScroll(projectionId, presentationKey, element.scrollTop, false, anchor);
         }
-        folding.current.set(key, !collapsed); forceCardState(value => value + 1);
+        if (viewport.setCardCollapsed(projectionId, presentationKey, key, !collapsed))
+            forceCardState(value => value + 1);
     };
     const copyCard = (content: CardCopyContent) => writeCardClipboard(content);
     const visibleSections = conversation.sections
@@ -730,14 +751,14 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         .filter(section => section.cards.length > 0);
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
-        return <Card key={key} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
+        return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
-            <div className="conversation-lockup"><h1>{thread?.title ?? (snapshot.newThreadIntent ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
+            <div className="conversation-lockup"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
                 <p className="conversation-meta">{thread ? thread.cwd
-                    : snapshot.newThreadIntent ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>
-                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={classifyStatus(thread.status).tone}>{displayStatus(thread.status)}</strong></p>}</div></div>
+                    : projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>
+                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={statusTone(thread.status)}>{displayStatus(thread.status)}</strong></p>}</div></div>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
@@ -751,65 +772,67 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
             aria-busy={threadTransitionActive || undefined} onScroll={event => {
             const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-            viewport.updateScroll(projectionId, element.scrollTop, following, conversationAnchor(element));
+            viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following,
+                conversationAnchor(element));
         }}>
             {threadTransitionActive
-                ? <ThreadLoadingSurface spinning={spinnerProjection === projectionId} />
-                : <>{conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
+                ? <ThreadLoadingSurface spinning={spinnerProjection === presentationKey} />
+                : <>{conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId, presentationKey); forceCardState(value => value + 1); }}>Load earlier activity</button>}
                     {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
                     {visibleSections.map(section => {
                         const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
                         const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
                         const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
                         const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card, undefined, false, true)) : undefined;
-                        return <section key={section.key} className="turn-section">
+                        return <section key={`${presentationKey}:${rootKey || section.key}`} className="turn-section">
                             {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
                         </section>;
                     })}</>}
         </div>
         <div ref={composerDock} className="composer-dock">
-            <SettingsPanel key={`settings:${projectionId}`} session={session} draft={settingsDraft} onChange={(field, value) => {
-                changeSettingDraft(settingsDrafts, projectionId, canonicalSettings, settingsRevision, field, value);
+            <SettingsPanel key={`settings:${settingsIdentity}`} draft={settingsDraft} presentation={settingsProjection}
+                onChange={(field, value) => {
+                if (session.threadVisualKey(projectionId) !== settingsIdentity) return;
+                changeSettingDraft(settingsDrafts, settingsIdentity, canonicalSettings, settingsCatalog,
+                    settingsDraft.settingStamps, field, value);
                 forceSettingsState(revision => revision + 1);
             }} />
-            <Composer key={`shared-composer:${snapshot.newThreadDraftRevision}`} session={session} active={Boolean(thread || snapshot.newThreadIntent) && session.canSubmit()} draftKey="shared" drafts={drafts.current} options={settingsOptions} />
+            <Composer key={`shared-composer:${draftGeneration}`} session={session} presentationKey={presentationKey}
+                active={Boolean(thread || projectionId === DraftThreadId) && session.canSubmit()} options={settingsOptions} />
         </div>
     </main>;
 }
 
-function SettingsPanel({session, draft, onChange}: {session: BrowserFrontendSession; draft: SettingDraft; onChange: (field: SettingField, value: string) => void}) {
+const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange}: {draft: SettingDraft;
+    presentation: SettingPresentation; onChange: (field: SettingField, value: string) => void}) {
     const [open, setOpen] = useState(false);
     const {values, touched} = draft;
-    const models = session.model.modelCatalog();
-    const modelDefinitions = Array.isArray(models) ? models : [];
-    const profilesDomain = session.model.globalDomains().get("operation.permission-profiles.list");
-    const profiles = Array.isArray(profilesDomain) ? profilesDomain : (profilesDomain && typeof profilesDomain === "object" && Array.isArray((profilesDomain as {data?: unknown}).data) ? (profilesDomain as {data: unknown[]}).data : []);
-    const select = (label: string, field: SettingField, choices: readonly [string, string][]) => <label><span>{label}</span><select value={values[field]} onChange={event => onChange(field, event.target.value)}>{choices.map(([name, value]) => <option key={value} value={value}>{name}</option>)}</select></label>;
-    const defaults: [string, string] = ["Thread default", DefaultSetting];
+    const select = (label: string, field: SettingField, choices: SettingPresentation["models"], enabled = true, tooltip = "") => <label title={tooltip || undefined}><span>{label}</span><select value={values[field]} disabled={!enabled} onChange={event => onChange(field, event.target.value)}>{choices.map(choice => <option key={choice.value} value={choice.value} title={choice.description || undefined}>{choice.label}</option>)}</select></label>;
     return <div className={`settings-panel ${open ? "open" : ""}`}
         onWheel={event => event.preventDefault()}>
         <button className="settings-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>Turn settings <span>{touched.size > 0 ? `${touched.size} changed` : "Thread defaults"} {open ? "⌃" : "⌄"}</span></button>
         {open && <div className="settings-grid">
-            {select("Model", "model", [defaults, ...modelDefinitions.filter(value => typeof value === "object" && value !== null && !((value as {hidden?: boolean}).hidden)).map(value => [String((value as {displayName?: string}).displayName ?? (value as {model?: string; id?: string}).model ?? (value as {id?: string}).id), String((value as {model?: string; id?: string}).model ?? (value as {id?: string}).id)] as [string, string])])}
-            {select("Reasoning", "effort", [defaults, ...["minimal", "low", "medium", "high", "xhigh", "ultra"].map(value => [humanize(value), value] as [string, string])])}
-            {select("Access", "sandbox", [defaults, ["Workspace", "workspace-write"], ["Read only", "read-only"], ["Full access", "danger-full-access"], ["External", "external"]])}
-            {select("Network", "network", [defaults, ["Restricted", "restricted"], ["Enabled", "enabled"]])}
+            {select("Model", "model", presentation.models)}
+            {select("Reasoning", "effort", presentation.efforts)}
+            {select("Access", "sandbox", fixedSettingChoices("sandbox", values.sandbox))}
+            {select("Network", "network", fixedSettingChoices("network", values.network), presentation.networkDisabledReason === "", presentation.networkDisabledReason)}
             <label><span>Workspace</span><input value={values.cwd} placeholder="Provider workspace path" onChange={event => onChange("cwd", event.target.value)} /></label>
-            {select("Approval", "approval", [defaults, ["On request", "on-request"], ["Untrusted", "untrusted"], ["Never", "never"]])}
-            {select("Style", "personality", [defaults, ["None", "none"], ["Friendly", "friendly"], ["Pragmatic", "pragmatic"]])}
-            {select("Approval reviewer", "reviewer", [defaults, ["User", "user"], ["Auto review", "auto_review"], ["Guardian", "guardian_subagent"]])}
-            {select("Permission profile", "permissionProfile", [defaults, ...profiles.filter(value => typeof value === "object" && value !== null && (value as {allowed?: boolean}).allowed !== false).map(value => { const id = String((value as {id?: string}).id); return [permissionProfileLabel(id), id] as [string, string]; })])}
-            <label><span>Service tier</span><input value={values.serviceTier === DefaultSetting ? "" : values.serviceTier} placeholder="Thread default" onChange={event => onChange("serviceTier", event.target.value || DefaultSetting)} /></label>
-            {select("Reasoning summary", "summary", [defaults, ["Auto", "auto"], ["Concise", "concise"], ["Detailed", "detailed"], ["None", "none"]])}
-            {select("Collaboration mode", "collaboration", [["Code", "default"], ["Plan", "plan"]])}
+            {select("Approval", "approval", fixedSettingChoices("approval", values.approval))}
+            {select("Style", "personality", fixedSettingChoices("personality", values.personality), presentation.personalityDisabledReason === "", presentation.personalityDisabledReason)}
+            {select("Approval reviewer", "reviewer", fixedSettingChoices("reviewer", values.reviewer))}
+            {select("Permission profile", "permissionProfile", presentation.permissionProfiles)}
+            {select("Service tier", "serviceTier", presentation.serviceTiers)}
+            {select("Reasoning summary", "summary", fixedSettingChoices("summary", values.summary))}
+            {select("Collaboration mode", "collaboration", fixedSettingChoices("collaboration", values.collaboration))}
         </div>}
     </div>;
-}
+}, (previous, current) => previous.draft === current.draft && previous.presentation === current.presentation);
 
-function Composer({session, active, draftKey, drafts, options}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>; options: SettingPromptOptions}) {
-    const [prompt, setPrompt] = useState(drafts.get(draftKey) ?? "");
+function Composer({session, presentationKey, active, options}: {session: BrowserFrontendSession;
+    presentationKey: string; active: boolean; options: ReturnType<typeof settingPromptOptions>}) {
+    const [prompt, setPrompt] = useState("");
     const editor = useRef<HTMLTextAreaElement>(null);
-    const running = session.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
+    const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     useBrowserLayoutEffect(() => {
         const element = editor.current;
         if (!element) return;
@@ -822,12 +845,13 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
     }, [prompt]);
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (!active || prompt.trim() === "") return;
-        const value = prompt; setPrompt(""); drafts.set(draftKey, "");
-        void session.submitPrompt(value, [], options.turn, options.thread);
+        if (!active || prompt.trim() === "" || !session.canSubmit(presentationKey)) return;
+        const value = prompt;
+        void session.submitPrompt(value, [], options.turn, options.thread, presentationKey);
+        setPrompt("");
     };
     return <form className="composer" onSubmit={submit}>
-        <textarea ref={editor} value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
+        <textarea ref={editor} value={prompt} disabled={!active} onChange={event => setPrompt(event.target.value)}
             aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
             onKeyDown={event => { const composing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229; if (shouldSubmitPromptFromKey({
                 key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
@@ -839,17 +863,27 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
             placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={1} />
         <div className="composer-actions"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span>
             <span className="composer-submit-actions"><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || prompt.trim() === ""}>{running ? "Steer ↑" : "Send ↑"}</button>
-                {running && <button type="button" className="stop-button" onClick={() => session.interrupt()}>■ Stop</button>}</span></div>
+                {running && <button type="button" className="stop-button" onClick={() => session.interrupt(presentationKey)}>■ Stop</button>}</span></div>
     </form>;
 }
 
-export function inspectorPlainState(selected: ThreadPresentation | undefined, enabled: boolean): unknown {
+export function inspectorPlainState(selected: ThreadPresentation | undefined, enabled: boolean) {
     if (!enabled || !selected) return null;
+    const changedPaths = new Set<string>();
+    const turns = selected.turnOrder.map(id => {
+        const turn = selected.turns.get(id)!;
+        return {id, status: statusToken(turn.status), plan: turn.plan, items: turn.itemOrder.map(itemId => {
+            const raw = turn.items.get(itemId)?.raw;
+            if (stringMember(raw, "type") === "fileChange" && Array.isArray(raw?.changes))
+                for (const change of raw.changes) { const path = stringMember(change, "path"); if (path) changedPaths.add(path); }
+            return raw;
+        })};
+    });
     return {
-        id: selected.id, title: selected.title, cwd: selected.cwd, status: selected.status, archived: selected.archived,
-        turns: selected.turnOrder.map(id => { const turn = selected.turns.get(id)!; return {id, status: turn.status, plan: turn.plan,
-            items: turn.itemOrder.map(itemId => turn.items.get(itemId)?.raw)}; }),
-        agents: selected.agentOrder.map(id => selected.agents.get(id)), domains: Object.fromEntries(selected.domains),
+        id: selected.id, title: selected.title, cwd: selected.cwd, status: statusToken(selected.status), archived: selected.archived,
+        turns,
+        agents: selected.agentOrder.map(id => { const agent = selected.agents.get(id)!; return {...agent, status: statusToken(agent.status)}; }),
+        changedFileCount: changedPaths.size,
     };
 }
 
@@ -887,7 +921,7 @@ export function InspectorAgentCard({id, agent}: {id: string; agent: AgentPresent
     };
     const title = agent.raw.agentPath ? String(agent.raw.agentPath) : id;
     return <article className={`agent-card${expanded ? " expanded" : " collapsed"}`}>
-        <header><strong>{title}</strong><span className="agent-card-actions"><span className={`status ${classifyStatus(agent.status).tone}`}>{displayStatus(agent.status)}</span>
+        <header><strong>{title}</strong><span className="agent-card-actions"><span className={`status ${statusTone(agent.status)}`}>{displayStatus(agent.status)}</span>
             <button className={`agent-copy-button${copied ? " copied" : ""}`} onClick={() => void copy()} aria-label="Copy agent content"><CopyIcon checked={copied} /></button>
             <button className="agent-fold-button" onClick={() => setExpanded(value => !value)} aria-label={expanded ? "Collapse agent" : "Expand agent"}><FoldIcon collapsed={!expanded} /></button></span></header>
         {expanded && <div className="agent-card-content">{agent.childThreadId && <small>Thread {agent.childThreadId}</small>}
@@ -895,32 +929,34 @@ export function InspectorAgentCard({id, agent}: {id: string; agent: AgentPresent
     </article>;
 }
 
-function Inspector({session, revision, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number} & DrawerPaneProps) {
-    void revision;
+function Inspector({session, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession} & DrawerPaneProps) {
     const [tab, setTab] = useState<"plan" | "agents" | "requests" | "state" | "protocol">("plan");
-    const selected = session.model.thread(session.getSnapshot().selectedThreadId);
-    const requests = [...session.model.pendingRequestPresentations().values()];
-    const latestPlan = tab === "plan" && selected
-        ? [...selected.turnOrder].reverse().map(id => selected.turns.get(id)).find(turn => turn && (Object.keys(turn.plan).length > 0 || turn.itemOrder.some(itemId => turn.items.get(itemId)?.raw.type === "plan")))
-        : undefined;
+    const selectedThreadId = session.getSnapshot().selectedThreadId;
+    const selected = session.model.thread(selectedThreadId);
+    const selectedPresentationKey = session.threadVisualKey(selectedThreadId);
+    const pendingRequests = session.model.pendingRequestPresentations();
+    const requests = tab === "requests" ? [...pendingRequests.values()] : [];
+    let latestPlan: PlanData | undefined;
+    if (tab === "plan" && selected) for (let index = selected.turnOrder.length - 1; index >= 0 && !latestPlan; --index) {
+        const turn = selected.turns.get(selected.turnOrder[index]!);
+        if (turn) latestPlan = projectTurnPlan(turn, selected.status);
+    }
     const plainState = inspectorPlainState(selected, tab === "state");
     return <aside ref={paneRef} className={`inspector-pane${drawer ? " responsive-drawer drawer-right" : ""}`} id={drawer ? "inspector-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "inspector-pane-title" : undefined}>
         <div className="pane-heading"><div><span className="eyebrow">Details</span><h2 id={drawer ? "inspector-pane-title" : undefined}>Inspector</h2></div>
             {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Inspector drawer">×</button>}</div>
         <nav className="inspector-tabs">{(["plan", "agents", "requests", "state", "protocol"] as const).map(value =>
-            <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{humanize(value)}{value === "requests" && requests.length > 0 ? ` ${requests.length}` : ""}</button>)}</nav>
+            <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{humanize(value)}{value === "requests" && pendingRequests.size > 0 ? ` ${pendingRequests.size}` : ""}</button>)}</nav>
         <div className="inspector-content">
             {tab === "plan" && (!selected ? <p className="muted-copy">Select a thread to inspect its plan.</p> : latestPlan ? <div className="plan-view">
-                {typeof latestPlan.plan.explanation === "string" && <p>{latestPlan.plan.explanation}</p>}
-                {Array.isArray(latestPlan.plan.steps) && latestPlan.plan.steps.map((step, index) => {
-                    const status = effectivePlanStepStatus(String((step as {status?: string}).status ?? ""), latestPlan.status, selected.status);
-                    return <div key={index}><StatusDot tone={classifyStatus(status).tone} /><span>{String((step as {step?: string}).step ?? "")}</span><small>{displayStatus(status)}</small></div>;
-                })}
+                {latestPlan.explanation && <p>{latestPlan.explanation}</p>}
+                {latestPlan.legacyText && <SafeMarkdown text={latestPlan.legacyText} />}
+                {latestPlan.steps.map((step, index) => <div key={index}><StatusDot tone={statusTone(step.status)} /><span>{step.text}</span><small>{displayStatus(step.status)}</small></div>)}
             </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
-            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => <InspectorAgentCard key={`${selected.id}:${id}`} id={id} agent={selected.agents.get(id)!} />))}
-            {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.id} request={request} session={session} />))}
-            {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={displayStatus(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(selected.changedPaths.length)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
+            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => <InspectorAgentCard key={`${selectedPresentationKey}:${id}`} id={id} agent={selected.agents.get(id)!} />))}
+            {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.presentationKey} request={request} session={session} />))}
+            {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={displayStatus(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(plainState?.changedFileCount ?? 0)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
             {tab === "protocol" && <div className="protocol-list">{[...session.getSnapshot().protocolFrames].reverse().map((frame, index) => <details key={index}><summary>{humanize(String((frame as Record<string, unknown>).type ?? (frame as Record<string, unknown>).action ?? "Frame"))}</summary><pre>{JSON.stringify(frame, null, 2)}</pre></details>)}</div>}
         </div>
     </aside>;
@@ -929,12 +965,13 @@ function Info({label, value}: {label: string; value: string}) { return <div clas
 
 function RequestCard({request, session}: {request: PendingRequestPresentation; session: BrowserFrontendSession}) {
     const raw = request.raw && typeof request.raw === "object" ? request.raw as Record<string, unknown> : {};
-    const questions = Array.isArray(raw.questions) ? raw.questions as Record<string, unknown>[] : [];
+    const decisions = pendingDecisionOptions(request);
+    const questions = decisions.some(decision => decision.value === "submit") && Array.isArray(raw.questions)
+        ? raw.questions as Record<string, unknown>[] : [];
     const [answers, setAnswers] = useState<Record<string, string[]>>({});
     const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({});
     const [structured, setStructured] = useState("{}");
     const details = pendingRequestDetails(request);
-    const decisions = pendingDecisionOptions(request);
     const resolving = session.isPendingResolving(request);
     const actionable = session.canResolvePending(request);
     const userInputValid = questions.length > 0 && questions.every(question => {
@@ -944,11 +981,11 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
     let structuredInput: unknown = raw.requestedSchema === undefined ? null : {};
     let structuredValid = true;
     if (request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined) {
-        try { structuredInput = JSON.parse(structured); structuredValid = structuredInput !== null && typeof structuredInput === "object" && !Array.isArray(structuredInput); }
+        try { structuredInput = JSON.parse(structured); }
         catch { structuredValid = false; }
     }
-    const respond = (decision: string) => {
-        let input: unknown = {};
+    const submission = (decision: string) => {
+        let input: unknown;
         if (request.kind === "user-input") input = Object.fromEntries(questions.map(question => {
             const id = typeof question.id === "string" ? question.id : "";
             const values = [...(answers[id] ?? [])];
@@ -957,15 +994,13 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
             return [id, {answers: values}];
         }));
         else if (request.kind === "mcp-elicitation") input = structuredInput;
-        const response = pendingResponse(request, decision, input);
-        if (response) session.resolvePending(request, response);
+        return {choice: decision, input};
     };
     const toggleAnswer = (id: string, value: string, checked: boolean) => setAnswers(current => ({...current,
         [id]: checked ? [...(current[id] ?? []), value] : (current[id] ?? []).filter(answer => answer !== value),
     }));
     return <div className="request-card" aria-busy={resolving || undefined}>
         <strong>{humanize(request.kind)}</strong>
-        {typeof raw.command === "string" && raw.command.trim() !== "" && <code>{raw.command}</code>}
         {details.entries.length > 0 && <dl className="request-details">{details.entries.map((detail, index) => <div key={`${detail.path}-${index}`}>
             <dt>{detail.path.split(" / ").map(humanize).join(" / ")}</dt><dd>{detail.value}</dd></div>)}
             {details.truncated && <div><dt>Additional detail</dt><dd>Too large to display safely</dd></div>}</dl>}
@@ -983,14 +1018,14 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
                     onChange={event => setOtherAnswers(current => ({...current, [id]: event.target.value}))} />}
             </fieldset>;
         })}
-        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
-        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter a valid JSON object.</p>}
+        {request.kind === "mcp-elicitation" && decisions.some(decision => decision.value === "accept" && decision.requiresInput) && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
+        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter valid JSON.</p>}
         <div className="request-actions">{resolving ? <span>Resolving…</span> : decisions.map(decision => {
-            const inputValid = request.kind === "user-input" ? userInputValid : request.kind === "mcp-elicitation" ? structuredValid : true;
-            const safeWithoutFullDisclosure = ["decline", "cancel", "denied", "abort", "unavailable", "unsupported"].includes(decision.value);
+            const inputValid = !decision.requiresInput || ((request.kind !== "user-input" || userInputValid)
+                && (request.kind !== "mcp-elicitation" || structuredValid));
             return <button type="button" key={decision.value} className={`request-button ${decision.tone === "neutral" ? "" : decision.tone}`}
-                disabled={!actionable || (details.truncated && !safeWithoutFullDisclosure) || (decision.requiresInput === true && !inputValid)}
-                onClick={() => respond(decision.value)}>{decision.label}</button>;
+                disabled={!actionable || !inputValid}
+                onClick={() => session.resolvePending(request, submission(decision.value))}>{decision.label}</button>;
         })}</div>
     </div>;
 }
@@ -998,16 +1033,17 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
 export function App({session}: {session: BrowserFrontendSession}) {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
     const connection = session.model.connection();
+    const role = session.role();
     const connectionTone = connection.connected ? "success" : connection.retrying ? "warning" : "muted";
     const globalStatus = connection.connected
-        ? `${humanize(connection.providerState || "connected")} · ${humanize(connection.role || "observer")}`
+        ? `${humanize(connection.providerState || "connected")} · ${humanize(role || "observer")}`
         : connection.retrying ? "Connecting" : "Offline";
     const [url, setUrl] = useState(snapshot.bridgeUrl);
-    const canControl = connection.role === "controller";
+    const canControl = role === "controller";
     const responsiveMode = useResponsiveMode();
     const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
     const [newThreadDialog, setNewThreadDialog] = useState(false);
-    const [forkWithOptionsThreadId, setForkWithOptionsThreadId] = useState<string | null>(null);
+    const [forkWithOptionsTarget, setForkWithOptionsTarget] = useState<ThreadPresentationTarget | null>(null);
     const shell = useRef<HTMLDivElement>(null);
     const threadTrigger = useRef<HTMLButtonElement>(null);
     const inspectorTrigger = useRef<HTMLButtonElement>(null);
@@ -1017,18 +1053,27 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const threadsOverlay = responsiveMode === "mobile";
     const inspectorOverlay = responsiveMode !== "desktop";
     const activeDrawer = drawer === "threads" && threadsOverlay || drawer === "inspector" && inspectorOverlay ? drawer : null;
-    const modalOpen = Boolean(activeDrawer || newThreadDialog || forkWithOptionsThreadId);
+    const activeForkTarget = forkWithOptionsTarget
+        && session.threadVisualKey(forkWithOptionsTarget.threadId) === forkWithOptionsTarget.presentationKey
+        ? forkWithOptionsTarget : null;
+    const modalOpen = Boolean(activeDrawer || newThreadDialog || activeForkTarget);
     const closeDrawer = () => setDrawer(null);
     const requestNewThread = () => { closeDrawer(); setNewThreadDialog(true); };
-    const requestForkWithOptions = (threadId: string) => { closeDrawer(); setForkWithOptionsThreadId(threadId); };
+    const requestForkWithOptions = (target: ThreadPresentationTarget) => {
+        closeDrawer(); setForkWithOptionsTarget(target);
+    };
     const createNewThreadDraft = (draft: NewThreadDraft) => {
         session.beginNewThread(draft); setNewThreadDialog(false); closeDrawer();
     };
     const forkThreadWithOptions = (draft: NewThreadDraft) => {
-        if (forkWithOptionsThreadId) session.forkThread(forkWithOptionsThreadId, draft);
-        setForkWithOptionsThreadId(null); closeDrawer();
+        if (activeForkTarget)
+            session.forkThread(activeForkTarget.threadId, draft, activeForkTarget.presentationKey);
+        setForkWithOptionsTarget(null); closeDrawer();
     };
     useEffect(() => setDrawer(null), [responsiveMode]);
+    useEffect(() => {
+        if (forkWithOptionsTarget && !activeForkTarget) setForkWithOptionsTarget(null);
+    }, [forkWithOptionsTarget, activeForkTarget]);
     useBrowserLayoutEffect(() => {
         for (const region of shell.current?.querySelectorAll<HTMLElement>("[data-modal-background]") ?? [])
             region.toggleAttribute("inert", modalOpen);
@@ -1077,18 +1122,18 @@ export function App({session}: {session: BrowserFrontendSession}) {
         </header>
         {snapshot.notice && <div className="notice-banner" data-modal-background role="alert" aria-hidden={modalOpen || undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
         <div className="workspace-grid" data-modal-background aria-hidden={modalOpen || undefined}>
-            {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} />}
-            <Conversation session={session} revision={snapshot.revision} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
-            {!inspectorOverlay && <Inspector session={session} revision={snapshot.revision} />}
+            {!threadsOverlay && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} />}
+            <Conversation session={session} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
+            {!inspectorOverlay && <Inspector session={session} />}
         </div>
         <footer className="status-bar" data-modal-background aria-hidden={modalOpen || undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
         {activeDrawer && <button type="button" className="drawer-backdrop" tabIndex={-1} onClick={closeDrawer} aria-label={`Close ${activeDrawer === "threads" ? "Threads" : "Inspector"} drawer`} />}
-        {activeDrawer === "threads" && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
-        {activeDrawer === "inspector" && <Inspector session={session} revision={snapshot.revision} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "threads" && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "inspector" && <Inspector session={session} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
         {newThreadDialog && <NewThreadDialog initialWorkspace={session.model.thread(snapshot.selectedThreadId)?.cwd ?? ""} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
-        {forkWithOptionsThreadId && <NewThreadDialog purpose="fork" initialWorkspace={session.model.thread(forkWithOptionsThreadId)?.cwd ?? ""} initialDraft={session.forkDraft(forkWithOptionsThreadId)} onCancel={() => setForkWithOptionsThreadId(null)} onContinue={forkThreadWithOptions} />}
+        {activeForkTarget && <NewThreadDialog purpose="fork" initialWorkspace={session.model.thread(activeForkTarget.threadId)?.cwd ?? ""} initialDraft={session.forkDraft(activeForkTarget.threadId)} onCancel={() => setForkWithOptionsTarget(null)} onContinue={forkThreadWithOptions} />}
     </div>;
 }

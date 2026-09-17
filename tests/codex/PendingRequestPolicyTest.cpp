@@ -7,275 +7,281 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
+using codexui::codex::PendingRequestAvailability;
+using codexui::codex::PendingRequestControls;
+using codexui::codex::PendingRequestDescriptor;
+using codexui::codex::PendingRequestKind;
 using codexui::codex::PendingRequestPolicy;
-using codexui::codex::PendingRequestResponse;
+using codexui::codex::PendingRequestSubmission;
 
 bool expect(bool condition, std::string_view message) {
   std::cout << (condition ? "PASS " : "FAIL ") << message << '\n';
   return condition;
 }
 
-nlohmann::json error(std::string message) {
-  return {{"code", -32601}, {"message", std::move(message)}};
+PendingRequestDescriptor
+descriptor(PendingRequestKind kind,
+           nlohmann::json raw = nlohmann::json::object()) {
+  PendingRequestDescriptor result;
+  result.kind = kind;
+  result.threadId = "thread-1";
+  result.raw = std::move(raw);
+  return result;
 }
 
-nlohmann::json denied() {
-  return {{"decision", {{"denied", {{"rejection", "Denied by user"}}}}}};
-}
-
-nlohmann::json failedTool(std::string text) {
-  return {{"contentItems",
-           nlohmann::json::array(
-               {{{"type", "inputText"}, {"text", std::move(text)}}})},
-          {"success", false}};
-}
-
-bool expectResponse(std::string_view name, const PendingRequestResponse &actual,
-                    const nlohmann::json &result,
-                    const nlohmann::json &responseError = nullptr) {
-  const bool matches = actual.result == result && actual.error == responseError;
-  if (!matches) {
-    std::cerr << "Expected result " << result.dump() << " and error "
-              << responseError.dump() << ", got result " << actual.result.dump()
-              << " and error " << actual.error.dump() << '\n';
-  }
-  return expect(matches, name);
-}
-
-bool verifyPresentationMetadata() {
-  struct TitleCase {
-    std::string_view kind;
+bool verifyKindsAndPresentation() {
+  struct KindCase {
+    PendingRequestKind kind;
     std::string_view title;
     std::string_view dialogTitle;
   };
-  constexpr std::array titles{
-      TitleCase{"command-approval", "Command approval requested",
-                "Command approval"},
-      TitleCase{"file-change-approval", "File-change approval requested",
-                "File-change approval"},
-      TitleCase{"user-input", "Codex needs input", "Codex needs input"},
-      TitleCase{"mcp-elicitation", "MCP server request", "MCP server request"},
-      TitleCase{"permissions-approval", "Permission request",
-                "Permission request"},
-      TitleCase{"dynamic-tool-call", "Codex request needs attention",
-                "Dynamic tool request"},
-      TitleCase{"authentication-refresh", "Codex request needs attention",
-                "Authentication refresh"},
-      TitleCase{"attestation", "Codex request needs attention",
-                "Attestation request"},
-      TitleCase{"legacy-patch-approval", "Legacy patch approval",
-                "Legacy patch approval"},
-      TitleCase{"legacy-command-approval", "Legacy command approval",
-                "Legacy command approval"},
-      TitleCase{"unsupported", "Codex request needs attention",
-                "Unsupported Codex request"},
+  constexpr std::array cases{
+      KindCase{PendingRequestKind::CommandApproval,
+               "Command approval requested", "Command approval"},
+      KindCase{PendingRequestKind::FileChangeApproval,
+               "File-change approval requested", "File-change approval"},
+      KindCase{PendingRequestKind::UserInput, "Codex needs input",
+               "Codex needs input"},
+      KindCase{PendingRequestKind::McpElicitation, "MCP server request",
+               "MCP server request"},
+      KindCase{PendingRequestKind::PermissionsApproval, "Permission request",
+               "Permission request"},
+      KindCase{PendingRequestKind::DynamicToolCall,
+               "Codex request needs attention", "Dynamic tool request"},
+      KindCase{PendingRequestKind::AuthenticationRefresh,
+               "Codex request needs attention", "Authentication refresh"},
+      KindCase{PendingRequestKind::Attestation, "Codex request needs attention",
+               "Attestation request"},
+      KindCase{PendingRequestKind::LegacyPatchApproval, "Legacy patch approval",
+               "Legacy patch approval"},
+      KindCase{PendingRequestKind::LegacyCommandApproval,
+               "Legacy command approval", "Legacy command approval"},
+      KindCase{PendingRequestKind::Unsupported, "Codex request needs attention",
+               "Unsupported Codex request"},
   };
 
   bool passed = true;
-  for (const TitleCase &entry : titles) {
-    passed &= expect(PendingRequestPolicy::title(entry.kind) == entry.title &&
-                         PendingRequestPolicy::dialogTitle(entry.kind) ==
-                             entry.dialogTitle,
-                     std::string("titles: ") + std::string(entry.kind));
+  for (const KindCase &entry : cases) {
+    passed &= expect(
+        PendingRequestPolicy::title(entry.kind) == entry.title &&
+            PendingRequestPolicy::dialogTitle(entry.kind) == entry.dialogTitle,
+        std::string("native request titles: ") + std::string(entry.title));
   }
 
-  constexpr std::array directAcceptKinds{
-      "command-approval", "file-change-approval", "permissions-approval",
-      "legacy-patch-approval", "legacy-command-approval"};
-  for (const std::string_view kind : directAcceptKinds)
-    passed &= expect(PendingRequestPolicy::supportsDirectAccept(kind),
-                     std::string("direct accept: ") + std::string(kind));
-  passed &= expect(!PendingRequestPolicy::supportsDirectAccept("user-input") &&
-                       PendingRequestPolicy::directAcceptLabel(
-                           "permissions-approval") == "Allow this turn" &&
-                       PendingRequestPolicy::directAcceptLabel(
-                           "command-approval") == "Accept",
-                   "direct-accept capability and labels are exact");
-
-  const nlohmann::json request{{"command", "make test"},
-                               {"reason", "review"},
-                               {"message", "Need confirmation"},
-                               {"cwd", "/repo"},
-                               {"grantRoot", "/repo"},
-                               {"permissions", {{"network", true}}},
-                               {"questions", nlohmann::json::array({1, 2})}};
-  const std::string actualDetail =
-      PendingRequestPolicy::detail("request-1", "thread-1", request);
-  const std::string expectedDetail =
-      "Command: make test  |  Reason: review  |  Need confirmation  |  "
-      "Directory: /repo  |  Grant root: /repo  |  Permissions: "
-      "{\n\"network\": true\n}  |  2 questions";
-  if (actualDetail != expectedDetail)
-    std::cerr << "Expected detail " << expectedDetail << ", got "
-              << actualDetail << '\n';
+  PendingRequestDescriptor detailed =
+      descriptor(PendingRequestKind::CommandApproval,
+                 {{"command", "make test"},
+                  {"reason", "review"},
+                  {"cwd", "/repo"},
+                  {"secret", "must not be displayed"},
+                  {"permissions", {{"network", true}}},
+                  {"questions", nlohmann::json::array({1, 2})}});
+  const std::string detail = PendingRequestPolicy::detail(detailed);
   passed &=
-      expect(actualDetail == expectedDetail,
-             "request detail preserves the existing field order and labels");
-  passed &= expect(PendingRequestPolicy::detail("request-2", "thread-2",
-                                                nlohmann::json::object()) ==
-                       "Request request-2 for thread thread-2",
-                   "empty request detail uses identity fallback");
+      expect(detail.find("Thread: thread-1") != std::string::npos &&
+                 detail.find("Command: make test") != std::string::npos &&
+                 detail.find("Reason: review") != std::string::npos &&
+                 detail.find("Directory: /repo") != std::string::npos &&
+                 detail.find("must not be displayed") == std::string::npos,
+             "request detail is derived once from the descriptor");
+  passed &= expect(PendingRequestPolicy::detail(descriptor(
+                       PendingRequestKind::Unsupported)) == "Thread: thread-1",
+                   "empty request detail preserves its visible context");
+
+  PendingRequestDescriptor dynamic =
+      descriptor(PendingRequestKind::DynamicToolCall,
+                 {{"callId", "call-1"},
+                  {"namespace", "tools"},
+                  {"tool", "lookup"},
+                  {"arguments", {{"password", "secret"}}},
+                  {"providerPrivate", "hidden"}});
+  const nlohmann::json dynamicDisclosure =
+      PendingRequestPolicy::disclosure(dynamic);
+  passed &= expect(
+      dynamicDisclosure.value("callId", std::string{}) == "call-1" &&
+          dynamicDisclosure.value("namespace", std::string{}) == "tools" &&
+          dynamicDisclosure.value("tool", std::string{}) == "lookup" &&
+          !dynamicDisclosure.contains("arguments") &&
+          !dynamicDisclosure.contains("providerPrivate") &&
+          dynamicDisclosure.contains("additionalDetails"),
+      "dynamic-tool disclosure excludes arguments and marks "
+      "unknown fields");
+
+  PendingRequestDescriptor mcp =
+      descriptor(PendingRequestKind::McpElicitation,
+                 {{"serverName", "server"},
+                  {"message", "Confirm access"},
+                  {"url", "https://example.invalid/confirm"},
+                  {"requestedSchema", {{"type", "object"}}},
+                  {"_meta", {{"credential", "secret"}}}});
+  const nlohmann::json mcpDisclosure = PendingRequestPolicy::disclosure(mcp);
+  passed &= expect(mcpDisclosure.contains("serverName") &&
+                       mcpDisclosure.contains("message") &&
+                       mcpDisclosure.contains("requestedSchema") &&
+                       mcpDisclosure.contains("url") &&
+                       !mcpDisclosure.contains("_meta"),
+                   "MCP disclosure keeps review facts but hides metadata");
+
+  PendingRequestDescriptor user = descriptor(
+      PendingRequestKind::UserInput,
+      {{"isBlocking", true},
+       {"questions", nlohmann::json::array({{{"id", "q"},
+                                             {"question", "Secret?"},
+                                             {"options", nullptr},
+                                             {"isSecret", true}}})}});
+  passed &= expect(PendingRequestPolicy::disclosure(user) ==
+                           nlohmann::json({{"isBlocking", true}}) &&
+                       PendingRequestPolicy::detail(user).find("1 questions") !=
+                           std::string::npos,
+                   "question content has one specialized rendering");
+
+  PendingRequestDescriptor oversized =
+      descriptor(PendingRequestKind::PermissionsApproval,
+                 {{"permissions", nlohmann::json::array()}});
+  for (int index = 0; index < 1000; ++index)
+    oversized.raw["permissions"].push_back(nlohmann::json::object());
+  const nlohmann::json bounded = PendingRequestPolicy::disclosure(oversized);
+  passed &= expect(
+      bounded.contains("permissions") && bounded["permissions"].is_array() &&
+          bounded["permissions"].size() < 1000 &&
+          bounded.value("additionalDetails", std::string{}) ==
+              "Omitted for display",
+      "empty containers and depth limits consume the disclosure budget");
   return passed;
 }
 
-bool verifySubmissionResponses() {
+bool verifyNativeControlsAndRecovery() {
   bool passed = true;
-  const nlohmann::json permissions{{"network", {{"enabled", true}}}};
-  const nlohmann::json request{{"permissions", permissions}};
-  const nlohmann::json answers{
-      {"question", {{"answers", nlohmann::json::array({"yes"})}}}};
-  const nlohmann::json content{{"accepted", true}};
+  PendingRequestDescriptor command = descriptor(
+      PendingRequestKind::CommandApproval, {{"command", "make test"}});
+  PendingRequestControls controls = PendingRequestPolicy::controls(command);
+  passed &= expect(controls.positive && controls.positive->value == "accept" &&
+                       !controls.negative,
+                   "command direct controls use the canonical policy");
 
-  passed &= expectResponse(
-      "command submission response",
-      PendingRequestPolicy::responseForSubmission(
-          "command-approval", nlohmann::json::object(), "cancel"),
-      {{"decision", "cancel"}});
-  passed &= expectResponse(
-      "file-change submission response",
-      PendingRequestPolicy::responseForSubmission(
-          "file-change-approval", nlohmann::json::object(), "acceptForSession"),
-      {{"decision", "acceptForSession"}});
+  const PendingRequestDescriptor malformedExec =
+      descriptor(PendingRequestKind::CommandApproval,
+                 {{"command", "make test"},
+                  {"proposedExecpolicyAmendment", nlohmann::json::object()}});
+  const auto malformedActions = PendingRequestPolicy::actions(malformedExec);
+  passed &= expect(
+      malformedActions.size() == 1 &&
+          malformedActions.front().value == "cancel" &&
+          !PendingRequestPolicy::controls(malformedExec).positive,
+      "malformed command amendments fail closed without compact approval");
+
+  const PendingRequestDescriptor networkOnly =
+      descriptor(PendingRequestKind::CommandApproval,
+                 {{"networkApprovalContext",
+                   {{"host", "example.test"}, {"protocol", "https"}}}});
+  passed &= expect(!PendingRequestPolicy::controls(networkOnly).positive,
+                   "network approvals require full review");
+
+  const PendingRequestDescriptor additionalPermissions = descriptor(
+      PendingRequestKind::CommandApproval,
+      {{"additionalPermissions", {{"network", {{"enabled", true}}}}}});
+  passed &= expect(
+      PendingRequestPolicy::disclosure(additionalPermissions)
+              .contains("additionalPermissions") &&
+          !PendingRequestPolicy::controls(additionalPermissions).positive,
+      "additional command permissions are disclosed only in full review");
+
+  const PendingRequestDescriptor structuredForm =
+      descriptor(PendingRequestKind::McpElicitation,
+                 {{"serverName", "server"},
+                  {"threadId", "thread-1"},
+                  {"message", "Provide a value"},
+                  {"mode", "form"},
+                  {"requestedSchema",
+                   {{"type", "object"},
+                    {"properties", {{"answer", {{"type", "string"}}}}}}},
+                  {"_meta", {{"codex_approval_kind", "mcp_tool_call"}}}});
+  const auto structuredActions = PendingRequestPolicy::actions(structuredForm);
+  passed &= expect(
+      !structuredActions.empty() && structuredActions.front().requiresInput,
+      "a structured MCP form cannot become a message-only approval");
+
+  command.availability = PendingRequestAvailability::Actionable;
+  controls = PendingRequestPolicy::controls(command);
+  passed &= expect(controls.positive && !controls.negative &&
+                       controls.directEnabled && controls.reviewEnabled,
+                   "actionable compact controls have one policy projection");
+  command.availability = PendingRequestAvailability::Submitting;
+  controls = PendingRequestPolicy::controls(command);
+  passed &= expect(controls.positive && !controls.negative &&
+                       !controls.directEnabled && !controls.reviewEnabled,
+                   "submitting controls remain stable and single-flight");
+  command.availability = PendingRequestAvailability::RecoveryOnly;
+  command.retainedSubmission = PendingRequestSubmission{"accept"};
+  command.error = "The provider rejected the response.";
+  controls = PendingRequestPolicy::controls(command);
   passed &=
-      expectResponse("user-input submission response",
-                     PendingRequestPolicy::responseForSubmission(
-                         "user-input", nlohmann::json::object(), {}, answers),
-                     {{"answers", answers}});
-  passed &= expectResponse(
-      "MCP accepted submission response",
-      PendingRequestPolicy::responseForSubmission(
-          "mcp-elicitation", nlohmann::json::object(), "accept", content),
-      {{"action", "accept"}, {"content", content}, {"_meta", nullptr}});
-  passed &= expectResponse(
-      "MCP cancelled submission response",
-      PendingRequestPolicy::responseForSubmission(
-          "mcp-elicitation", nlohmann::json::object(), "cancel", content),
-      {{"action", "cancel"}, {"content", nullptr}, {"_meta", nullptr}});
-  passed &=
-      expectResponse("permission accepted submission response",
-                     PendingRequestPolicy::responseForSubmission(
-                         "permissions-approval", request, "session"),
-                     {{"permissions", permissions}, {"scope", "session"}});
-  passed &= expectResponse("permission declined submission response",
-                           PendingRequestPolicy::responseForSubmission(
-                               "permissions-approval", request, "decline"),
-                           nlohmann::json::object(),
-                           error("Permission request declined by user"));
-  passed &=
-      expectResponse("legacy patch approved-for-session response",
-                     PendingRequestPolicy::responseForSubmission(
-                         "legacy-patch-approval", nlohmann::json::object(),
-                         "approved_for_session"),
-                     {{"decision", "approved_for_session"}});
-  passed &= expectResponse(
-      "legacy patch denied response",
-      PendingRequestPolicy::responseForSubmission(
-          "legacy-patch-approval", nlohmann::json::object(), "denied"),
-      denied());
-  passed &= expectResponse(
-      "legacy command abort response",
-      PendingRequestPolicy::responseForSubmission(
-          "legacy-command-approval", nlohmann::json::object(), "abort"),
-      {{"decision", "abort"}});
-  passed &=
-      expectResponse("dynamic-tool unavailable response",
-                     PendingRequestPolicy::responseForSubmission(
-                         "dynamic-tool-call", nlohmann::json::object()),
-                     failedTool("CodexUI does not provide this dynamic tool"));
-  for (const std::string_view kind :
-       {"authentication-refresh", "attestation", "unsupported"}) {
-    passed &=
-        expectResponse(std::string(kind) + " unsupported submission response",
-                       PendingRequestPolicy::responseForSubmission(
-                           kind, nlohmann::json::object()),
-                       nlohmann::json::object(),
-                       error("CodexUI does not support this server request"));
-  }
+      expect(!controls.positive && !controls.negative &&
+                 !controls.directEnabled && controls.reviewEnabled,
+             "retained authored input is reviewed without direct actions");
+  passed &= expect(
+      PendingRequestPolicy::status(command) ==
+          "The provider rejected the response.  |  The authored response is "
+          "retained for review.",
+      "recovery status preserves both the failure and retained response facts");
+  command.retainedSubmission.reset();
+  passed &= expect(
+      PendingRequestPolicy::status(command) ==
+          "The provider rejected the response.  |  The request is no longer "
+          "actionable.",
+      "recovery status never invents authored input that was not retained");
   return passed;
 }
 
-bool verifyCanonicalResponses() {
-  struct ResponseCase {
-    std::string_view kind;
-    nlohmann::json request;
-    nlohmann::json positiveResult;
-    nlohmann::json positiveError;
-    nlohmann::json negativeResult;
-    nlohmann::json negativeError;
-  };
-  const nlohmann::json cannotApprove =
-      error("CodexUI cannot directly approve this server request");
-  const nlohmann::json declined = error("Request declined by user");
-  const nlohmann::json empty = nlohmann::json::object();
-  const nlohmann::json permissions{{"network", true}};
-  const std::array cases{
-      ResponseCase{"command-approval",
-                   empty,
-                   {{"decision", "accept"}},
-                   nullptr,
-                   {{"decision", "decline"}},
-                   nullptr},
-      ResponseCase{"file-change-approval",
-                   empty,
-                   {{"decision", "accept"}},
-                   nullptr,
-                   {{"decision", "decline"}},
-                   nullptr},
-      ResponseCase{"user-input", empty, empty, cannotApprove, empty, declined},
-      ResponseCase{
-          "mcp-elicitation",
-          empty,
-          empty,
-          cannotApprove,
-          {{"action", "decline"}, {"content", nullptr}, {"_meta", nullptr}},
-          nullptr},
-      ResponseCase{"permissions-approval",
-                   {{"permissions", permissions}},
-                   {{"permissions", permissions}, {"scope", "turn"}},
-                   nullptr,
-                   empty,
-                   declined},
-      ResponseCase{"legacy-patch-approval",
-                   empty,
-                   {{"decision", "approved"}},
-                   nullptr,
-                   denied(),
-                   nullptr},
-      ResponseCase{"legacy-command-approval",
-                   empty,
-                   {{"decision", "approved"}},
-                   nullptr,
-                   denied(),
-                   nullptr},
-      ResponseCase{"dynamic-tool-call", empty, empty, cannotApprove,
-                   failedTool("Request declined by user"), nullptr},
-      ResponseCase{"authentication-refresh", empty, empty, cannotApprove, empty,
-                   declined},
-      ResponseCase{"attestation", empty, empty, cannotApprove, empty, declined},
-      ResponseCase{"unsupported", empty, empty, cannotApprove, empty, declined},
-  };
+bool verifyAttentionPolicy() {
+  PendingRequestDescriptor recovery =
+      descriptor(PendingRequestKind::CommandApproval);
+  recovery.threadId = "selected";
+  recovery.availability = PendingRequestAvailability::RecoveryOnly;
+  recovery.retainedSubmission = PendingRequestSubmission{"accept"};
+  PendingRequestDescriptor actionable = recovery;
+  actionable.availability = PendingRequestAvailability::Actionable;
+  actionable.retainedSubmission.reset();
 
   bool passed = true;
-  for (const ResponseCase &entry : cases) {
-    passed &= expectResponse(
-        std::string(entry.kind) + " direct positive response",
-        PendingRequestPolicy::positiveResponse(entry.kind, entry.request),
-        entry.positiveResult, entry.positiveError);
-    passed &= expectResponse(
-        std::string(entry.kind) + " negative response",
-        PendingRequestPolicy::negativeResponse(entry.kind, entry.request),
-        entry.negativeResult, entry.negativeError);
-  }
+  std::vector requests{recovery, actionable};
+  passed &= expect(PendingRequestPolicy::attentionIndex(requests, "selected") ==
+                       std::optional<std::size_t>(1),
+                   "current actionable request outranks selected recovery");
+
+  requests.front().availability = PendingRequestAvailability::Submitting;
+  requests.front().retainedSubmission.reset();
+  requests.back().threadId = "other";
+  passed &= expect(PendingRequestPolicy::attentionIndex(requests, "selected") ==
+                       std::optional<std::size_t>(1),
+                   "actionable work outranks selected submitting feedback");
+
+  requests = {recovery, recovery};
+  requests.back().availability = PendingRequestAvailability::Unavailable;
+  requests.back().threadId = "other";
+  passed &= expect(PendingRequestPolicy::attentionIndex(requests, "selected") ==
+                       std::optional<std::size_t>(0),
+                   "selected recovery outranks unavailable remote recovery");
+
+  requests = {actionable, actionable};
+  passed &= expect(PendingRequestPolicy::attentionIndex(requests, "selected") ==
+                       std::optional<std::size_t>(0),
+                   "equal attention candidates preserve graph order");
+  passed &= expect(!PendingRequestPolicy::attentionIndex({}, "selected"),
+                   "empty pending requests have no attention target");
   return passed;
 }
 
 } // namespace
 
 int main() {
-  const bool passed = verifyPresentationMetadata() &&
-                      verifySubmissionResponses() && verifyCanonicalResponses();
+  bool passed = true;
+  passed &= verifyKindsAndPresentation();
+  passed &= verifyNativeControlsAndRecovery();
+  passed &= verifyAttentionPolicy();
   return passed ? 0 : 1;
 }

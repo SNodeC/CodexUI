@@ -3,6 +3,7 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 
+#include "codex/UiStatus.h"
 #include "codex/nodegraph/NodeGraph.h"
 
 #include <cstddef>
@@ -16,8 +17,6 @@
 namespace codexui::codex::middle {
 
 inline constexpr std::int64_t PendingAnimationDelayMilliseconds = 1000;
-inline constexpr std::size_t AuthoritativeHistoryPageSize = 80;
-
 struct AuthoritativeItemKey {
   std::string threadId;
   std::string turnId;
@@ -35,14 +34,7 @@ struct LocalPromptKey {
   auto operator<=>(const LocalPromptKey &) const = default;
 };
 
-struct TurnPlanKey {
-  std::string threadId;
-  std::string turnId;
-
-  auto operator<=>(const TurnPlanKey &) const = default;
-};
-
-using CardKey = std::variant<AuthoritativeItemKey, TurnPlanKey, LocalPromptKey>;
+using CardKey = std::variant<AuthoritativeItemKey, LocalPromptKey>;
 
 [[nodiscard]] std::string stableKey(const CardKey &key);
 [[nodiscard]] bool terminalOutputHasVisibleText(std::string_view output);
@@ -83,7 +75,6 @@ struct AgentMessageData {
 struct CommandExecutionData {
   std::string command;
   std::string output;
-  std::string status;
   std::string cwd;
   std::optional<int> exitCode;
   std::optional<std::int64_t> durationMilliseconds;
@@ -93,7 +84,6 @@ struct CommandExecutionData {
 
 struct AgentActivityData {
   std::string tool;
-  std::string status;
   std::string kind;
   std::string prompt;
   std::string resultText;
@@ -123,7 +113,6 @@ struct FileChangeData {
 };
 
 struct FileChangesData {
-  std::string status;
   std::vector<FileChangeData> changes;
   // Relative provider paths are resolved against the owning thread's current
   // workspace only when the user explicitly asks the desktop to open them.
@@ -134,7 +123,6 @@ struct FileChangesData {
 
 struct ImageGenerationData {
   std::string path;
-  std::string status;
   std::string revisedPrompt;
 
   bool operator==(const ImageGenerationData &) const = default;
@@ -142,7 +130,7 @@ struct ImageGenerationData {
 
 struct PlanStepData {
   std::string text;
-  std::string status;
+  UiStatus status;
 
   bool operator==(const PlanStepData &) const = default;
 };
@@ -157,7 +145,6 @@ struct PlanData {
 
 struct GenericActivityData {
   std::string type;
-  std::string status;
   std::string displayDetail;
 
   bool operator==(const GenericActivityData &) const = default;
@@ -188,7 +175,7 @@ struct VisibleCardData {
   std::string turnId;
   std::string itemId;
   CardPayload payload = GenericActivityData{};
-  std::optional<bool> activeWork;
+  UiStatus status;
   // Stable action/lifetime identity supplied by the adapter. Widgets retain
   // it but never inspect graph state through it.
   nodegraph::NodeRef target;
@@ -204,15 +191,18 @@ struct TurnSection {
   std::string turnId;
   std::vector<VisibleCardData> cards;
   // The projection, which sees the complete authoritative turn, identifies
-  // its actual opening prompt. Rendering must never infer ownership from the
-  // first user message that happens to survive history paging.
+  // its actual opening prompt. Rendering must never infer ownership from row
+  // position.
   std::optional<CardKey> rootCardKey;
-  // True only when the root lies before the requested activity suffix and is
-  // retained solely to preserve the canonical Turn/You owner.
-  bool rootPinned = false;
 
   bool operator==(const TurnSection &) const = default;
 };
+
+[[nodiscard]] inline bool
+isNestedTurnCard(std::optional<std::size_t> rootPosition,
+                 std::size_t cardPosition) noexcept {
+  return rootPosition && cardPosition > *rootPosition;
+}
 
 // Exact placement facts for one conversation row. They carry no authority:
 // the NodeRef target and all values are read from NodeGraph under one short
@@ -223,7 +213,6 @@ struct ConversationRowPlacement {
   bool turnRoot = false;
   bool nested = false;
   bool activeTurn = false;
-  bool historyActivity = true;
 };
 
 // One canonical row plus its immediate presented neighbors. The neighboring
@@ -235,25 +224,33 @@ struct ConversationRowChange {
   std::optional<CardKey> nextCardKey;
 };
 
-// Prompt acknowledgement and authoritative row ownership are two different
-// identities during materialization. Keeping them explicit lets the Qt row
-// adopt the authoritative Item NodeRef before the local prompt is retired.
 struct PromptMaterialization {
-  ConversationRowChange change;
+  CardKey cardKey;
   nodegraph::NodeRef prompt;
+
+  bool operator==(const PromptMaterialization &) const = default;
 };
 
-// Bounded projection for the common canonical tail insertion, with the two
-// thread-history facts needed to update the retained window chrome.
-struct ConversationTailCard : ConversationRowPlacement {
-  std::size_t authoritativeItemCount = 0;
+// One lock-free value transaction from the graph projection to the item view.
+// Presentation-only changes remain separately budgetable from structural
+// placement. Each structural row carries final canonical neighbors, and rows
+// whose changed neighbors depend on one another are dependency-ordered;
+// removals are exact graph identities.
+struct ConversationDelta {
+  std::string threadId;
+  std::vector<VisibleCardData> presentations;
+  std::vector<ConversationRowChange> rows;
+  std::vector<nodegraph::NodeRef> removals;
+  std::vector<PromptMaterialization> materializedPrompts;
   bool providerHasMore = false;
 };
 
 struct ConversationSnapshot {
   std::string threadId;
   std::vector<TurnSection> sections;
-  std::size_t hiddenAuthoritativeItemCount = 0;
+  std::vector<PromptMaterialization> materializedPrompts;
+  // Provider continuation only. Every item already loaded in NodeGraph is
+  // represented in sections; QWidget residency remains independently bounded.
   bool hasMore = false;
   std::optional<std::string> activeTurnId;
 

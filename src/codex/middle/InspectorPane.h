@@ -3,8 +3,8 @@
 #ifndef CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 #define CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 
-#include "codex/ui/UiViewState.h"
 #include "codex/nodegraph/Messages.h"
+#include "codex/ui/UiViewState.h"
 
 #include <QByteArray>
 #include <QFrame>
@@ -18,16 +18,13 @@
 #include <functional>
 #include <optional>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 class QLabel;
+class QHideEvent;
 class QPlainTextEdit;
 class QShowEvent;
 class QStackedWidget;
 class QTabWidget;
-class QVBoxLayout;
 
 namespace codexui::codex {
 
@@ -35,12 +32,14 @@ class DiffViewer;
 
 namespace middle {
 
+class MarkdownTextView;
+
 // The inspector owns only presentation snapshots.  It never clears a visible
 // tab in response to an unrelated frame and never participates in app-server
 // state ownership.
 class InspectorPane final : public QFrame {
 public:
-  using RequestAction = std::function<void(const std::string &)>;
+  using RequestAction = std::function<void(const nodegraph::NodeRef &)>;
 
   explicit InspectorPane(QWidget *parent = nullptr);
 
@@ -48,37 +47,40 @@ public:
   void setRefreshRequestedAction(std::function<void()> refresh);
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
-  void refresh(const ui::InspectorSnapshot &snapshot);
   void refresh(const ui::InspectorSnapshot &snapshot,
                ui::InspectorProjection projection);
+  [[nodiscard]] std::optional<ui::InspectorProjection>
+  currentProjection() const;
+  [[nodiscard]] ui::InspectorRowRequest
+  rowRequest(ui::InspectorProjection projection) const;
   void appendProtocolFrame(const nlohmann::json &frame);
   void appendProtocolDiagnostic(const nodegraph::UiEffect &effect);
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
 protected:
+  void hideEvent(QHideEvent *event) override;
   void showEvent(QShowEvent *event) override;
 
 private:
-  QFrame *agentFrame(const ui::InspectorAgentRow &agent);
-  void patchAgentFrame(QFrame *frame, const ui::InspectorAgentRow &agent);
-  QFrame *planStepFrame(const ui::InspectorPlanStep &step);
-  void patchPlanStepFrame(QFrame *frame,
-                          const ui::InspectorPlanStep &step);
-  QFrame *requestFrame(const ui::InspectorRequestRow &request);
-  void patchRequestFrame(QFrame *frame,
-                         const ui::InspectorRequestRow &request);
+  class AgentFrame;
+  class PlanStepFrame;
+  class RequestFrame;
+  class RowViewport;
+
+  AgentFrame *agentFrame(const std::string &rowKey);
+  RequestFrame *requestFrame();
+  void retireThreadPresentation();
   void refreshCurrentTab();
-  void refreshPlan();
-  void refreshAgents();
   void refreshChanges();
-  void refreshRequests();
   void refreshState();
   void refreshProtocolStats();
   void showProtocolTail();
   void restoreProtocolScroll(bool followsTail, int pausedValue);
 
-  std::optional<ui::InspectorSnapshot> currentSnapshot;
+  std::optional<std::uint64_t> currentThreadIncarnation;
+  ui::InspectorChangesSnapshot changes;
+  ui::InspectorStateSnapshot state;
   RequestAction reviewRequest;
   RequestAction acceptRequest;
   RequestAction rejectRequest;
@@ -87,31 +89,15 @@ private:
 
   QTabWidget *inspectorTabs = nullptr;
   QStackedWidget *infoStack = nullptr;
-  QWidget *planContent = nullptr;
-  QVBoxLayout *planLayout = nullptr;
-  QWidget *agentsContent = nullptr;
-  QVBoxLayout *agentsLayout = nullptr;
-  QWidget *requestsContent = nullptr;
-  QVBoxLayout *requestsLayout = nullptr;
+  RowViewport *planRows = nullptr;
+  RowViewport *agentsRows = nullptr;
+  RowViewport *requestRows = nullptr;
   DiffViewer *diffViewer = nullptr;
   QPlainTextEdit *stateView = nullptr;
   QPlainTextEdit *protocolLog = nullptr;
   QLabel *protocolStats = nullptr;
 
-  std::optional<ui::InspectorPlanSnapshot> planSnapshot;
-  std::unordered_map<std::string, QFrame *> planFrames;
-  std::unordered_map<std::string, ui::InspectorPlanStep> renderedPlanSteps;
-  QWidget *planExplanation = nullptr;
-  QWidget *planMessage = nullptr;
-  std::optional<ui::InspectorAgentsSnapshot> agentsSnapshot;
-  std::unordered_map<std::string, QFrame *> agentFrames;
-  std::unordered_map<std::string, ui::InspectorAgentRow> renderedAgentRows;
-  QWidget *agentsMessage = nullptr;
-  std::unordered_set<std::string> expandedAgents;
-  std::optional<ui::InspectorRequestsSnapshot> requestsSnapshot;
-  std::unordered_map<std::string, QFrame *> requestFrames;
-  std::unordered_map<std::string, ui::InspectorRequestRow> renderedRequests;
-  QWidget *requestsMessage = nullptr;
+  std::deque<std::string> expandedAgentIds;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;

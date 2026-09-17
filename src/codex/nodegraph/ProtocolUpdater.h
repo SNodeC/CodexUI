@@ -65,7 +65,9 @@ struct ApplyResult final {
   MessageDisposition disposition =
       MessageDisposition::IntentionallyStateNeutral;
   GraphChange change;
-  // The exact newly-created Operation or Interaction, when applicable.
+  // The exact Operation or Interaction accepted by this transaction. A
+  // result/error returns the correlated object even when that object is
+  // retired by the same transaction.
   NodeRef primary;
 };
 
@@ -102,12 +104,10 @@ public:
 
   // Called on the worker after CodexBridge accepts the matching server-request
   // response. This is a lifecycle operation, not a Qt callback.
+  [[nodiscard]] GraphChange resolveInteraction(const NodeRef &interaction);
   [[nodiscard]] GraphChange
-  resolveInteraction(const ProtocolRequestId &requestId, bool accepted,
-                     std::string error = {});
-  [[nodiscard]] GraphChange resolveInteraction(const NodeRef &interaction,
-                                               bool accepted,
-                                               std::string error = {});
+  failInteractionResponse(const NodeRef &interaction, std::string error,
+                          std::optional<Value::Object> authoredResponse = {});
 
 private:
   [[nodiscard]] ProtocolDirection
@@ -118,7 +118,8 @@ private:
                                          const DecodedMessage &message);
   void applyGraphUpdate(NodeGraph::WriteAccess &write,
                         const DecodedMessage &message,
-                        std::optional<std::uint64_t> preserveChangesAfter = {});
+                        std::optional<std::uint64_t> preserveChangesAfter = {},
+                        bool *advancesActivity = nullptr);
   [[nodiscard]] bool applyRealtimeUpdate(NodeGraph::WriteAccess &write,
                                          const DecodedMessage &message);
   void applyUnknown(NodeGraph::WriteAccess &write,
@@ -145,7 +146,8 @@ private:
   void admitRootThread(NodeGraph::WriteAccess &write, const NodeRef &thread,
                        bool prepend);
   void replaceThreadList(NodeGraph::WriteAccess &write,
-                         const Value::Array &threads);
+                         const Value::Array &threads,
+                         std::optional<std::uint64_t> preserveChangesAfter);
   void removeThread(NodeGraph::WriteAccess &write, const NodeRef &thread);
 
   NodeGraph *graph_;

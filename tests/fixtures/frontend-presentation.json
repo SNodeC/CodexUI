@@ -1,0 +1,921 @@
+{
+  "schemaVersion": 5,
+  "statusCases": [
+    {
+      "id": "pending-aliases",
+      "inputs": ["pending", "queued"],
+      "expected": {"semantic": "pending", "token": "pending", "display": "pending", "tone": "", "active": false, "working": true, "terminal": false}
+    },
+    {
+      "id": "running-aliases",
+      "inputs": ["running", "inProgress", "active", "started"],
+      "expected": {"semantic": "running", "token": "running", "display": "running", "tone": "active", "active": true, "working": true, "terminal": false}
+    },
+    {
+      "id": "completed-aliases",
+      "inputs": ["completed", "complete", "succeeded", "idle"],
+      "expected": {"semantic": "completed", "token": "completed", "display": "completed", "tone": "success", "active": false, "working": false, "terminal": true}
+    },
+    {
+      "id": "failed-aliases",
+      "inputs": ["failed", "error", "systemError", "blocked"],
+      "expected": {"semantic": "failed", "token": "failed", "display": "failed", "tone": "danger", "active": false, "working": false, "terminal": true}
+    },
+    {
+      "id": "interrupted-aliases",
+      "inputs": ["interrupted", "cancelled", "canceled", "stopped"],
+      "expected": {"semantic": "interrupted", "token": "interrupted", "display": "interrupted", "tone": "warning", "active": false, "working": false, "terminal": true}
+    },
+    {
+      "id": "not-loaded",
+      "inputs": ["notLoaded"],
+      "expected": {"semantic": "notLoaded", "token": "notLoaded", "display": "not loaded", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "connected",
+      "inputs": ["connected"],
+      "expected": {"semantic": "connected", "token": "connected", "display": "connected", "tone": "success", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "disconnected",
+      "inputs": ["disconnected"],
+      "expected": {"semantic": "disconnected", "token": "disconnected", "display": "disconnected", "tone": "danger", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "empty",
+      "inputs": [""],
+      "expected": {"semantic": "unknown", "token": "", "display": "unknown", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "agent-kind-only-progress",
+      "inputs": ["progress"],
+      "expected": {"semantic": "unknown", "token": "progress", "display": "progress", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "case-sensitive-forward-value",
+      "inputs": ["Completed"],
+      "expected": {"semantic": "unknown", "token": "Completed", "display": "completed", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "whitespace-preserving-token",
+      "inputs": [" completed "],
+      "expected": {"semantic": "unknown", "token": " completed ", "display": "completed", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "ascii-separator",
+      "inputs": ["in_progress"],
+      "expected": {"semantic": "unknown", "token": "in_progress", "display": "in progress", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "camel-case-forward-value",
+      "inputs": ["futureProviderState"],
+      "expected": {"semantic": "unknown", "token": "futureProviderState", "display": "future provider state", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "acronym-and-digit-boundaries",
+      "inputs": ["HTTPServer2XX"],
+      "expected": {"semantic": "unknown", "token": "HTTPServer2XX", "display": "http server2 xx", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "mixed-ascii-separators",
+      "inputs": ["  Future--Provider/_State.\t"],
+      "expected": {"semantic": "unknown", "token": "  Future--Provider/_State.\t", "display": "future provider state", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "unicode-leading-letter",
+      "inputs": ["ÉtatEnCours"],
+      "expected": {"semantic": "unknown", "token": "ÉtatEnCours", "display": "État en cours", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "non-ascii-space-is-preserved",
+      "inputs": ["État EnCours"],
+      "expected": {"semantic": "unknown", "token": "État EnCours", "display": "État en cours", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "emoji-boundary",
+      "inputs": ["needs🚀Launch"],
+      "expected": {"semantic": "unknown", "token": "needs🚀Launch", "display": "needs🚀launch", "tone": "", "active": false, "working": false, "terminal": false}
+    },
+    {
+      "id": "separator-only",
+      "inputs": ["___"],
+      "expected": {"semantic": "unknown", "token": "___", "display": "unknown", "tone": "", "active": false, "working": false, "terminal": false}
+    }
+  ],
+  "planCases": [
+    {"id": "completed-turn", "step": "inProgress", "turn": "complete", "thread": "failed", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "failed-turn", "step": "started", "turn": "blocked", "thread": "completed", "expected": {"semantic": "failed", "token": "failed"}},
+    {"id": "interrupted-turn", "step": "running", "turn": "canceled", "thread": "completed", "expected": {"semantic": "interrupted", "token": "interrupted"}},
+    {"id": "completed-thread-fallback", "step": "active", "turn": "pending", "thread": "succeeded", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "failed-thread-fallback", "step": "inProgress", "turn": "", "thread": "error", "expected": {"semantic": "failed", "token": "failed"}},
+    {"id": "interrupted-thread-fallback", "step": "running", "turn": "notLoaded", "thread": "stopped", "expected": {"semantic": "interrupted", "token": "interrupted"}},
+    {"id": "turn-precedes-thread", "step": "running", "turn": "complete", "thread": "failed", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "running-is-preserved", "step": "started", "turn": "pending", "thread": "connected", "expected": {"semantic": "running", "token": "running"}},
+    {"id": "pending-step-is-preserved", "step": "queued", "turn": "failed", "thread": "completed", "expected": {"semantic": "pending", "token": "pending"}},
+    {"id": "completed-step-is-preserved", "step": "succeeded", "turn": "failed", "thread": "interrupted", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "failed-step-is-preserved", "step": "systemError", "turn": "completed", "thread": "interrupted", "expected": {"semantic": "failed", "token": "failed"}},
+    {"id": "unknown-step-is-preserved", "step": "futureStepState", "turn": "completed", "thread": "failed", "expected": {"semantic": "unknown", "token": "futureStepState"}}
+  ],
+  "lifecycleCases": [
+    {"id": "turn-started-default", "entity": "turn", "lifecycle": "started", "initialThreadStatus": "completed", "expectedThreadStatus": "completed", "expectedActiveTurnId": "turn", "expected": {"semantic": "running", "token": "running"}},
+    {"id": "thread-terminal-clears-active-turn", "entity": "thread", "lifecycle": "status", "initialThreadStatus": "running", "status": "completed", "expectedActiveTurnId": "", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "turn-started-forward-status", "entity": "turn", "lifecycle": "started", "status": "futureProviderState", "expected": {"semantic": "unknown", "token": "futureProviderState"}},
+    {"id": "turn-completed-default", "entity": "turn", "lifecycle": "completed", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "turn-completed-forward-status", "entity": "turn", "lifecycle": "completed", "status": "futureProviderState", "expected": {"semantic": "unknown", "token": "futureProviderState"}},
+    {"id": "item-started-default", "entity": "item", "lifecycle": "started", "expected": {"semantic": "running", "token": "running"}},
+    {"id": "item-started-forward-status", "entity": "item", "lifecycle": "started", "status": "futureProviderState", "expected": {"semantic": "unknown", "token": "futureProviderState"}},
+    {"id": "item-completed-default", "entity": "item", "lifecycle": "completed", "expected": {"semantic": "completed", "token": "completed"}},
+    {"id": "item-completed-forward-status", "entity": "item", "lifecycle": "completed", "status": "futureProviderState", "expected": {"semantic": "unknown", "token": "futureProviderState"}}
+  ],
+  "planReplacementCases": [
+    {"id": "omitted-explanation-clears", "initialExplanation": "obsolete explanation", "replacementPlan": [], "expectedExplanation": "", "expectedStepCount": 0},
+    {"id": "malformed-plan-becomes-empty", "initialExplanation": "obsolete explanation", "replacementPlan": {"unexpected": true}, "expectedExplanation": "", "expectedStepCount": 0}
+  ],
+  "childLifecycleCases": [
+    {"id": "closed-child-is-not-running", "lifecycle": "closed", "expectedAgentStatus": "notLoaded"}
+  ],
+  "agentStatusCases": [
+    {"id": "kind-fallback", "kind": "completed", "expectedAgentStatus": "completed"},
+    {"id": "forward-status-precedes-kind", "kind": "completed", "status": "futureProviderState", "expectedAgentStatus": "futureProviderState"}
+  ],
+  "pendingRequestCases": [
+    {
+      "id": "command-default",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": "git status"},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "accept", "choice": "accept", "expected": {"result": {"decision": "accept"}}},
+        {"id": "undeclared-decline", "choice": "decline", "expected": null}
+      ]
+    },
+    {
+      "id": "command-declared-structured-exec",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "git status",
+        "proposedExecpolicyAmendment": ["git", "status"],
+        "availableDecisions": [
+          "cancel",
+          {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git", "status"]}}
+        ]
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false},
+        {"value": "acceptWithExecpolicyAmendment:1", "label": "Accept and allow matching commands: git", "tone": "approve", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "amend", "choice": "acceptWithExecpolicyAmendment:1", "expected": {"result": {"decision": {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git", "status"]}}}}},
+        {"id": "undeclared-accept", "choice": "accept", "expected": null}
+      ]
+    },
+    {
+      "id": "command-exec-fallback",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": "git status", "proposedExecpolicyAmendment": ["git", "status"]},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "acceptWithExecpolicyAmendment:0", "label": "Accept and allow matching commands: git", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "amend", "choice": "acceptWithExecpolicyAmendment:0", "expected": {"result": {"decision": {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git", "status"]}}}}}
+      ]
+    },
+    {
+      "id": "command-network-fallback",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "networkApprovalContext": {"host": "example.test", "protocol": "https"},
+        "proposedNetworkPolicyAmendments": [
+          {"host": "blocked.test", "action": "deny"},
+          {"host": "example.test", "action": "allow"}
+        ]
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "acceptForSession", "label": "Accept for session", "tone": "approve", "requiresInput": false},
+        {"value": "applyNetworkPolicyAmendment:0", "label": "Allow example.test in future", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "amend", "choice": "applyNetworkPolicyAmendment:0", "expected": {"result": {"decision": {"applyNetworkPolicyAmendment": {"network_policy_amendment": {"host": "example.test", "action": "allow"}}}}}}
+      ]
+    },
+    {
+      "id": "command-declared-network-deny",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "networkApprovalContext": {"host": "blocked.test", "protocol": "https"},
+        "proposedNetworkPolicyAmendments": [{"host": "blocked.test", "action": "deny"}],
+        "availableDecisions": [{"applyNetworkPolicyAmendment": {"network_policy_amendment": {"host": "blocked.test", "action": "deny"}}}, "cancel"]
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "applyNetworkPolicyAmendment:0", "label": "Block blocked.test in future", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "deny-rule", "choice": "applyNetworkPolicyAmendment:0", "expected": {"result": {"decision": {"applyNetworkPolicyAmendment": {"network_policy_amendment": {"host": "blocked.test", "action": "deny"}}}}}}
+      ]
+    },
+    {
+      "id": "command-mismatched-structured-proposal",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": "git status", "proposedExecpolicyAmendment": ["git", "status"], "availableDecisions": [{"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git", "push"]}}]},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "reject-mismatch", "choice": "acceptWithExecpolicyAmendment:0", "expected": null}
+      ]
+    },
+    {
+      "id": "command-additional-permissions-fallback",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": "curl example.test", "additionalPermissions": {"network": {"enabled": true}, "fileSystem": null}},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "cancel", "choice": "cancel", "expected": {"result": {"decision": "cancel"}}}
+      ]
+    },
+    {
+      "id": "command-malformed-sibling-fails-closed",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": "curl example.test", "additionalPermissions": {"network": true}},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "reject-hidden-approval", "choice": "accept", "expected": null}
+      ]
+    },
+    {
+      "id": "command-malformed-network-amendment-fails-closed",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"networkApprovalContext": {"host": "example.test", "protocol": "https"}, "proposedNetworkPolicyAmendments": [{"host": "example.test"}]},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": []
+    },
+    {
+      "id": "command-malformed-mixed-decisions",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": "git status", "availableDecisions": ["accept", 42]},
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "unsupported", "choice": "unsupported", "expected": {"error": {"code": -32601, "message": "CodexUI does not support this server request"}}}
+      ]
+    },
+    {
+      "id": "file-change",
+      "method": "item/fileChange/requestApproval",
+      "raw": {"itemId": "file-item", "reason": "Apply proposed edits"},
+      "expectedKind": "file-change-approval",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "acceptForSession", "label": "Accept for session", "tone": "approve", "requiresInput": false},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "session", "choice": "acceptForSession", "expected": {"result": {"decision": "acceptForSession"}}}
+      ]
+    },
+    {
+      "id": "user-input",
+      "method": "item/tool/requestUserInput",
+      "raw": {"questions": [{"id": "answer", "question": "Continue?", "options": [{"label": "yes", "description": "Proceed"}]}]},
+      "expectedKind": "user-input",
+      "expectedActions": [
+        {"value": "submit", "label": "Submit", "tone": "approve", "requiresInput": true},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "submit", "choice": "submit", "input": {"answer": {"answers": ["yes"]}}, "expected": {"result": {"answers": {"answer": {"answers": ["yes"]}}}}},
+        {"id": "invalid", "choice": "submit", "input": {"answer": "yes"}, "expected": null},
+        {"id": "decline", "choice": "decline", "expected": {"error": {"code": -32601, "message": "Request declined by user"}}}
+      ]
+    },
+    {
+      "id": "mcp-standard-form",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Provide values", "mode": "form", "requestedSchema": {"type": "object", "properties": {"accepted": {"type": "boolean"}}}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": true},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "accept", "choice": "accept", "input": {"accepted": true}, "metadata": {"authored": true}, "expected": {"result": {"action": "accept", "content": {"accepted": true}, "_meta": {"authored": true}}}},
+        {"id": "invalid-array", "choice": "accept", "input": [], "expected": null},
+        {"id": "cancel", "choice": "cancel", "expected": {"result": {"action": "cancel", "content": null, "_meta": null}}}
+      ]
+    },
+    {
+      "id": "mcp-openai-form",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Provide JSON", "mode": "openai/form", "requestedSchema": null},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": true},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "arbitrary-json", "choice": "accept", "input": ["value"], "expected": {"result": {"action": "accept", "content": ["value"], "_meta": null}}}
+      ]
+    },
+    {
+      "id": "mcp-url",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Open authorization", "mode": "url", "elicitationId": "elicitation", "url": "https://example.test/authorize"},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "accept", "choice": "accept", "expected": {"result": {"action": "accept", "content": null, "_meta": null}}}
+      ]
+    },
+    {
+      "id": "mcp-privileged-tool",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow Calendar?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "connector_name": "Calendar", "tool_name": "create_event", "tool_params": {"calendar": "primary"}, "tool_params_display": [{"name": "calendar", "display_name": "Calendar", "value": "primary"}], "persist": ["session", "always"]}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "acceptForSession", "label": "Accept for session", "tone": "approve", "requiresInput": false},
+        {"value": "acceptAlways", "label": "Always allow", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "session", "choice": "acceptForSession", "input": {"ignored": true}, "metadata": {"ignored": true}, "expected": {"result": {"action": "accept", "content": null, "_meta": {"persist": "session"}}}},
+        {"id": "always", "choice": "acceptAlways", "expected": {"result": {"action": "accept", "content": null, "_meta": {"persist": "always"}}}}
+      ]
+    },
+    {
+      "id": "mcp-privileged-null-persistence",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "persist": null}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": []
+    },
+    {
+      "id": "mcp-malformed-tool-context",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {"secret": "hidden"}}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "hidden-accept", "choice": "accept", "expected": null}
+      ]
+    },
+    {
+      "id": "mcp-mismatched-tool-display",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {"secret": "hidden"}, "tool_params_display": [{"name": "calendar", "display_name": "Calendar", "value": "primary"}]}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "reject-mismatch", "choice": "accept", "expected": null}
+      ]
+    },
+    {
+      "id": "mcp-tool-suggestion-unsupported",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Install tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "tool_suggestion"}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": []
+    },
+    {
+      "id": "mcp-unknown-privileged-kind",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Future approval", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "future_approval"}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "unsupported", "choice": "unsupported", "expected": {"error": {"code": -32601, "message": "CodexUI does not support this server request"}}}
+      ]
+    },
+    {
+      "id": "permissions",
+      "method": "item/permissions/requestApproval",
+      "raw": {"permissions": {"network": {"enabled": true}, "fileSystem": {"read": null, "write": ["/workspace"]}}},
+      "expectedKind": "permissions-approval",
+      "expectedActions": [
+        {"value": "turn", "label": "Allow this turn", "tone": "approve", "requiresInput": false},
+        {"value": "session", "label": "Allow this session", "tone": "approve", "requiresInput": false},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "turn", "choice": "turn", "expected": {"result": {"permissions": {"network": {"enabled": true}, "fileSystem": {"read": null, "write": ["/workspace"]}}, "scope": "turn"}}},
+        {"id": "decline", "choice": "decline", "expected": {"error": {"code": -32601, "message": "Permission request declined by user"}}}
+      ]
+    },
+    {
+      "id": "permissions-malformed-filesystem",
+      "method": "item/permissions/requestApproval",
+      "raw": {"permissions": {"network": null, "fileSystem": {"write": "/workspace"}}},
+      "expectedKind": "permissions-approval",
+      "expectedActions": [
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "reject-invalid-grant", "choice": "turn", "expected": null}
+      ]
+    },
+    {
+      "id": "dynamic-tool",
+      "method": "item/tool/call",
+      "raw": {"tool": "future_tool", "arguments": {"secret": true}},
+      "expectedKind": "dynamic-tool-call",
+      "expectedActions": [
+        {"value": "unavailable", "label": "Return unavailable", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "unavailable", "choice": "unavailable", "expected": {"result": {"contentItems": [{"type": "inputText", "text": "CodexUI does not provide this dynamic tool"}], "success": false}}}
+      ]
+    },
+    {
+      "id": "authentication-refresh",
+      "method": "account/chatgptAuthTokens/refresh",
+      "raw": {"reason": "expired"},
+      "expectedKind": "authentication-refresh",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "unsupported", "choice": "unsupported", "expected": {"error": {"code": -32601, "message": "CodexUI does not support authentication token refresh"}}}
+      ]
+    },
+    {
+      "id": "attestation",
+      "method": "attestation/generate",
+      "raw": {"challenge": "private"},
+      "expectedKind": "attestation",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "unsupported", "choice": "unsupported", "expected": {"error": {"code": -32601, "message": "CodexUI does not support attestation generation"}}}
+      ]
+    },
+    {
+      "id": "legacy-patch",
+      "method": "applyPatchApproval",
+      "raw": {"conversationId": "conversation", "fileChanges": {"file.txt": {"type": "update"}}},
+      "expectedKind": "legacy-patch-approval",
+      "expectedActions": [
+        {"value": "approved", "label": "Approve", "tone": "approve", "requiresInput": false},
+        {"value": "approved_for_session", "label": "Approve for session", "tone": "approve", "requiresInput": false},
+        {"value": "denied", "label": "Deny", "tone": "danger", "requiresInput": false},
+        {"value": "abort", "label": "Abort", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "denied", "choice": "denied", "expected": {"result": {"decision": {"denied": {"rejection": "Denied by user"}}}}}
+      ]
+    },
+    {
+      "id": "legacy-command",
+      "method": "execCommandApproval",
+      "raw": {"conversationId": "conversation", "command": ["git", "status"]},
+      "expectedKind": "legacy-command-approval",
+      "expectedActions": [
+        {"value": "approved", "label": "Approve", "tone": "approve", "requiresInput": false},
+        {"value": "approved_for_session", "label": "Approve for session", "tone": "approve", "requiresInput": false},
+        {"value": "denied", "label": "Deny", "tone": "danger", "requiresInput": false},
+        {"value": "abort", "label": "Abort", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "approved-session", "choice": "approved_for_session", "expected": {"result": {"decision": "approved_for_session"}}},
+        {"id": "abort", "choice": "abort", "expected": {"result": {"decision": "abort"}}}
+      ]
+    },
+    {
+      "id": "unknown-method",
+      "method": "future/request",
+      "raw": {"future": true},
+      "expectedKind": "unsupported",
+      "expectedActions": [
+        {"value": "unsupported", "label": "Return unsupported", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "unsupported", "choice": "unsupported", "expected": {"error": {"code": -32601, "message": "CodexUI does not support this server request"}}}
+      ]
+    }
+  ],
+  "pendingRequestBoundaryCases": [
+    {
+      "id": "command-1025-byte-context",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": ""},
+      "repeats": [{"path": ["command"], "text": "x", "count": 1025}],
+      "expectedActionValues": ["cancel"],
+      "rejectedChoices": ["accept"]
+    },
+    {
+      "id": "command-1024-byte-unicode-context",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": ""},
+      "repeats": [{"path": ["command"], "text": "🚀", "count": 256}],
+      "expectedActionValues": ["accept", "cancel"],
+      "rejectedChoices": []
+    },
+    {
+      "id": "command-1028-byte-unicode-context",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"command": ""},
+      "repeats": [{"path": ["command"], "text": "🚀", "count": 257}],
+      "expectedActionValues": ["cancel"],
+      "rejectedChoices": ["accept"]
+    },
+    {
+      "id": "mcp-url-1025-byte-context",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Authorize", "mode": "url", "elicitationId": "elicitation", "url": ""},
+      "repeats": [{"path": ["url"], "text": "x", "count": 1025}],
+      "expectedActionValues": ["decline", "cancel"],
+      "rejectedChoices": ["accept"]
+    },
+    {
+      "id": "mcp-combined-review-budget",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "connector_description": []}},
+      "repeats": [{"path": ["_meta", "connector_description"], "element": "detail", "count": 64}],
+      "expectedActionValues": ["cancel"],
+      "rejectedChoices": ["accept"]
+    },
+    {
+      "id": "command-network-amendment-bound",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {"networkApprovalContext": {"host": "example.test", "protocol": "https"}, "proposedNetworkPolicyAmendments": []},
+      "repeats": [{"path": ["proposedNetworkPolicyAmendments"], "element": {"host": "example.test", "action": "allow"}, "count": 65}],
+      "expectedActionValues": ["cancel"],
+      "rejectedChoices": ["accept", "acceptForSession"]
+    },
+    {
+      "id": "mcp-persistence-bound",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "persist": ["session", "always", "session"]}},
+      "expectedActionValues": ["cancel"],
+      "rejectedChoices": ["accept", "acceptForSession", "acceptAlways"]
+    },
+    {
+      "id": "permissions-integral-floating-depth",
+      "method": "item/permissions/requestApproval",
+      "raw": {"permissions": {"fileSystem": {"write": ["/workspace"], "globScanMaxDepth": 1.0}}},
+      "expectedActionValues": ["turn", "session", "decline"],
+      "rejectedChoices": []
+    }
+  ],
+  "turnSettingsCases": [
+    {
+      "id": "aliases-catalogs-drafts",
+      "catalogs": {
+        "models": [
+          17,
+          {"id": ""},
+          {"model": "retired", "displayName": "Retired visible"},
+          {"model": "gpt-default", "hidden": true},
+          {"id": "gpt-current", "hidden": true},
+          {"model": "retired", "hidden": true},
+          {
+            "model": "gpt-default",
+            "displayName": "GPT default",
+            "description": "Default model",
+            "isDefault": true,
+            "supportsPersonality": false,
+            "supportedReasoningEfforts": [
+              {"reasoningEffort": "low"},
+              {"reasoningEffort": "low"},
+              {"reasoningEffort": "high"},
+              {}
+            ],
+            "defaultReasoningEffort": "low",
+            "serviceTiers": [
+              {"id": "fast", "name": "Fast", "description": "Low latency"},
+              {"id": "fast", "name": "Duplicate"},
+              {}
+            ],
+            "additionalSpeedTiers": ["flex", "fast", "", 7],
+            "defaultServiceTier": "fast"
+          },
+          {
+            "id": "gpt-current",
+            "displayName": "GPT current final",
+            "supportsPersonality": true,
+            "supportedReasoningEfforts": [
+              {"reasoningEffort": "low"},
+              {"reasoningEffort": "high"}
+            ]
+          },
+          {"model": "hidden", "hidden": true},
+          {"id": 123}
+        ],
+        "permissionProfiles": [
+          {"id": ":workspace", "description": "Workspace writes"},
+          {"id": ":read-only", "allowed": false},
+          {"id": ":workspace", "allowed": false},
+          {"id": ":read-only", "description": "Read-only final"},
+          {"id": ":danger-full-access"},
+          {"id": "team-managed", "description": "Managed by team"},
+          {"id": "blocked", "allowed": false},
+          {"id": ""},
+          {"id": 123},
+          "malformed"
+        ]
+      },
+      "threads": [
+        {
+          "id": "settings-a",
+          "key": "settings-a",
+          "canonical": {
+            "id": "settings-a",
+            "creationCorrelation": "draft-a",
+            "effort": "low",
+            "personality": "friendly",
+            "approvalPolicy": "never",
+            "sandboxPolicy": {
+              "type": "workspaceWrite",
+              "networkAccess": true,
+              "writableRoots": ["obsolete"]
+            },
+            "activePermissionProfile": {"id": ":workspace"}
+          }
+        },
+        {
+          "id": "settings-b",
+          "key": "settings-b",
+          "canonical": {
+            "id": "settings-b",
+            "model": "gpt-current",
+            "approvalPolicy": "on-request",
+            "sandbox": "read-only"
+          }
+        }
+      ],
+      "newThread": {
+        "key": "creation:draft-new",
+        "cwd": "/new/work"
+      },
+      "steps": [
+        {
+          "select": "settings-a",
+          "expect": {
+            "identity": "settings-a",
+            "values": {
+              "model": "default",
+              "effort": "low",
+              "personality": "default",
+              "sandbox": "workspace-write",
+              "network": "enabled",
+              "approval": "never",
+              "permissionProfile": ":workspace"
+            },
+            "touched": [],
+            "catalog": {
+              "models": ["gpt-default", "gpt-current"],
+              "modelLabels": ["GPT default", "GPT current final"],
+              "modelDescriptions": ["Default model", ""],
+              "modelDefaults": [true, false],
+              "modelPersonalitySupport": [false, true],
+              "defaultEfforts": ["low", ""],
+              "defaultServiceTiers": ["fast", ""],
+              "efforts": ["low", "high"],
+              "serviceTiers": ["fast", "flex"],
+              "serviceTierLabels": ["Fast", ""],
+              "serviceTierDescriptions": ["Low latency", ""],
+              "permissionProfiles": [":read-only", ":danger-full-access", "team-managed"],
+              "permissionProfileDescriptions": ["Read-only final", "", "Managed by team"],
+              "selectedModel": "gpt-default",
+              "personalityEnabled": false
+            },
+            "threadOptions": {},
+            "turnOptions": {
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "gpt-default",
+                  "developer_instructions": null,
+                  "reasoning_effort": "low"
+                }
+              }
+            }
+          }
+        },
+        {
+          "changes": [["approval", "never"], ["summary", "concise"]],
+          "expect": {"touched": ["approval", "summary"]}
+        },
+        {
+          "updates": [{"approvalPolicy": "never"}, {"summary": "concise"}],
+          "expect": {
+            "values": {"approval": "never", "summary": "concise"},
+            "touched": [],
+            "acknowledged": ["approval", "summary"]
+          }
+        },
+        {"change": ["approval", "untrusted"]},
+        {
+          "update": {"summary": "concise"},
+          "expect": {
+            "values": {"approval": "untrusted", "summary": "concise"},
+            "touched": ["approval"],
+            "acknowledged": ["summary"]
+          }
+        },
+        {
+          "select": "settings-b",
+          "expect": {
+            "values": {
+              "model": "gpt-current",
+              "sandbox": "read-only",
+              "network": "restricted",
+              "approval": "on-request"
+            },
+            "touched": [],
+            "acknowledged": []
+          }
+        },
+        {
+          "change": ["effort", "unsupported"],
+          "expect": {
+            "values": {"effort": "default"},
+            "touched": ["effort"]
+          }
+        },
+        {
+          "select": "settings-a",
+          "expect": {
+            "values": {"approval": "untrusted", "summary": "concise"},
+            "touched": ["approval"]
+          }
+        },
+        {
+          "update": {
+            "reasoningEffort": null,
+            "sandboxPolicy": {"type": "readOnly"},
+            "approvalPolicy": null
+          },
+          "expect": {
+            "values": {
+              "effort": "default",
+              "sandbox": "read-only",
+              "network": "restricted",
+              "approval": "untrusted",
+              "summary": "concise"
+            },
+            "touched": ["approval"],
+            "acknowledged": ["effort", "sandbox", "network", "approval"]
+          }
+        },
+        {
+          "change": ["permissionProfile", ":read-only"],
+          "expect": {
+            "values": {"permissionProfile": ":read-only"},
+            "touched": ["approval", "permissionProfile"]
+          }
+        },
+        {
+          "change": ["sandbox", "danger-full-access"],
+          "expect": {
+            "values": {"sandbox": "danger-full-access", "network": "enabled", "permissionProfile": "default"},
+            "touched": ["sandbox", "approval", "permissionProfile"],
+            "threadOptions": {"approvalPolicy": "untrusted", "permissions": null, "sandbox": "danger-full-access"},
+            "turnOptions": {
+              "approvalPolicy": "untrusted",
+              "permissions": null,
+              "sandboxPolicy": {"type": "dangerFullAccess"},
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "gpt-default",
+                  "developer_instructions": null,
+                  "reasoning_effort": null
+                }
+              }
+            }
+          }
+        },
+        {
+          "changes": [
+            ["model", "gpt-current"],
+            ["effort", "high"],
+            ["personality", "pragmatic"],
+            ["sandbox", "workspace-write"],
+            ["network", "enabled"],
+            ["approval", "on-request"],
+            ["reviewer", "auto_review"],
+            ["cwd", "  /authored/work  "],
+            ["permissionProfile", "default"],
+            ["serviceTier", "flex"],
+            ["summary", "detailed"],
+            ["collaboration", "plan"]
+          ],
+          "expect": {
+            "values": {
+              "model": "gpt-current",
+              "effort": "high",
+              "personality": "pragmatic",
+              "sandbox": "workspace-write",
+              "network": "enabled",
+              "approval": "on-request",
+              "reviewer": "auto_review",
+              "cwd": "  /authored/work  ",
+              "permissionProfile": "default",
+              "serviceTier": "flex",
+              "summary": "detailed",
+              "collaboration": "plan"
+            },
+            "touched": [
+              "model",
+              "effort",
+              "personality",
+              "sandbox",
+              "network",
+              "approval",
+              "reviewer",
+              "cwd",
+              "permissionProfile",
+              "serviceTier",
+              "summary",
+              "collaboration"
+            ],
+            "threadOptions": {
+              "model": "gpt-current",
+              "personality": "pragmatic",
+              "approvalPolicy": "on-request",
+              "approvalsReviewer": "auto_review",
+              "serviceTier": "flex",
+              "cwd": "/authored/work",
+              "permissions": null,
+              "sandbox": "workspace-write"
+            },
+            "turnOptions": {
+              "model": "gpt-current",
+              "effort": "high",
+              "personality": "pragmatic",
+              "approvalPolicy": "on-request",
+              "approvalsReviewer": "auto_review",
+              "serviceTier": "flex",
+              "summary": "detailed",
+              "cwd": "/authored/work",
+              "permissions": null,
+              "sandboxPolicy": {
+                "type": "workspaceWrite",
+                "writableRoots": [],
+                "networkAccess": true,
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false
+              },
+              "collaborationMode": {
+                "mode": "plan",
+                "settings": {
+                  "model": "gpt-current",
+                  "developer_instructions": null,
+                  "reasoning_effort": "high"
+                }
+              }
+            }
+          }
+        },
+        {"select": "settings-b", "expect": {"touched": ["effort"]}}
+      ]
+    }
+  ]
+}

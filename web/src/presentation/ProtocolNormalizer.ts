@@ -11,6 +11,7 @@ import {
     member,
     result,
     stringMember,
+    ThreadSettingFields,
 } from "./PresentationProtocol.js";
 import type {
     Authority,
@@ -18,7 +19,7 @@ import type {
     PresentationFrame,
 } from "./PresentationProtocol.js";
 
-export type PresentationSink = (frame: PresentationFrame) => boolean;
+export type PresentationSink = (frame: PresentationFrame) => void;
 
 const stableScopeKeys = [
     "threadId",
@@ -43,21 +44,20 @@ function errorValue(response: JsonObject): unknown {
         : {code: -32000, message: "operation failed"};
 }
 
-function requestKind(method: string): string {
-    const categories: Readonly<Record<string, string>> = {
-        "item/commandExecution/requestApproval": "command-approval",
-        "item/fileChange/requestApproval": "file-change-approval",
-        "item/tool/requestUserInput": "user-input",
-        "mcpServer/elicitation/request": "mcp-elicitation",
-        "item/permissions/requestApproval": "permissions-approval",
-        "item/tool/call": "dynamic-tool-call",
-        "account/chatgptAuthTokens/refresh": "authentication-refresh",
-        "attestation/generate": "attestation",
-        applyPatchApproval: "legacy-patch-approval",
-        execCommandApproval: "legacy-command-approval",
-    };
-    return categories[method] ?? "unsupported";
-}
+const requestKinds: Readonly<Record<string, string>> = {
+    "item/commandExecution/requestApproval": "command-approval",
+    "item/fileChange/requestApproval": "file-change-approval",
+    "item/tool/requestUserInput": "user-input",
+    "mcpServer/elicitation/request": "mcp-elicitation",
+    "item/permissions/requestApproval": "permissions-approval",
+    "item/tool/call": "dynamic-tool-call",
+    "account/chatgptAuthTokens/refresh": "authentication-refresh",
+    "attestation/generate": "attestation",
+    applyPatchApproval: "legacy-patch-approval",
+    execCommandApproval: "legacy-command-approval",
+};
+
+function requestKind(method: string): string { return requestKinds[method] ?? "unsupported"; }
 
 interface EventDescriptor {
     readonly type: string;
@@ -118,42 +118,16 @@ const remainingNotifications: Readonly<Record<string, EventDescriptor>> = {
 };
 
 export class ProtocolNormalizer {
-    private deliveryFailureHandler: (() => void) | undefined;
-    private deliveryFailed = false;
     private connectionGeneration = 0;
     private nextSequence = 1;
 
     public constructor(private readonly sink: PresentationSink) {}
-
-    public setDeliveryFailureHandler(handler?: () => void): void {
-        this.deliveryFailureHandler = handler;
-    }
 
     public transportEvent(eventName: string, detail = ""): void {
         if (eventName === "connected") ++this.connectionGeneration;
         const data: JsonObject = {state: eventName};
         if (detail !== "") data.detail = detail;
         this.emitEvent("connection.lifecycle", data);
-    }
-
-    public connectionSettings(settings: JsonObject): void {
-        this.emitEvent("connection.settings.changed", settings, "replace");
-    }
-
-    public localOperationResult(
-        action: string,
-        correlationId: string,
-        ok: boolean,
-        data: unknown,
-    ): void {
-        this.emit(result(
-            this.nextSequence++,
-            this.connectionGeneration,
-            action,
-            correlationId,
-            ok,
-            data,
-        ));
     }
 
     public bridgeEvent(value: unknown): void {
@@ -252,10 +226,6 @@ export class ProtocolNormalizer {
             }
             const lifecycle = method === "item/started" ? "started" : "completed";
             this.emitEvent("conversation.item.upsert", {lifecycle, item}, "merge", itemScope);
-            const itemType = stringMember(item, "type");
-            if (itemType === "collabAgentToolCall" || itemType === "subAgentActivity") {
-                this.emitEvent("agents.activity.upsert", {lifecycle, activity: item}, "merge", itemScope);
-            }
         } else if (
             method === "item/agentMessage/delta"
             || method === "item/plan/delta"
@@ -339,6 +309,7 @@ export class ProtocolNormalizer {
         let data: unknown;
         let authority: Authority = "none";
         const scope = stableScope(context);
+        const requestSequence = startedAtSequence === undefined ? {} : {requestSequence: startedAtSequence};
         if (ok) {
             const rawValue = response.result;
             const value = isObject(rawValue) ? rawValue : {};
@@ -348,18 +319,39 @@ export class ProtocolNormalizer {
                     threads: Array.isArray(threads) ? threads : [],
                     nextCursor: member(value, "nextCursor"),
                     backwardsCursor: member(value, "backwardsCursor"),
+                    ...requestSequence,
                 };
                 authority = "merge";
             } else if (action === "thread.read") {
                 const candidate = member(value, "thread", {});
                 const thread = isObject(candidate) ? candidate : {};
-                data = {thread};
+                data = {thread, ...requestSequence};
                 authority = startedAtSequence !== undefined
                     && startedAtSequence === this.nextSequence
                     ? "replace"
                     : "merge";
                 const threadId = stringMember(thread, "id");
                 if (threadId !== "") scope.threadId = threadId;
+            } else if (action === "thread.turns.list") {
+                const turns = member(value, "data", []);
+                data = {
+                    turns: Array.isArray(turns) ? turns : [],
+                    nextCursor: member(value, "nextCursor"),
+                    backwardsCursor: member(value, "backwardsCursor"),
+                    sortDirection: stringMember(context, "sortDirection"),
+                    ...requestSequence,
+                };
+                authority = "merge";
+            } else if (action === "thread.items.list") {
+                const entries = member(value, "data", []);
+                data = {
+                    entries: Array.isArray(entries) ? entries : [],
+                    nextCursor: member(value, "nextCursor"),
+                    backwardsCursor: member(value, "backwardsCursor"),
+                    sortDirection: stringMember(context, "sortDirection"),
+                    ...requestSequence,
+                };
+                authority = "merge";
             } else if (
                 action === "thread.create"
                 || action === "thread.resume"
@@ -367,20 +359,10 @@ export class ProtocolNormalizer {
             ) {
                 const candidate = member(value, "thread", {});
                 const thread: JsonObject = isObject(candidate) ? {...candidate} : {};
-                for (const field of [
-                    "activePermissionProfile",
-                    "approvalPolicy",
-                    "approvalsReviewer",
-                    "cwd",
-                    "model",
-                    "modelProvider",
-                    "reasoningEffort",
-                    "sandbox",
-                    "serviceTier",
-                ]) {
+                for (const field of ThreadSettingFields) {
                     if (Object.hasOwn(value, field)) thread[field] = value[field];
                 }
-                data = {thread};
+                data = {thread, ...requestSequence};
                 authority = "merge";
             } else if (action === "models.list") {
                 const models = member(value, "data", []);
@@ -390,19 +372,7 @@ export class ProtocolNormalizer {
                 };
                 authority = "replace";
             } else if (
-                action === "model-provider-capabilities.read"
-                || action === "account.read"
-                || action === "account.rate-limits.read"
-                || action === "account.token-usage.read"
-                || action === "config.read"
-                || action === "permission-profiles.list"
-                || action === "experimental-features.list"
-                || action === "skills.list"
-                || action === "hooks.list"
-                || action === "plugins.list"
-                || action === "apps.list"
-                || action === "mcp-servers.list"
-                || action.endsWith(".list")
+                action.endsWith(".list")
                 || action.endsWith(".read")
                 || action.endsWith(".get")
                 || action === "plugins.installed"
@@ -433,32 +403,12 @@ export class ProtocolNormalizer {
         ));
     }
 
-    public operationRejected(
-        action: string,
-        correlationId: string,
-        code: number,
-        message: string,
-    ): void {
-        this.emit(result(
-            this.nextSequence++,
-            this.connectionGeneration,
-            action,
-            correlationId,
-            false,
-            {code, message},
-        ));
-    }
-
     public get sequence(): number {
         return this.nextSequence;
     }
 
-    private emit(frame: PresentationFrame): boolean {
-        if (this.deliveryFailed) return false;
-        if (this.sink(frame)) return true;
-        this.deliveryFailed = true;
-        this.deliveryFailureHandler?.();
-        return false;
+    private emit(frame: PresentationFrame): void {
+        this.sink(frame);
     }
 
     private emitEvent(
@@ -466,8 +416,8 @@ export class ProtocolNormalizer {
         data: JsonObject = {},
         authority: Authority = "none",
         scope: JsonObject = {},
-    ): boolean {
-        return this.emit(event(
+    ): void {
+        this.emit(event(
             this.nextSequence++,
             this.connectionGeneration,
             type,

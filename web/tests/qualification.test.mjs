@@ -6,7 +6,7 @@ import {createElement} from "react";
 import {App, NewThreadDialog, ThreadLoadingSpinnerDelayMilliseconds, ThreadLoadingSurface, inspectorPlainState, writeCardClipboard} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
 import {readBrowserStorage, writeBrowserStorage} from "../dist/app/BrowserStorage.js";
-import {event, humanizeProtocolLabel, result} from "../dist/index.js";
+import {event, humanizeProtocolLabel, result, statusFromValue} from "../dist/index.js";
 
 test("browser storage denial falls back without breaking startup or persistence", () => {
     globalThis.window = {
@@ -76,7 +76,7 @@ test("thread-loading surface delays only its bounded visual spinner", () => {
     assert.match(spinning, /class="thread-loading-spinner" aria-hidden="true"/u);
 });
 
-test("new-thread dialog exposes the complete native creation draft", () => {
+test("new-thread dialog exposes the complete creation draft", () => {
     const markup = renderToStaticMarkup(createElement(NewThreadDialog, {
         initialWorkspace: "/workspace", onCancel: () => {}, onContinue: () => {},
     }));
@@ -117,8 +117,8 @@ test("Inspector state diagnostics read items only while State is selected", () =
     const item = {};
     Object.defineProperty(item, "raw", {get: () => { ++itemReads; return {type: "agentMessage"}; }});
     const thread = {
-        id: "thread", title: "", cwd: "", status: "", archived: false,
-        turnOrder: ["turn"], turns: new Map([["turn", {id: "turn", status: "", plan: {}, itemOrder: ["item"], items: new Map([["item", item]])}]]),
+        id: "thread", title: "", cwd: "", status: statusFromValue(""), archived: false,
+        turnOrder: ["turn"], turns: new Map([["turn", {id: "turn", status: statusFromValue(""), plan: {}, itemOrder: ["item"], items: new Map([["item", item]])}]]),
         agentOrder: [], agents: new Map(), domains: new Map(),
     };
     assert.equal(inspectorPlainState(thread, false), null);
@@ -187,7 +187,15 @@ test("conversation presentation preferences retain filtered cards and initialize
         getItem: key => values.get(key) ?? null,
         setItem: (key, value) => values.set(key, value),
     }};
-    const filtered = renderToStaticMarkup(createElement(App, {session}));
+    const filteredSession = new BrowserFrontendSession("ws://bridge.test/codex", () => {
+        throw new Error("not connected");
+    });
+    filteredSession.model.applyEvent(result(1, 1, "threads.list", "list", true,
+        {threads: [{id: "thread-1"}]}, "replace"));
+    filteredSession.selectThread("thread-1");
+    filteredSession.model.applyEvent(result(2, 1, "thread.read", "read", true, {thread}, "replace",
+        {threadId: "thread-1"}));
+    const filtered = renderToStaticMarkup(createElement(App, {session: filteredSession}));
     delete globalThis.window;
     assert.match(filtered, /conversation-card reasoning\s+collapsed/u);
     assert.doesNotMatch(filtered, /Retained reasoning detail/u);
@@ -202,6 +210,7 @@ test("conversation presentation preferences retain filtered cards and initialize
     assert.match(filtered, /aria-label="Show Codex update cards"/u);
     assert.match(filtered, /aria-label="New command cards start collapsed"/u);
     assert.match(filtered, /aria-label="New image cards start collapsed"/u);
+    filteredSession.dispose();
     session.dispose();
 });
 
@@ -209,19 +218,29 @@ test("Plan reconciles stale running against terminal lifecycle without changing 
     const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
     session.model.applyEvent(event(1, 1, "thread.upsert", {thread: {id: "plan-thread", status: "active"}}, "merge", {threadId: "plan-thread"}));
     session.model.applyEvent(event(2, 1, "turn.upsert", {turn: {id: "plan-turn", status: "inProgress"}}, "merge", {threadId: "plan-thread", turnId: "plan-turn"}));
-    session.model.applyEvent(event(3, 1, "plan.replaced", {
+    session.model.applyEvent(event(3, 1, "plan.replaced", {steps: []}, "replace", {
+        threadId: "plan-thread", turnId: "plan-turn",
+    }));
+    session.selectThread("plan-thread");
+    const render = () => renderToStaticMarkup(createElement(App, {session}));
+    assert.match(render(), /<div class="plan-view"><\/div>/u);
+    assert.doesNotMatch(render(), /No structured plan is available/u);
+
+    session.model.applyEvent(event(4, 1, "plan.replaced", {
         explanation: "Lifecycle plan",
         steps: [{step: "Active step", status: "inProgress"}, {step: "Pending step", status: "pending"}],
     }, "replace", {threadId: "plan-thread", turnId: "plan-turn"}));
-    session.selectThread("plan-thread");
-    const render = () => renderToStaticMarkup(createElement(App, {session}));
     assert.match(render(), /<small>running<\/small>[\s\S]*<small>pending<\/small>/u);
 
-    for (const [sequence, source, display] of [[4, "completed", "completed"], [5, "failed", "failed"], [6, "interrupted", "interrupted"]]) {
+    for (const [sequence, source, display] of [[5, "completed", "completed"], [6, "failed", "failed"], [7, "interrupted", "interrupted"]]) {
         session.model.applyEvent(event(sequence, 1, "thread.upsert", {thread: {id: "plan-thread", status: source}}, "merge", {threadId: "plan-thread"}));
         const markup = render();
         assert.doesNotMatch(markup, /<small>running<\/small>/u);
         assert.match(markup, new RegExp(`<small>${display}</small>[\\s\\S]*<small>pending</small>`, "u"));
     }
+    session.model.applyEvent(event(8, 1, "turn.upsert", {
+        turn: {id: "plan-turn", status: "completed"},
+    }, "merge", {threadId: "plan-thread", turnId: "plan-turn"}));
+    assert.match(render(), /<small>completed<\/small>[\s\S]*<small>pending<\/small>/u);
     session.dispose();
 });

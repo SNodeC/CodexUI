@@ -3,25 +3,47 @@
 #ifndef CODEXUI_CODEX_UI_UIVIEWSTATE_H
 #define CODEXUI_CODEX_UI_UIVIEWSTATE_H
 
+#include "codex/PendingRequestPolicy.h"
+#include "codex/middle/MiddleTypes.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <variant>
 #include <vector>
 
 namespace codexui::codex::ui {
 
-enum class InspectorProjection { All, Plan, Agents, Changes, Requests, State };
+enum class InspectorProjection { Plan, Agents, Changes, Requests, State };
+inline constexpr std::size_t MaximumInspectorRows = 50;
+
+struct InspectorRowRequest final {
+  std::size_t first = 0;
+  std::size_t count = MaximumInspectorRows;
+  std::string anchorKey;
+  std::string focusedKey;
+  std::vector<std::string> retainedKeys;
+};
+
+inline std::string threadPresentationKey(std::string_view threadId,
+                                         std::string_view correlation) {
+  return correlation.empty() ? std::string(threadId)
+                             : "creation:" + std::string(correlation);
+}
 
 // Toolkit-neutral inputs for the concrete thread-list renderer. Expansion
 // and optimistic rows deliberately remain local to that renderer.
 struct ThreadListRow {
   std::string id;
+  std::string presentationKey;
+  nodegraph::NodeRef target;
   std::string title;
   std::string cwd;
-  std::string status;
+  UiStatus status;
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;
@@ -44,32 +66,8 @@ struct ThreadListSnapshot {
   bool operator==(const ThreadListSnapshot &) const = default;
 };
 
-struct InspectorPlanStep {
-  std::string step;
-  std::string status;
-
-  bool operator==(const InspectorPlanStep &) const = default;
-};
-
-struct InspectorPlan {
-  std::string explanation;
-  std::vector<InspectorPlanStep> steps;
-
-  bool operator==(const InspectorPlan &) const = default;
-};
-
-struct InspectorPlanSnapshot {
-  std::string threadId;
-  bool threadPresent = false;
-  std::optional<InspectorPlan> plan;
-  std::optional<std::string> planItem;
-
-  bool operator==(const InspectorPlanSnapshot &) const = default;
-};
-
 struct InspectorAgentRow {
-  std::string id;
-  std::string status;
+  UiStatus status;
   std::string childThreadId;
   std::string agentPath;
   std::string tool;
@@ -83,32 +81,41 @@ struct InspectorAgentRow {
   bool operator==(const InspectorAgentRow &) const = default;
 };
 
-struct InspectorAgentsSnapshot {
-  std::string threadId;
-  bool threadPresent = false;
-  std::vector<InspectorAgentRow> agents;
+struct InspectorMarkdownRow {
+  std::string text;
+  std::string accessibleName;
 
-  bool operator==(const InspectorAgentsSnapshot &) const = default;
+  bool operator==(const InspectorMarkdownRow &) const = default;
 };
 
-struct InspectorRequestRow {
-  std::string id;
-  std::string kind;
-  std::string threadContext;
-  std::uint64_t generation = 0;
-  std::string command;
-  std::string reason;
-  std::string message;
-  std::optional<std::size_t> questionCount;
-  bool actionable = false;
+using InspectorRowValue =
+    std::variant<InspectorMarkdownRow, middle::PlanStepData, InspectorAgentRow,
+                 PendingRequestDescriptor>;
 
-  bool operator==(const InspectorRequestRow &) const = default;
+struct InspectorRow {
+  std::string key;
+  InspectorRowValue value;
+
+  bool operator==(const InspectorRow &) const = default;
 };
 
-struct InspectorRequestsSnapshot {
-  std::vector<InspectorRequestRow> requests;
+struct InspectorPageSnapshot {
+  std::size_t first = 0;
+  std::size_t total = 0;
+  std::uint64_t orderRevision = 0;
+  std::string emptyMessage;
+  std::optional<std::size_t> anchorIndex;
+  std::optional<std::size_t> focusedIndex;
+  std::vector<InspectorRow> rows;
+  std::optional<InspectorRow> focused;
+  std::optional<std::vector<std::string>> validRetainedKeys;
 
-  bool operator==(const InspectorRequestsSnapshot &) const = default;
+  bool operator==(const InspectorPageSnapshot &) const = default;
+};
+
+struct PendingRequestsSummary {
+  std::size_t total = 0;
+  std::vector<PendingRequestDescriptor> candidates;
 };
 
 struct InspectorChangesSnapshot {
@@ -133,10 +140,11 @@ struct InspectorStateSnapshot {
 };
 
 struct InspectorSnapshot {
-  InspectorPlanSnapshot plan;
-  InspectorAgentsSnapshot agents;
+  std::uint64_t threadIncarnation = 0;
+  InspectorPageSnapshot plan;
+  InspectorPageSnapshot agents;
   InspectorChangesSnapshot changes;
-  InspectorRequestsSnapshot requests;
+  InspectorPageSnapshot requests;
   InspectorStateSnapshot state;
 
   bool operator==(const InspectorSnapshot &) const = default;

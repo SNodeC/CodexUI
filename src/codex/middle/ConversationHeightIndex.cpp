@@ -14,17 +14,6 @@ int validHeight(int height) noexcept { return std::max(0, height); }
 
 ConversationHeightIndex::~ConversationHeightIndex() = default;
 
-void ConversationHeightIndex::clear() noexcept {
-  root_.reset();
-  lastLookupSteps_ = 0;
-  lastUpdateSteps_ = 0;
-}
-
-void ConversationHeightIndex::reset(std::size_t count, int estimatedHeight) {
-  std::vector<int> heights(count, validHeight(estimatedHeight));
-  assign(heights);
-}
-
 void ConversationHeightIndex::assign(std::span<const int> heights) {
   lastUpdateSteps_ = 0;
   root_ = makeRows(heights, lastUpdateSteps_);
@@ -167,6 +156,23 @@ std::size_t ConversationHeightIndex::rowAt(qint64 contentY) const noexcept {
     current = current->right.get();
   }
   return size() - 1;
+}
+
+std::size_t
+ConversationHeightIndex::nextRowWithExtent(std::size_t row) const noexcept {
+  if (row >= size())
+    return size();
+  const qint64 position = top(row);
+  return position < totalHeight() ? rowAt(position) : size();
+}
+
+std::size_t ConversationHeightIndex::previousRowWithExtent(
+    std::size_t row) const noexcept {
+  if (empty())
+    return size();
+  row = std::min(row, size() - 1);
+  const qint64 position = bottom(row);
+  return position > 0 ? rowAt(position - 1) : size();
 }
 
 qint64 ConversationHeightIndex::prefix(std::size_t count) const noexcept {

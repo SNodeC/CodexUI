@@ -3,6 +3,7 @@
 #include "codex/ui/ExpandingPromptEditor.h"
 
 #include <QAbstractTextDocumentLayout>
+#include <QEvent>
 #include <QFocusEvent>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
@@ -24,19 +25,12 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget *parent)
   setObjectName(QStringLiteral("upcomingPromptEditor"));
   setPlaceholderText(QStringLiteral("Message Codex"));
   setAccessibleName(QStringLiteral("Message Codex"));
-  setAccessibleDescription(QStringLiteral(
-      "Enter to send. Shift+Enter inserts a new line."));
+  setAccessibleDescription(
+      QStringLiteral("Enter to send. Shift+Enter inserts a new line."));
   setLineWrapMode(QPlainTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  maximumEditorHeight =
-      fontMetrics().lineSpacing() * maximumVisibleLineCount() + 10;
-  setMinimumHeight(compactHeight());
-  setMaximumHeight(maximumEditorHeight);
   setFixedHeight(compactHeight());
-  setStyleSheet(QStringLiteral(
-      "QPlainTextEdit{background:transparent;color:#1d2633;border:0;padding:"
-      "3px 2px;}"));
 
   connect(this, &QPlainTextEdit::textChanged, this,
           &ExpandingPromptEditor::scheduleRemeasure);
@@ -47,6 +41,14 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget *parent)
           });
 }
 
+void ExpandingPromptEditor::changeEvent(QEvent *event) {
+  QPlainTextEdit::changeEvent(event);
+  if (event && (event->type() == QEvent::ApplicationFontChange ||
+                event->type() == QEvent::FontChange ||
+                event->type() == QEvent::StyleChange))
+    scheduleRemeasure();
+}
+
 bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const {
   const QString content = toPlainText();
   if (content.isEmpty())
@@ -55,9 +57,8 @@ bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const {
     return true;
 
   const int viewportReduction = std::max(0, width() - viewport()->width());
-  const qreal contentWidth =
-      std::max<qreal>(1, widgetWidth - viewportReduction -
-                            2 * document()->documentMargin());
+  const qreal contentWidth = std::max<qreal>(
+      1, widgetWidth - viewportReduction - 2 * document()->documentMargin());
   QTextLayout layout(content, font());
   QTextOption option = document()->defaultTextOption();
   option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
@@ -142,6 +143,8 @@ void ExpandingPromptEditor::remeasure() {
   if (viewport()->width() <= 0)
     return;
 
+  const int maximumContentHeight =
+      fontMetrics().lineSpacing() * maximumVisibleLineCount() + 10;
   document()->setTextWidth(viewport()->width());
   qreal laidOutHeight = 0;
   QAbstractTextDocumentLayout *documentLayout = document()->documentLayout();
@@ -150,8 +153,8 @@ void ExpandingPromptEditor::remeasure() {
     laidOutHeight += documentLayout->blockBoundingRect(block).height();
   const int documentHeight = static_cast<int>(std::ceil(laidOutHeight)) + 10;
   const int wanted =
-      std::clamp(documentHeight, compactHeight(), maximumEditorHeight);
-  contentScrollable = documentHeight > maximumEditorHeight;
+      std::clamp(documentHeight, compactHeight(), maximumContentHeight);
+  contentScrollable = documentHeight > maximumContentHeight;
   setVerticalScrollBarPolicy(contentScrollable ? Qt::ScrollBarAsNeeded
                                                : Qt::ScrollBarAlwaysOff);
   if (!contentScrollable)

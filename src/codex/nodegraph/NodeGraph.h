@@ -8,9 +8,13 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <span>
 #include <string>
@@ -75,6 +79,43 @@ enum class NodeStatus : std::uint8_t {
   Disconnected,
 };
 
+constexpr NodeStatus nodeStatusFromText(std::string_view status) noexcept {
+  if (status == "pending" || status == "queued")
+    return NodeStatus::Pending;
+  if (status == "running" || status == "inProgress" || status == "active" ||
+      status == "started")
+    return NodeStatus::Running;
+  if (status == "completed" || status == "complete" || status == "succeeded" ||
+      status == "idle")
+    return NodeStatus::Completed;
+  if (status == "failed" || status == "error" || status == "systemError" ||
+      status == "blocked")
+    return NodeStatus::Failed;
+  if (status == "interrupted" || status == "cancelled" ||
+      status == "canceled" || status == "stopped")
+    return NodeStatus::Interrupted;
+  if (status == "notLoaded")
+    return NodeStatus::NotLoaded;
+  if (status == "connected")
+    return NodeStatus::Connected;
+  if (status == "disconnected")
+    return NodeStatus::Disconnected;
+  return NodeStatus::Unknown;
+}
+
+struct NodeStatusView final {
+  NodeStatus semantic = NodeStatus::Unknown;
+  std::string_view unknownText;
+
+  [[nodiscard]] constexpr bool empty() const noexcept {
+    return semantic == NodeStatus::Unknown && unknownText.empty();
+  }
+};
+
+[[nodiscard]] std::string_view statusTextFromValue(const Value *value);
+[[nodiscard]] NodeStatus nodeStatusFromValue(const Value *value);
+[[nodiscard]] NodeStatusView nodeStatusView(const Value *value);
+
 // Protocol facts are retained directly here. The immutable storage is replaced
 // as one unit by the sole writer and can be pinned briefly by Qt after a
 // successful try-read.
@@ -85,6 +126,31 @@ struct NodeState final {
   bool operator==(const NodeState &) const = default;
 };
 
+[[nodiscard]] inline const Value *valueMember(const NodeState &state,
+                                              std::string_view key) noexcept {
+  return valueMember(state.fields, key);
+}
+
+[[nodiscard]] NodeStatusView nodeStatusView(const NodeState &state);
+[[nodiscard]] NodeStatusView agentActivityStatus(const NodeState &state);
+[[nodiscard]] bool agentActivityCanCreate(const NodeState &state);
+
+struct InspectorPlanView final {
+  const Value *steps = nullptr;
+  const Value *explanation = nullptr;
+  std::size_t rowCount = 0;
+
+  [[nodiscard]] explicit operator bool() const noexcept { return steps; }
+};
+
+[[nodiscard]] InspectorPlanView
+inspectorPlanView(const NodeState &state) noexcept;
+[[nodiscard]] const Value::Object *
+reportedAgentState(const NodeState &state, std::string_view childId) noexcept;
+[[nodiscard]] NodeStatusView inspectorAgentActivityStatus(
+    const NodeState &state, const NodeState *turn, NodeStatusView child,
+    bool childIdVisible) noexcept;
+
 enum class RelationKind : std::uint8_t {
   RootThread,
   StructuralChildThread,
@@ -94,7 +160,7 @@ enum class RelationKind : std::uint8_t {
   ProjectMembership,
   SectionMembership,
   TurnRootItem,
-  OperationTarget,
+  PendingOperation,
   InteractionTarget,
   PendingInteraction,
   PendingPrompt,
@@ -111,11 +177,9 @@ public:
   Node &operator=(const Node &) = delete;
 
   [[nodiscard]] const NodeId &id() const noexcept;
-
-  // The slot is intentionally untyped and non-owning. Only the Qt main thread
-  // may set, clear, or dereference it; the worker never examines it.
-  [[nodiscard]] void *uiAttachment() const noexcept;
-  void setUiAttachment(void *attachment) noexcept;
+  [[nodiscard]] std::uint64_t incarnation() const noexcept {
+    return insertionOrder_;
+  }
 
 private:
   friend class NodeGraph;
@@ -125,8 +189,15 @@ private:
   NodeId id_;
   std::shared_ptr<const NodeState> state_;
   Node *parent_ = nullptr;
+  // Child slot while parented; retirement slot while graph-retained. The
+  // vector identity is authoritative. Atomic access keeps foreign membership
+  // probes race-free without adding a second retirement index.
+  std::atomic<std::size_t> parentIndex_{0};
   std::vector<Node *> children_;
   std::unordered_map<RelationKind, std::vector<Node *>> relations_;
+  // Derived from relations_ so removal can find exact incoming edges without
+  // searching unrelated nodes. Only WriteAccess mutates both sides.
+  std::vector<std::pair<Node *, RelationKind>> incomingRelations_;
   std::unordered_map<std::string, std::uint64_t> fieldChangedRevisions_;
   std::uint64_t statusChangedRevision_ = 0;
   // Changes only when this node's parent, ordered children, or an outgoing
@@ -134,20 +205,76 @@ private:
   // reads without treating ordinary streaming fields as topology changes.
   std::uint64_t structureChangedRevision_ = 0;
   std::uint64_t changedRevision_ = 0;
-  // Immutable position in the graph's append-only insertion order. Qt uses
-  // this only to resume bounded scans after unrelated removals shift the
-  // ordered-node vector.
+  // Immutable node incarnation and position in the graph's append-only
+  // insertion order. It distinguishes a removed node from a later node that
+  // reuses the same protocol identity.
   std::uint64_t insertionOrder_ = 0;
-  bool removed_ = false;
-  std::atomic<void *> uiAttachment_{nullptr};
 };
 
 using NodeRef = std::shared_ptr<Node>;
+
+inline constexpr std::array<std::string_view, 6> InspectorAgentDetailFields{
+    "agentPath", "tool", "model", "reasoningEffort", "prompt",
+    "senderThreadId"};
+
+struct InspectorAgentSelector final {
+  static constexpr std::size_t CandidateSetCount =
+      InspectorAgentDetailFields.size() + 4;
+
+  std::string key;
+  std::string childId;
+  NodeRef exactChild;
+  bool childIdVisible = true;
+  std::deque<NodeRef> contributors;
+  std::array<std::set<std::size_t>, CandidateSetCount> candidates;
+
+  bool operator==(const InspectorAgentSelector &) const = default;
+};
+
+struct InspectorAgentDependency final {
+  std::size_t row = 0;
+  std::size_t contributor = 0;
+};
+
+// Graph-owned semantic selectors for bounded Inspector projection. These
+// values identify authoritative sources; they deliberately contain no Qt or
+// formatted presentation data.
+struct InspectorThreadIndex final {
+  NodeRef planSource;
+  std::size_t planRowCount = 0;
+  bool planHasExplanation = false;
+  std::deque<InspectorAgentSelector> agents;
+  std::map<std::string, std::size_t> agentPositions;
+  std::unordered_map<Node *, std::deque<InspectorAgentDependency>>
+      agentDependencies;
+  std::map<Node *, std::size_t> agentMessageOrder;
+  std::map<std::size_t, NodeRef> agentMessages;
+  std::uint64_t planOrderRevision = 0;
+  std::uint64_t planChangedRevision = 0;
+  std::uint64_t agentOrderRevision = 0;
+  std::uint64_t agentChangedRevision = 0;
+
+  [[nodiscard]] NodeRef latestAgentMessage() const {
+    return agentMessages.empty() ? NodeRef{} : agentMessages.rbegin()->second;
+  }
+};
+
+// Identifies one authoritative ordered child subsequence affected by a graph
+// transaction. Consumers can distinguish relevant child kinds without
+// consulting mutable state from a later revision.
+struct ChildListChange final {
+  NodeRef owner;
+  NodeKind childKind = NodeKind::UnknownProtocol;
+
+  bool operator==(const ChildListChange &) const = default;
+};
 
 struct GraphChange final {
   std::uint64_t revision = 0;
   std::vector<NodeRef> affected;
   std::vector<NodeRef> removed;
+  std::vector<ChildListChange> childListsChanged;
+  std::uint64_t providerAuthorityRevision = 0;
 
   [[nodiscard]] bool empty() const noexcept;
 };
@@ -178,16 +305,17 @@ public:
     [[nodiscard]] std::uint64_t structureRevision(NodeKind kind) const noexcept;
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
-    [[nodiscard]] std::uint64_t insertionOrder(const NodeRef &node) const;
-    [[nodiscard]] const std::vector<NodeRef> &retiredNodes() const noexcept;
     [[nodiscard]] std::size_t retiredCount() const noexcept;
     [[nodiscard]] NodeRef retiredAt(std::size_t index) const;
     // Changes only when an existing retirement is released. Appending a
     // newly removed node preserves every earlier index.
     [[nodiscard]] std::uint64_t retiredOrderGeneration() const noexcept;
+    [[nodiscard]] std::uint64_t
+    pendingInteractionOrderRevision() const noexcept;
     // Retained UI NodeRefs may outlive retirement acknowledgement. This
     // non-throwing probe lets a deferred Qt pass discard such a reference
     // before asking for graph-owned state.
+    [[nodiscard]] bool live(const NodeRef &node) const noexcept;
     [[nodiscard]] bool contains(const NodeRef &node) const noexcept;
     [[nodiscard]] std::shared_ptr<const NodeState>
     state(const NodeRef &node) const;
@@ -200,8 +328,9 @@ public:
     statusChangedRevision(const NodeRef &node) const;
     [[nodiscard]] std::uint64_t
     structureChangedRevision(const NodeRef &node) const;
-    [[nodiscard]] bool removed(const NodeRef &node) const;
     [[nodiscard]] NodeRef parent(const NodeRef &node) const;
+    [[nodiscard]] std::optional<std::size_t>
+    childIndex(const NodeRef &node) const;
     [[nodiscard]] std::size_t childCount(const NodeRef &node) const;
     [[nodiscard]] NodeRef childAt(const NodeRef &node, std::size_t index) const;
     [[nodiscard]] std::vector<NodeRef> children(const NodeRef &node) const;
@@ -209,8 +338,14 @@ public:
                                            RelationKind kind) const;
     [[nodiscard]] NodeRef relatedAt(const NodeRef &node, RelationKind kind,
                                     std::size_t index) const;
+    [[nodiscard]] bool isRelated(const NodeRef &source, RelationKind kind,
+                                 const NodeRef &target) const;
+    [[nodiscard]] bool hasIncomingRelation(const NodeRef &target,
+                                           RelationKind kind) const;
     [[nodiscard]] std::vector<NodeRef> related(const NodeRef &node,
                                                RelationKind kind) const;
+    [[nodiscard]] const InspectorThreadIndex *
+    inspectorIndex(const NodeRef &thread) const;
 
   private:
     friend class NodeGraph;
@@ -270,15 +405,16 @@ public:
     void remove(const NodeRef &node);
     void removeMany(std::span<const NodeRef> nodes);
 
-    // Removed nodes remain reachable only for UI-detachment recovery when a
-    // graph notification saturates. The sole writer releases them after Qt has
-    // acknowledged detachment through the typed command mailbox.
+    // Removed nodes remain graph-readable until Qt has observed all preceding
+    // callbacks, including a synthesized rescan after notification saturation.
+    // The sole writer releases them after the typed acknowledgement arrives.
     void releaseRetired(std::span<const NodeRef> nodes);
 
     // Publishes one revision for the complete mutation and unlocks before
     // returning, so callers can notify Qt without holding graph
-    // synchronization.
-    [[nodiscard]] GraphChange finish();
+    // synchronization. A commit cannot roll back mutations already applied by
+    // the sole writer, so allocation or invariant failure is process-fatal.
+    [[nodiscard]] GraphChange finish() noexcept;
 
   private:
     friend class NodeGraph;
@@ -287,12 +423,55 @@ public:
       std::unordered_set<std::string> fields;
     };
 
+    struct ChildListChangeHash final {
+      std::size_t operator()(const ChildListChange &change) const noexcept {
+        const std::size_t owner = std::hash<Node *>{}(change.owner.get());
+        const std::size_t kind = static_cast<std::size_t>(change.childKind);
+        return owner ^ (kind + 0x9e3779b9U + (owner << 6U) + (owner >> 2U));
+      }
+    };
+
+    struct InspectorImpact final {
+      struct AgentAppend final {
+        Node *turn = nullptr;
+        std::size_t first = 0;
+      };
+
+      std::uint8_t rebuild = 0;
+      std::optional<AgentAppend> append;
+    };
+
     WriteAccess(NodeGraph &graph,
                 std::unique_lock<std::shared_mutex> lock) noexcept;
 
     void requireLive(const NodeRef &node) const;
+    [[nodiscard]] Node *inspectorThread(Node *node) const noexcept;
+    [[nodiscard]] std::uint8_t inspectorItemSections(Node *item) const;
+    [[nodiscard]] std::uint8_t inspectorTurnSections(Node *turn) const;
+    [[nodiscard]] std::uint8_t inspectorIndexedSections(Node *thread,
+                                                        Node *node) const;
+    void markInspectorRebuild(Node *thread, std::uint8_t sections);
+    [[nodiscard]] bool markInspectorAppend(Node *thread, Node *turn,
+                                           std::size_t first);
+    void noteInspectorChildChange(Node *parent, Node *child, bool appended);
+    void noteInspectorChildrenReplacement(
+        Node *parent, std::span<Node *const> previous,
+        std::span<const NodeRef> next);
+    void noteInspectorRelationChange(Node *source, RelationKind kind);
+    void refreshInspectorIndexes();
+    void refreshInspectorAgentContribution(InspectorAgentSelector &selector,
+                                           std::size_t contributor) const;
+    void refreshInspectorAgentDependencies(InspectorThreadIndex &index,
+                                           Node *dependency) const;
+    [[nodiscard]] bool refreshInspectorAgentMessage(
+        InspectorThreadIndex &index, Node *source) const;
+    [[nodiscard]] bool appendInspectorAgentItem(InspectorThreadIndex &index,
+                                                Node *item) const;
+    [[nodiscard]] InspectorThreadIndex
+    buildInspectorIndex(Node *thread, std::uint8_t sections) const;
     void prepareChanges(std::span<const NodeRef> affected,
-                        std::span<const NodeRef> structureChanged);
+                        std::span<const NodeRef> structureChanged,
+                        std::span<const ChildListChange> childrenChanged = {});
     [[nodiscard]] GraphChange publish();
 
     NodeGraph *graph_;
@@ -303,8 +482,12 @@ public:
     std::unordered_set<Node *> revisionTouchIndex_;
     std::unordered_map<Node *, PendingStateRevision> pendingStateRevisions_;
     std::unordered_set<Node *> pendingStructureRevisions_;
+    std::vector<ChildListChange> childListsChanged_;
+    std::unordered_set<ChildListChange, ChildListChangeHash>
+        childListsChangedIndex_;
+    std::map<Node *, InspectorImpact> inspectorImpacts_;
     std::vector<NodeRef> removed_;
-    std::unordered_set<Node *> removedIndex_;
+    bool pendingInteractionOrderChanged_ = false;
     bool dirty_ = false;
     bool finished_ = false;
   };
@@ -317,14 +500,15 @@ private:
   std::unordered_map<NodeId, NodeRef, NodeIdHash> nodes_;
   std::vector<NodeRef> orderedNodes_;
   std::vector<NodeRef> retiredNodes_;
-  std::unordered_map<Node *, std::size_t> retiredIndex_;
   std::uint64_t retiredOrderGeneration_ = 0;
+  std::uint64_t pendingInteractionOrderRevision_ = 0;
   std::uint64_t nextInsertionOrder_ = 1;
   std::uint64_t revision_ = 0;
   std::array<std::uint64_t, NodeKindCount> structureRevisions_{};
   std::atomic<std::uint64_t> publishedRevision_{0};
   std::array<std::atomic<std::uint64_t>, NodeKindCount>
       publishedStructureRevisions_{};
+  std::map<Node *, InspectorThreadIndex> inspectorIndexes_;
 };
 
 } // namespace codexui::nodegraph

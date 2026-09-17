@@ -7,119 +7,96 @@
 
 #include <QFrame>
 
-#include <cstddef>
+#include <array>
 #include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
-class QListWidget;
-class QListWidgetItem;
 class QMenu;
+class QAction;
 class QToolButton;
 class QTimer;
 
 namespace codexui::codex {
 namespace middle {
 
+class ThreadTreeItem;
+class ThreadTreeWidget;
+
 class ThreadPane final : public QFrame {
 public:
   enum class SortCriterion { Alphanumeric, Created, Recency };
 
+  using ThreadAction = std::function<void(const nodegraph::NodeRef &)>;
+
+  struct VisibleThread {
+    std::string id;
+    std::string presentationKey;
+    nodegraph::NodeRef target;
+  };
+
   struct Actions {
     std::function<void()> newThread;
-    std::function<void()> refresh;
     std::function<void()> loadMore;
     std::function<void()> hide;
-    std::function<void(const std::string &)> select;
-    std::function<void(const std::string &)> reload;
-    std::function<void(const std::string &)> rename;
-    std::function<void(const std::string &)> fork;
-    std::function<void(const std::string &)> forkWithOptions;
-    std::function<void(const std::string &)> toggleArchive;
-    std::function<void(const std::string &)> remove;
+    ThreadAction select;
+    ThreadAction reload;
+    ThreadAction rename;
+    ThreadAction fork;
+    ThreadAction forkWithOptions;
+    ThreadAction toggleArchive;
+    ThreadAction remove;
   };
 
   explicit ThreadPane(QWidget *parent = nullptr);
+  ~ThreadPane() override;
 
   void setActions(Actions actions);
   void refresh(const ui::ThreadListSnapshot &snapshot);
   [[nodiscard]] bool applyRowPresentation(const ui::ThreadListRow &row);
-  void beginOptimisticThread(std::string id, std::string title,
-                             std::string cwd);
-  void promoteOptimisticThread(const std::string &draftId,
-                               const std::string &authoritativeId);
-  void confirmOptimisticThread(const std::string &threadId);
-  void failOptimisticThread(const std::string &threadId);
-  [[nodiscard]] bool isOptimisticThread(const std::string &threadId) const;
+  void beginOptimisticThread(std::string id, std::string presentationKey,
+                             std::string title, std::string cwd);
+  void discardOptimisticThread(const std::string &threadId);
   void setSortCriterion(SortCriterion criterion);
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
-  [[nodiscard]] std::string visiblySelectedThreadId() const;
+  [[nodiscard]] std::optional<VisibleThread> visiblySelectedThread() const;
 
 private:
-  struct RenderedThreadRow {
-    std::string id;
-    std::string title;
-    std::string cwd;
-    std::string status;
-    std::optional<std::int64_t> createdAt;
-    std::optional<std::int64_t> recencyAt;
-    std::optional<std::int64_t> lastActivityAt;
-    std::string parentId;
-    std::size_t pending = 0;
-    std::size_t depth = 0;
-    bool hasChildren = false;
-    bool expanded = false;
-    bool optimistic = false;
-    bool optimisticFailed = false;
-    bool awaitingPromptAcknowledgement = false;
-    std::optional<std::int64_t> pendingPromptAdmittedAtMs;
-    std::optional<std::int64_t> optimisticAnimationStartedAtMs;
+  struct SortAction {
+    SortCriterion criterion;
+    QAction *action;
+  };
 
-    bool operator==(const RenderedThreadRow &) const = default;
-  };
-  struct RenderedThreadList {
-    std::string selectedThreadId;
-    SortCriterion sortCriterion = SortCriterion::Recency;
-    std::vector<RenderedThreadRow> rows;
-
-    bool operator==(const RenderedThreadList &) const = default;
-  };
-  struct OptimisticThread {
-    std::string id;
-    std::string title;
-    std::string cwd;
-    bool failed = false;
-    std::int64_t animationStartedAtMs = 0;
-  };
+  bool applyItemPresentation(ThreadTreeItem *item, const ui::ThreadListRow &row,
+                             bool draft = false,
+                             std::optional<std::int64_t> draftStartedAt = {},
+                             bool publishAccessibility = true);
+  void retireOptimisticThread();
   void updateSortButton();
-  void sortRootThreads(std::vector<ui::ThreadListRow> &rows) const;
-  void updateAnimationTimer();
+  void sortRootItems();
+  void updateAnimationTimer(bool repaint = false);
   void requestMoreNearListEnd();
-  void appendVisibleThread(RenderedThreadList &snapshot,
-                           const ui::ThreadListRow &thread,
-                           const std::string &parentId, std::size_t depth,
-                           std::unordered_set<std::string> &visited) const;
-  void toggleExpanded(const std::string &threadId);
-  void navigateHierarchy(int key);
-  void setContextHighlight(const std::string &threadId, bool highlighted);
+  void updateContextRow(const std::string &presentationKey);
   void showContextMenu(const QPoint &position);
 
-  std::optional<ui::ThreadListSnapshot> currentSnapshot;
+  friend class ThreadTreeWidget;
+
   Actions actions;
   SortCriterion sortCriterion = SortCriterion::Recency;
+  std::array<SortAction, 3> sortActions;
   QToolButton *sortButton = nullptr;
-  QListWidget *list = nullptr;
-  std::unordered_map<std::string, QListWidgetItem *> rows;
-  std::unordered_set<std::string> expandedThreads;
-  std::string projectedSelectedThreadId;
-  std::string contextThreadId;
+  ThreadTreeWidget *tree = nullptr;
+  std::unordered_map<std::string, ThreadTreeItem *> rows;
+  ThreadTreeItem *draftItem = nullptr;
+  bool providerReady = false;
+  bool canControl = false;
+  std::string contextPresentationKey;
+  nodegraph::NodeRef contextTarget;
+  bool contextArchived = false;
   QMenu *contextMenu = nullptr;
   QTimer *optimisticAnimation = nullptr;
-  std::vector<OptimisticThread> optimisticThreads;
-  std::optional<RenderedThreadList> visibleSnapshot;
+  bool selectionDispatchPending = false;
 };
 
 } // namespace middle

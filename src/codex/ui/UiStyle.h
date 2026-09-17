@@ -3,10 +3,13 @@
 #ifndef CODEXUI_UI_UISTYLE_H
 #define CODEXUI_UI_UISTYLE_H
 
+#include <QColor>
+#include <QComboBox>
 #include <QString>
 #include <QToolButton>
 
 class QPaintEvent;
+class QLabel;
 class QPainter;
 class QRect;
 class QWidget;
@@ -21,9 +24,28 @@ inline constexpr auto inspector = "#fbfcfe";
 inline constexpr auto divider = "#d7dee8";
 inline constexpr auto dividerStrong = "#b9c4d2";
 inline constexpr auto primary = "#1d2633";
+inline constexpr auto strongText = "#344054";
 inline constexpr auto secondary = "#667085";
+inline constexpr auto secondaryStrong = "#475467";
 inline constexpr auto placeholder = "#98a2b3";
 inline constexpr auto threadInactive = "#cacccf";
+inline constexpr auto onAccent = panel;
+inline constexpr auto neutralSurface = "#eef1f5";
+inline constexpr auto neutralSurfaceHover = "#e3e8ef";
+inline constexpr auto neutralBorder = "#c8d0dc";
+inline constexpr auto neutralBorderHover = "#aeb8c6";
+inline constexpr auto neutralBorderPressed = "#9eabbc";
+inline constexpr auto codeSurface = "#111827";
+inline constexpr auto codeText = "#e5e7eb";
+inline constexpr auto diffHunkSurface = "#edf3ff";
+inline constexpr auto activeTurnBorder = "#6f98e8";
+inline constexpr auto brandAccent = "#63d5a5";
+inline constexpr QRgb pendingSteeringSweepEdge = qRgba(22, 123, 128, 0);
+inline constexpr QRgb pendingSteeringSweepCenter = qRgba(92, 180, 184, 105);
+inline constexpr QRgb pendingPromptSweepEdge = qRgba(47, 111, 235, 0);
+inline constexpr QRgb pendingPromptSweepCenter = qRgba(117, 160, 239, 105);
+inline constexpr int commandOutputHorizontalPadding = 7;
+inline constexpr int commandOutputVerticalPadding = 4;
 // Semantic ramps are precomputed from shared OKLCH role targets. Equivalent
 // roles have the same perceptual lightness/chroma and retain the family hue.
 // base .550/.090; hover .490/.080; pressed .430/.070;
@@ -33,8 +55,10 @@ inline constexpr auto blue = "#5471a6";
 inline constexpr auto blueHover = "#47608e";
 inline constexpr auto bluePressed = "#3a5076";
 inline constexpr auto blueSelected = "#e5eefe";
+inline constexpr auto blueSelectedHover = "#d8e7ff";
 inline constexpr auto blueSurface = "#eff5fe";
 inline constexpr auto blueBorder = "#b7cff9";
+inline constexpr auto blueBorderHover = "#9ebcf3";
 inline constexpr auto blueBorderStrong = "#8fb4f8";
 inline constexpr auto blueText = "#415882";
 inline constexpr auto hover = "#f1f5fb";
@@ -82,6 +106,9 @@ inline constexpr auto tealText = "#0d6565";
 
 QString applicationStyleSheet();
 QString humanizeLabel(QString value);
+[[nodiscard]] bool animationsEnabled(const QWidget &widget);
+QLabel *makeLabel(QString value, const char *kind = "body",
+                  QWidget *parent = nullptr);
 enum class ChevronDirection { Down, Left, Right };
 void drawChevron(QPainter &painter, const QRect &indicator, bool enabled,
                  bool highlighted,
@@ -93,6 +120,14 @@ void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
 class ChevronToolButton final : public QToolButton {
 public:
   using QToolButton::QToolButton;
+
+protected:
+  void paintEvent(QPaintEvent *event) override;
+};
+
+class ChevronComboBox final : public QComboBox {
+public:
+  using QComboBox::QComboBox;
 
 protected:
   void paintEvent(QPaintEvent *event) override;

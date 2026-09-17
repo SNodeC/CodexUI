@@ -55,6 +55,7 @@ constexpr std::array GeneratedServerNotifications{
 #undef CODEXUI_CAPTURE_SERVER_NOTIFICATION
 
 constexpr std::array CompatibilityClientRequests{
+    clientRequests::ThreadItemsList::method,
     clientRequests::ThreadTurnsList::method,
 };
 constexpr std::array CompatibilityServerRequests{
@@ -145,7 +146,7 @@ static_assert(GeneratedClientRequests.size() == 95);
 static_assert(GeneratedServerRequests.size() == 10);
 static_assert(GeneratedServerNotifications.size() == 76);
 static_assert(GeneratedClientNotifications.size() == 1);
-static_assert(CompatibilityClientRequests.size() == 1);
+static_assert(CompatibilityClientRequests.size() == 2);
 static_assert(CompatibilityServerRequests.size() == 1);
 static_assert(CompatibilityServerNotifications.size() == 7);
 static_assert(VerifiedNewerClientRequests.size() == 62);
@@ -186,6 +187,11 @@ static_assert(BridgeServerRequest<requests::CurrentTimeRead>);
 static_assert(RequiredValueParams<requests::CurrentTimeRead>);
 static_assert(
     std::same_as<requests::CurrentTimeRead::Response, GeneratedValue>);
+
+static_assert(BridgeClientRequest<clientRequests::ThreadItemsList>);
+static_assert(RequiredValueParams<clientRequests::ThreadItemsList>);
+static_assert(
+    std::same_as<clientRequests::ThreadItemsList::Response, GeneratedValue>);
 
 static_assert(BridgeClientRequest<clientRequests::ThreadTurnsList>);
 static_assert(RequiredValueParams<clientRequests::ThreadTurnsList>);
@@ -363,6 +369,7 @@ bool notificationPayloadRoundTrips(nlohmann::json payload) {
 
 bool testExactMethods() {
   constexpr std::array methods{
+      clientRequests::ThreadItemsList::method,
       clientRequests::ThreadTurnsList::method,
       requests::CurrentTimeRead::method,
       notifications::ModelProviderAuthRecoveryStarted::method,
@@ -374,6 +381,7 @@ bool testExactMethods() {
       notifications::ThreadRealtimeItemCompleted::method,
   };
   constexpr std::array expected{
+      std::string_view("thread/items/list"),
       std::string_view("thread/turns/list"),
       std::string_view("currentTime/read"),
       std::string_view("modelProvider/authRecoveryStarted"),

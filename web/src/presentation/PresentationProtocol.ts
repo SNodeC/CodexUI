@@ -3,6 +3,19 @@ export const PresentationProtocolVersion = 1;
 
 export type Authority = "none" | "merge" | "replace" | "remove";
 export type JsonObject = Record<string, unknown>;
+export const ThreadSettingFields = ["activePermissionProfile", "approvalPolicy", "approvalsReviewer",
+    "collaborationMode", "cwd", "effort", "instructionSources", "model", "modelProvider", "personality",
+    "reasoningEffort", "sandbox", "sandboxPolicy", "serviceTier", "summary"] as const;
+const ThreadSettingConceptAliases: Record<string, string> = {activePermissionProfile: "permissionProfile",
+    approvalPolicy: "approval", approvalsReviewer: "reviewer", collaborationMode: "collaboration",
+    permissions: "permissionProfile", reasoningEffort: "effort", sandboxPolicy: "sandbox"};
+
+export interface ThreadSettingStamp {generation: number; sequence: number; acknowledgements: number}
+
+export function threadSettingConcept(field: string): string {
+    const alias = ThreadSettingConceptAliases[field];
+    return alias ?? ((ThreadSettingFields as readonly string[]).includes(field) ? field : "");
+}
 
 export interface PresentationFrame extends JsonObject {
     protocol: typeof PresentationProtocolName;
@@ -79,6 +92,16 @@ export function event(
 
 export function isObject(value: unknown): value is JsonObject {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function jsonEqual(left: unknown, right: unknown): boolean {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right)
+        && left.length === right.length && left.every((value, index) => jsonEqual(value, right[index]));
+    if (!isObject(left) || !isObject(right)) return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length
+        && keys.every(key => Object.hasOwn(right, key) && jsonEqual(left[key], right[key]));
 }
 
 function isUnsigned(value: unknown): value is number {

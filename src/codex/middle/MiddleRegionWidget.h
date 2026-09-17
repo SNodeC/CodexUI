@@ -3,11 +3,13 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLEREGIONWIDGET_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLEREGIONWIDGET_H
 
+#include <QPointer>
 #include <QWidget>
 
 #include <functional>
 
 class QEvent;
+class QAbstractScrollArea;
 class QFrame;
 class QLabel;
 class QSplitter;
@@ -53,6 +55,14 @@ protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+  enum class ScrollGestureRoute {
+    Inactive,
+    AwaitingNested,
+    Conversation,
+    Native,
+    Dispatching,
+  };
+
   void applyConversationPresentationOptions();
   void alignThreadHeadingBaselines();
 
@@ -75,6 +85,8 @@ private:
   ConversationView *conversationView = nullptr;
   ComposerPane *composerPane = nullptr;
   InspectorPane *inspectorPane = nullptr;
+  ScrollGestureRoute scrollGestureRoute_ = ScrollGestureRoute::Inactive;
+  QPointer<QAbstractScrollArea> scrollGestureArea_;
   std::function<void(bool, bool)> paneVisibilityAction;
 };
 

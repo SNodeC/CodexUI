@@ -12,7 +12,7 @@
 #include <memory>
 #include <span>
 #include <thread>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 class QSocketNotifier;
@@ -50,8 +50,9 @@ public:
   // Qt receives read-only access and must use NodeGraph::tryRead().
   [[nodiscard]] const nodegraph::NodeGraph &nodeGraph() const noexcept;
 
-  // On QueueFull the action is untouched, so newly authored input remains in
-  // the widget and can be rejected visibly by its caller.
+  // On QueueFull newly authored input remains in the widget for visible
+  // rejection. On live mailbox saturation the idempotent PromptMaterialized
+  // acknowledgement is instead retained internally and reported as accepted.
   [[nodiscard]] nodegraph::ChannelSendStatus
   sendNodeAction(nodegraph::NodeAction &action);
   [[nodiscard]] nodegraph::ChannelSendStatus
@@ -64,8 +65,10 @@ private:
   void scheduleWorkerMessageDrain();
   void requireRescanRetirementCollection();
   void collectRescanRetirements();
-  void collectDetachedNodes(std::span<const nodegraph::NodeRef> nodes);
-  void flushDetachAcknowledgements();
+  void
+  queueRetirementAcknowledgements(std::span<const nodegraph::NodeRef> nodes);
+  void queueNodeAcknowledgement(nodegraph::NodeAction action);
+  void flushNodeAcknowledgements();
   void notifyRuntimeStopped() noexcept;
 
   nodegraph::NodeGraph graph;
@@ -76,8 +79,9 @@ private:
   RuntimeStoppedHandler runtimeStoppedHandler;
   GraphChangedHandler graphChangedHandler;
   GraphUiEffectHandler graphUiEffectHandler;
-  std::vector<nodegraph::NodeRef> pendingDetachAcknowledgements;
-  std::unordered_set<nodegraph::Node *> pendingDetachAcknowledgementIndex;
+  std::vector<nodegraph::NodeAction> pendingNodeAcknowledgements;
+  std::unordered_map<nodegraph::Node *, std::uint8_t>
+      pendingNodeAcknowledgementKinds;
   std::size_t retirementScanOffset = 0;
   std::uint64_t retirementScanOrderGeneration = 0;
   std::atomic_bool workerFinished{false};
@@ -87,7 +91,6 @@ private:
   bool workerDrainScheduled = false;
   bool rescanRetirementPending = false;
   bool retirementScanGenerationKnown = false;
-  bool retirementRetryNeeded = false;
   std::uint64_t nextUiActionCorrelation = 1;
   Configuration &configuration;
 };

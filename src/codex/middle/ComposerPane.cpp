@@ -3,6 +3,7 @@
 #include "codex/middle/ComposerPane.h"
 
 #include "codex/TurnSettingsWidget.h"
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 
 #include <QDir>
@@ -140,7 +141,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attention_->hide();
   surfacesLayout->addWidget(attention_);
 
-  turnSettings_ = new TurnSettingsWidget(surfaces);
+  turnSettings_ = new TurnSettingsWidget(turnSettingsPolicy_, surfaces);
   surfacesLayout->addWidget(turnSettings_);
 
   composer_ = new QFrame(surfaces);
@@ -241,6 +242,8 @@ ComposerPane::ComposerPane(QWidget *anchor)
   raise();
 }
 
+ComposerPane::~ComposerPane() { delete turnSettings_; }
+
 void ComposerPane::setActions(Actions actions) {
   actions_ = std::move(actions);
 }
@@ -263,44 +266,77 @@ const std::vector<AttachmentDraft> &ComposerPane::attachments() const noexcept {
 }
 
 void ComposerPane::setAttentionVisible(bool visible) {
-  if (attention_->isVisible() == visible)
+  if (attention_->isHidden() != visible)
     return;
+  const bool transferFocus = !visible && (attentionRejectButton_->hasFocus() ||
+                                          attentionAcceptButton_->hasFocus() ||
+                                          attentionReviewButton_->hasFocus());
   attention_->setVisible(visible);
+  if (transferFocus)
+    promptEditor_->setFocus();
   synchronizeGeometry();
 }
 
 void ComposerPane::setAttentionRequest(QString title, QString detail,
-                                       bool directAccept, QString acceptLabel) {
+                                       bool directAccept, QString acceptLabel,
+                                       bool directReject, QString rejectLabel,
+                                       bool replacesTarget) {
   if (title.isEmpty())
     title = QStringLiteral("A Codex request needs attention");
   if (detail.isEmpty())
     detail = QStringLiteral("Review the pending request.");
   if (acceptLabel.isEmpty())
     acceptLabel = QStringLiteral("Accept");
-  const bool unchanged = attentionTitle_->text() == title &&
+  if (rejectLabel.isEmpty())
+    rejectLabel = QStringLiteral("Decline");
+  const bool targetHadFocus =
+      replacesTarget && (attentionRejectButton_->hasFocus() ||
+                         attentionAcceptButton_->hasFocus() ||
+                         attentionReviewButton_->hasFocus());
+  const bool transferToReview =
+      (attentionRejectButton_->hasFocus() && !directReject) ||
+      (attentionAcceptButton_->hasFocus() && !directAccept);
+  const bool unchanged = !replacesTarget && attentionTitle_->text() == title &&
                          attentionDetail_->text() == detail &&
-                         attentionAcceptButton_->isVisible() == directAccept &&
-                         attentionReviewButton_->isVisible() != directAccept &&
-                         attentionAcceptButton_->text() == acceptLabel;
+                         !attentionRejectButton_->isHidden() == directReject &&
+                         !attentionAcceptButton_->isHidden() == directAccept &&
+                         !attentionReviewButton_->isHidden() &&
+                         attentionAcceptButton_->text() == acceptLabel &&
+                         attentionRejectButton_->text() == rejectLabel;
   if (unchanged)
     return;
+  presentation::setAccessibleNameIfChanged(*attention_, title);
+  presentation::setAccessibleDescriptionIfChanged(*attention_, detail);
   attentionTitle_->setText(std::move(title));
   attentionDetail_->setText(std::move(detail));
+  attentionRejectButton_->setText(std::move(rejectLabel));
+  attentionRejectButton_->setVisible(directReject);
   attentionAcceptButton_->setText(std::move(acceptLabel));
   attentionAcceptButton_->setVisible(directAccept);
-  attentionReviewButton_->setVisible(!directAccept);
+  attentionReviewButton_->setVisible(true);
+  if (targetHadFocus)
+    promptEditor_->setFocus();
+  else if (transferToReview)
+    attentionReviewButton_->setFocus();
   synchronizeGeometry();
 }
 
-void ComposerPane::setAttentionEnabled(bool enabled) {
-  setAttentionActionEnabled(enabled, false);
-}
-
-void ComposerPane::setAttentionActionEnabled(bool enabled,
+void ComposerPane::setAttentionActionEnabled(bool acceptEnabled,
+                                             bool rejectEnabled,
                                              bool reviewEnabled) {
-  attentionRejectButton_->setEnabled(enabled);
-  attentionAcceptButton_->setEnabled(enabled);
-  attentionReviewButton_->setEnabled(enabled || reviewEnabled);
+  const bool transferFocus =
+      (attentionRejectButton_->hasFocus() && !rejectEnabled) ||
+      (attentionAcceptButton_->hasFocus() && !acceptEnabled) ||
+      (attentionReviewButton_->hasFocus() && !reviewEnabled);
+  attentionRejectButton_->setEnabled(rejectEnabled);
+  attentionAcceptButton_->setEnabled(acceptEnabled);
+  attentionReviewButton_->setEnabled(reviewEnabled);
+  if (transferFocus) {
+    if (reviewEnabled)
+      attentionReviewButton_->setFocus();
+    else
+      promptEditor_->setFocus();
+  }
 }
 
 void ComposerPane::setActiveTurn(bool active) {
@@ -327,7 +363,14 @@ void ComposerPane::setCanSubmit(bool canSubmit) {
 }
 
 void ComposerPane::setSettingsEnabled(bool enabled) {
-  turnSettings_->setControlsEnabled(enabled);
+  turnSettings_->setEnabled(enabled);
+  turnSettings_->setToolTip(
+      enabled ? QString{}
+              : QStringLiteral("Settings apply when starting a turn"));
+}
+
+void ComposerPane::setTurnSettingsContext(TurnSettingsContext context) {
+  turnSettings_->setContext(std::move(context));
 }
 
 void ComposerPane::clearDraft() {
@@ -452,9 +495,6 @@ void ComposerPane::refreshAttachments() {
 
     auto *fileBox = new QFrame(row);
     fileBox->setObjectName(QStringLiteral("attachmentFileBox"));
-    fileBox->setStyleSheet(
-        QStringLiteral("QFrame#attachmentFileBox{background:#ffffff;"
-                       "border:1px solid #d7dee8;border-radius:6px;}"));
     auto *fileLayout = new QHBoxLayout(fileBox);
     fileLayout->setContentsMargins(8, 1, 8, 1);
     auto *name = makeLabel(text(attachment.name), "meta");

@@ -2,6 +2,7 @@
 
 #include "codex/nodegraph/Value.h"
 
+#include <limits>
 #include <utility>
 
 namespace codexui::nodegraph {
@@ -124,6 +125,53 @@ const Value *Value::find(std::string_view key) const noexcept {
     return nullptr;
   const auto member = object->find(key);
   return member == object->end() ? nullptr : &member->second;
+}
+
+const Value *valueMember(const Value::Object &object,
+                         std::string_view key) noexcept {
+  const auto member = object.find(key);
+  return member == object.end() ? nullptr : &member->second;
+}
+
+std::string exactStringFromValue(const Value *value) {
+  const std::string *text = value ? value->asString() : nullptr;
+  return text ? *text : std::string{};
+}
+
+std::string scalarTextFromValue(const Value *value) {
+  if (const std::string *text = value ? value->asString() : nullptr)
+    return *text;
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr)
+    return std::to_string(*number);
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr)
+    return std::to_string(*number);
+  return {};
+}
+
+bool boolFromValue(const Value *value, bool fallback) noexcept {
+  const bool *boolean = value ? value->asBool() : nullptr;
+  return boolean ? *boolean : fallback;
+}
+
+std::optional<std::int64_t>
+signedIntegerFromValue(const Value *value) noexcept {
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr)
+    return *number;
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr;
+      number && *number <= static_cast<std::uint64_t>(
+                               std::numeric_limits<std::int64_t>::max()))
+    return static_cast<std::int64_t>(*number);
+  return std::nullopt;
+}
+
+std::optional<std::uint64_t>
+unsignedIntegerFromValue(const Value *value) noexcept {
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr)
+    return *number;
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr;
+      number && *number >= 0)
+    return static_cast<std::uint64_t>(*number);
+  return std::nullopt;
 }
 
 } // namespace codexui::nodegraph

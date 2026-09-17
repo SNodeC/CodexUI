@@ -1,48 +1,92 @@
-export type StatusKind = "unknown" | "active" | "completed" | "failed" | "interrupted" | "pending" | "notLoaded";
+export type StatusKind = "unknown" | "pending" | "running" | "completed" | "failed" | "interrupted"
+    | "notLoaded" | "connected" | "disconnected";
 
 export interface PresentationStatus {
-    readonly kind: StatusKind;
-    readonly text: string;
-    readonly tone: string;
+    readonly semantic: StatusKind;
+    readonly unknownText: string;
 }
 
-export function classifyStatus(status: string): PresentationStatus {
-    if (["active", "inProgress", "running", "started"].includes(status))
-        return {kind: "active", text: "running", tone: "active"};
-    if (["completed", "idle"].includes(status))
-        return {kind: "completed", text: "completed", tone: "success"};
-    if (["failed", "systemError"].includes(status))
-        return {kind: "failed", text: "failed", tone: "danger"};
-    if (status === "interrupted")
-        return {kind: "interrupted", text: "interrupted", tone: "warning"};
-    if (status === "pending") return {kind: "pending", text: "pending", tone: ""};
-    if (status === "notLoaded") return {kind: "notLoaded", text: "not loaded", tone: ""};
-    return {kind: "unknown", text: status === "" ? "unknown" : status, tone: ""};
-}
+export const UnknownStatus: PresentationStatus = {semantic: "unknown", unknownText: ""};
 
-export function displayStatus(status: string): string {
-    const classified = classifyStatus(status);
-    if (classified.kind !== "unknown" || status === "") return classified.text;
-    const words = [...status.trim()].reduce<string[]>((result, original, index, characters) => {
-        if (/\s|[-_./]/u.test(original)) {
-            if (result.length > 0 && result.at(-1) !== " ") result.push(" ");
-            return result;
-        }
+function protocolWords(value: string, format: "label" | "status"): string {
+    if (format === "label" && value.toLowerCase() === "xhigh") return "Extra high";
+    const result: string[] = [];
+    let pendingSpace = false;
+    const characters = [...(format === "label" ? value.trim() : value)];
+    for (let index = 0; index < characters.length; ++index) {
+        let character = characters[index]!;
+        const separator = format === "label" ? /\s|[-_./]/u.test(character)
+            : /[ \t\n\r\f\v_.\/-]/u.test(character);
+        if (separator) { pendingSpace = result.length > 0; continue; }
         const previous = characters[index - 1] ?? "";
         const next = characters[index + 1] ?? "";
-        const boundary = /[A-Z]/u.test(original) && (/[a-z\d]/u.test(previous)
+        const boundary = /[A-Z]/u.test(character) && (/[a-z\d]/u.test(previous)
             || (/[A-Z]/u.test(previous) && /[a-z]/u.test(next)));
-        if (boundary && result.length > 0 && result.at(-1) !== " ") result.push(" ");
-        result.push(original.toLocaleLowerCase());
-        return result;
-    }, []);
-    return words.join("").trim() || "unknown";
+        if ((pendingSpace || boundary) && result.at(-1) !== " ") result.push(" ");
+        if (format === "status" ? /[A-Z]/u.test(character)
+            : boundary || (pendingSpace && /[A-Z]/u.test(character) && /[a-z]/u.test(next)))
+            character = character.toLowerCase();
+        result.push(character); pendingSpace = false;
+    }
+    if (result.length === 0) return format === "label" ? "Activity" : "unknown";
+    if (format === "label") result[0] = result[0]!.toUpperCase();
+    return result.join("");
 }
 
-export function isActiveStatus(status: string): boolean {
-    return classifyStatus(status).kind === "active";
+export function humanizeProtocolLabel(value: string): string {
+    return protocolWords(value, "label");
 }
 
-export function isTerminalTurnStatus(status: string): boolean {
-    return ["completed", "failed", "interrupted"].includes(classifyStatus(status).kind);
+export function statusFromValue(value: unknown): PresentationStatus {
+    const raw = typeof value === "string" ? value
+        : value !== null && typeof value === "object" && typeof (value as {type?: unknown}).type === "string"
+            ? (value as {type: string}).type : "";
+    if (["pending", "queued"].includes(raw)) return {semantic: "pending", unknownText: ""};
+    if (["active", "inProgress", "running", "started"].includes(raw)) return {semantic: "running", unknownText: ""};
+    if (["complete", "completed", "idle", "succeeded"].includes(raw)) return {semantic: "completed", unknownText: ""};
+    if (["blocked", "error", "failed", "systemError"].includes(raw)) return {semantic: "failed", unknownText: ""};
+    if (["canceled", "cancelled", "interrupted", "stopped"].includes(raw))
+        return {semantic: "interrupted", unknownText: ""};
+    if (raw === "notLoaded" || raw === "connected" || raw === "disconnected")
+        return {semantic: raw, unknownText: ""};
+    return {semantic: "unknown", unknownText: raw};
+}
+
+export function statusToken(status: PresentationStatus): string {
+    return status.semantic === "unknown" ? status.unknownText : status.semantic;
+}
+
+export function displayStatus(status: PresentationStatus): string {
+    if (status.semantic !== "unknown") return status.semantic === "notLoaded" ? "not loaded" : status.semantic;
+    return protocolWords(status.unknownText, "status");
+}
+
+export function statusTone(status: PresentationStatus): string {
+    if (status.semantic === "running") return "active";
+    if (status.semantic === "completed" || status.semantic === "connected") return "success";
+    if (status.semantic === "failed" || status.semantic === "disconnected") return "danger";
+    return status.semantic === "interrupted" ? "warning" : "";
+}
+
+export function isEmptyStatus(status: PresentationStatus): boolean {
+    return status.semantic === "unknown" && status.unknownText === "";
+}
+
+export function isActiveStatus(status: PresentationStatus): boolean {
+    return status.semantic === "running";
+}
+
+export function isWorkingStatus(status: PresentationStatus): boolean {
+    return status.semantic === "pending" || status.semantic === "running";
+}
+
+export function isTerminalTurnStatus(status: PresentationStatus): boolean {
+    return status.semantic === "completed" || status.semantic === "failed" || status.semantic === "interrupted";
+}
+
+export function effectivePlanStepStatus(step: PresentationStatus, turn: PresentationStatus,
+    thread: PresentationStatus): PresentationStatus {
+    if (!isActiveStatus(step)) return step;
+    const outcome = isTerminalTurnStatus(turn) ? turn : thread;
+    return isTerminalTurnStatus(outcome) ? outcome : step;
 }

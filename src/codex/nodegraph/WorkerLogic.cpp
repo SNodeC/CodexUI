@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <limits>
 #include <ranges>
 #include <unordered_set>
 #include <utility>
@@ -14,46 +13,23 @@
 namespace codexui::nodegraph {
 namespace {
 
-const Value *field(const NodeState &state, std::string_view name) {
-  const auto found = state.fields.find(name);
-  return found == state.fields.end() ? nullptr : &found->second;
-}
-
 std::string stringField(const NodeState &state, std::string_view name) {
-  const Value *value = field(state, name);
-  const std::string *text = value ? value->asString() : nullptr;
-  return text ? *text : std::string{};
+  return exactStringFromValue(valueMember(state, name));
 }
 
 std::uint64_t unsignedField(const NodeState &state, std::string_view name) {
-  const Value *value = field(state, name);
+  const Value *value = valueMember(state, name);
   const std::uint64_t *number = value ? value->asUInt64() : nullptr;
   return number ? *number : 0;
 }
 
 std::optional<std::int64_t> integerField(const NodeState &state,
                                          std::string_view name) {
-  const Value *value = field(state, name);
-  if (!value)
-    return std::nullopt;
-  if (const auto *number = value->asInt64())
-    return *number;
-  if (const auto *number = value->asUInt64();
-      number && *number <= static_cast<std::uint64_t>(
-                               std::numeric_limits<std::int64_t>::max()))
-    return static_cast<std::int64_t>(*number);
-  return std::nullopt;
-}
-
-const Value *objectField(const Value::Object &object, std::string_view name) {
-  const auto found = object.find(name);
-  return found == object.end() ? nullptr : &found->second;
+  return signedIntegerFromValue(valueMember(state, name));
 }
 
 std::string objectString(const Value::Object &object, std::string_view name) {
-  const Value *value = objectField(object, name);
-  const std::string *text = value ? value->asString() : nullptr;
-  return text ? *text : std::string{};
+  return exactStringFromValue(valueMember(object, name));
 }
 
 bool isProviderNotice(const DecodedMessage &message) {
@@ -70,7 +46,7 @@ std::string providerNoticeText(const DecodedMessage &message) {
   if (text.empty())
     text = objectString(message.payload, "detail");
   if (text.empty()) {
-    const Value *error = objectField(message.payload, "error");
+    const Value *error = valueMember(message.payload, "error");
     if (const Value::Object *object = error ? error->asObject() : nullptr)
       text = objectString(*object, "message");
   }
@@ -79,48 +55,6 @@ std::string providerNoticeText(const DecodedMessage &message) {
 
 bool isLocalPrompt(const NodeState &state) {
   return stringField(state, "type") == "localPrompt";
-}
-
-bool hydrationResultIsUsable(NodeGraph::WriteAccess &write,
-                             const DecodedMessage &result,
-                             const NodeRef &thread) {
-  if (!thread || write.find(thread->id()) != thread)
-    return false;
-  // A successfully reduced correlated result retires its transient operation
-  // in the same transaction. If it is still live, the response was stale or
-  // mismatched and cannot make this thread ready.
-  if (result.expectedNode &&
-      write.find(result.expectedNode->id()) == result.expectedNode)
-    return false;
-  const Value *threadValue = objectField(result.payload, "thread");
-  const Value::Object *threadObject =
-      threadValue ? threadValue->asObject() : nullptr;
-  if (!threadObject ||
-      objectString(*threadObject, "id") != thread->id().canonical)
-    return false;
-
-  std::unordered_set<const Node *> checkedItems;
-  const auto itemIsUsable = [&](const NodeRef &item) {
-    if (!item || item->id().kind != NodeKind::Item ||
-        !checkedItems.insert(item.get()).second)
-      return true;
-    const NodeState &state = *write.state(item);
-    return isLocalPrompt(state) || !stringField(state, "type").empty();
-  };
-  for (const NodeRef &turn : write.children(thread)) {
-    if (!turn || turn->id().kind != NodeKind::Turn)
-      continue;
-    for (const NodeRef &item : write.children(turn)) {
-      if (!itemIsUsable(item))
-        return false;
-    }
-    for (const NodeRef &root :
-         write.related(turn, RelationKind::TurnRootItem)) {
-      if (!itemIsUsable(root))
-        return false;
-    }
-  }
-  return true;
 }
 
 bool isLocalShell(const NodeRef &node) {
@@ -313,6 +247,7 @@ ChannelSendStatus WorkerLogic::transportEvent(std::string state,
   }
 
   GraphChange change;
+  std::uint64_t providerAuthorityRevision = 0;
   {
     auto write = graph_.write();
     const NodeRef connection = connectionNode(write);
@@ -326,9 +261,10 @@ ChannelSendStatus WorkerLogic::transportEvent(std::string state,
     if (connected || clearsBridge)
       clearBridgeFields(write, connection, connected);
     if (resetProvider)
-      resetProviderDerived(write, resetReason);
+      providerAuthorityRevision = resetProviderDerived(write, resetReason);
     change = write.finish();
   }
+  change.providerAuthorityRevision = providerAuthorityRevision;
   return publish(std::move(change));
 }
 
@@ -337,6 +273,8 @@ ChannelSendStatus WorkerLogic::bridgeState(
     std::string controllerConnectionId, std::uint64_t providerGeneration,
     std::optional<std::string> providerState, std::string detail) {
   GraphChange change;
+  bool resetProvider = false;
+  std::uint64_t providerAuthorityRevision = 0;
   {
     auto write = graph_.write();
     const NodeRef connection = connectionNode(write);
@@ -345,7 +283,7 @@ ChannelSendStatus WorkerLogic::bridgeState(
     if (providerState && providerGeneration < currentProviderGeneration) {
       change = write.finish();
     } else {
-      const bool resetProvider =
+      resetProvider =
           providerState && providerGeneration > currentProviderGeneration;
       const std::string resetReason =
           resetProvider
@@ -364,10 +302,11 @@ ChannelSendStatus WorkerLogic::bridgeState(
         write.setField(connection, "providerDetail", Value(std::move(detail)));
       }
       if (resetProvider)
-        resetProviderDerived(write, resetReason);
+        providerAuthorityRevision = resetProviderDerived(write, resetReason);
       change = write.finish();
     }
   }
+  change.providerAuthorityRevision = providerAuthorityRevision;
   return publish(std::move(change));
 }
 
@@ -401,8 +340,7 @@ ChannelSendStatus WorkerLogic::completeFork(DecodedMessage result,
   {
     auto write = graph_.write();
     static_cast<void>(updater_.applyInto(write, result));
-    const NodeRef thread =
-        write.find({NodeKind::Thread, std::move(threadId)});
+    const NodeRef thread = write.find({NodeKind::Thread, std::move(threadId)});
     if (thread) {
       if (!chosenName.empty()) {
         write.setField(thread, "localNameOverlay", Value(chosenName));
@@ -423,13 +361,28 @@ ChannelSendStatus WorkerLogic::completeThreadHydration(DecodedMessage result,
   GraphChange change;
   {
     auto write = graph_.write();
-    static_cast<void>(updater_.applyInto(write, result));
-    if (state == "ready" && !hydrationResultIsUsable(write, result, thread)) {
-      state = "failed";
-      if (error.empty())
-        error = "Thread hydration returned incomplete item identity";
+    const AppliedMessage applied = updater_.applyInto(write, result);
+    if (result.expectedNode && applied.primary == result.expectedNode) {
+      if (state == "ready") {
+        const Value *threadValue = valueMember(result.payload, "thread");
+        const Value::Object *threadObject =
+            threadValue ? threadValue->asObject() : nullptr;
+        const bool matchingRead =
+            result.method == "thread/read" && threadObject && thread &&
+            objectString(*threadObject, "id") == thread->id().canonical;
+        const bool matchingPage =
+            result.method == "thread/turns/list" && thread &&
+            (!valueMember(result.payload, "threadId") ||
+             objectString(result.payload, "threadId") ==
+                 thread->id().canonical);
+        if (!matchingRead && !matchingPage) {
+          state = "failed";
+          if (error.empty())
+            error = "Thread hydration returned a mismatched thread";
+        }
+      }
+      updateThreadHydration(write, thread, std::move(state), std::move(error));
     }
-    updateThreadHydration(write, thread, std::move(state), std::move(error));
     change = write.finish();
   }
   forgetRemoved(change);
@@ -469,12 +422,8 @@ std::vector<NodeRef> WorkerLogic::activeAgentChildren(const NodeRef &thread) {
       if (!item || item->id().kind != NodeKind::Item)
         continue;
       const std::shared_ptr<const NodeState> state = write.state(item);
-      const std::string status = stringField(*state, "status");
       const bool active = state->status == NodeStatus::Pending ||
-                          state->status == NodeStatus::Running ||
-                          status == "pending" || status == "queued" ||
-                          status == "running" || status == "active" ||
-                          status == "inProgress";
+                          state->status == NodeStatus::Running;
       if (!active)
         continue;
       for (const NodeRef &child :
@@ -537,53 +486,15 @@ ChannelSendStatus WorkerLogic::selectThread(const NodeRef &thread) {
   return publish(std::move(change));
 }
 
-ChannelSendStatus
-WorkerLogic::resolveInteraction(const ProtocolRequestId &requestId,
-                                bool accepted, std::string error) {
-  return publish(
-      updater_.resolveInteraction(requestId, accepted, std::move(error)));
+ChannelSendStatus WorkerLogic::resolveInteraction(const NodeRef &interaction) {
+  return publish(updater_.resolveInteraction(interaction));
 }
 
-ChannelSendStatus WorkerLogic::resolveInteraction(const NodeRef &interaction,
-                                                  bool accepted,
-                                                  std::string error) {
-  return publish(
-      updater_.resolveInteraction(interaction, accepted, std::move(error)));
-}
-
-ChannelSendStatus
-WorkerLogic::rejectInteractionResponse(const NodeRef &interaction,
-                                       Value::Object authoredResponse,
-                                       std::string error) {
-  GraphChange change;
-  {
-    auto write = graph_.write();
-    if (interaction && interaction->id().kind == NodeKind::Interaction &&
-        write.find(interaction->id()) == interaction) {
-      write.setStatus(interaction, NodeStatus::Failed);
-      write.setField(interaction, "error", Value(std::move(error)));
-      write.setField(interaction, "retainedResponsePayload",
-                     Value(std::move(authoredResponse)));
-      for (const NodeRef &target :
-           write.related(interaction, RelationKind::InteractionTarget)) {
-        NodeRef thread = containingThread(write, target);
-        if (!thread)
-          continue;
-        std::size_t pending = 0;
-        for (const NodeRef &candidate :
-             write.related(thread, RelationKind::PendingInteraction)) {
-          if (candidate &&
-              (write.state(candidate)->status == NodeStatus::Pending ||
-               write.state(candidate)->status == NodeStatus::Failed))
-            ++pending;
-        }
-        write.setField(thread, "pendingInteractionCount",
-                       Value(static_cast<std::uint64_t>(pending)));
-      }
-    }
-    change = write.finish();
-  }
-  return publish(std::move(change));
+ChannelSendStatus WorkerLogic::failInteractionResponse(
+    const NodeRef &interaction, std::string error,
+    std::optional<Value::Object> authoredResponse) {
+  return publish(updater_.failInteractionResponse(interaction, std::move(error),
+                                                  std::move(authoredResponse)));
 }
 
 PromptTransition
@@ -670,8 +581,13 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
     if (pending.createsThread) {
       NodeState threadState;
       threadState.status = NodeStatus::Pending;
-      threadState.fields = {{"type", Value("localThread")},
-                            {"local", Value(true)}};
+      threadState.fields = {
+          {"type", Value("localThread")},
+          {"local", Value(true)},
+          {"creationCorrelation", Value(pending.creationCorrelation)}};
+      if (const auto cwd = pending.options.find("cwd");
+          cwd != pending.options.end())
+        threadState.fields.emplace("cwd", cwd->second);
       if (!pending.requestedName.empty())
         threadState.fields.emplace("name", Value(pending.requestedName));
       pending.thread = write.upsert(
@@ -694,7 +610,7 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
         invalidTargetReason = "The destination thread is no longer available";
       } else {
         const Value *recoveryOnly =
-            field(*write.state(current), "recoveryOnly");
+            valueMember(*write.state(current), "recoveryOnly");
         if (recoveryOnly && recoveryOnly->asBool() && *recoveryOnly->asBool()) {
           invalidTarget = true;
           invalidTargetReason =
@@ -854,7 +770,7 @@ WorkerLogic::advancePromptActivity(NodeGraph::WriteAccess &write,
     for (const std::string_view key :
          {std::string_view("updatedAt"), std::string_view("recencyAt"),
           std::string_view("localPromptActivityAt")}) {
-      retainMaximum(field(*state, key));
+      retainMaximum(valueMember(*state, key));
     }
   }
 
@@ -889,7 +805,7 @@ void WorkerLogic::recomputePromptActivity(NodeGraph::WriteAccess &write) {
       const auto promptState = write.state(prompt);
       if (stringField(*promptState, "type") != "localPrompt")
         continue;
-      const Value *startsTurn = field(*promptState, "startsTurn");
+      const Value *startsTurn = valueMember(*promptState, "startsTurn");
       const bool *beginsTurn = startsTurn ? startsTurn->asBool() : nullptr;
       if (!beginsTurn || !*beginsTurn)
         continue;
@@ -960,7 +876,6 @@ WorkerLogic::takeNextPrompt(NodeGraph::WriteAccess &write,
     command.clientUserMessageId = std::move(pending.clientUserMessageId);
     command.promptText = std::move(pending.promptText);
     command.attachments = std::move(pending.attachments);
-    command.options = std::move(pending.options);
     command.turnOptions = std::move(pending.turnOptions);
     command.requestedName = std::move(pending.requestedName);
     command.creationCorrelation = std::move(pending.creationCorrelation);
@@ -986,14 +901,16 @@ WorkerLogic::takeNextPrompt(NodeGraph::WriteAccess &write,
         if (!integerField(*promptState, "sortActivityAt")) {
           if (const auto admittedAtMs =
                   integerField(*promptState, "admittedAtMs")) {
-            const std::int64_t activityAt = advancePromptActivity(
-                write, thread, *admittedAtMs / 1000);
+            const std::int64_t activityAt =
+                advancePromptActivity(write, thread, *admittedAtMs / 1000);
             write.setField(command.localPrompt, "sortActivityAt",
                            Value(activityAt));
           }
         }
       }
     }
+    if (command.kind != PromptCommandKind::SteerTurn)
+      command.options = std::move(pending.options);
     write.setField(command.localPrompt, "dispatchState", Value("dispatching"));
     promptInFlight_.insert_or_assign(thread.get(), command.localPrompt);
     if (queue->second.empty())
@@ -1082,8 +999,9 @@ bool WorkerLogic::attachCreatedThread(NodeGraph::WriteAccess &write,
   for (const std::string_view key :
        {std::string_view("localActivityAt"),
         std::string_view("localPromptActivityAt"),
-        std::string_view("confirmedLocalPromptActivityAt")}) {
-    if (const Value *value = field(*draftState, key))
+        std::string_view("confirmedLocalPromptActivityAt"),
+        std::string_view("creationCorrelation"), std::string_view("cwd")}) {
+    if (const Value *value = valueMember(*draftState, key))
       write.setField(authoritative, std::string(key), *value);
   }
   if (const std::string chosenName = stringField(*draftState, "name");
@@ -1179,7 +1097,7 @@ PromptTransition WorkerLogic::completePromptResult(
     bool requiresRecovery = false;
     if (localPrompt && write.find(localPrompt->id()) == localPrompt) {
       const std::shared_ptr<const NodeState> state = write.state(localPrompt);
-      const Value *value = field(*state, "requiresExplicitRecovery");
+      const Value *value = valueMember(*state, "requiresExplicitRecovery");
       requiresRecovery = value && value->asBool() && *value->asBool();
     }
     if (requiresRecovery) {
@@ -1208,7 +1126,8 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
     return std::nullopt;
   const std::shared_ptr<const NodeState> initialState =
       write.state(localPrompt);
-  const Value *recovery = field(*initialState, "requiresExplicitRecovery");
+  const Value *recovery =
+      valueMember(*initialState, "requiresExplicitRecovery");
   if (recovery && recovery->asBool() && *recovery->asBool()) {
     forgetPrompt(localPrompt);
     return std::nullopt;
@@ -1221,10 +1140,10 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
     promptInFlight_.erase(inFlight);
 
   const std::shared_ptr<const NodeState> promptState = write.state(localPrompt);
-  const Value *materialized = field(*promptState, "uiMaterialized");
+  const Value *materialized = valueMember(*promptState, "uiMaterialized");
   const bool uiMaterialized =
       materialized && materialized->asBool() && *materialized->asBool();
-  const Value *startsTurnValue = field(*promptState, "startsTurn");
+  const Value *startsTurnValue = valueMember(*promptState, "startsTurn");
   const bool startsTurn = startsTurnValue && startsTurnValue->asBool() &&
                           *startsTurnValue->asBool();
 
@@ -1285,36 +1204,16 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
       NodeRef previous = write.parent(localPrompt);
       write.setParent(turn, localPrompt);
       if (startsTurn) {
-        NodeRef materializedItem;
-        std::vector<NodeRef> ordered = write.children(turn);
-        for (const NodeRef &candidate : ordered) {
-          if (!candidate || candidate == localPrompt ||
-              candidate->id().kind != NodeKind::Item)
-            continue;
-          const std::vector<NodeRef> prompts =
-              write.related(candidate, RelationKind::PromptMaterialization);
-          if (std::find(prompts.begin(), prompts.end(), localPrompt) !=
-              prompts.end()) {
-            materializedItem = candidate;
-            break;
-          }
-        }
-        ordered.erase(std::remove(ordered.begin(), ordered.end(), localPrompt),
-                      ordered.end());
-        if (materializedItem)
-          ordered.erase(
-              std::remove(ordered.begin(), ordered.end(), materializedItem),
-              ordered.end());
-        ordered.insert(ordered.begin(), localPrompt);
-        if (materializedItem)
-          ordered.insert(ordered.begin() + 1, materializedItem);
-        write.replaceChildren(turn, ordered);
         const std::vector<NodeRef> roots =
             write.related(turn, RelationKind::TurnRootItem);
         if (roots.empty() ||
             std::ranges::find(roots, localPrompt) != roots.end()) {
-          const std::array<NodeRef, 1> root{materializedItem ? materializedItem
-                                                             : localPrompt};
+          std::vector<NodeRef> ordered = write.children(turn);
+          ordered.erase(std::remove(ordered.begin(), ordered.end(), localPrompt),
+                        ordered.end());
+          ordered.insert(ordered.begin(), localPrompt);
+          write.replaceChildren(turn, ordered);
+          const std::array<NodeRef, 1> root{localPrompt};
           write.replaceRelated(turn, RelationKind::TurnRootItem, root);
         }
       }
@@ -1338,6 +1237,7 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
     // Keep every authored draft visible as failed; never turn a queued draft
     // into an automatic request against the local-only thread id.
     if (thread->id().canonical.starts_with("local-thread:")) {
+      write.setStatus(thread, NodeStatus::Failed);
       const std::string correlation =
           stringField(*write.state(localPrompt), "creationCorrelation");
       if (!correlation.empty()) {
@@ -1426,16 +1326,21 @@ ChannelSendStatus WorkerLogic::publish(GraphChange change) {
   return channels_.sendGraphChanged(std::move(change));
 }
 
-void WorkerLogic::resetProviderDerived(NodeGraph::WriteAccess &write,
-                                       std::string_view reason) {
+std::uint64_t WorkerLogic::resetProviderDerived(NodeGraph::WriteAccess &write,
+                                                std::string_view reason) {
   const std::vector<NodeRef> nodes = write.orderedNodes();
   std::unordered_set<const Node *> retained;
   std::vector<NodeRef> prompts;
   std::vector<NodeRef> interactions;
   if (NodeRef runtime = write.find({NodeKind::Runtime, "runtime"}))
     retained.insert(runtime.get());
-  if (NodeRef connection = write.find({NodeKind::Connection, "connection"}))
+  std::uint64_t authorityRevision = 0;
+  if (NodeRef connection = write.find({NodeKind::Connection, "connection"})) {
     retained.insert(connection.get());
+    authorityRevision = write.revision() + 1;
+    write.setField(connection, "providerAuthorityRevision",
+                   Value(authorityRevision));
+  }
 
   for (const NodeRef &node : nodes) {
     if (node && node->id().kind == NodeKind::Interaction) {
@@ -1521,6 +1426,7 @@ void WorkerLogic::resetProviderDerived(NodeGraph::WriteAccess &write,
   promptQueues_.clear();
   promptInFlight_.clear();
   creatingThreads_.clear();
+  return authorityRevision;
 }
 
 void WorkerLogic::forgetPrompt(const NodeRef &localPrompt) {

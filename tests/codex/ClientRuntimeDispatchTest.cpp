@@ -44,6 +44,22 @@ using namespace nodegraph;
 
 int failures = 0;
 
+Value::Object userInputSubmission(std::string questionId, std::string answer) {
+  return {
+      {"choice", Value("submit")},
+      {"input",
+       Value(Value::Object{
+           {std::move(questionId),
+            Value(Value::Object{{"answers", Value(Value::Array{Value(
+                                                std::move(answer))})}})}})}};
+}
+
+nlohmann::json userInputQuestions(std::string id) {
+  return nlohmann::json::array({{{"id", std::move(id)},
+                                 {"question", "Provide a value"},
+                                 {"options", nullptr}}});
+}
+
 void expect(bool condition, std::string_view message) {
   if (condition)
     return;
@@ -310,16 +326,23 @@ public:
       message = WorkerStopped{};
   }
 
-  std::vector<UiEffect> takeProtocolDiagnostics() {
-    std::vector<UiEffect> diagnostics;
+  std::vector<UiEffect> takeUiEffects() {
+    std::vector<UiEffect> effects;
     static_cast<void>(channels_.drainWorkerToQtWake());
     WorkerToQtMessage message;
     while (channels_.tryReceiveForQt(message)) {
-      if (UiEffect *effect = std::get_if<UiEffect>(&message);
-          effect && effect->kind == UiEffectKind::ProtocolDiagnostic)
-        diagnostics.emplace_back(std::move(*effect));
+      if (UiEffect *effect = std::get_if<UiEffect>(&message))
+        effects.emplace_back(std::move(*effect));
       message = WorkerStopped{};
     }
+    return effects;
+  }
+
+  std::vector<UiEffect> takeProtocolDiagnostics() {
+    std::vector<UiEffect> diagnostics;
+    for (UiEffect &effect : takeUiEffects())
+      if (effect.kind == UiEffectKind::ProtocolDiagnostic)
+        diagnostics.emplace_back(std::move(effect));
     return diagnostics;
   }
 
@@ -360,7 +383,8 @@ NodeRef findRetiredNode(NodeGraph &graph, const NodeId &id) {
     std::optional<NodeGraph::ReadAccess> read = graph.tryRead();
     if (!read)
       return false;
-    for (const NodeRef &node : read->retiredNodes()) {
+    for (std::size_t index = 0; index < read->retiredCount(); ++index) {
+      const NodeRef node = read->retiredAt(index);
       if (node && node->id() == id) {
         found = node;
         return true;
@@ -387,8 +411,8 @@ bool operationTargets(NodeGraph &graph, const nlohmann::json &requestId,
   if (!read)
     return false;
   const NodeRef operation = read->find({NodeKind::Operation, id.canonical()});
-  return operation && read->related(operation, RelationKind::OperationTarget) ==
-                          std::vector<NodeRef>{target};
+  return operation && read->related(target, RelationKind::PendingOperation) ==
+                          std::vector<NodeRef>{operation};
 }
 
 bool operationRetired(NodeGraph &graph, const nlohmann::json &requestId) {
@@ -403,8 +427,8 @@ bool interactionRetired(NodeGraph &graph, const NodeRef &interaction) {
   std::optional<NodeGraph::ReadAccess> read = graph.tryRead();
   if (!read || read->find(interaction->id()))
     return false;
-  for (const NodeRef &retired : read->retiredNodes())
-    if (retired == interaction)
+  for (std::size_t index = 0; index < read->retiredCount(); ++index)
+    if (read->retiredAt(index) == interaction)
       return true;
   return false;
 }
@@ -418,9 +442,13 @@ bool sendAction(ThreadChannels &channels, RuntimeAction action) {
 }
 
 nlohmann::json listedThread() {
-  return {{"id", "runtime-thread"}, {"name", "Runtime dispatch"},
-          {"status", "idle"},       {"createdAt", 1},
-          {"updatedAt", 2},         {"turns", nlohmann::json::array()}};
+  return {{"id", "runtime-thread"},
+          {"name", "Runtime dispatch"},
+          {"status", "idle"},
+          {"historyMode", "legacy"},
+          {"createdAt", 1},
+          {"updatedAt", 2},
+          {"turns", nlohmann::json::array()}};
 }
 
 bool rejectedAutomaticCurrentTimeResponseIsTerminal(UnixBridge &bridge,
@@ -633,14 +661,12 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
     const std::optional<nlohmann::json> repairRequest =
         bridge.receiveAppServer();
     expect(repairRequest &&
-               repairRequest->value("method", std::string{}) ==
-                   "thread/list" &&
+               repairRequest->value("method", std::string{}) == "thread/list" &&
                !repairRequest->at("params").value("useStateDbOnly", true),
            "a failed fast DB request still falls back to repair scanning");
     if (repairRequest)
-      expect(bridge.reply(*repairRequest,
-                          {{"data", nlohmann::json::array()},
-                           {"nextCursor", nullptr}}),
+      expect(bridge.reply(*repairRequest, {{"data", nlohmann::json::array()},
+                                           {"nextCursor", nullptr}}),
              "repair fallback completes after the fast-path failure");
   }
 
@@ -648,53 +674,75 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
     runtime.drainNotifications();
     NodeAction reload{thread, NodeActionKind::Reload};
     expect(sendAction(runtime.channels(), std::move(reload)),
-           "thread/read diagnostic reload enters the typed mailbox");
+           "paginated diagnostic reload enters the typed mailbox");
+    const std::optional<nlohmann::json> resumeRequest =
+        bridge.receiveAppServer();
+    expect(resumeRequest &&
+               resumeRequest->value("method", std::string{}) ==
+                   "thread/resume" &&
+               resumeRequest->at("params").value("excludeTurns", false),
+           "diagnostic reload establishes metadata-only live state first");
+    if (!resumeRequest)
+      return std::string{};
+    expect(bridge.reply(*resumeRequest, nlohmann::json::object()),
+           "metadata-only settings refresh response is delivered");
     const std::optional<nlohmann::json> readRequest = bridge.receiveAppServer();
-    expect(readRequest &&
-               readRequest->value("method", std::string{}) == "thread/read",
-           "diagnostic reload emits thread/read");
+    expect(readRequest && readRequest->value("method", std::string{}) ==
+                              "thread/turns/list",
+           "diagnostic reload pages history after metadata resume");
     if (!readRequest)
       return std::string{};
+    expect(readRequest->at("params").value("itemsView", std::string{}) ==
+               "summary",
+           "thread hydration separates bounded turn summaries from items");
     if (insertInterveningFrame) {
       expect(bridge.appServerNotification(
                  "thread/name/updated",
                  {{"threadId", "runtime-thread"},
-                  {"name", "Changed while thread/read was pending"}}),
-             "intervening provider delta is delivered before thread/read");
+                  {"name", "Changed while pagination was pending"}}),
+             "intervening provider delta is delivered before pagination");
     }
-    expect(bridge.reply(*readRequest, {{"thread", listedThread()}}),
-           "thread/read diagnostic response is delivered");
+    expect(bridge.reply(*readRequest, {{"data", listedThread().at("turns")},
+                                       {"nextCursor", nullptr}}),
+           "turn summary diagnostic response is delivered");
 
-    // Interactive hydration preserves the existing settings-refresh behavior.
-    // Complete that follow-up so this authority check leaves no wire request
-    // behind for the rest of the runtime integration test.
-    const std::optional<nlohmann::json> resumeRequest =
-        bridge.receiveAppServer();
-    expect(resumeRequest &&
-               resumeRequest->value("method", std::string{}) == "thread/resume",
-           "interactive thread/read is followed by one settings refresh");
-    if (resumeRequest)
-      expect(bridge.reply(*resumeRequest, nlohmann::json::object()),
-             "settings refresh response is delivered");
+    const ProtocolRequestId readOperation =
+        requestIdFromJson(readRequest->at("id"));
+    expect(waitUntil([&] {
+             const std::optional<NodeGraph::ReadAccess> read =
+                 runtime.graph().tryRead();
+             if (!read)
+               return false;
+             const NodeRef current =
+                 read->find({NodeKind::Thread, "runtime-thread"});
+             if (!current)
+               return false;
+             const auto state = read->state(current);
+             return !read->find(
+                        {NodeKind::Operation, readOperation.canonical()}) &&
+                    exactStringFromValue(
+                        valueMember(*state, "hydrationState")) == "ready" &&
+                    !valueMember(*state, "hydrationError");
+           }),
+           "the exact bridge turn page retires its Operation and makes the "
+           "same thread ready without a synthetic failure");
 
     std::string authority;
     expect(waitUntil([&] {
              for (UiEffect &effect : runtime.takeProtocolDiagnostics()) {
                if (diagnosticField(effect, "direction") == "client result" &&
-                   diagnosticField(effect, "subject") == "thread/read")
+                   diagnosticField(effect, "subject") == "thread/turns/list")
                  authority = diagnosticField(effect, "authority");
              }
              return !authority.empty();
            }),
-           "thread/read result retains its diagnostic authority");
+           "thread/turns/list result retains its diagnostic authority");
     return authority;
   };
   expect(readAuthority(true) == "merge",
-         "an intervening provider frame makes stale thread/read diagnostics "
-         "field-aware merge authority");
-  expect(readAuthority(false) == "replace",
-         "an immediately correlated thread/read retains replacement "
-         "authority");
+         "an intervening provider frame retains paginated merge authority");
+  expect(readAuthority(false) == "merge",
+         "an immediately correlated page retains paginated merge authority");
 
   runtime.drainNotifications();
   expect(
@@ -950,8 +998,25 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   if (!thread)
     return;
 
+  NodeRef wrongHistoryTarget;
+  {
+    auto write = runtime.graph().write();
+    NodeState wrongTargetState;
+    wrongTargetState.fields = {{"type", Value("agentMessage")},
+                               {"threadId", Value("runtime-thread")}};
+    wrongHistoryTarget = write.upsert({NodeKind::Item, "wrong-history-target"},
+                                      std::move(wrongTargetState));
+    write.setField(thread, "historyNextCursor", Value("graph-history-cursor"));
+    static_cast<void>(write.finish());
+  }
+  NodeAction wrongHistory{wrongHistoryTarget, NodeActionKind::LoadHistory};
+  expect(sendAction(runtime.channels(), std::move(wrongHistory)),
+         "a malformed history target reaches typed validation");
+  expect(!bridge.receiveAppServer(100ms),
+         "history loading rejects a non-Thread target before wire dispatch");
+
   NodeAction history{thread, NodeActionKind::LoadHistory};
-  history.payload = {{"cursor", Value("history-cursor")},
+  history.payload = {{"cursor", Value("payload-decoy-cursor")},
                      {"limit", Value(std::uint64_t{23})}};
   expect(sendAction(runtime.channels(), std::move(history)),
          "history paging enters the typed worker mailbox");
@@ -961,22 +1026,75 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
              request->at("params").value("threadId", std::string{}) ==
                  "runtime-thread" &&
              request->at("params").value("cursor", std::string{}) ==
-                 "history-cursor" &&
-             request->at("params").value("limit", 0) == 23 &&
+                 "graph-history-cursor" &&
+             request->at("params").value("limit", 0) == 80 &&
              request->at("params").value("sortDirection", std::string{}) ==
                  "desc" &&
-             request->at("params").value("itemsView", std::string{}) == "full",
-         "Load More encodes one scoped thread/turns/list request");
+             request->at("params").value("itemsView", std::string{}) ==
+                 "summary",
+         "Load More derives one scoped page from authoritative graph state");
   if (request) {
     expect(operationTargets(runtime.graph(), request->at("id"), thread),
            "history paging preserves its exact thread NodeRef");
-    expect(bridge.reply(*request, {{"data", nlohmann::json::array()},
-                                   {"nextCursor", nullptr}}),
-           "history paging decodes its typed result");
+    NodeAction duplicate{thread, NodeActionKind::LoadHistory};
+    expect(sendAction(runtime.channels(), std::move(duplicate)),
+           "a duplicate history action reaches the worker");
+    expect(!bridge.receiveAppServer(100ms),
+           "the live graph operation is the history single-flight gate");
+    expect(bridge.replyError(*request, -32044, "temporary history failure"),
+           "history paging exposes a retryable provider failure");
     expect(waitUntil([&] {
              return operationRetired(runtime.graph(), request->at("id"));
            }),
-           "history paging result retires its exact operation");
+           "history paging failure retires its exact operation");
+
+    NodeAction retry{thread, NodeActionKind::LoadHistory};
+    retry.payload = {{"cursor", Value("different-decoy-cursor")},
+                     {"limit", Value(std::uint64_t{7})}};
+    expect(sendAction(runtime.channels(), std::move(retry)),
+           "a failed history operation can be retried");
+    request = bridge.receiveAppServer();
+    expect(request &&
+               request->value("method", std::string{}) == "thread/turns/list" &&
+               request->at("params").value("cursor", std::string{}) ==
+                   "graph-history-cursor" &&
+               request->at("params").value("limit", 0) == 80,
+           "history retry preserves the same authoritative page demand");
+    if (request)
+      expect(
+          bridge.reply(*request,
+                       {{"data", nlohmann::json::array(
+                                     {{{"id", "paged-runtime-turn"},
+                                       {"items", nlohmann::json::array()}}})},
+                        {"nextCursor", nullptr}}),
+          "the retried history page decodes its typed result");
+    std::optional<nlohmann::json> itemPage = bridge.receiveAppServer();
+    expect(itemPage &&
+               itemPage->value("method", std::string{}) ==
+                   "thread/items/list" &&
+               itemPage->at("params").value("threadId", std::string{}) ==
+                   "runtime-thread" &&
+               itemPage->at("params").value("turnId", std::string{}) ==
+                   "paged-runtime-turn" &&
+               itemPage->at("params").value("limit", 0) == 80 &&
+               itemPage->at("params").value("sortDirection", std::string{}) ==
+                   "desc",
+           "turn summaries schedule one bounded item page");
+    if (itemPage)
+      expect(bridge.reply(*itemPage, {{"data", nlohmann::json::array()},
+                                      {"nextCursor", "older-items"}}),
+             "item pagination retains its continuation");
+    itemPage = bridge.receiveAppServer();
+    expect(itemPage &&
+               itemPage->value("method", std::string{}) ==
+                   "thread/items/list" &&
+               itemPage->at("params").value("cursor", std::string{}) ==
+                   "older-items",
+           "item pagination continues through the provider cursor");
+    if (itemPage)
+      expect(bridge.reply(*itemPage, {{"data", nlohmann::json::array()},
+                                      {"nextCursor", nullptr}}),
+             "the final item page completes bounded hydration");
   }
   expect(!bridge.receiveAppServer(100ms),
          "history paging is never duplicated on the wire");
@@ -987,7 +1105,8 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   request = bridge.receiveAppServer();
   expect(request && request->value("method", std::string{}) == "thread/fork" &&
              request->at("params").value("threadId", std::string{}) ==
-                 "runtime-thread",
+                 "runtime-thread" &&
+             request->at("params").value("excludeTurns", false),
          "fork encodes one request addressed by the supplied NodeRef");
   if (request) {
     expect(operationTargets(runtime.graph(), request->at("id"), thread),
@@ -1057,17 +1176,18 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   expect(sendAction(runtime.channels(), std::move(create)),
          "new-thread prompt enters the typed worker mailbox");
   request = bridge.receiveAppServer();
-  expect(request && request->value("method", std::string{}) == "thread/start" &&
-             request->at("params").value("cwd", std::string{}) ==
-                 "/tmp/wire-create" &&
-             request->at("params").value("baseInstructions",
-                                          std::string{}) ==
-                 "Ephemeral base instructions" &&
-             request->at("params").value("developerInstructions",
-                                          std::string{}) ==
-                 "Ephemeral developer instructions" &&
-             request->at("params").value("ephemeral", false),
-         "Create Thread keeps ephemeral instructions in its thread options");
+  expect(
+      request && request->value("method", std::string{}) == "thread/start" &&
+          request->at("params").value("cwd", std::string{}) ==
+              "/tmp/wire-create" &&
+          request->at("params").value("baseInstructions", std::string{}) ==
+              "Ephemeral base instructions" &&
+          request->at("params").value("developerInstructions", std::string{}) ==
+              "Ephemeral developer instructions" &&
+          request->at("params").value("ephemeral", false) &&
+          !request->at("params").contains("historyMode"),
+      "Create Thread keeps ephemeral instructions and leaves app-server's "
+      "legacy history default authoritative");
   if (!request) {
     runtime.drainNotifications();
     return;
@@ -1119,6 +1239,8 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   if (created && active) {
     NodeAction steer{created, NodeActionKind::SubmitPrompt};
     steer.promptText = "Steer the exact active turn";
+    steer.payload.emplace("model", "must-not-steer");
+    steer.payload.emplace("summary", "must-not-steer");
     expect(sendAction(runtime.channels(), std::move(steer)),
            "active-turn steering enters the typed worker mailbox");
     request = bridge.receiveAppServer();
@@ -1126,8 +1248,10 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
                request->at("params").value("threadId", std::string{}) ==
                    "wire-created-thread" &&
                request->at("params").value("expectedTurnId", std::string{}) ==
-                   "wire-created-turn",
-           "Submit while active encodes one turn/steer for the exact turn");
+                   "wire-created-turn" &&
+               !request->at("params").contains("model") &&
+               !request->at("params").contains("summary"),
+           "Submit while active encodes one turn/steer without start settings");
     if (request)
       expect(bridge.reply(*request, {{"turnId", "wire-created-turn"}}),
              "turn/steer decodes its typed result");
@@ -1175,6 +1299,221 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void itemHistoryHydrationHasAnExactConcurrencyCeiling(UnixBridge &bridge,
+                                                      RunningRuntime &runtime) {
+  const NodeRef thread =
+      findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
+  expect(static_cast<bool>(thread),
+         "bounded item hydration has a stable thread target");
+  if (!thread)
+    return;
+  {
+    auto write = runtime.graph().write();
+    write.setField(thread, "historyNextCursor", Value("bounded-items-page"));
+    static_cast<void>(write.finish());
+  }
+  expect(sendAction(runtime.channels(),
+                    NodeAction{thread, NodeActionKind::LoadHistory}),
+         "bounded item hydration enters the worker mailbox");
+  const std::optional<nlohmann::json> turnPage = bridge.receiveAppServer();
+  expect(turnPage &&
+             turnPage->value("method", std::string{}) == "thread/turns/list",
+         "bounded item hydration starts from one turn page");
+  if (!turnPage)
+    return;
+  nlohmann::json turns = nlohmann::json::array();
+  for (int index = 0; index < 10; ++index)
+    turns.push_back({{"id", "bounded-turn-" + std::to_string(index)},
+                     {"items", nlohmann::json::array()}});
+  expect(bridge.reply(*turnPage,
+                      {{"data", std::move(turns)}, {"nextCursor", nullptr}}),
+         "ten turn summaries are delivered in one bounded page");
+
+  std::vector<nlohmann::json> firstWave;
+  for (int index = 0; index < 8; ++index) {
+    const std::optional<nlohmann::json> request = bridge.receiveAppServer();
+    expect(request &&
+               request->value("method", std::string{}) == "thread/items/list",
+           "the first item-hydration wave contains eight item pages");
+    if (request)
+      firstWave.push_back(*request);
+  }
+  expect(firstWave.size() == 8,
+         "the native item scheduler fills its exact eight-request ceiling");
+  expect(!bridge.receiveAppServer(100ms),
+         "a ninth item page waits while eight requests remain in flight");
+  if (firstWave.size() != 8)
+    return;
+
+  expect(bridge.reply(firstWave[0], {{"data", nlohmann::json::array()},
+                                     {"nextCursor", nullptr}}),
+         "one completed item page releases one scheduler slot");
+  const std::optional<nlohmann::json> ninth = bridge.receiveAppServer();
+  expect(ninth && ninth->value("method", std::string{}) == "thread/items/list",
+         "one completion admits exactly the ninth item page");
+  expect(bridge.reply(firstWave[1], {{"data", nlohmann::json::array()},
+                                     {"nextCursor", nullptr}}),
+         "a second completed item page releases the final queued turn");
+  const std::optional<nlohmann::json> tenth = bridge.receiveAppServer();
+  expect(tenth && tenth->value("method", std::string{}) == "thread/items/list",
+         "the second completion admits exactly the tenth item page");
+  for (std::size_t index = 2; index < firstWave.size(); ++index)
+    expect(bridge.reply(firstWave[index], {{"data", nlohmann::json::array()},
+                                           {"nextCursor", nullptr}}),
+           "the remaining first-wave item page completes");
+  if (ninth)
+    expect(bridge.reply(*ninth, {{"data", nlohmann::json::array()},
+                                 {"nextCursor", nullptr}}),
+           "the ninth item page completes");
+  if (tenth)
+    expect(bridge.reply(*tenth, {{"data", nlohmann::json::array()},
+                                 {"nextCursor", nullptr}}),
+           "the tenth item page completes");
+  expect(!bridge.receiveAppServer(100ms),
+         "item hydration emits no extra pages after the ten turns complete");
+  runtime.drainNotifications();
+}
+
+void conversationSnapshotsShareOneAdmissionAuthority(UnixBridge &bridge,
+                                                     RunningRuntime &runtime) {
+  const NodeRef thread =
+      findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
+  expect(static_cast<bool>(thread),
+         "snapshot single-flight coverage has a stable thread target");
+  if (!thread)
+    return;
+
+  {
+    auto write = runtime.graph().write();
+    write.setField(thread, "historyHasMore", Value(true));
+    write.setField(thread, "historyNextCursor", Value("read-overlap-cursor"));
+    static_cast<void>(write.finish());
+  }
+
+  expect(sendAction(runtime.channels(),
+                    NodeAction{thread, NodeActionKind::Reload}),
+         "reload enters the worker before competing Load More coverage");
+  const std::optional<nlohmann::json> resumeRequest = bridge.receiveAppServer();
+  expect(resumeRequest &&
+             resumeRequest->value("method", std::string{}) == "thread/resume" &&
+             resumeRequest->at("params").value("excludeTurns", false),
+         "reload owns one metadata-only resume before its history page");
+  expect(sendAction(runtime.channels(),
+                    NodeAction{thread, NodeActionKind::LoadHistory}),
+         "Load More reaches admission while reload resume is pending");
+  expect(!bridge.receiveAppServer(100ms),
+         "reload resume suppresses a competing history page");
+  if (resumeRequest) {
+    expect(bridge.reply(*resumeRequest, nlohmann::json::object()),
+           "metadata-only reload resume completes");
+    const std::optional<nlohmann::json> readRequest = bridge.receiveAppServer();
+    expect(readRequest &&
+               readRequest->value("method", std::string{}) ==
+                   "thread/turns/list" &&
+               readRequest->at("params").value("itemsView", std::string{}) ==
+                   "summary",
+           "reload owns one bounded conversation snapshot");
+    if (readRequest)
+      expect(bridge.reply(*readRequest, {{"data", nlohmann::json::array()},
+                                         {"nextCursor", nullptr}}),
+             "the sole reload page completes");
+  }
+
+  {
+    auto write = runtime.graph().write();
+    write.setField(thread, "historyHasMore", Value(true));
+    write.setField(thread, "historyNextCursor", Value("page-overlap-cursor"));
+    static_cast<void>(write.finish());
+  }
+  expect(sendAction(runtime.channels(),
+                    NodeAction{thread, NodeActionKind::LoadHistory}),
+         "Load More enters the worker before competing reload coverage");
+  const std::optional<nlohmann::json> pageRequest = bridge.receiveAppServer();
+  expect(pageRequest &&
+             pageRequest->value("method", std::string{}) == "thread/turns/list",
+         "Load More owns one paginated conversation snapshot");
+  expect(sendAction(runtime.channels(),
+                    NodeAction{thread, NodeActionKind::Reload}),
+         "reload reaches admission while thread/turns/list is pending");
+  expect(!bridge.receiveAppServer(100ms),
+         "thread/turns/list suppresses a competing reload snapshot");
+  if (pageRequest)
+    expect(bridge.reply(*pageRequest, {{"data", nlohmann::json::array()},
+                                       {"nextCursor", nullptr}}),
+           "the sole paginated snapshot completes");
+  runtime.drainNotifications();
+}
+
+void staleHistoryFailureIsSemanticallyInert(UnixBridge &bridge,
+                                            RunningRuntime &runtime) {
+  constexpr std::string_view ThreadId = "stale-history-thread";
+  constexpr std::string_view ErrorText =
+      "late history failure must remain invisible";
+  NodeRef thread;
+  {
+    auto write = runtime.graph().write();
+    NodeState state;
+    state.fields = {{"historyHasMore", Value(true)},
+                    {"historyNextCursor", Value("stale-cursor")}};
+    thread = write.upsert({NodeKind::Thread, std::string(ThreadId)},
+                          std::move(state));
+    static_cast<void>(write.finish());
+  }
+  static_cast<void>(runtime.takeUiEffects());
+
+  NodeAction action{thread, NodeActionKind::LoadHistory};
+  expect(sendAction(runtime.channels(), std::move(action)),
+         "stale-history coverage admits one exact action");
+  const std::optional<nlohmann::json> request = bridge.receiveAppServer();
+  expect(request &&
+             request->value("method", std::string{}) == "thread/turns/list" &&
+             operationTargets(runtime.graph(), request->at("id"), thread),
+         "stale-history coverage observes the target-owned Operation");
+  if (!request)
+    return;
+
+  {
+    auto write = runtime.graph().write();
+    write.remove(thread);
+    static_cast<void>(write.finish());
+  }
+  expect(operationRetired(runtime.graph(), request->at("id")),
+         "removing the history target cascades its pending Operation");
+  static_cast<void>(runtime.takeUiEffects());
+  expect(bridge.replyError(*request, -32055, std::string(ErrorText)),
+         "the retired history request receives its late provider failure");
+  expect(bridge.appServerNotification(
+             "thread/started", {{"thread",
+                                 {{"id", "stale-history-barrier"},
+                                  {"name", "Stale history barrier"}}}}) &&
+             waitUntil([&] {
+               return static_cast<bool>(
+                   findNode(runtime.graph(),
+                            {NodeKind::Thread, "stale-history-barrier"}));
+             }),
+         "a later wire frame proves the late callback has settled");
+
+  const std::vector<UiEffect> effects = runtime.takeUiEffects();
+  expect(std::ranges::any_of(
+             effects,
+             [](const UiEffect &effect) {
+               return effect.kind == UiEffectKind::ProtocolDiagnostic &&
+                      diagnosticField(effect, "direction") == "client error" &&
+                      diagnosticField(effect, "subject") == "thread/turns/list";
+             }),
+         "the late history failure remains visible to protocol diagnostics");
+  expect(std::ranges::none_of(effects,
+                              [&](const UiEffect &effect) {
+                                return effect.kind ==
+                                           UiEffectKind::ShowNotice &&
+                                       effect.text.find(ErrorText) !=
+                                           std::string::npos;
+                              }),
+         "a stale history failure emits no user-visible notice");
+  expect(!findNode(runtime.graph(), {NodeKind::Thread, std::string(ThreadId)}),
+         "the stale history result cannot recreate its retired thread");
+}
+
 void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
                                         RunningRuntime &runtime) {
   const NodeRef source =
@@ -1201,23 +1540,23 @@ void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
              request->at("params").value("baseInstructions", std::string{}) ==
                  "Fork base" &&
              request->at("params").value("developerInstructions",
-                                          std::string{}) ==
-                 "Fork developer" &&
+                                         std::string{}) == "Fork developer" &&
              request->at("params").value("ephemeral", false) &&
+             request->at("params").value("excludeTurns", false) &&
              !request->at("params").contains("requestedName") &&
              !request->at("params").contains("name"),
-         "successful fork sends adjustable options but keeps its chosen name out of thread/fork");
+         "successful fork sends adjustable options but keeps its chosen name "
+         "out of thread/fork");
   if (!request)
     return;
-  const nlohmann::json forkedThread{
-      {"id", "runtime-fork"},
-      {"name", "Runtime fork"},
-      {"forkedFromId", "runtime-thread"},
-      {"status", "idle"},
-      {"createdAt", 3},
-      {"updatedAt", 4},
-      {"recencyAt", 4},
-      {"turns", nlohmann::json::array()}};
+  const nlohmann::json forkedThread{{"id", "runtime-fork"},
+                                    {"name", "Runtime fork"},
+                                    {"forkedFromId", "runtime-thread"},
+                                    {"status", "idle"},
+                                    {"createdAt", 3},
+                                    {"updatedAt", 4},
+                                    {"recencyAt", 4},
+                                    {"turns", nlohmann::json::array()}};
   expect(bridge.reply(*request, {{"thread", forkedThread}}),
          "successful fork result is delivered");
 
@@ -1241,8 +1580,15 @@ void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
          "successful fork retains its authoritative thread node");
   if (!forked)
     return;
-  expect(!bridge.receiveAppServer(100ms),
-         "an ephemeral fork never sends an unsupported metadata update");
+  const std::optional<nlohmann::json> historyPage = bridge.receiveAppServer();
+  expect(historyPage &&
+             historyPage->value("method", std::string{}) ==
+                 "thread/turns/list" &&
+             historyPage->at("params").value("threadId", std::string{}) ==
+                 "runtime-fork" &&
+             historyPage->at("params").value("itemsView", std::string{}) ==
+                 "summary",
+         "metadata-only fork hydrates copied history through bounded pages");
   NodeAction prompt{forked, NodeActionKind::SubmitPrompt};
   prompt.promptText = "Answer after a successful fork";
   expect(sendAction(runtime.channels(), std::move(prompt)),
@@ -1251,32 +1597,45 @@ void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
   expect(request && request->value("method", std::string{}) == "turn/start" &&
              request->at("params").value("threadId", std::string{}) ==
                  "runtime-fork",
-         "the first fork prompt starts immediately without a redundant read or resume");
+         "the first fork prompt starts immediately without a redundant read or "
+         "resume");
   if (!request)
     return;
-  expect(bridge.reply(*request,
-                      {{"turn", {{"id", "runtime-fork-turn"},
-                                  {"status", "inProgress"},
-                                  {"items", nlohmann::json::array()}}}}),
+  expect(bridge.reply(*request, {{"turn",
+                                  {{"id", "runtime-fork-turn"},
+                                   {"status", "inProgress"},
+                                   {"items", nlohmann::json::array()}}}}),
          "the first fork prompt acknowledgement is delivered");
-  expect(bridge.appServerNotification(
-             "turn/completed",
-             {{"threadId", "runtime-fork"},
-              {"turn", {{"id", "runtime-fork-turn"},
-                         {"status", "completed"},
-                         {"items", nlohmann::json::array()}}}}),
+  if (historyPage)
+    expect(bridge.reply(*historyPage, {{"data", nlohmann::json::array()},
+                                       {"nextCursor", nullptr}}),
+           "fork history can complete after its first prompt starts");
+  expect(bridge.appServerNotification("turn/completed",
+                                      {{"threadId", "runtime-fork"},
+                                       {"turn",
+                                        {{"id", "runtime-fork-turn"},
+                                         {"status", "completed"},
+                                         {"items", nlohmann::json::array()}}}}),
          "the fork turn reaches an authoritative terminal state");
   runtime.drainNotifications();
 }
 
 void ordinaryThreadPromptStillStartsAndCompletes(UnixBridge &bridge,
-                                                  RunningRuntime &runtime) {
+                                                 RunningRuntime &runtime) {
   const NodeRef thread =
       findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
   expect(static_cast<bool>(thread),
          "ordinary prompt coverage has a stable thread");
   if (!thread)
     return;
+
+  {
+    auto write = runtime.graph().write();
+    write.setStatus(thread, NodeStatus::Completed);
+    write.setField(thread, "status", Value("notLoaded"));
+    write.setField(thread, "hydrationState", Value("ready"));
+    static_cast<void>(write.finish());
+  }
   NodeAction prompt{thread, NodeActionKind::SubmitPrompt};
   prompt.promptText = "Answer an ordinary thread prompt";
   expect(sendAction(runtime.channels(), std::move(prompt)),
@@ -1285,22 +1644,78 @@ void ordinaryThreadPromptStillStartsAndCompletes(UnixBridge &bridge,
   expect(request && request->value("method", std::string{}) == "turn/start" &&
              request->at("params").value("threadId", std::string{}) ==
                  "runtime-thread",
-         "an ordinary thread prompt reaches turn/start");
+         "typed completed state overrides conflicting raw notLoaded text");
   if (!request)
     return;
-  expect(bridge.reply(*request,
-                      {{"turn", {{"id", "ordinary-runtime-turn"},
-                                  {"status", "inProgress"},
-                                  {"items", nlohmann::json::array()}}}}),
+  expect(bridge.reply(*request, {{"turn",
+                                  {{"id", "ordinary-runtime-turn"},
+                                   {"status", "inProgress"},
+                                   {"items", nlohmann::json::array()}}}}),
          "the ordinary prompt acknowledgement is delivered");
-  expect(bridge.appServerNotification(
-             "turn/completed",
-             {{"threadId", "runtime-thread"},
-              {"turn", {{"id", "ordinary-runtime-turn"},
-                         {"status", "completed"},
-                         {"items", nlohmann::json::array()}}}}),
+  expect(bridge.appServerNotification("turn/completed",
+                                      {{"threadId", "runtime-thread"},
+                                       {"turn",
+                                        {{"id", "ordinary-runtime-turn"},
+                                         {"status", "completed"},
+                                         {"items", nlohmann::json::array()}}}}),
          "the ordinary prompt reaches an authoritative terminal state");
   runtime.drainNotifications();
+
+  const auto activeTurnCleared = [&] {
+    const std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
+    return read && read->related(thread, RelationKind::ActiveTurn).empty();
+  };
+  expect(waitUntil(activeTurnCleared),
+         "the ordinary prompt releases its active-turn relation");
+
+  {
+    auto write = runtime.graph().write();
+    write.setStatus(thread, NodeStatus::NotLoaded);
+    write.setField(thread, "status", Value("completed"));
+    write.setField(thread, "hydrationState", Value("ready"));
+    static_cast<void>(write.finish());
+  }
+  NodeAction resumedPrompt{thread, NodeActionKind::SubmitPrompt};
+  resumedPrompt.promptText = "Resume from typed thread state";
+  expect(sendAction(runtime.channels(), std::move(resumedPrompt)),
+         "a typed not-loaded prompt enters the worker mailbox");
+  request = bridge.receiveAppServer();
+  expect(request &&
+             request->value("method", std::string{}) == "thread/resume" &&
+             request->at("params").value("threadId", std::string{}) ==
+                 "runtime-thread" &&
+             request->at("params").value("excludeTurns", false),
+         "typed not-loaded state overrides conflicting raw completed text");
+  if (request)
+    expect(bridge.reply(*request, nlohmann::json::object()),
+           "the typed-state resume acknowledgement is delivered");
+  request = bridge.receiveAppServer();
+  expect(request && request->value("method", std::string{}) == "turn/start" &&
+             request->at("params").value("threadId", std::string{}) ==
+                 "runtime-thread",
+         "the resumed prompt continues through one turn/start");
+  if (request)
+    expect(bridge.reply(*request, {{"turn",
+                                    {{"id", "resumed-runtime-turn"},
+                                     {"status", "inProgress"},
+                                     {"items", nlohmann::json::array()}}}}),
+           "the resumed prompt acknowledgement is delivered");
+  expect(bridge.appServerNotification("turn/completed",
+                                      {{"threadId", "runtime-thread"},
+                                       {"turn",
+                                        {{"id", "resumed-runtime-turn"},
+                                         {"status", "completed"},
+                                         {"items", nlohmann::json::array()}}}}),
+         "the resumed prompt reaches an authoritative terminal state");
+  runtime.drainNotifications();
+  expect(waitUntil(activeTurnCleared),
+         "the resumed prompt releases its active-turn relation");
+  {
+    auto write = runtime.graph().write();
+    write.setStatus(thread, NodeStatus::Completed);
+    write.setField(thread, "status", Value("idle"));
+    static_cast<void>(write.finish());
+  }
 }
 
 void runtimeRefreshActionsHaveExactRequestCardinality(UnixBridge &bridge,
@@ -1343,16 +1758,17 @@ void runtimeRefreshActionsHaveExactRequestCardinality(UnixBridge &bridge,
   expect(sendAction(runtime.channels(), std::move(loadMore)),
          "scroll pagination enters the worker mailbox");
   request = bridge.receiveAppServer();
-  expect(request && request->value("method", std::string{}) == "thread/list" &&
-             request->at("params").value("limit", 0) == 100 &&
-             request->at("params").value("sortKey", std::string{}) ==
-                 "recency_at" &&
-             request->at("params").value("sortDirection", std::string{}) ==
-                 "desc" &&
-             request->at("params").value("useStateDbOnly", false) &&
-             request->at("params").value("cursor", std::string{}) ==
-                 "recent-page-2",
-         "scroll pagination follows the repaired cursor through the DB-only path");
+  expect(
+      request && request->value("method", std::string{}) == "thread/list" &&
+          request->at("params").value("limit", 0) == 100 &&
+          request->at("params").value("sortKey", std::string{}) ==
+              "recency_at" &&
+          request->at("params").value("sortDirection", std::string{}) ==
+              "desc" &&
+          request->at("params").value("useStateDbOnly", false) &&
+          request->at("params").value("cursor", std::string{}) ==
+              "recent-page-2",
+      "scroll pagination follows the repaired cursor through the DB-only path");
   if (request)
     expect(bridge.replyError(*request, -32000, "temporary paging failure"),
            "a transient page failure is delivered");
@@ -1465,7 +1881,7 @@ void reverseInteractionsRespondOnceWithAuthoredData(UnixBridge &bridge,
          "reverse approval is represented by its stable interaction node");
   if (approval) {
     NodeAction resolve{approval, NodeActionKind::ResolveInteraction};
-    resolve.payload = {{"decision", Value("accept")}};
+    resolve.payload = {{"choice", Value("accept")}};
     expect(sendAction(runtime.channels(), std::move(resolve)),
            "approval response action enters the worker mailbox");
     const std::optional<nlohmann::json> response = bridge.receiveAppServer();
@@ -1487,11 +1903,13 @@ void reverseInteractionsRespondOnceWithAuthoredData(UnixBridge &bridge,
            "accepted response retires the exact interaction");
   }
 
-  expect(bridge.appServerRequest("input-runtime", "item/tool/requestUserInput",
-                                 {{"threadId", "runtime-thread"},
-                                  {"turnId", "runtime-turn"},
-                                  {"itemId", "runtime-question"},
-                                  {"questions", nlohmann::json::array()}}),
+  expect(bridge.appServerRequest(
+             "input-runtime", "item/tool/requestUserInput",
+             {{"threadId", "runtime-thread"},
+              {"turnId", "runtime-turn"},
+              {"itemId", "runtime-question"},
+              {"isBlocking", true},
+              {"questions", userInputQuestions("question-1")}}),
          "user-input request reaches CodexBridge");
   const NodeRef input = findNode(
       runtime.graph(),
@@ -1500,16 +1918,16 @@ void reverseInteractionsRespondOnceWithAuthoredData(UnixBridge &bridge,
          "reverse user input is represented by its interaction node");
   if (input) {
     NodeAction answer{input, NodeActionKind::ResolveInteraction};
-    answer.payload = {
-        {"answers", Value(Value::Object{
-                        {"question-1", Value(Value::Array{Value("yes")})}})}};
+    answer.payload = userInputSubmission("question-1", "yes");
     expect(sendAction(runtime.channels(), std::move(answer)),
            "user-input response action enters the worker mailbox");
     const std::optional<nlohmann::json> response = bridge.receiveAppServer();
     expect(response &&
                response->value("id", std::string{}) == "input-runtime" &&
-               response->at("result").at("answers").at("question-1") ==
-                   nlohmann::json::array({"yes"}),
+               response->at("result")
+                       .at("answers")
+                       .at("question-1")
+                       .at("answers") == nlohmann::json::array({"yes"}),
            "user-input response moves only newly authored answers to the wire");
     expect(!bridge.receiveAppServer(100ms),
            "user-input response is never dual-sent");
@@ -1517,6 +1935,77 @@ void reverseInteractionsRespondOnceWithAuthoredData(UnixBridge &bridge,
         waitUntil([&] { return interactionRetired(runtime.graph(), input); }),
         "user-input response removes the exact interaction once");
   }
+  runtime.drainNotifications();
+}
+
+void invalidAuthoredReverseResponseNeverReachesWire(UnixBridge &bridge,
+                                                    RunningRuntime &runtime) {
+  expect(bridge.appServerRequest(
+             "invalid-input-runtime", "item/tool/requestUserInput",
+             {{"threadId", "runtime-thread"},
+              {"turnId", "runtime-turn"},
+              {"itemId", "invalid-runtime-question"},
+              {"isBlocking", true},
+              {"questions", userInputQuestions("required-question")}}),
+         "invalid-submission fixture reaches CodexBridge");
+  const NodeRef interaction =
+      findNode(runtime.graph(),
+               {NodeKind::Interaction,
+                ProtocolRequestId("invalid-input-runtime").canonical()});
+  expect(static_cast<bool>(interaction),
+         "invalid-submission fixture has one exact interaction");
+  if (!interaction)
+    return;
+
+  const Value::Object malformed =
+      userInputSubmission("unexpected-question", "must remain local");
+  NodeAction invalid{interaction, NodeActionKind::ResolveInteraction};
+  invalid.payload = malformed;
+  expect(sendAction(runtime.channels(), std::move(invalid)),
+         "malformed authored response enters the typed worker mailbox");
+  expect(!bridge.receiveAppServer(200ms),
+         "malformed authored response never reaches the wire");
+  expect(
+      waitUntil([&] {
+        std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
+        if (!read || read->find(interaction->id()) != interaction)
+          return false;
+        const auto state = read->state(interaction);
+        const auto retained = state->fields.find("retainedResponsePayload");
+        const auto revision = state->fields.find("responseRevision");
+        const auto error = state->fields.find("error");
+        return state->status == NodeStatus::Failed &&
+               error != state->fields.end() && error->second.asString() &&
+               *error->second.asString() ==
+                   "The authored pending response is invalid." &&
+               retained != state->fields.end() && retained->second.asObject() &&
+               *retained->second.asObject() == malformed &&
+               revision != state->fields.end() && revision->second.asUInt64() &&
+               *revision->second.asUInt64() != 0;
+      }),
+      "invalid submission remains exact, recoverable, and authoritatively "
+      "acknowledged");
+
+  NodeAction corrected{interaction, NodeActionKind::ResolveInteraction};
+  corrected.payload =
+      userInputSubmission("required-question", "corrected answer");
+  expect(sendAction(runtime.channels(), std::move(corrected)),
+         "a deliberate corrected response can reuse the exact interaction");
+  const std::optional<nlohmann::json> response = bridge.receiveAppServer();
+  expect(response &&
+             response->value("id", std::string{}) == "invalid-input-runtime" &&
+             response->at("result")
+                     .at("answers")
+                     .at("required-question")
+                     .at("answers") ==
+                 nlohmann::json::array({"corrected answer"}) &&
+             waitUntil([&] {
+               return interactionRetired(runtime.graph(), interaction);
+             }),
+         "the corrected authored response is sent once and retires the exact "
+         "interaction");
+  expect(!bridge.receiveAppServer(100ms),
+         "invalid-response recovery never duplicates the wire response");
   runtime.drainNotifications();
 }
 
@@ -1538,13 +2027,15 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
   expect(bridge.setRole("observer", "another-connection") &&
              waitUntil([&] { return graphRoleIs("observer"); }),
          "runtime enters observer role before receiving a reverse request");
-  expect(bridge.appServerRequest("observer-input", "item/tool/requestUserInput",
-                                 {{"threadId", "runtime-thread"},
-                                  {"turnId", "observer-turn"},
-                                  {"itemId", "observer-question"},
-                                  {"questions", nlohmann::json::array()}},
-                                 "observer"),
-         "observer-delivered reverse request reaches the graph");
+  expect(
+      bridge.appServerRequest("observer-input", "item/tool/requestUserInput",
+                              {{"threadId", "runtime-thread"},
+                               {"turnId", "observer-turn"},
+                               {"itemId", "observer-question"},
+                               {"isBlocking", true},
+                               {"questions", userInputQuestions("question")}},
+                              "observer"),
+      "observer-delivered reverse request reaches the graph");
   const NodeRef observerInput = findNode(
       runtime.graph(),
       {NodeKind::Interaction, ProtocolRequestId("observer-input").canonical()});
@@ -1556,23 +2047,24 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
          "the same connection can subsequently claim controller");
   if (observerInput) {
     NodeAction response{observerInput, NodeActionKind::ResolveInteraction};
-    response.payload = {
-        {"answers", Value(Value::Object{{"question", Value("claimed")}})}};
+    response.payload = userInputSubmission("question", "claimed");
     expect(sendAction(runtime.channels(), std::move(response)),
            "new controller admits the earlier observer request response");
     const std::optional<nlohmann::json> wire = bridge.receiveAppServer();
     expect(wire && wire->value("id", std::string{}) == "observer-input" &&
-               wire->at("result").at("answers").at("question") == "claimed",
+               wire->at("result").at("answers").at("question").at("answers") ==
+                   nlohmann::json::array({"claimed"}),
            "current controller role, not receipt-time role, authorizes the "
            "exact response");
   }
 
-  expect(bridge.appServerRequest("lost-control-input",
-                                 "item/tool/requestUserInput",
-                                 {{"threadId", "runtime-thread"},
-                                  {"turnId", "lost-control-turn"},
-                                  {"itemId", "lost-control-question"},
-                                  {"questions", nlohmann::json::array()}}),
+  expect(bridge.appServerRequest(
+             "lost-control-input", "item/tool/requestUserInput",
+             {{"threadId", "runtime-thread"},
+              {"turnId", "lost-control-turn"},
+              {"itemId", "lost-control-question"},
+              {"isBlocking", true},
+              {"questions", userInputQuestions("question")}}),
          "second reverse request arrives while controlled");
   const NodeRef lostControl = findNode(
       runtime.graph(), {NodeKind::Interaction,
@@ -1582,8 +2074,7 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
          "controller loss is visible before queued action consumption");
   if (lostControl) {
     NodeAction rejected{lostControl, NodeActionKind::ResolveInteraction};
-    rejected.payload = {
-        {"answers", Value(Value::Object{{"question", Value("preserved")}})}};
+    rejected.payload = userInputSubmission("question", "preserved");
     expect(sendAction(runtime.channels(), std::move(rejected)),
            "stale Qt response still enters the typed mailbox");
     expect(!bridge.receiveAppServer(200ms),
@@ -1602,7 +2093,8 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
                  state->fields.find("retainedResponsePayload");
              return retained != state->fields.end() &&
                     retained->second.asObject() &&
-                    retained->second.asObject()->contains("answers");
+                    *retained->second.asObject() ==
+                        userInputSubmission("question", "preserved");
            }),
            "worker rejection keeps the authored answer on the actionable "
            "interaction for manual recovery");
@@ -1623,13 +2115,13 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
          "runtime restores controller for remaining coverage");
   if (lostControl) {
     NodeAction retry{lostControl, NodeActionKind::ResolveInteraction};
-    retry.payload = {
-        {"answers", Value(Value::Object{{"question", Value("preserved")}})}};
+    retry.payload = userInputSubmission("question", "preserved");
     expect(sendAction(runtime.channels(), std::move(retry)),
            "the user can explicitly resubmit the preserved response");
     const std::optional<nlohmann::json> wire = bridge.receiveAppServer();
     expect(wire && wire->value("id", std::string{}) == "lost-control-input" &&
-               wire->at("result").at("answers").at("question") == "preserved" &&
+               wire->at("result").at("answers").at("question").at("answers") ==
+                   nlohmann::json::array({"preserved"}) &&
                waitUntil([&] {
                  return interactionRetired(runtime.graph(), lostControl);
                }),
@@ -1768,13 +2260,14 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
            "worker membership revalidation blocks a removed thread target");
   }
 
-  expect(bridge.appServerRequest("generation-input",
-                                 "item/tool/requestUserInput",
-                                 {{"threadId", "runtime-thread"},
-                                  {"turnId", "generation-turn"},
-                                  {"itemId", "generation-question"},
-                                  {"questions", nlohmann::json::array()}}),
-         "generation-change request reaches the current graph");
+  expect(
+      bridge.appServerRequest("generation-input", "item/tool/requestUserInput",
+                              {{"threadId", "runtime-thread"},
+                               {"turnId", "generation-turn"},
+                               {"itemId", "generation-question"},
+                               {"isBlocking", true},
+                               {"questions", userInputQuestions("question")}}),
+      "generation-change request reaches the current graph");
   const NodeRef generationInput = findNode(
       runtime.graph(), {NodeKind::Interaction,
                         ProtocolRequestId("generation-input").canonical()});
@@ -1809,8 +2302,7 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
          "response-recovery state");
   if (generationInput) {
     NodeAction response{generationInput, NodeActionKind::ResolveInteraction};
-    response.payload = {
-        {"answers", Value(Value::Object{{"question", Value("generation")}})}};
+    response.payload = userInputSubmission("question", "generation");
     expect(sendAction(runtime.channels(), std::move(response)),
            "authored response can reach the worker after generation reset");
     expect(!bridge.receiveAppServer(200ms),
@@ -1829,7 +2321,8 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
                  state->fields.find("retainedResponsePayload");
              return retained != state->fields.end() &&
                     retained->second.asObject() &&
-                    retained->second.asObject()->contains("answers");
+                    *retained->second.asObject() ==
+                        userInputSubmission("question", "generation");
            }),
            "generation rejection preserves newly authored response data in "
            "the shared graph");
@@ -1876,7 +2369,7 @@ void remainingReverseRequestFamiliesRoundTripExactlyOnce(
   fileChangeRequest["reason"] = "write the focused test";
   std::optional<nlohmann::json> response =
       roundTrip("file-change-runtime", "item/fileChange/requestApproval",
-                std::move(fileChangeRequest), {{"decision", Value("accept")}});
+                std::move(fileChangeRequest), {{"choice", Value("accept")}});
   expect(response && response->contains("result") &&
              response->at("result") == nlohmann::json{{"decision", "accept"}},
          "file-change approval encodes the authored decision exactly");
@@ -1884,13 +2377,14 @@ void remainingReverseRequestFamiliesRoundTripExactlyOnce(
   nlohmann::json elicitationRequest = address;
   elicitationRequest["serverName"] = "test-mcp";
   elicitationRequest["message"] = "Choose a value";
+  elicitationRequest["mode"] = "form";
   elicitationRequest["requestedSchema"] = nlohmann::json{{"type", "object"}};
   response =
       roundTrip("mcp-runtime", "mcpServer/elicitation/request",
                 std::move(elicitationRequest),
-                {{"decision", Value("accept")},
-                 {"content", Value(Value::Object{{"choice", Value("safe")}})},
-                 {"_meta", Value(Value::Object{{"source", Value("qt")}})}});
+                {{"choice", Value("accept")},
+                 {"input", Value(Value::Object{{"choice", Value("safe")}})},
+                 {"metadata", Value(Value::Object{{"source", Value("qt")}})}});
   expect(response && response->contains("result") &&
              response->at("result") ==
                  nlohmann::json{{"action", "accept"},
@@ -1906,8 +2400,7 @@ void remainingReverseRequestFamiliesRoundTripExactlyOnce(
   permissionsRequest["permissions"] = requestedPermissions;
   response =
       roundTrip("permissions-runtime", "item/permissions/requestApproval",
-                std::move(permissionsRequest),
-                {{"decision", Value("accept")}, {"scope", Value("turn")}});
+                std::move(permissionsRequest), {{"choice", Value("turn")}});
   expect(response && response->contains("result") &&
              response->at("result") ==
                  nlohmann::json{{"permissions", requestedPermissions},
@@ -1919,24 +2412,23 @@ void remainingReverseRequestFamiliesRoundTripExactlyOnce(
   dynamicToolRequest["callId"] = "reverse-dynamic-tool";
   dynamicToolRequest["tool"] = "unsupported_tool";
   dynamicToolRequest["arguments"] = nlohmann::json{{"value", 7}};
-  response = roundTrip(
-      "dynamic-tool-runtime", "item/tool/call", std::move(dynamicToolRequest),
-      {{"contentItems", Value(Value::Array{Value(Value::Object{
-                            {"type", Value("inputText")},
-                            {"text", Value("Request declined by user")}})})},
-       {"success", Value(false)}});
+  response = roundTrip("dynamic-tool-runtime", "item/tool/call",
+                       std::move(dynamicToolRequest),
+                       {{"choice", Value("unavailable")}});
   expect(response && response->contains("result") &&
              response->at("result") ==
-                 nlohmann::json{{"contentItems",
-                                 nlohmann::json::array(
-                                     {{{"type", "inputText"},
-                                       {"text", "Request declined by user"}}})},
-                                {"success", false}},
+                 nlohmann::json{
+                     {"contentItems",
+                      nlohmann::json::array(
+                          {{{"type", "inputText"},
+                            {"text",
+                             "CodexUI does not provide this dynamic tool"}}})},
+                     {"success", false}},
          "dynamic-tool response encodes one explicit failure content item");
 
-  response =
-      roundTrip("auth-refresh-runtime", "account/chatgptAuthTokens/refresh",
-                {{"reason", "expired"}}, {});
+  response = roundTrip(
+      "auth-refresh-runtime", "account/chatgptAuthTokens/refresh",
+      {{"reason", "unauthorized"}}, {{"choice", Value("unsupported")}});
   expect(response && response->contains("error") &&
              response->at("error").value("code", 0) == -32601 &&
              response->at("error").value("message", std::string{}) ==
@@ -1944,34 +2436,32 @@ void remainingReverseRequestFamiliesRoundTripExactlyOnce(
          "authentication refresh emits the explicit unsupported error");
 
   response = roundTrip("attestation-runtime", "attestation/generate",
-                       {{"challenge", "challenge-value"}}, {});
+                       {{"challenge", "challenge-value"}},
+                       {{"choice", Value("unsupported")}});
   expect(response && response->contains("error") &&
              response->at("error").value("code", 0) == -32601 &&
              response->at("error").value("message", std::string{}) ==
                  "CodexUI does not support attestation generation",
          "attestation generation emits the explicit unsupported error");
 
-  const Value::Object deniedDecision{
-      {"denied",
-       Value(Value::Object{{"rejection", Value("Denied by focused test")}})}};
   response = roundTrip("apply-patch-runtime", "applyPatchApproval",
                        {{"conversationId", "runtime-thread"},
                         {"callId", "reverse-apply-patch"},
                         {"fileChanges", nlohmann::json::object()}},
-                       {{"decision", Value(deniedDecision)}});
-  expect(response && response->contains("result") &&
-             response->at("result") ==
-                 nlohmann::json{
-                     {"decision",
-                      {{"denied", {{"rejection", "Denied by focused test"}}}}}},
-         "apply-patch approval preserves an authored structured decision");
+                       {{"choice", Value("denied")}});
+  expect(
+      response && response->contains("result") &&
+          response->at("result") ==
+              nlohmann::json{{"decision",
+                              {{"denied", {{"rejection", "Denied by user"}}}}}},
+      "apply-patch approval derives the typed denial from authored intent");
 
   response = roundTrip("exec-command-runtime", "execCommandApproval",
                        {{"conversationId", "runtime-thread"},
                         {"callId", "reverse-exec"},
                         {"command", nlohmann::json::array({"printf", "test"})},
                         {"cwd", "/tmp"}},
-                       {{"decision", Value("acceptForSession")}});
+                       {{"choice", Value("approved_for_session")}});
   expect(response && response->contains("result") &&
              response->at("result") ==
                  nlohmann::json{{"decision", "approved_for_session"}},
@@ -1982,6 +2472,29 @@ void remainingReverseRequestFamiliesRoundTripExactlyOnce(
 
 void unknownInboundIsRetainedWithoutCorruptingKnownState(
     UnixBridge &bridge, RunningRuntime &runtime) {
+  constexpr std::string_view RequestMethod = "future/runtime-request";
+  expect(bridge.appServerRequest(
+             "future-runtime-request", std::string(RequestMethod),
+             {{"threadId", "runtime-thread"}, {"futureValue", 23}}),
+         "unknown inbound request reaches CodexBridge");
+  const std::optional<nlohmann::json> rejection = bridge.receiveAppServer();
+  expect(rejection && !rejection->contains("method") &&
+             rejection->value("id", std::string{}) ==
+                 "future-runtime-request" &&
+             rejection->contains("error") &&
+             rejection->at("error").value("code", 0) == -32601,
+         "CodexBridge automatically rejects an unregistered server request");
+  {
+    std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
+    expect(read &&
+               !read->find(
+                   {NodeKind::Interaction,
+                    ProtocolRequestId("future-runtime-request").canonical()}),
+           "unknown server request creates no phantom UI interaction");
+  }
+  expect(!bridge.receiveAppServer(100ms),
+         "unknown server request is rejected exactly once");
+
   constexpr std::string_view Method = "future/runtime-event";
   expect(bridge.appServerNotification(
              std::string(Method), {{"threadId", "runtime-thread"},
@@ -2043,13 +2556,20 @@ int main(int argc, char **argv) {
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
     codexui::codex::remainingUiCommandFamiliesUseExactWirePaths(bridge,
                                                                 runtime);
+    codexui::codex::itemHistoryHydrationHasAnExactConcurrencyCeiling(bridge,
+                                                                     runtime);
+    codexui::codex::conversationSnapshotsShareOneAdmissionAuthority(bridge,
+                                                                    runtime);
+    codexui::codex::staleHistoryFailureIsSemanticallyInert(bridge, runtime);
     codexui::codex::ordinaryThreadPromptStillStartsAndCompletes(bridge,
-                                                                 runtime);
+                                                                runtime);
     codexui::codex::firstPromptAfterForkStartsANewTurn(bridge, runtime);
     codexui::codex::runtimeRefreshActionsHaveExactRequestCardinality(bridge,
                                                                      runtime);
     codexui::codex::failedWakeUsesBoundedWorkerRecovery(bridge, runtime);
     codexui::codex::reverseInteractionsRespondOnceWithAuthoredData(bridge,
+                                                                   runtime);
+    codexui::codex::invalidAuthoredReverseResponseNeverReachesWire(bridge,
                                                                    runtime);
     codexui::codex::remainingReverseRequestFamiliesRoundTripExactlyOnce(
         bridge, runtime);

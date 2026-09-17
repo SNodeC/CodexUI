@@ -95,6 +95,7 @@ private:
   EventFd workerToQtWake_;
   EventFd qtToWorkerWake_;
   std::atomic<std::uint64_t> rescanRevision_{0};
+  std::atomic<std::uint64_t> pendingProviderAuthorityRevision_{0};
   std::atomic_bool closed_{false};
   mutable std::atomic_bool failNextWorkerToQtWake_{false};
   mutable std::atomic_bool failNextQtToWorkerWake_{false};
