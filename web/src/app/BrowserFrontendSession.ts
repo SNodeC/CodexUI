@@ -24,6 +24,8 @@ import type {SettingDraft} from "./TurnSettingsOptions.js";
 
 export const DraftThreadId = "__codexui_new_thread__";
 const MaximumProtocolFrames = 500;
+const MaximumHistoricalHydrations = 8;
+const MaximumItemHydrations = 8;
 
 function isThreadHydrationAction(action: string): boolean {
     return action === "thread.read" || action === "thread.resume"
@@ -97,10 +99,13 @@ export function suggestForkName(sourceTitle: string, existingThreadTitles: reado
     return `${base} (fork ${[...source.lineage, next].join(".")})`;
 }
 
-type ThreadPhase = "cold" | "reading" | "ready" | "resuming" | "failed";
+type ThreadPhase = "cold" | "hydrating" | "ready" | "resuming" | "failed";
 interface ThreadRuntimeState {
     phase: ThreadPhase;
+    historyPageInFlight: boolean;
+    readonly seenHistoryCursors: Set<string>;
 }
+interface ItemPage {threadId: string; turnId: string; cursor: string; runtime: ThreadRuntimeState}
 interface OperationResponse {ok: boolean; data?: unknown; error?: unknown; stale?: boolean}
 
 type RawRequest = (method: string, params: unknown, handler: (response: unknown) => void) => string;
@@ -121,6 +126,11 @@ export class BrowserFrontendSession {
     private readonly resolvingRequests = new Set<PendingRequestPresentation>();
     private readonly pendingUserOperations = new Map<string, object>();
     private readonly pendingAnimationTimers = new Map<number, ReturnType<typeof setTimeout>>();
+    private readonly historicalHydrationQueue: string[] = [];
+    private readonly historicalHydrations = new Set<string>();
+    private readonly historicalHydrationVisited = new Set<string>();
+    private readonly itemPageQueue: ItemPage[] = [];
+    private pendingItemPages = 0;
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
     private newThreadDraft: NewThreadDraft | undefined;
@@ -169,6 +179,8 @@ export class BrowserFrontendSession {
             this.reconcilePromptsForFrame(frame);
             this.handlePresentationFrame(frame, application === "provider-reset",
                 application === "requests-reset" || application === "provider-reset", retiringRequest);
+            if (threadId !== "" && stringMember(frame, "type") === "conversation.item.upsert")
+                this.queueActiveAgentChildren(threadId);
             this.schedulePublish();
         });
         this.connection = new ClientConnection(this.sdk, {
@@ -392,6 +404,7 @@ export class BrowserFrontendSession {
         const index = indexAuthoritativeItems(projectionId, thread);
         if (thread) this.prompts.decorate(this.selectedThreadId, index);
         const conversation = projectConversation(index, this.prompts.submissions(projectionId), limit, Date.now(), thread);
+        conversation.hasMore ||= thread?.historyHasMore === true;
         conversation.activeTurnId = this.model.activeTurnId(this.selectedThreadId);
         return conversation;
     }
@@ -477,7 +490,11 @@ export class BrowserFrontendSession {
         void this.performUserOperation("thread.rename", "thread.rename", {threadId, name}, "Rename thread", presentationKey);
     }
     reloadThread(threadId: string, presentationKey?: string): void {
-        if (this.matchesThreadPresentation(threadId, presentationKey)) this.readThread(threadId, true);
+        if (this.matchesThreadPresentation(threadId, presentationKey)) void this.hydrateThread(threadId, true, true);
+    }
+    historyPagePending(threadId: string, presentationKey?: string): boolean {
+        return this.matchesThreadPresentation(threadId, presentationKey)
+            && this.runtimeByThread.get(threadId)?.historyPageInFlight === true;
     }
     forkDraft(threadId: string): NewThreadDraft {
         const source = this.model.thread(threadId);
@@ -510,7 +527,7 @@ export class BrowserFrontendSession {
                 runtime.phase = "ready";
                 if (requestedName !== "") this.renameThread(id, requestedName);
                 this.selectThread(id);
-                void this.pageThreadHistory(id, runtime);
+                this.loadForkHistory(id, runtime);
             }
             else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");
         });
@@ -559,7 +576,7 @@ export class BrowserFrontendSession {
     private threadRuntime(threadId: string): ThreadRuntimeState {
         let runtime = this.runtimeByThread.get(threadId);
         if (!runtime) {
-            runtime = {phase: "cold"};
+            runtime = {phase: "cold", historyPageInFlight: false, seenHistoryCursors: new Set()};
             this.runtimeByThread.set(threadId, runtime);
         }
         return runtime;
@@ -574,6 +591,10 @@ export class BrowserFrontendSession {
         this.threadListLoadMoreRequested = false;
         this.threadListNextCursor = "";
         this.threadListSeenCursors.clear();
+        this.historicalHydrationQueue.length = 0;
+        this.historicalHydrations.clear();
+        this.historicalHydrationVisited.clear();
+        this.itemPageQueue.length = 0;
         this.catalogHydrationKey = "";
         this.pendingUserOperations.clear();
         const affectedThreads = new Set([...this.runtimeByThread.keys(), ...this.prompts.queuedThreadIds()]);
@@ -600,72 +621,140 @@ export class BrowserFrontendSession {
         if (!this.providerReady() || threadId === "" || threadId === DraftThreadId) return;
         const runtime = this.threadRuntime(threadId);
         if (runtime.phase !== "cold") return;
-        this.readThread(threadId);
+        void this.hydrateThread(threadId, true);
     }
-    private readThread(threadId: string, forced = false): void {
+    private async hydrateThread(threadId: string, interactive: boolean, forced = false): Promise<void> {
         if (!this.providerReady() || threadId === "") return;
         const runtime = this.threadRuntime(threadId);
-        if (runtime.phase === "reading" || runtime.phase === "resuming") return;
+        if (runtime.phase === "hydrating" || runtime.phase === "resuming" || runtime.historyPageInFlight) return;
         if (!forced && runtime.phase !== "cold") return;
-        runtime.phase = "reading";
+        runtime.phase = "hydrating";
+        runtime.historyPageInFlight = true;
+        runtime.seenHistoryCursors.clear();
         this.schedulePublish();
-        this.requestPromise("thread.read", {threadId, includeTurns: false}, () =>
-            this.runtimeByThread.get(threadId) === runtime && runtime.phase === "reading").then(response => {
-            if (response.stale) return;
-            const current = this.runtimeByThread.get(threadId);
-            if (current !== runtime || current.phase !== "reading") return;
-            if (response.ok && this.model.thread(threadId)) {
-                current.phase = "ready";
-                this.publish();
-                void this.pageThreadHistory(threadId, runtime);
-                queueMicrotask(() => this.dispatchNextPrompt(threadId));
-                return;
-            }
-            current.phase = "failed";
-            const message = response.ok ? "Thread loading returned no thread" : this.errorMessage(response);
+        const current = () => this.runtimeByThread.get(threadId) === runtime && runtime.phase === "hydrating";
+        let resumeAttempted = false;
+        if (interactive && this.sdk.role === "controller") {
+            resumeAttempted = true;
+            const response = await this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current);
+            if (response.stale || !current()) return;
+            if (!response.ok) this.setNotice(`Thread settings refresh failed: ${this.errorMessage(response)}`);
+        }
+        const response = await this.requestTurnPage(threadId, "", runtime, current);
+        if (response.stale || !current()) return;
+        runtime.historyPageInFlight = false;
+        if (!response.ok) {
+            runtime.phase = "failed";
+            const message = `Thread history requires paginated app-server support: ${this.errorMessage(response)}`;
             this.prompts.failQueued(threadId, message);
             this.setNotice(message);
-        });
+            return;
+        }
+        runtime.phase = "ready";
+        this.queueTurnItems(threadId, response.data, runtime);
+        this.queueActiveAgentChildren(threadId);
+        this.publish();
+        queueMicrotask(() => this.dispatchNextPrompt(threadId, resumeAttempted));
     }
-    private async pageThreadHistory(threadId: string, runtime: ThreadRuntimeState): Promise<void> {
-        let cursor = "";
-        do {
-            const response = await this.requestPromise("thread.turns.list", {
-                threadId, limit: 80, sortDirection: "desc", itemsView: "summary",
-                ...(cursor === "" ? {} : {cursor}),
-            }, () => this.runtimeByThread.get(threadId) === runtime && runtime.phase !== "failed");
+    private requestTurnPage(threadId: string, cursor: string, runtime: ThreadRuntimeState,
+        acceptResult: () => boolean = () => this.runtimeByThread.get(threadId) === runtime
+            && runtime.phase !== "failed"): Promise<OperationResponse> {
+        return this.requestPromise("thread.turns.list", {
+            threadId, limit: 80, sortDirection: "desc", itemsView: "summary",
+            ...(cursor === "" ? {} : {cursor}),
+        }, acceptResult);
+    }
+    private queueTurnItems(threadId: string, responseData: unknown, runtime: ThreadRuntimeState): void {
+        const turns = isObject(responseData) && Array.isArray(responseData.data)
+            ? responseData.data.filter(isObject) : [];
+        for (const turn of turns) {
+            const turnId = stringMember(turn, "id");
+            if (turnId !== "") this.itemPageQueue.push({threadId, turnId, cursor: "", runtime});
+        }
+        this.pumpItemPages();
+    }
+    private pumpItemPages(): void {
+        while (this.pendingItemPages < MaximumItemHydrations && this.itemPageQueue.length > 0) {
+            const page = this.itemPageQueue.shift()!;
+            if (this.runtimeByThread.get(page.threadId) !== page.runtime || page.runtime.phase === "failed") continue;
+            ++this.pendingItemPages;
+            void this.requestPromise("thread.items.list", {
+                threadId: page.threadId, turnId: page.turnId, limit: 80, sortDirection: "desc",
+                ...(page.cursor === "" ? {} : {cursor: page.cursor}),
+            }, () => this.runtimeByThread.get(page.threadId) === page.runtime
+                && page.runtime.phase !== "failed").then(response => {
+                --this.pendingItemPages;
+                if (!response.stale && response.ok) {
+                    const cursor = isObject(response.data) ? stringMember(response.data, "nextCursor") : "";
+                    if (cursor !== "") this.itemPageQueue.push({...page, cursor});
+                    this.queueActiveAgentChildren(page.threadId);
+                } else if (!response.stale) {
+                    this.setNotice(`Thread item history could not be loaded: ${this.errorMessage(response)}`);
+                }
+                this.pumpItemPages();
+            });
+        }
+    }
+    private queueActiveAgentChildren(parentThreadId: string): void {
+        for (const child of this.model.activeAgentChildIds(parentThreadId)) {
+            const runtime = this.threadRuntime(child);
+            if (runtime.phase !== "cold" || this.historicalHydrationVisited.has(child)) continue;
+            this.historicalHydrationVisited.add(child);
+            this.historicalHydrationQueue.push(child);
+        }
+        this.pumpHistoricalHydrations();
+    }
+    private pumpHistoricalHydrations(): void {
+        while (this.historicalHydrations.size < MaximumHistoricalHydrations
+            && this.historicalHydrationQueue.length > 0) {
+            const threadId = this.historicalHydrationQueue.shift()!;
+            const runtime = this.threadRuntime(threadId);
+            if (runtime.phase !== "cold") continue;
+            this.historicalHydrations.add(threadId);
+            void this.hydrateThread(threadId, false).finally(() => {
+                this.historicalHydrations.delete(threadId);
+                this.pumpHistoricalHydrations();
+            });
+        }
+    }
+    private loadForkHistory(threadId: string, runtime: ThreadRuntimeState): void {
+        if (runtime.historyPageInFlight) return;
+        runtime.historyPageInFlight = true;
+        void this.requestTurnPage(threadId, "", runtime).then(response => {
+            if (this.runtimeByThread.get(threadId) !== runtime) return;
+            runtime.historyPageInFlight = false;
             if (response.stale) return;
             if (!response.ok) {
                 this.setNotice(`Thread history requires paginated app-server support: ${this.errorMessage(response)}`);
                 return;
             }
-            const page = isObject(response.data) && Array.isArray(response.data.data)
-                ? response.data.data.filter(isObject) : [];
-            let nextTurn = 0;
-            const hydrateNext = async (): Promise<void> => {
-                while (nextTurn < page.length) {
-                    const turnId = stringMember(page[nextTurn++], "id");
-                    if (turnId !== "") await this.pageTurnItems(threadId, turnId, runtime);
-                }
-            };
-            await Promise.all(Array.from({length: Math.min(8, page.length)}, hydrateNext));
-            cursor = isObject(response.data) ? stringMember(response.data, "nextCursor") : "";
-        } while (cursor !== "" && this.runtimeByThread.get(threadId) === runtime);
+            this.queueTurnItems(threadId, response.data, runtime);
+            this.queueActiveAgentChildren(threadId);
+            this.publish();
+        });
     }
-    private async pageTurnItems(threadId: string, turnId: string, runtime: ThreadRuntimeState): Promise<void> {
-        let cursor = "";
-        do {
-            const response = await this.requestPromise("thread.items.list", {
-                threadId, turnId, limit: 80, sortDirection: "desc",
-                ...(cursor === "" ? {} : {cursor}),
-            }, () => this.runtimeByThread.get(threadId) === runtime && runtime.phase !== "failed");
+    loadMoreHistory(threadId: string, presentationKey?: string): void {
+        if (!this.providerReady() || !this.matchesThreadPresentation(threadId, presentationKey)) return;
+        const runtime = this.threadRuntime(threadId);
+        const cursor = this.model.thread(threadId)?.historyNextCursor ?? "";
+        if (runtime.phase !== "ready" || runtime.historyPageInFlight || cursor === ""
+            || runtime.seenHistoryCursors.has(cursor)) return;
+        runtime.historyPageInFlight = true;
+        runtime.seenHistoryCursors.add(cursor);
+        this.publish();
+        void this.requestTurnPage(threadId, cursor, runtime).then(response => {
+            if (this.runtimeByThread.get(threadId) !== runtime) return;
+            runtime.historyPageInFlight = false;
             if (response.stale) return;
             if (!response.ok) {
-                this.setNotice(`Thread item history could not be loaded: ${this.errorMessage(response)}`);
+                runtime.seenHistoryCursors.delete(cursor);
+                this.setNotice(`Loading more thread history failed: ${this.errorMessage(response)}`);
                 return;
             }
-            cursor = isObject(response.data) ? stringMember(response.data, "nextCursor") : "";
-        } while (cursor !== "" && this.runtimeByThread.get(threadId) === runtime);
+            this.queueTurnItems(threadId, response.data, runtime);
+            this.queueActiveAgentChildren(threadId);
+            this.publish();
+        });
     }
     private dispatchQueuedPrompts(): void {
         if (!this.canSubmit()) return;
@@ -872,7 +961,7 @@ export class BrowserFrontendSession {
     private matchesThreadPresentation(threadId: string, presentationKey?: string): boolean {
         return presentationKey === undefined || this.threadVisualKey(threadId) === presentationKey;
     }
-    private dispatchNextPrompt(threadId: string): void {
+    private dispatchNextPrompt(threadId: string, metadataResumeAttempted = false): void {
         if (!this.canSubmit() || this.prompts.hasInFlight(threadId)) return;
         if (!this.prompts.submissions(threadId).some(submission => submission.state === "queued")) return;
         const runtime = this.threadRuntime(threadId);
@@ -886,7 +975,7 @@ export class BrowserFrontendSession {
             this.ensureThreadHydrated(threadId);
             return;
         }
-        if (thread.status.semantic === "notLoaded") {
+        if (thread.status.semantic === "notLoaded" && !metadataResumeAttempted) {
             this.resumePromptQueue(threadId);
             return;
         }
@@ -1029,7 +1118,7 @@ export class BrowserFrontendSession {
         return {
             revision: this.revision, selectedThreadId: this.selectedThreadId,
             selectedThreadLoading: this.selectedThreadId !== "" && this.selectedThreadId !== DraftThreadId
-                && this.runtimeByThread.get(this.selectedThreadId)?.phase === "reading",
+                && this.runtimeByThread.get(this.selectedThreadId)?.phase === "hydrating",
             ...(this.newThreadDraft ? {newThreadDraft: this.newThreadDraft} : {}),
             protocolFrames: this.protocolFrames, notice: this.notice, bridgeUrl: this.bridgeUrl,
         };

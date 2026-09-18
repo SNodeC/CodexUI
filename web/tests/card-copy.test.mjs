@@ -5,7 +5,7 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 
 import {Card, InspectorAgentCard, cardCopyContent, userMessageMarkdownText} from "../dist/app/App.js";
-import {statusFromValue} from "../dist/index.js";
+import {findCard, projectConversation, statusFromValue} from "../dist/index.js";
 
 function itemCard(kind, itemId, payload, status = "") {
     return {
@@ -233,7 +233,19 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     assert.match(imageMarkup, /card-phase status success">completed/u);
     assert.equal((imageMarkup.match(/>completed</gu) ?? []).length, 1);
 
-    const generic = itemCard("genericActivity", "generic", {type: "futureThing", raw: {text: "x".repeat(5000)}});
+    const genericThread = {
+        id: "thread", title: "", preview: "", cwd: "", status: statusFromValue("idle"),
+        turnOrder: ["turn"], turns: new Map([["turn", {
+            id: "turn", status: statusFromValue("completed"), itemOrder: ["generic"],
+            items: new Map([["generic", {id: "generic", raw: {type: "futureThing", text: "x".repeat(5000)}}]]),
+            plan: {},
+        }]]), raw: {}, settingStamps: new Map(), agentOrder: [], agents: new Map(),
+        childThreadOrder: [], archived: false, historyNextCursor: "", historyHasMore: false,
+    };
+    const generic = findCard(projectConversation(genericThread, [], 80, 0), {
+        kind: "item", threadId: "thread", turnId: "turn", itemId: "generic",
+    });
+    assert.ok(generic);
     assert.match(cardCopyContent(generic).text, /\[Activity details truncated\]$/u);
 });
 

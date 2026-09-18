@@ -46,6 +46,22 @@ async function readyProvider(socket, connectionId, role = "controller", provider
     socket.receive({kind: "bridge.provider", state: "ready", providerGeneration});
     await Promise.resolve();
 }
+async function completeControllerHydration(socket, thread, nextCursor = null) {
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume, "controller hydration starts with metadata-only resume");
+    assert.deepEqual(resume.payload.params, {threadId: thread.id, excludeTurns: true});
+    const {turns = [], ...metadata} = thread;
+    respond(socket, resume, {thread: metadata});
+    await Promise.resolve(); await Promise.resolve();
+    const page = requests(socket, "thread/turns/list").at(-1);
+    assert.ok(page, "metadata resume is followed by one bounded turn page");
+    assert.deepEqual(page.payload.params, {
+        threadId: thread.id, limit: 80, sortDirection: "desc", itemsView: "summary",
+    });
+    respond(socket, page, {data: turns, nextCursor});
+    await Promise.resolve(); await Promise.resolve();
+    return {resume, page};
+}
 const waitForPublish = () => new Promise(resolve => setTimeout(resolve, 25));
 
 test("browser session defaults to the bridge's canonical WebSocket endpoint", () => {
@@ -73,25 +89,29 @@ test("selected-thread loading follows the latest hydration identity", async () =
     ]});
 
     session.selectThread("thread-a");
-    const readA = requests(socket, "thread/read").at(-1);
+    const resumeA = requests(socket, "thread/resume").at(-1);
     assert.equal(session.getSnapshot().selectedThreadLoading, true);
     session.selectThread("thread-b");
-    const readB = requests(socket, "thread/read").at(-1);
+    const resumeB = requests(socket, "thread/resume").at(-1);
     assert.equal(session.getSnapshot().selectedThreadLoading, true);
 
-    respond(socket, readA, {thread: {id: "thread-a", turns: []}});
+    respond(socket, resumeA, {thread: {id: "thread-a"}});
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(session.getSnapshot().selectedThreadId, "thread-b");
     assert.equal(session.getSnapshot().selectedThreadLoading, true,
         "a superseded hydration cannot complete the visible loading state");
 
-    respond(socket, readB, {thread: {id: "thread-b", turns: []}});
+    respond(socket, resumeB, {thread: {id: "thread-b"}});
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(session.getSnapshot().selectedThreadLoading, false);
     session.dispose();
 });
 
-test("repeated reloads share one thread read until it settles", async () => {
+test("repeated reloads share one metadata resume and turn page until hydration settles", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "reload-single-flight");
@@ -99,18 +119,22 @@ test("repeated reloads share one thread read until it settles", async () => {
         {id: "reload-thread", status: {type: "idle"}},
     ]});
     session.selectThread("reload-thread");
-    const initialRead = requests(socket, "thread/read").at(-1);
+    const initialResume = requests(socket, "thread/resume").at(-1);
 
     session.reloadThread("reload-thread"); session.reloadThread("reload-thread");
-    assert.equal(requests(socket, "thread/read").length, 1);
-    respond(socket, initialRead, {thread: {id: "reload-thread", status: {type: "idle"}, turns: []}});
+    assert.equal(requests(socket, "thread/resume").length, 1);
+    respond(socket, initialResume, {thread: {id: "reload-thread", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
 
     session.reloadThread("reload-thread"); session.reloadThread("reload-thread");
-    assert.equal(requests(socket, "thread/read").length, 2);
-    respond(socket, requests(socket, "thread/read").at(-1), {
-        thread: {id: "reload-thread", status: {type: "idle"}, turns: []},
+    assert.equal(requests(socket, "thread/resume").length, 2);
+    respond(socket, requests(socket, "thread/resume").at(-1), {
+        thread: {id: "reload-thread", status: {type: "idle"}},
     });
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
     session.dispose();
 });
@@ -123,9 +147,9 @@ test("browser history hydration separates metadata, turn summaries, and bounded 
         {id: "paged", status: {type: "idle"}},
     ]});
     session.selectThread("paged");
-    const metadata = requests(socket, "thread/read").at(-1);
-    assert.deepEqual(metadata.payload.params, {threadId: "paged", includeTurns: false});
-    respond(socket, metadata, {thread: {id: "paged", status: {type: "idle"}, turns: []}});
+    const metadata = requests(socket, "thread/resume").at(-1);
+    assert.deepEqual(metadata.payload.params, {threadId: "paged", excludeTurns: true});
+    respond(socket, metadata, {thread: {id: "paged", status: {type: "idle"}}});
     await Promise.resolve(); await Promise.resolve();
 
     const turns = requests(socket, "thread/turns/list").at(-1);
@@ -133,8 +157,14 @@ test("browser history hydration separates metadata, turn summaries, and bounded 
         threadId: "paged", limit: 80, sortDirection: "desc", itemsView: "summary",
     });
     respond(socket, turns, {data: [
-        {id: "newer", items: [{id: "newer-summary", type: "agentMessage", text: "summary"}]},
-        {id: "older", items: [{id: "older-summary", type: "agentMessage", text: "summary"}]},
+        {id: "newer", items: [
+            {id: "newer-user", type: "userMessage", content: [{type: "inputText", text: "prompt"}]},
+            {id: "newer-agent", type: "agentMessage", text: "answer"},
+        ]},
+        {id: "older", items: [
+            {id: "older-user", type: "userMessage", content: [{type: "inputText", text: "prompt"}]},
+            {id: "older-agent", type: "agentMessage", text: "answer"},
+        ]},
     ], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
 
@@ -146,36 +176,55 @@ test("browser history hydration separates metadata, turn summaries, and bounded 
         const turnId = page.payload.params.turnId;
         respond(socket, page, {data: [
             {turnId, item: {id: `${turnId}-agent`, type: "agentMessage", text: "answer"}},
-            {turnId, item: {id: `${turnId}-user`, type: "userMessage", content: [{type: "inputText", text: "prompt"}]}},
-        ], nextCursor: null});
+            {turnId, item: {id: `${turnId}-command`, type: "commandExecution", command: "pwd"}},
+        ], nextCursor: turnId === "older" ? "older-items" : null});
     }
+    await Promise.resolve(); await Promise.resolve();
+
+    const continuation = requests(socket, "thread/items/list").at(-1);
+    assert.deepEqual(continuation.payload.params, {
+        threadId: "paged", turnId: "older", limit: 80, sortDirection: "desc", cursor: "older-items",
+    });
+    respond(socket, continuation, {data: [
+        {turnId: "older", item: {id: "older-earliest", type: "agentMessage", text: "earliest"}},
+    ], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
 
     const thread = session.model.thread("paged");
     assert.deepEqual(thread?.turnOrder, ["older", "newer"]);
     assert.deepEqual(thread?.turns.get("older")?.itemOrder,
-        ["older-user", "older-agent", "older-summary"]);
+        ["older-earliest", "older-user", "older-command", "older-agent"]);
     assert.deepEqual(thread?.turns.get("newer")?.itemOrder,
-        ["newer-user", "newer-agent", "newer-summary"]);
+        ["newer-user", "newer-command", "newer-agent"]);
     session.dispose();
 });
 
-test("browser history hydration admits at most eight concurrent item pages", async () => {
+test("observer hydration reads directly and the item-page ceiling is global across threads", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
-    session.connect(); socket.open(); await readyProvider(socket, "bounded-item-pages");
+    session.connect(); socket.open(); await readyProvider(socket, "bounded-item-pages", "observer");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
-        {id: "bounded", status: {type: "idle"}},
+        {id: "bounded-a", status: {type: "idle"}},
+        {id: "bounded-b", status: {type: "idle"}},
     ]});
-    session.selectThread("bounded");
-    respond(socket, requests(socket, "thread/read").at(-1), {
-        thread: {id: "bounded", status: {type: "idle"}, turns: []},
+    session.selectThread("bounded-a");
+    assert.equal(session.getSnapshot().selectedThreadLoading, true);
+    const pageA = requests(socket, "thread/turns/list").at(-1);
+    assert.equal(pageA.payload.params.threadId, "bounded-a");
+    assert.equal(requests(socket, "thread/resume").length, 0,
+        "observer selection never attempts a controller-only resume");
+    respond(socket, pageA, {
+        data: Array.from({length: 6}, (_, index) => ({id: `a-turn-${index}`, items: []})),
+        nextCursor: null,
     });
     await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.getSnapshot().selectedThreadLoading, false);
 
-    const turns = requests(socket, "thread/turns/list").at(-1);
-    respond(socket, turns, {
-        data: Array.from({length: 10}, (_, index) => ({id: `turn-${index}`, items: []})),
+    session.selectThread("bounded-b");
+    const pageB = requests(socket, "thread/turns/list").at(-1);
+    assert.equal(pageB.payload.params.threadId, "bounded-b");
+    respond(socket, pageB, {
+        data: Array.from({length: 6}, (_, index) => ({id: `b-turn-${index}`, items: []})),
         nextCursor: null,
     });
     await Promise.resolve(); await Promise.resolve();
@@ -187,6 +236,66 @@ test("browser history hydration admits at most eight concurrent item pages", asy
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "thread/items/list").length, 9,
         "one completion admits exactly one queued turn");
+    session.dispose();
+});
+
+test("turn history advances one explicit page at a time and retries the same cursor after failure", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "turn-pagination");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "paged-turns", status: {type: "idle"}},
+    ]});
+    session.selectThread("paged-turns");
+    await completeControllerHydration(socket, {
+        id: "paged-turns", status: {type: "idle"}, turns: [{id: "newest", items: []}],
+    }, "turn-cursor-1");
+    assert.equal(requests(socket, "thread/turns/list").length, 1,
+        "the first page does not recursively drain retained history");
+    assert.equal(session.conversation().hasMore, true);
+
+    session.loadMoreHistory("paged-turns");
+    session.loadMoreHistory("paged-turns");
+    const failedPage = requests(socket, "thread/turns/list").at(-1);
+    assert.equal(session.historyPagePending("paged-turns"), true);
+    assert.equal(requests(socket, "thread/turns/list").length, 2,
+        "a continuation page is single-flight");
+    assert.equal(failedPage.payload.params.cursor, "turn-cursor-1");
+    reject(socket, failedPage, "temporary paging failure");
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.historyPagePending("paged-turns"), false);
+
+    session.loadMoreHistory("paged-turns");
+    const retry = requests(socket, "thread/turns/list").at(-1);
+    assert.equal(requests(socket, "thread/turns/list").length, 3);
+    assert.equal(retry.payload.params.cursor, "turn-cursor-1");
+    respond(socket, retry, {data: [{id: "older", items: []}], nextCursor: "turn-cursor-2"});
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(session.model.thread("paged-turns")?.turnOrder, ["older", "newest"]);
+    assert.equal(session.model.thread("paged-turns")?.historyNextCursor, "turn-cursor-2");
+    session.dispose();
+});
+
+test("active retained agent children hydrate read-only without another metadata resume", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "agent-history");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "parent", status: {type: "idle"}},
+    ]});
+    session.selectThread("parent");
+    await completeControllerHydration(socket, {id: "parent", status: {type: "idle"}, turns: [{
+        id: "parent-turn", items: [{
+            id: "spawn", type: "subAgentActivity", status: "started", agentThreadId: "child",
+        }],
+    }]});
+    const childPage = requests(socket, "thread/turns/list").find(
+        request => request.payload.params.threadId === "child");
+    assert.ok(childPage, "an active retained child is admitted to bounded historical hydration");
+    assert.equal(requests(socket, "thread/resume").length, 1,
+        "historical child hydration does not mutate provider subscription state");
+    respond(socket, childPage, {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
     session.dispose();
 });
 
@@ -381,10 +490,8 @@ test("browser session uses canonical action routing and preserves prompt-respons
     respond(socket, modelList, {data: [{id: "gpt-current", displayName: "Current"}]});
     respond(socket, profiles, {data: []});
     session.selectThread("thread-1");
-    const read = requests(socket, "thread/read").at(-1);
-    assert.deepEqual(read.payload.params, {threadId: "thread-1", includeTurns: false},
-        "metadata hydration cannot embed retained history");
-    respond(socket, read, {thread: {id: "thread-1", preview: "Browser thread", cwd: "/workspace", status: {type: "idle"}, turns: []}});
+    await completeControllerHydration(socket,
+        {id: "thread-1", preview: "Browser thread", cwd: "/workspace", status: {type: "idle"}, turns: []});
 
     const authoredPrompt = "  first authored line\n\nthird authored line\n\n";
     assert.equal(await session.submitPrompt(authoredPrompt), true);
@@ -437,8 +544,8 @@ test("acknowledged turn roots stay active across a delayed lifecycle event", asy
     respond(socket, requests(socket, "thread/list").at(-1),
         {data: [{id: "handoff-thread", status: {type: "idle"}}]});
     session.selectThread("handoff-thread");
-    respond(socket, requests(socket, "thread/read").at(-1),
-        {thread: {id: "handoff-thread", status: {type: "idle"}, turns: []}});
+    await completeControllerHydration(socket,
+        {id: "handoff-thread", status: {type: "idle"}, turns: []});
     await session.submitPrompt("handoff prompt"); await Promise.resolve();
     const start = requests(socket, "turn/start").at(-1);
     socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
@@ -475,11 +582,11 @@ test("stream deltas reconcile prompts only when a user message can materialize",
     await readyProvider(socket, "reconcile-scope");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "thread-1"}]});
     session.selectThread("thread-1");
-    respond(socket, requests(socket, "thread/read").at(-1), {thread: {
+    await completeControllerHydration(socket, {
         id: "thread-1", turns: [{id: "turn-1", status: "inProgress", items: [{
             id: "command-1", type: "commandExecution", status: "inProgress", command: "printf output",
         }]}],
-    }});
+    });
     let reconciliations = 0;
     const reconcile = session.prompts.reconcile.bind(session.prompts);
     session.prompts.reconcile = (...arguments_) => { ++reconciliations; return reconcile(...arguments_); };
@@ -741,10 +848,9 @@ test("Recent promotes on turn admission, reverts rejection, confirms acknowledge
     try {
         Date.now = () => 40_000;
         session.selectThread("older");
-        respond(socket, requests(socket, "thread/read").at(-1), {thread: {
+        await completeControllerHydration(socket, {
             id: "older", recencyAt: 10, updatedAt: 12, status: {type: "idle"}, turns: [],
-        }});
-        await Promise.resolve(); await Promise.resolve();
+        });
         await session.submitPrompt("use older thread");
         await Promise.resolve();
         const rejectedStart = requests(socket, "turn/start").at(-1);
@@ -776,10 +882,9 @@ test("Recent promotes on turn admission, reverts rejection, confirms acknowledge
             "turn ordering never rewrites last-changed data");
 
         session.selectThread("recent");
-        respond(socket, requests(socket, "thread/read").at(-1), {thread: {
+        await completeControllerHydration(socket, {
             id: "recent", recencyAt: 30, updatedAt: 32, status: {type: "idle"}, turns: [],
-        }});
-        await Promise.resolve(); await Promise.resolve();
+        });
         await session.submitPrompt("confirm recent thread");
         await Promise.resolve();
         assert.deepEqual(session.threadOrder(), ["recent", "older"],
@@ -813,12 +918,11 @@ test("thread activity preserves provider time during hydration and advances for 
 
     session.selectThread("tracked");
     assert.equal(session.model.thread("tracked").lastActivityAt, 30,
-        "selection-driven read does not replace authoritative activity");
+        "selection-driven hydration does not replace authoritative activity");
 
-    const read = requests(socket, "thread/read").at(-1);
-    respond(socket, read, {thread: {id: "tracked", updatedAt: 20, recencyAt: 30, turns: []}});
+    await completeControllerHydration(socket, {id: "tracked", updatedAt: 20, recencyAt: 30, turns: []});
     assert.equal(session.model.thread("tracked").lastActivityAt, 30,
-        "authoritative read response remains the activity source during hydration");
+        "authoritative resume response remains the activity source during hydration");
 
     const beforeOutbound = Math.floor(Date.now() / 1000);
     session.renameThread("tracked", "Renamed tracked thread");
@@ -919,9 +1023,7 @@ test("browser session resumes a not-loaded thread before starting its queued tur
     await readyProvider(socket, "resume-test");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "sleeping", status: {type: "notLoaded"}}]});
     session.selectThread("sleeping");
-    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "sleeping", status: {type: "notLoaded"}, turns: []}});
     await session.submitPrompt("wake and work");
-    await Promise.resolve();
     const resume = requests(socket, "thread/resume").at(-1);
     assert.ok(resume);
     assert.equal(resume.payload.params.excludeTurns, true,
@@ -929,11 +1031,13 @@ test("browser session resumes a not-loaded thread before starting its queued tur
     assert.equal(requests(socket, "turn/start").length, 0);
     respond(socket, resume, {thread: {id: "sleeping", status: {type: "idle"}}});
     await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wake and work");
     session.dispose();
 });
 
-test("a successful resume that leaves the thread not loaded terminates without retry", async () => {
+test("a hydration resume is not repeated before dispatching its already-queued prompt", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "resume-without-progress");
@@ -942,19 +1046,15 @@ test("a successful resume that leaves the thread not loaded terminates without r
     ]});
     await Promise.resolve();
     session.selectThread("still-sleeping");
-    respond(socket, requests(socket, "thread/read").at(-1), {
-        thread: {id: "still-sleeping", status: {type: "notLoaded"}, turns: []},
-    });
-    await Promise.resolve(); await Promise.resolve();
-    await session.submitPrompt("do not spin"); await Promise.resolve();
     const resume = requests(socket, "thread/resume").at(-1);
+    await session.submitPrompt("do not spin");
     assert.ok(resume);
-    respond(socket, resume, {thread: {id: "still-sleeping", status: {type: "notLoaded"}, turns: []}});
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    respond(socket, resume, {thread: {id: "still-sleeping", status: {type: "notLoaded"}}});
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "thread/resume").length, 1);
-    assert.equal(requests(socket, "turn/start").length, 0);
-    assert.equal(session.prompts.submissions("still-sleeping").at(-1).state, "failed");
-    assert.match(session.getSnapshot().notice, /resume returned without loading/u);
+    assert.equal(requests(socket, "turn/start").length, 1);
     session.dispose();
 });
 
@@ -968,25 +1068,25 @@ test("resume eligibility follows authoritative lifecycle state after hydration",
     ]});
 
     session.selectThread("closed-after-read");
-    respond(socket, requests(socket, "thread/read").at(-1),
-        {thread: {id: "closed-after-read", status: {type: "idle"}, turns: []}});
+    await completeControllerHydration(socket,
+        {id: "closed-after-read", status: {type: "idle"}, turns: []});
     socket.receive(appserver({jsonrpc: "2.0", method: "thread/closed", params: {
         threadId: "closed-after-read",
     }}));
     await session.submitPrompt("resume closed thread"); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 0);
-    assert.equal(requests(socket, "thread/resume").length, 1,
-        "a post-read close is derived from current model status");
+    assert.equal(requests(socket, "thread/resume").length, 2,
+        "a post-hydration close is derived from current model status");
 
     session.selectThread("woken-after-read");
-    respond(socket, requests(socket, "thread/read").at(-1),
-        {thread: {id: "woken-after-read", status: {type: "notLoaded"}, turns: []}});
+    await completeControllerHydration(socket,
+        {id: "woken-after-read", status: {type: "notLoaded"}, turns: []});
     socket.receive(appserver({jsonrpc: "2.0", method: "thread/status/changed", params: {
         threadId: "woken-after-read", status: {type: "idle"},
     }}));
     await session.submitPrompt("already awake"); await Promise.resolve();
-    assert.equal(requests(socket, "thread/resume").length, 1,
-        "a post-read active status does not retain stale resume state");
+    assert.equal(requests(socket, "thread/resume").length, 3,
+        "a post-hydration active status does not retain stale resume state");
     assert.equal(requests(socket, "turn/start").at(-1).payload.params.threadId, "woken-after-read");
     session.dispose();
 });
@@ -1103,21 +1203,24 @@ test("pending request identity is immutable until retirement and resets before s
     session.dispose();
 });
 
-test("a prompt admitted during thread hydration waits for the authoritative read", async () => {
+test("a prompt admitted during thread hydration waits for the first authoritative turn page", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "hydrate-before-send");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "thread-h", status: {type: "idle"}}]});
     session.selectThread("thread-h");
-    const read = requests(socket, "thread/read").at(-1);
-    assert.ok(read);
-    assert.equal(await session.submitPrompt("wait for read"), true);
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume);
+    assert.equal(await session.submitPrompt("wait for page"), true);
     await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 0);
 
-    respond(socket, read, {thread: {id: "thread-h", status: {type: "idle"}, turns: []}});
+    respond(socket, resume, {thread: {id: "thread-h", status: {type: "idle"}}});
     await Promise.resolve(); await Promise.resolve();
-    assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wait for read");
+    assert.equal(requests(socket, "turn/start").length, 0);
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wait for page");
     session.dispose();
 });
 
@@ -1127,10 +1230,12 @@ test("a queued prompt waits through controller loss and resumes after control re
     session.connect(); socket.open(); await readyProvider(socket, "role-transition");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "role-thread", status: {type: "idle"}}]});
     session.selectThread("role-thread");
-    const read = requests(socket, "thread/read").at(-1);
+    const resume = requests(socket, "thread/resume").at(-1);
     assert.equal(await session.submitPrompt("wait for control"), true);
     socket.receive({kind: "bridge.controller", controllerConnectionId: "other-client"});
-    respond(socket, read, {thread: {id: "role-thread", status: {type: "idle"}, turns: []}});
+    respond(socket, resume, {thread: {id: "role-thread", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 0);
 
@@ -1148,20 +1253,18 @@ test("provider loss makes a queued hydration-gated prompt terminal instead of re
     session.connect(); sockets[0].open(); await readyProvider(sockets[0], "generation-a");
     respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
     session.selectThread("retained");
-    const staleRead = requests(sockets[0], "thread/read").at(-1);
+    const staleResume = requests(sockets[0], "thread/resume").at(-1);
     assert.equal(await session.submitPrompt("do not send after restart"), true);
     sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
     sockets[0].close(1000, "restart");
-    respond(sockets[0], staleRead, {thread: {id: "retained", status: {type: "idle"}, turns: []}});
+    respond(sockets[0], staleResume, {thread: {id: "retained", status: {type: "idle"}}});
     assert.equal(session.prompts.submissions("retained").at(-1).state, "failed");
     assert.match(session.prompts.submissions("retained").at(-1).error, /queued prompt was sent/u);
 
     session.reconnect(); await Promise.resolve();
     sockets[1].open(); await readyProvider(sockets[1], "generation-b", "controller", 2);
     respond(sockets[1], requests(sockets[1], "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
-    const currentRead = requests(sockets[1], "thread/read").at(-1);
-    respond(sockets[1], currentRead, {thread: {id: "retained", status: {type: "idle"}, turns: []}});
-    await Promise.resolve(); await Promise.resolve();
+    await completeControllerHydration(sockets[1], {id: "retained", status: {type: "idle"}, turns: []});
     assert.equal(requests(sockets[0], "turn/start").length, 0);
     assert.equal(requests(sockets[1], "turn/start").length, 0,
         "reconnection and hydration never submit an already-admitted prompt");
@@ -1177,10 +1280,8 @@ test("provider replacement retires an in-flight turn with an uncertain outcome a
     ]});
     await Promise.resolve();
     session.selectThread("inflight-thread");
-    respond(socket, requests(socket, "thread/read").at(-1), {
-        thread: {id: "inflight-thread", status: {type: "idle"}, turns: []},
-    });
-    await Promise.resolve(); await Promise.resolve();
+    await completeControllerHydration(socket,
+        {id: "inflight-thread", status: {type: "idle"}, turns: []});
     assert.equal(await session.submitPrompt("send exactly once"), true);
     await Promise.resolve();
     const start = requests(socket, "turn/start").at(-1);
@@ -1195,9 +1296,8 @@ test("provider replacement retires an in-flight turn with an uncertain outcome a
         frame?.kind === "result" && frame?.action === "turn.start"), false,
     "the synthetic stale SDK failure never enters presentation diagnostics");
 
-    const currentRead = requests(socket, "thread/read").at(-1);
-    respond(socket, currentRead, {thread: {id: "inflight-thread", status: {type: "idle"}, turns: []}});
-    await Promise.resolve(); await Promise.resolve();
+    await completeControllerHydration(socket,
+        {id: "inflight-thread", status: {type: "idle"}, turns: []});
     assert.equal(requests(socket, "turn/start").length, 1);
     session.dispose();
 });
@@ -1211,10 +1311,8 @@ test("transport detach retires an in-flight turn before its synthetic failure ca
     ]});
     await Promise.resolve();
     session.selectThread("detach-thread");
-    respond(socket, requests(socket, "thread/read").at(-1), {
-        thread: {id: "detach-thread", status: {type: "idle"}, turns: []},
-    });
-    await Promise.resolve(); await Promise.resolve();
+    await completeControllerHydration(socket,
+        {id: "detach-thread", status: {type: "idle"}, turns: []});
     await session.submitPrompt("uncertain transport outcome"); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 1);
 
@@ -1267,11 +1365,10 @@ test("a provider-generation jump cannot apply pending create, user-operation, or
     ]});
     await Promise.resolve();
     operationSession.selectThread("operation-thread");
-    respond(operationSocket, requests(operationSocket, "thread/read").at(-1), {thread: {
+    await completeControllerHydration(operationSocket, {
         id: "operation-thread", status: {type: "active"},
         turns: [{id: "operation-turn", status: "inProgress", items: []}],
-    }});
-    await Promise.resolve(); await Promise.resolve();
+    });
     operationSession.renameThread("operation-thread", "Old generation name");
     operationSession.interrupt();
     assert.equal(requests(operationSocket, "thread/name/set").length, 1);
@@ -1365,9 +1462,9 @@ test("a provider-generation transition invalidates prior thread hydration", asyn
     const staleProfiles = requests(socket, "permissionProfile/list").at(-1);
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "same-thread", status: {type: "idle"}}]});
     session.selectThread("same-thread");
-    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "same-thread", status: {type: "idle"}, turns: []}});
-    await Promise.resolve();
-    const readsBefore = requests(socket, "thread/read").length;
+    await completeControllerHydration(socket,
+        {id: "same-thread", status: {type: "idle"}, turns: []});
+    const resumesBefore = requests(socket, "thread/resume").length;
 
     socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
     await Promise.resolve();
@@ -1384,12 +1481,14 @@ test("a provider-generation transition invalidates prior thread hydration", asyn
     assert.doesNotMatch(JSON.stringify(session.getSnapshot().protocolFrames), /stale-(?:model|profile)/u,
         "stale catalog results never enter retained diagnostics");
     assert.equal(requests(socket, "thread/list").length, 2);
-    const currentRead = requests(socket, "thread/read").at(-1);
-    assert.equal(requests(socket, "thread/read").length, readsBefore + 1);
+    const currentResume = requests(socket, "thread/resume").at(-1);
+    assert.equal(requests(socket, "thread/resume").length, resumesBefore + 1);
     assert.equal(await session.submitPrompt("new generation"), true);
     await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 0);
-    respond(socket, currentRead, {thread: {id: "same-thread", status: {type: "idle"}, turns: []}});
+    respond(socket, currentResume, {thread: {id: "same-thread", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 1);
     session.dispose();
@@ -1401,14 +1500,14 @@ test("a rejected turn is terminal and never resubmitted automatically", async ()
     session.connect(); socket.open(); await readyProvider(socket, "recover");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "recover-thread", status: {type: "idle"}}]});
     session.selectThread("recover-thread");
-    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "recover-thread", status: {type: "idle"}, turns: []}});
-    await Promise.resolve();
+    await completeControllerHydration(socket,
+        {id: "recover-thread", status: {type: "idle"}, turns: []});
     await session.submitPrompt("do not resend"); await Promise.resolve();
     const first = requests(socket, "turn/start").at(-1);
     reject(socket, first, "thread not found");
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").length, 1);
-    assert.equal(requests(socket, "thread/resume").length, 0);
+    assert.equal(requests(socket, "thread/resume").length, 1);
     assert.equal(session.prompts.submissions("recover-thread").at(-1).state, "failed");
     session.dispose();
 });

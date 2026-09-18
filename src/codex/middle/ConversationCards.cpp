@@ -32,6 +32,7 @@
 #include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionFocusRect>
@@ -1074,7 +1075,6 @@ void CommandOutputView::settleWidth(int width) {
     setProperty(counter, property(counter).toULongLong() + 1);
   }
   settleScroll();
-  scheduleScrollSettlement();
 }
 
 QSize CommandOutputView::sizeHint() const {
@@ -1128,7 +1128,6 @@ bool CommandOutputView::setOutput(const QString &output) {
   if (isHeightCapped() && appendOnly && !displayOutput.isEmpty())
     viewport()->update();
   settleScroll();
-  scheduleScrollSettlement();
   return true;
 }
 
@@ -1176,9 +1175,15 @@ void CommandOutputView::restoreState(const State &state) {
     setTextCursor(cursor);
   }
   settleScroll();
-  scheduleScrollSettlement();
   if (releasedDetachedOwner)
     emit followLatestChanged(true);
+}
+
+void CommandOutputView::showEvent(QShowEvent *event) {
+  QTextEdit::showEvent(event);
+  // QTextEdit ensures its cursor is visible on first show. Restore the
+  // authoritative follow-tail or detached position after that adjustment.
+  settleScroll();
 }
 
 void CommandOutputView::wheelEvent(QWheelEvent *event) {
@@ -1215,16 +1220,6 @@ void CommandOutputView::settleScroll() {
   if (followsLatest_)
     preservedScrollValue_ = target;
   suppressScrollState_ = wasSuppressed;
-}
-
-void CommandOutputView::scheduleScrollSettlement() {
-  if (scrollSettlementPending_)
-    return;
-  scrollSettlementPending_ = true;
-  QTimer::singleShot(0, this, [this] {
-    scrollSettlementPending_ = false;
-    settleScroll();
-  });
 }
 
 bool CommandOutputView::isAtBottom() const {

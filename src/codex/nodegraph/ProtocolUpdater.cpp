@@ -2640,17 +2640,28 @@ void ProtocolUpdater::applyGraphUpdate(
 
     const std::string direction =
         scalarTextFromValue(valueMember(message.payload, "sortDirection"));
-    for (auto &[turn, page] : pages) {
+    const bool olderDescendingPage =
+        direction == "desc" &&
+        !scalarTextFromValue(valueMember(message.payload, "cursor")).empty();
+    for (std::size_t pageIndex = 0; pageIndex < pages.size(); ++pageIndex) {
+      auto &[turn, page] = pages[pageIndex];
       if (direction == "desc")
         std::reverse(page.begin(), page.end());
       const std::vector<NodeRef> existing = write.children(turn);
       const std::vector<NodeRef> previousRoots =
           write.related(turn, RelationKind::TurnRootItem);
-      std::vector<NodeRef> replacement;
-      if (direction == "asc")
-        replacement = mergeExistingTail(existing, page);
-      else
-        replacement = mergeExistingTail(std::move(page), existing);
+      std::vector<NodeRef> retained;
+      retained.reserve(existing.size());
+      for (const NodeRef &item : existing)
+        if (item && !pageItems[pageIndex].contains(item.get()))
+          retained.emplace_back(item);
+
+      // A cursorless descending response is the newest history window, so
+      // retained summary landmarks precede it. A cursored descending response
+      // is strictly older than the retained window and therefore prepends.
+      std::vector<NodeRef> replacement =
+          olderDescendingPage ? mergeExistingTail(std::move(page), retained)
+                              : mergeExistingTail(std::move(retained), page);
       write.replaceChildren(turn, replacement);
       replaceSingleRelation(write, turn, RelationKind::TurnRootItem,
                             replacementTurnRoot(write, replacement,

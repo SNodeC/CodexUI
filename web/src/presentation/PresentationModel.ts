@@ -82,6 +82,8 @@ export interface ThreadPresentation {
     agents: Map<string, AgentPresentation>;
     childThreadOrder: string[];
     archived: boolean;
+    historyNextCursor: string;
+    historyHasMore: boolean;
 }
 
 export interface PendingRequestPresentation {
@@ -346,7 +348,7 @@ function newThread(id: string): ThreadPresentation {
         id, title: "", preview: "", cwd: "", status: UnknownStatus,
         turnOrder: [], turns: new Map(), raw: {},
         settingStamps: new Map(), agentOrder: [], agents: new Map(),
-        childThreadOrder: [], archived: false,
+        childThreadOrder: [], archived: false, historyNextCursor: "", historyHasMore: false,
     };
 }
 
@@ -422,6 +424,17 @@ export class PresentationModel {
     activeTurnId(threadId: string): string | undefined {
         return this.thread(threadId)?.activeTurnId;
     }
+    activeAgentChildIds(threadId: string): readonly string[] {
+        const thread = this.thread(threadId);
+        if (!thread) return [];
+        const result = new Set<string>();
+        for (const id of thread.agentOrder) {
+            const agent = thread.agents.get(id);
+            if (agent?.childThreadId && ["pending", "running"].includes(agent.status.semantic))
+                result.add(agent.childThreadId);
+        }
+        return [...result];
+    }
     connection(): Readonly<ConnectionPresentation> { return this.connectionState; }
     turnSettingsCatalogs(): {models: unknown; permissionProfiles: unknown} {
         return {models: this.models, permissionProfiles: this.permissionProfiles};
@@ -463,10 +476,10 @@ export class PresentationModel {
                     true, requestSequence);
             } else if (action === "thread.turns.list") {
                 this.mergeTurnPage(stringMember(scope, "threadId"), member(data, "turns", []),
-                    stringMember(data, "sortDirection"));
+                    stringMember(data, "sortDirection"), stringMember(data, "nextCursor"));
             } else if (action === "thread.items.list") {
                 this.mergeItemPage(stringMember(scope, "threadId"), member(data, "entries", []),
-                    stringMember(data, "sortDirection"));
+                    stringMember(data, "sortDirection"), stringMember(data, "cursor"));
             } else if (["thread.create", "thread.resume", "thread.fork"].includes(action)) {
                 this.upsertThread(objectMember(data, "thread"), false, true, requestSequence);
             } else if (action === "turn.start") {
@@ -686,7 +699,7 @@ export class PresentationModel {
         this.orderedThreads = nextOrder;
     }
 
-    private mergeTurnPage(threadId: string, listedTurns: unknown, direction: string): void {
+    private mergeTurnPage(threadId: string, listedTurns: unknown, direction: string, nextCursor: string): void {
         if (threadId === "" || !Array.isArray(listedTurns)) return;
         const thread = this.threads.get(threadId) ?? this.upsertThread({id: threadId}, false, false);
         const page: string[] = [];
@@ -698,9 +711,19 @@ export class PresentationModel {
         if (direction === "desc") page.reverse();
         const retained = thread.turnOrder.filter(id => !page.includes(id));
         thread.turnOrder = direction === "desc" ? [...page, ...retained] : [...retained, ...page];
+        this.refreshActiveTurn(thread);
+        thread.historyNextCursor = nextCursor;
+        thread.historyHasMore = nextCursor !== "";
     }
 
-    private mergeItemPage(threadId: string, listedEntries: unknown, direction: string): void {
+    private refreshActiveTurn(thread: ThreadPresentation): void {
+        const active = [...thread.turnOrder].reverse().find(
+            turnId => isActiveStatus(thread.turns.get(turnId)?.status ?? UnknownStatus));
+        if (active) thread.activeTurnId = active;
+        else delete thread.activeTurnId;
+    }
+
+    private mergeItemPage(threadId: string, listedEntries: unknown, direction: string, cursor: string): void {
         const thread = this.threads.get(threadId);
         if (!thread || !Array.isArray(listedEntries)) return;
         const pages = new Map<string, string[]>();
@@ -721,7 +744,8 @@ export class PresentationModel {
             if (!turn) continue;
             if (direction === "desc") page.reverse();
             const retained = turn.itemOrder.filter(id => !page.includes(id));
-            turn.itemOrder = direction === "desc" ? [...page, ...retained] : [...retained, ...page];
+            turn.itemOrder = direction === "desc" && cursor !== ""
+                ? [...page, ...retained] : [...retained, ...page];
         }
     }
 
@@ -799,10 +823,7 @@ export class PresentationModel {
                     if (turn && isActiveStatus(turn.status)) turn.status = terminalStatus;
                 }
             }
-            const activeTurnId = [...result.turnOrder].reverse().find(
-                turnId => isActiveStatus(result.turns.get(turnId)?.status ?? UnknownStatus));
-            if (activeTurnId) result.activeTurnId = activeTurnId;
-            else delete result.activeTurnId;
+            this.refreshActiveTurn(result);
             if (!result.activeTurnId && isActiveStatus(result.status)
                 && previousThreadStatus.semantic === "completed") {
                 result.status = previousThreadStatus;

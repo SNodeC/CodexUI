@@ -2844,8 +2844,8 @@ void turnRootsAndPagedHistoryStayExplicit() {
       {"items", Value(Value::Array{
                     Value(Value::Object{{"id", Value("newer-root")},
                                         {"type", Value("userMessage")}}),
-                    Value(Value::Object{{"id", Value("newer-steering")},
-                                        {"type", Value("userMessage")}})})}})};
+                    Value(Value::Object{{"id", Value("newer-final")},
+                                        {"type", Value("agentMessage")}})})}})};
   const ApplyResult firstPageResult = updater.apply(
       {DecodedMessageKind::ClientResult, "thread/turns/list", firstPage,
        Value::Object{{"data", Value(std::move(firstTurns))},
@@ -2875,6 +2875,41 @@ void turnRootsAndPagedHistoryStayExplicit() {
     require(hasMore && hasMore->asBool() && *hasMore->asBool() && cursor &&
                 cursor->asString() && *cursor->asString() == "older-page",
             "a turns page exposes provider continuation on its thread");
+  }
+
+  const ProtocolRequestId newestItems("newest-items");
+  const ApplyResult newestItemsRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/items/list", newestItems,
+       Value::Object{{"threadId", Value("paged-thread")},
+                     {"turnId", Value("newer-turn")},
+                     {"sortDirection", Value("desc")}}});
+  Value::Array newestPage{
+      Value(Value::Object{
+          {"turnId", Value("newer-turn")},
+          {"item", Value(Value::Object{{"id", Value("newer-final")},
+                                       {"type", Value("agentMessage")}})}}),
+      Value(Value::Object{
+          {"turnId", Value("newer-turn")},
+          {"item",
+           Value(Value::Object{{"id", Value("newer-command")},
+                               {"type", Value("commandExecution")}})}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/items/list", newestItems,
+       Value::Object{{"data", Value(std::move(newestPage))},
+                     {"nextCursor", Value("older-items")}},
+       newestItemsRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef turn = findTurn(*read, "paged-thread", "newer-turn");
+    const NodeRef root =
+        findItem(*read, "paged-thread", "newer-turn", "newer-root");
+    require(protocolIds(*read, read->children(turn)) ==
+                    std::vector<std::string>{"newer-root", "newer-command",
+                                             "newer-final"} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{root},
+            "a cursorless descending item page retains an omitted summary "
+            "root before the newest window");
   }
 
   const ProtocolRequestId lastPage("turn-page-2");

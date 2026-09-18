@@ -1784,11 +1784,6 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card,
   ConversationCard *visibleCard = cardForStableKey(key);
   if (visibleCard && !visibleCard->canApply(card))
     return std::nullopt;
-  const bool cardNeedsLivePresentation =
-      visibleCard &&
-      (!visibleCard->isHidden() ||
-       owningCard(*this, QApplication::focusWidget()) == visibleCard);
-
   const ConversationItemModel::CardUpdateResult result =
       model_->updateCard(std::move(card));
   if (result == ConversationItemModel::CardUpdateResult::Missing ||
@@ -1801,7 +1796,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card,
   if (after)
     normalizeRetainedState(after->card, after->nested);
   PresentationImpact impact = PresentationImpact::None;
-  if (cardNeedsLivePresentation && after)
+  if (visibleCard && after)
     impact = visibleCard->applyPresentation(after->card);
   const bool presentationChanged =
       after && rowPresented(index.row()) != wasPresented;
@@ -2435,14 +2430,13 @@ int ConversationView::nextOverscanAdmissionRow() const {
     const ConversationItemModel::Row *row = model_->row(candidate);
     if (!row)
       continue;
-    const ConversationCard *card = cardForStableKey(row->stableKey);
-    const bool current = card && card->data() == row->card;
+    const bool resident = materializedCards_.contains(row->stableKey);
     if (candidate >= visibleFirst && candidate <= visibleLast) {
-      if (!current)
+      if (!resident)
         return candidate;
       continue;
     }
-    if (current)
+    if (resident)
       continue;
     if (candidate < visibleFirst) {
       closest = candidate;
@@ -2540,21 +2534,8 @@ bool ConversationView::materializeRow(int rowIndex) {
   const ConversationItemModel::Row *row = model_->row(rowIndex);
   if (!row || !rowPresented(rowIndex))
     return false;
-  if (ConversationCard *existing = cardForStableKey(row->stableKey)) {
-    if (existing->data() == row->card)
-      return false;
-    if (!existing->canApply(row->card))
-      return false;
-    const PresentationImpact impact = existing->applyPresentation(row->card);
-    configureCardForRow(existing, *row);
-    if (impact != PresentationImpact::GeometryChanged)
-      return false;
-    const int height = existing->settleHeightForWidth(rowWidth(*row));
-    retainCardState(row->card.threadId, row->stableKey).height =
-        HeightRecord{rowWidth(*row), height};
-    return heights_.setHeight(static_cast<std::size_t>(rowIndex),
-                              height + rowSpacing(rowIndex));
-  }
+  if (cardForStableKey(row->stableKey))
+    return false;
 
   ConversationCard *card = nullptr;
   if (const auto staged = stagedCards_.find(row->stableKey);
@@ -2688,13 +2669,21 @@ void ConversationView::layoutMaterializedCards() {
   const QRect visibleRect = viewport()->rect();
   ConversationCard *const focusedCard =
       owningCard(*this, QApplication::focusWidget());
-  for (const auto &[key, card] : materializedCards_) {
-    static_cast<void>(key);
-    card->setViewportVisible(false);
-    if (card != focusedCard)
-      card->hide();
-  }
   const auto [first, last] = materializationRows();
+  for (const auto &[key, card] : materializedCards_) {
+    const QModelIndex index = model_->indexForStableKey(key);
+    if (first >= 0 && index.isValid() && index.row() >= first &&
+        index.row() <= last)
+      continue;
+    const bool ownsFocus = card == focusedCard;
+    if (ownsFocus && index.isValid()) {
+      const QRect geometry = rowRect(index.row());
+      if (card->geometry() != geometry)
+        card->setGeometry(geometry);
+    }
+    card->setViewportVisible(false);
+    card->setVisible(ownsFocus);
+  }
   if (first < 0)
     return;
   std::size_t rowIndex = heights_.nextRowWithExtent(first);
@@ -2722,7 +2711,7 @@ void ConversationView::layoutMaterializedCards() {
                                          rowSpacing(rowIndex)));
     const bool visible = geometry.intersects(visibleRect);
     const bool ownsFocus = !visible && card == focusedCard;
-    if (visible || ownsFocus || !card->isHidden())
+    if (card->geometry() != geometry)
       card->setGeometry(geometry);
     card->setViewportVisible(visible);
     card->setVisible(visible || ownsFocus);

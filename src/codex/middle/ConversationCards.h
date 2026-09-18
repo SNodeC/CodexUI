@@ -17,6 +17,7 @@
 
 class QLabel;
 class QPaintEvent;
+class QShowEvent;
 class QTimer;
 class QVBoxLayout;
 class QWheelEvent;
@@ -80,18 +81,17 @@ signals:
   void followLatestChanged(bool followsLatest);
 
 protected:
+  void showEvent(QShowEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
 
 private:
   void measureAtCurrentWidth();
   void setPreferredContentHeight(int height);
   void settleScroll();
-  void scheduleScrollSettlement();
   void setUserFollowLatest(bool followsLatest);
   [[nodiscard]] bool isAtBottom() const;
   bool followsLatest_ = true;
   bool suppressScrollState_ = false;
-  bool scrollSettlementPending_ = false;
   int preferredHeight_ = 0;
   int preservedScrollValue_ = 0;
   QString currentOutput_;

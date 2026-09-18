@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | CodexUI native application | 1.0.0 | installed `codex-ui`, desktop entry, and icon |
 | CodexWebUI | 1.0.0 | relocatable `web/app-dist/` static artifact |
-| AISuite frontend SDK | 1.0.0 at `53b3d03014a7cdea68fd47a05cb100b9a1094c80` | publishable `@snodec/codex-frontend` package |
+| AISuite frontend SDK | 1.0.0 at `bc4485161ed43428e23e9edf027be6410adc6b5d` | publishable `@snodec/codex-frontend` package |
 
 The SDK revision is machine-readable in `web/AISUITE_REVISION` and is checked
 by CI before either SDK or application tests run. The source layout and build

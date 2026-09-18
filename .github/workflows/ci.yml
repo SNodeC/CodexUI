@@ -39,11 +39,15 @@ jobs:
           ref: master
           path: _deps/snodec
 
+      - name: Read paired AISuite revision
+        id: aisuite_revision
+        run: echo "revision=$(cat web/AISUITE_REVISION)" >> "$GITHUB_OUTPUT"
+
       - name: Check out paired AISuite Codex
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: 53b3d03014a7cdea68fd47a05cb100b9a1094c80
+          ref: ${{ steps.aisuite_revision.outputs.revision }}
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -152,11 +156,16 @@ jobs:
                 github.event.pull_request.head.sha || github.sha }}
           path: CodexUI/codexui
 
+      - name: Read pinned AISuite revision
+        id: aisuite_revision
+        working-directory: CodexUI/codexui
+        run: echo "revision=$(cat web/AISUITE_REVISION)" >> "$GITHUB_OUTPUT"
+
       - name: Check out pinned AISuite frontend SDK
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: 53b3d03014a7cdea68fd47a05cb100b9a1094c80
+          ref: ${{ steps.aisuite_revision.outputs.revision }}
           path: AISuite-extraction/AISuite-final
 
       - name: Set up Node.js

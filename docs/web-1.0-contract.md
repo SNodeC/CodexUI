@@ -172,6 +172,14 @@ Conversation paging pins each represented turn's complete-history root prompt
 as structural context outside the activity budget; steering prompts never
 become turn roots.
 
+Controller selection refreshes metadata and live subscription with
+`thread/resume(excludeTurns:true)` before requesting one bounded
+`thread/turns/list` page. Observer selection starts directly with that read-only
+page. Selection becomes ready only after the first page; older turn pages are
+loaded one at a time by explicit demand, while item pages and active retained
+agent children use the same global bounded hydration policy as the native
+frontend. Neither frontend automatically requests complete retained history.
+
 Thread selection clears only the conversation message surface immediately.
 Hydration and React preparation remain identified by the latest selected
 thread; superseded results cannot reveal content. Loads finishing within 500 ms

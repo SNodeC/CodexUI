@@ -4552,6 +4552,81 @@ bool singleRendererLifecycleAndResidency() {
       "scrolling recycles residency without introducing another renderer");
   return result;
 }
+
+bool hiddenResidentPresentationPrecedesScroll() {
+  ConversationView view;
+  view.resize(820, 420);
+  view.show();
+
+  bool result = expect(changed(view.reconcile(conversation(240))),
+                       "hidden-resident presentation fixture reconciles");
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
+  result &= expect(waitForResidency(view),
+                   "hidden-resident fixture settles its overscan window");
+
+  ConversationCard *hidden = nullptr;
+  QModelIndex hiddenIndex;
+  for (ConversationCard *candidate :
+       view.viewport()->findChildren<ConversationCard *>(
+           QString{}, Qt::FindDirectChildrenOnly)) {
+    if (!candidate->isHidden())
+      continue;
+    const QModelIndex index = view.conversationModel()->indexForStableKey(
+        stableKey(candidate->data().key));
+    if (!index.isValid())
+      continue;
+    hidden = candidate;
+    hiddenIndex = index;
+    break;
+  }
+  result &= expect(hidden && hiddenIndex.isValid(),
+                   "the settled window contains a hidden resident card");
+  if (!hidden || !hiddenIndex.isValid())
+    return false;
+  const std::string hiddenKey = stableKey(hidden->data().key);
+  QPointer<ConversationCard> hiddenIdentity = hidden;
+
+  VisibleCardData update = *view.conversationModel()->card(hiddenIndex.row());
+  const QString expectedMarkdown =
+      QString::fromStdString(std::get<AgentMessageData>(update.payload).text) +
+      QStringLiteral("\n\nIncoming presentation while hidden.");
+  std::get<AgentMessageData>(update.payload).text =
+      expectedMarkdown.toStdString();
+  const qulonglong constructions =
+      view.property("conversationCardConstructions").toULongLong();
+  result &= expect(applyPresentation(view, std::move(update)).has_value(),
+                   "the hidden resident accepts its presentation delta");
+
+  const auto residentGeometryMatchesModel = [&view] {
+    return std::ranges::all_of(
+        view.viewport()->findChildren<ConversationCard *>(
+            QString{}, Qt::FindDirectChildrenOnly),
+        [&view](ConversationCard *card) {
+          const QModelIndex index = view.conversationModel()->indexForStableKey(
+              stableKey(card->data().key));
+          return index.isValid() && card->geometry() == view.visualRect(index);
+        });
+  };
+  QPointer<MarkdownTextView> body = hidden->findChild<MarkdownTextView *>();
+  result &= expect(
+      hidden->data() == *view.conversationModel()->card(hiddenIndex.row()) &&
+          body && body->markdownSource() == expectedMarkdown &&
+          residentGeometryMatchesModel(),
+      "every resident card is current and geometrically authoritative before "
+      "scrolling");
+
+  view.scrollTo(hiddenIndex, QAbstractItemView::PositionAtCenter);
+  result &= expect(
+      hiddenIdentity && materializedCard(view, hiddenKey) == hiddenIdentity &&
+          hiddenIdentity->data() ==
+              *view.conversationModel()->card(hiddenIndex.row()) &&
+          body->markdownSource() == expectedMarkdown &&
+          view.property("conversationCardConstructions").toULongLong() ==
+              constructions,
+      "scrolling exposes the already-current resident without renderer work");
+  return result;
+}
+
 bool acknowledgedSteeringMovesAboveFollowingActivity() {
   ConversationSnapshot snapshot = conversation(12);
   TurnSection active;
@@ -7018,6 +7093,8 @@ int main(int argc, char **argv) {
       stagedInactiveTruncationCannotResurrectCommandState);
   run("singleRendererLifecycleAndResidency",
       singleRendererLifecycleAndResidency);
+  run("hiddenResidentPresentationPrecedesScroll",
+      hiddenResidentPresentationPrecedesScroll);
   run("acknowledgedSteeringMovesAboveFollowingActivity",
       acknowledgedSteeringMovesAboveFollowingActivity);
   run("singleRendererInteractionTargetsVisibleChildren",

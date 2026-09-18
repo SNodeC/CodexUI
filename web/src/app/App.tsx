@@ -3,7 +3,7 @@ import type {FormEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-    UnknownStatus, anchoredScrollTop, changeSettingDraft, displayStatus,
+    AuthoritativeHistoryPageSize, UnknownStatus, anchoredScrollTop, changeSettingDraft, displayStatus,
     fixedSettingChoices, humanizeProtocolLabel as humanize,
     foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
@@ -741,6 +741,7 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
     const visibleSections = conversation.sections
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
+    const historyPagePending = session.historyPagePending(projectionId, presentationKey);
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
         return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
@@ -769,7 +770,14 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
         }}>
             {threadTransitionActive
                 ? <ThreadLoadingSurface spinning={spinnerProjection === presentationKey} />
-                : <>{conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId, presentationKey); forceCardState(value => value + 1); }}>Load earlier activity</button>}
+                : <>{conversation.hasMore && <button className="load-more" disabled={historyPagePending}
+                    aria-busy={historyPagePending || undefined} onClick={() => {
+                    if (historyPagePending) return;
+                    viewport.loadMore(projectionId, presentationKey);
+                    if (conversation.hiddenAuthoritativeItemCount <= AuthoritativeHistoryPageSize)
+                        session.loadMoreHistory(projectionId, presentationKey);
+                    forceCardState(value => value + 1);
+                }}>{historyPagePending ? "Loading earlier activity…" : "Load earlier activity"}</button>}
                     {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
                     {visibleSections.map(section => {
                         const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";

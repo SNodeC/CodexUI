@@ -1534,16 +1534,7 @@ void ShellWidget::Impl::commitPendingPanes() {
       for (std::size_t index = 0; index < requestedRows; ++index)
         popPendingConversationItem();
     } else if (projected) {
-      auto structural =
-          uiAdapter.conversationDelta(boundGraphThread, items, true);
-      if (structural) {
-        pendingStructuralConversationDelta = std::move(*structural);
-        pendingConversation = true;
-        for (std::size_t index = 0; index < requestedRows; ++index)
-          popPendingConversationItem();
-      } else {
-        retry = true;
-      }
+      pendingConversation = true;
     } else {
       retry = true;
     }
@@ -1599,7 +1590,8 @@ void ShellWidget::Impl::commitPendingPanes() {
       !pendingStructuralConversationDelta &&
       !pendingConversationItems.empty() && boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {
-    const std::size_t requestedRows = pendingConversationItems.size();
+    const std::size_t requestedRows = std::min(
+        ConversationPresentationRowsPerPass, pendingConversationItems.size());
     std::vector<nodegraph::NodeRef> items;
     items.reserve(requestedRows);
     auto pending = pendingConversationItems.begin();

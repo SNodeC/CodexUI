@@ -2950,9 +2950,11 @@ read-only turn page. Each returned Turn schedules `thread/items/list` pages of
 `WorkerLogic`/`ProtocolUpdater` and stable graph identities remain the sole
 merge and ordering authority; the scheduler retains only pending page work and
 no history cache. Metadata-only fork uses the same page path while its first
-prompt remains immediately admissible. Browser hydration uses
-`thread/read(includeTurns:false)` for metadata and the same turn/item page
-contract. Both frontends retain bounded cursor continuation and provider-
+prompt remains immediately admissible. Browser controller hydration now uses
+the same `thread/resume(excludeTurns:true)` then first-turn-page ordering;
+browser observers start directly with the read-only turn page. Both frontends
+become ready only after that first page and retain bounded cursor continuation,
+global eight-request item hydration, active-child hydration, and provider-
 generation/stale-result rejection.
 
 AISuite codex-bridge now permits the two pagination methods for observers and
@@ -3006,6 +3008,17 @@ The authoritative interruption plan is:
 5. [x] **M-46** is disproven as a CodexUI defect and **M-47** is implemented
    and live-qualified below. MR-9D/MR-9E are complete; MR-9F retains only the
    explicitly unavailable S8 platform/AT-SPI execution breadth.
+6. [x] **M-45E:** remove the browser's remaining legacy/eager divergence. The
+   browser no longer selects with `thread/read`, recursively drains every turn
+   page, marks the thread ready before its first page, or applies an eight-page
+   ceiling independently per turn. Controller/observer ordering, one-page
+   continuation and retry, chronological item-page merge, active-turn recovery,
+   active-child hydration, and the global item ceiling are browser-session
+   contract cases. CodexUI now pins AISuite `bc448516...`, whose bridge permits
+   both observer page methods; CI reads that one revision file for native and
+   web checkouts. Published generated bindings still require the separately
+   recorded generator transition, while the CodexUI wire path remains runtime-
+   compatible through the existing SDK request boundary.
 
 AISuite's isolated implementation delta is production **+2 CLOC** and tests
 **+15 CLOC**. The two production lines extend the existing observer read
@@ -3051,6 +3064,19 @@ controller remained connected after both page requests and emitted no frame-
 limit error. Exact raw request parameters were not retained on the wire, so
 `excludeTurns:true` is corroborated by the exact running source path rather
 than claimed from a packet capture.
+
+M-45E exact-current verification: `npm test --prefix web` passed all **11/11**
+browser suites, with **42/42** browser-session cases. `npm run profile --prefix
+web` measured hydration **36.09 ms**, projection **20.92 ms**, streaming **3.20
+ms**, and presentation churn **8.87 ms**, within the respective **47/45/4/20
+ms** hard limits. A clean temporary extraction of pinned AISuite
+`bc448516...` built its SDK, compiled the current browser, and passed all
+**42/42** session cases without using the local regenerated bindings. `npm run
+build:app --prefix web` and `npm run verify:artifact --prefix web` passed. The
+current restricted execution sandbox denied the
+qualification tool's local HTTP listener (`listen EPERM 127.0.0.1`), so a fresh
+Chromium workflow run is not claimed by M-45E; the production artifact itself
+was built and verified.
 
 ### M-46 final-answer parent and transcript-order report
 

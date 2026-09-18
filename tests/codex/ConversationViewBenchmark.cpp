@@ -1643,8 +1643,7 @@ int main(int argc, char **argv) {
   MarkdownTextView *streamBody =
       streamCard ? streamCard->findChild<MarkdownTextView *>() : nullptr;
   QTextDocument *streamDocument = streamBody ? streamBody->document() : nullptr;
-  const qulonglong streamConstructions =
-      counter(view, "conversationCardConstructions");
+  qulonglong streamConstructions = 0;
   std::vector<qint64> streamTimings;
   qulonglong streamDocumentChanges = 0;
   qulonglong streamTailLocalityChecks = 0;
@@ -1654,7 +1653,47 @@ int main(int argc, char **argv) {
   bool streamTailLocal = true;
   bool streamAccepted =
       streamCard && streamBody && streamData.kind == CardKind::AgentMessage;
-  const QMetaObject::Connection streamChangeConnection =
+  QMetaObject::Connection streamChangeConnection;
+  documents.observe(view);
+  PaintedScrollWork paintedStreaming;
+  int streamingAngleDelta = -120;
+  for (int sample = 0; sample < StreamSamples && streamAccepted; ++sample) {
+    QScrollBar *const bar = view.verticalScrollBar();
+    if (streamingAngleDelta < 0 &&
+        bar->value() >= bar->maximum() - bar->pageStep())
+      streamingAngleDelta = 120;
+    else if (streamingAngleDelta > 0 &&
+             bar->value() <= bar->minimum() + bar->pageStep())
+      streamingAngleDelta = -120;
+    std::get<AgentMessageData>(streamData.payload).text +=
+        " concurrent-scroll-delta-" + std::to_string(sample);
+    const QPointF local = view.viewport()->rect().center();
+    QWheelEvent wheel(local, view.viewport()->mapToGlobal(local.toPoint()), {},
+                      QPoint(0, streamingAngleDelta), Qt::NoButton,
+                      Qt::NoModifier, Qt::NoScrollPhase, false,
+                      Qt::MouseEventSynthesizedByApplication,
+                      QPointingDevice::primaryPointingDevice());
+    samplePaintedAction(application, view, paintedStreaming, peak, constructions,
+                        [&] {
+                          const bool applied =
+                              applyPresentation(view, streamData).has_value();
+                          return applied &&
+                                 QApplication::sendEvent(view.viewport(),
+                                                         &wheel) &&
+                                 wheel.isAccepted();
+                        });
+  }
+  exactResidency &= waitForResidency(view, &constructions);
+  view.scrollTo(streamIndex, QAbstractItemView::PositionAtCenter);
+  processFrame();
+  exactResidency &= waitForResidency(view, &constructions);
+  streamCard = cardForKey(view, streamKey);
+  streamBody =
+      streamCard ? streamCard->findChild<MarkdownTextView *>() : nullptr;
+  streamDocument = streamBody ? streamBody->document() : nullptr;
+  streamAccepted = streamCard && streamBody && streamDocument;
+  streamConstructions = counter(view, "conversationCardConstructions");
+  streamChangeConnection =
       streamDocument
           ? QObject::connect(streamDocument, &QTextDocument::contentsChange,
                              &view,
@@ -1663,7 +1702,6 @@ int main(int argc, char **argv) {
                                    std::min(streamEarliestChange, position);
                              })
           : QMetaObject::Connection{};
-  documents.observe(view);
   for (int sample = 0; sample < StreamSamples && streamAccepted; ++sample) {
     const presentation::MarkdownTailState tailBefore =
         streamBody->markdownTailState();
@@ -1895,6 +1933,8 @@ int main(int argc, char **argv) {
   const SampleStats warmedWheelStats = statistics(warmedWheel.timings);
   const SampleStats normalStats = statistics(normal.timings);
   const SampleStats seekStats = statistics(seeks.timings);
+  const SampleStats paintedStreamingStats =
+      statistics(paintedStreaming.timings);
   const SampleStats streamStats = statistics(streamTimings);
   const SampleStats commandStats = statistics(commandTimings);
   const SampleStats followingAppendStats = statistics(followingAppendTimings);
@@ -2016,6 +2056,7 @@ int main(int argc, char **argv) {
               paintedWarm.maximumConstructions <= 1 &&
               paintedWarm.maximumAdmissionPasses <= 1 &&
               paintedWarm.maximumResidencyScans <= 1 &&
+              paintedWarm.maximumLayoutRequests == 0 &&
               paintedWarm.maximumUpdateRequests <= 2 &&
               paintedFrameWorkBounded(paintedWarm),
           QStringLiteral("warm wheel input reaches one complete backing-store "
@@ -2072,6 +2113,19 @@ int main(int argc, char **argv) {
   require(timingWithin(paintedAngleStats, 8000, 16667, 33334),
           QStringLiteral("progressive wheel input reaches completed QWidget "
                          "paint within one 60-Hz frame at p95"));
+  require(paintedStreaming.timings.size() == StreamSamples &&
+              paintedStreaming.firstFramePixelsMoved &&
+              paintedStreaming.targetsReached &&
+              paintedStreaming.viewportRowsRendered &&
+              paintedStreaming.maximumConstructions <= 1 &&
+              paintedStreaming.maximumAdmissionPasses <= 1 &&
+              paintedStreaming.maximumResidencyScans <= 4 &&
+              paintedStreaming.maximumPaints <= 128,
+          QStringLiteral("streaming during wheel input reaches one complete "
+                         "frame with bounded renderer work"));
+  require(timingWithin(paintedStreamingStats, 15000, 16667, 33334),
+          QStringLiteral("streaming during wheel input reaches completed "
+                         "QWidget paint within one 60-Hz frame at p95"));
   require(warmedWheelSettled &&
               warmedWheel.timings.size() == WarmedScrollSamples &&
               warmedWheelValues.size() >= 80 && warmedWheel.targetsReached &&
@@ -2295,6 +2349,16 @@ int main(int argc, char **argv) {
       {"viewportStepScrollBarPaintedFrameMaxUpdateRequests",
        static_cast<qint64>(paintedScrollBarStepWork.maximumUpdateRequests)},
       {"angleInputToBackingStorePaint", statsJson(paintedAngleStats)},
+      {"streamingInputToBackingStorePaint",
+       statsJson(paintedStreamingStats)},
+      {"streamingPaintedFrameMaxConstructions",
+       static_cast<qint64>(paintedStreaming.maximumConstructions)},
+      {"streamingPaintedFrameMaxAdmissionPasses",
+       static_cast<qint64>(paintedStreaming.maximumAdmissionPasses)},
+      {"streamingPaintedFrameMaxResidencyScans",
+       static_cast<qint64>(paintedStreaming.maximumResidencyScans)},
+      {"streamingPaintedFrameMaxPaints",
+       static_cast<qint64>(paintedStreaming.maximumPaints)},
       {"anglePaintedFrameSamples",
        static_cast<qint64>(paintedAngle.timings.size())},
       {"anglePaintedFramePixelsMoved", paintedAngle.firstFramePixelsMoved},

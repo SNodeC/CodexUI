@@ -349,6 +349,7 @@ export class ProtocolNormalizer {
                     nextCursor: member(value, "nextCursor"),
                     backwardsCursor: member(value, "backwardsCursor"),
                     sortDirection: stringMember(context, "sortDirection"),
+                    cursor: stringMember(context, "cursor"),
                     ...requestSequence,
                 };
                 authority = "merge";

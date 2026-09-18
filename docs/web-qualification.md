@@ -24,7 +24,9 @@ they neither execute Qt nor claim pixel identity with it.
   metadata, and agent correlation within the browser implementation.
 - Browser-session tests use a scripted bridge endpoint and assert the protocol
   presentation-action methods, resume-before-turn ordering, provider
-  recovery, and malformed-input containment.
+  recovery, observer direct paging, one-page cursor continuation/retry,
+  chronological multi-page item merge, active-child hydration, the global
+  eight-item-page ceiling, and malformed-input containment.
 - Settings and pending-request tests assert the protocol request payloads.
 - Server rendering verifies the shell landmarks and accessible connection and
   disclosure controls without requiring a second UI state implementation.
