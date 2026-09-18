@@ -1026,7 +1026,7 @@ CommandOutputView::CommandOutputView(QWidget *parent) : QTextEdit(parent) {
   setProperty("kind", "code");
   setObjectName(QStringLiteral("commandOutputView"));
   ensurePolished();
-  setMaximumHeight(MaximumCommandOutputHeight);
+  invalidateGeometryEnvironment();
 
   connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
@@ -1057,6 +1057,11 @@ CommandOutputView::CommandOutputView(QWidget *parent) : QTextEdit(parent) {
 }
 
 void CommandOutputView::invalidateGeometryEnvironment() {
+  const int verticalPadding = 2 * UiStyle::commandOutputVerticalPadding;
+  const int lineHeight = std::max(1, fontMetrics().lineSpacing());
+  const int maximumRows = std::max(
+      1, (MaximumCommandOutputHeight - verticalPadding) / lineHeight);
+  setMaximumHeight(verticalPadding + maximumRows * lineHeight);
   preferredHeight_ = 0;
 }
 
@@ -1134,7 +1139,7 @@ void CommandOutputView::measureAtCurrentWidth() {
   }
   document()->setTextWidth(std::max(1, maximumViewportSize().width()));
   QAbstractTextDocumentLayout *layout = document()->documentLayout();
-  qreal contentHeight = UiStyle::commandOutputTopPadding;
+  qreal contentHeight = 2 * UiStyle::commandOutputVerticalPadding;
   for (QTextBlock block = document()->begin(); block.isValid();
        block = block.next()) {
     contentHeight += layout->blockBoundingRect(block).height();

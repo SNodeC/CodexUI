@@ -536,6 +536,29 @@ if(BUILD_TESTING)
         codexui-conversation-cards
         PROPERTIES TIMEOUT 35 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+    foreach(command_output_style IN ITEMS Fusion Breeze)
+        string(TOLOWER "${command_output_style}" command_output_style_name)
+        foreach(command_output_dpr IN ITEMS 1 1.25 1.5 2)
+            string(
+                REPLACE "." "_" command_output_dpr_name "${command_output_dpr}"
+            )
+            set(command_output_test
+                "codexui-command-output-geometry-${command_output_style_name}-dpr-${command_output_dpr_name}"
+            )
+            add_test(
+                NAME ${command_output_test}
+                COMMAND codexui-conversation-cards-test
+            )
+            set_tests_properties(
+                ${command_output_test}
+                PROPERTIES
+                    TIMEOUT 15
+                    LABELS "conversation;dpr;geometry;qt"
+                    ENVIRONMENT
+                        "QT_QPA_PLATFORM=offscreen;QT_STYLE_OVERRIDE=${command_output_style};QT_SCALE_FACTOR=${command_output_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough;CODEXUI_SETTLEMENT_TESTS=1"
+            )
+        endforeach()
+    endforeach()
 
     qt_add_executable(
         codexui-conversation-item-model-test

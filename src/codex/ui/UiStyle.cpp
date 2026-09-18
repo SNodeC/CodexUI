@@ -323,7 +323,7 @@ QString applicationStyleSheet() {
             background: %{codeSurface};
             color: %{codeText};
             border-radius: 6px;
-            padding: %{commandOutputTopPadding}px %{commandOutputHorizontalPadding}px 0;
+            padding: %{commandOutputVerticalPadding}px %{commandOutputHorizontalPadding}px;
         }
         QTextEdit#commandTextView {
             background: %{raised};
@@ -596,8 +596,8 @@ QString applicationStyleSheet() {
   style.replace(QStringLiteral("%{section}"), section);
   style.replace(QStringLiteral("%{heading}"), heading);
   style.replace(QStringLiteral("%{panelHeader}"), panelHeader);
-  style.replace(QStringLiteral("%{commandOutputTopPadding}"),
-                QString::number(commandOutputTopPadding));
+  style.replace(QStringLiteral("%{commandOutputVerticalPadding}"),
+                QString::number(commandOutputVerticalPadding));
   style.replace(QStringLiteral("%{commandOutputHorizontalPadding}"),
                 QString::number(commandOutputHorizontalPadding));
   return style;

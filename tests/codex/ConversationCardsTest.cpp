@@ -485,10 +485,10 @@ bool testApplicationStyleSheetContract() {
       QStringLiteral("QWidget#messageImageStrip { background: %1; }")
           .arg(token(codexui::UiStyle::codeSurface)),
       QStringLiteral("QTextEdit#commandOutputView { background: %1; color: %2; "
-                     "border-radius: 6px; padding: %3px %4px 0; }")
+                     "border-radius: 6px; padding: %3px %4px; }")
           .arg(token(codexui::UiStyle::codeSurface),
                token(codexui::UiStyle::codeText))
-          .arg(codexui::UiStyle::commandOutputTopPadding)
+          .arg(codexui::UiStyle::commandOutputVerticalPadding)
           .arg(codexui::UiStyle::commandOutputHorizontalPadding),
       QStringLiteral("QTextEdit#commandTextView { background: %1; border: 1px "
                      "solid %2; border-radius: 6px; }")
@@ -3862,16 +3862,28 @@ bool testBottomAnchoredCommandOutputGrowth() {
   cappedEnd.movePosition(QTextCursor::End);
   const int cappedBottomGap =
       output->viewport()->height() - output->cursorRect(cappedEnd).bottom();
+  const QRect cappedViewport = output->viewport()->geometry();
+  const int cappedTopInset = cappedViewport.top();
+  const int cappedBottomInset =
+      output->height() - cappedViewport.bottom() - 1;
+  const QRect firstVisibleLine =
+      output->cursorRect(output->cursorForPosition(QPoint(0, 0)));
+  const bool cappedViewportAligned =
+      cappedTopInset >= UiStyle::commandOutputVerticalPadding &&
+      cappedBottomInset >= UiStyle::commandOutputVerticalPadding &&
+      std::abs(cappedTopInset - cappedBottomInset) <= 1 &&
+      (firstVisibleLine.top() >= 0 || firstVisibleLine.bottom() < 0);
   result &= expect(
       output->height() == output->maximumHeight() &&
           output->verticalScrollBar()->maximum() > 0 && cappedBottomGap <= 2 &&
+          cappedViewportAligned &&
           !output->document()->lastBlock().text().isEmpty() &&
           output->verticalScrollBar()->value() ==
               output->verticalScrollBar()->maximum() &&
           commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
                   .y() == cardBottomBefore,
-      "capped output follows its final populated row and keeps its scrollbar "
-      "and fixed card bottom");
+      "capped output keeps symmetric outer padding, exposes only whole rows, "
+      "and follows its final populated row");
 
   const qulonglong geometryBeforeAppend =
       view.property("conversationLocalGeometryPasses").toULongLong();
