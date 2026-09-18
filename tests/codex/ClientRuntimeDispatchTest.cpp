@@ -326,23 +326,16 @@ public:
       message = WorkerStopped{};
   }
 
-  std::vector<UiEffect> takeUiEffects() {
-    std::vector<UiEffect> effects;
+  std::vector<ProtocolDiagnostic> takeProtocolDiagnostics() {
+    std::vector<ProtocolDiagnostic> diagnostics;
     static_cast<void>(channels_.drainWorkerToQtWake());
     WorkerToQtMessage message;
     while (channels_.tryReceiveForQt(message)) {
-      if (UiEffect *effect = std::get_if<UiEffect>(&message))
-        effects.emplace_back(std::move(*effect));
+      if (ProtocolDiagnostic *diagnostic =
+              std::get_if<ProtocolDiagnostic>(&message))
+        diagnostics.emplace_back(std::move(*diagnostic));
       message = WorkerStopped{};
     }
-    return effects;
-  }
-
-  std::vector<UiEffect> takeProtocolDiagnostics() {
-    std::vector<UiEffect> diagnostics;
-    for (UiEffect &effect : takeUiEffects())
-      if (effect.kind == UiEffectKind::ProtocolDiagnostic)
-        diagnostics.emplace_back(std::move(effect));
     return diagnostics;
   }
 
@@ -533,7 +526,7 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
              findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
 }
 
-std::string diagnosticField(const UiEffect &effect, std::string_view key) {
+std::string diagnosticField(const ProtocolDiagnostic &effect, std::string_view key) {
   const auto found = effect.details.find(key);
   if (found == effect.details.end() || !found->second.asString())
     return {};
@@ -542,15 +535,15 @@ std::string diagnosticField(const UiEffect &effect, std::string_view key) {
 
 void protocolDiagnosticsPreserveMetadataWithoutPayloads(
     UnixBridge &bridge, RunningRuntime &runtime) {
-  const std::vector<UiEffect> initialDiagnostics =
+  const std::vector<ProtocolDiagnostic> initialDiagnostics =
       runtime.takeProtocolDiagnostics();
   expect(std::ranges::any_of(initialDiagnostics,
-                             [](const UiEffect &effect) {
+                             [](const ProtocolDiagnostic &effect) {
                                return diagnosticField(effect, "subject") ==
                                       "connection.lifecycle";
                              }) &&
              std::ranges::any_of(initialDiagnostics,
-                                 [](const UiEffect &effect) {
+                                 [](const ProtocolDiagnostic &effect) {
                                    return diagnosticField(effect, "subject") ==
                                               "connection.provider" &&
                                           diagnosticField(
@@ -575,22 +568,22 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
   expect(bridge.replyError(*request, -32041, "rename rejected safely"),
          "diagnostic fixture receives a benign JSON-RPC error");
 
-  std::vector<UiEffect> diagnostics;
+  std::vector<ProtocolDiagnostic> diagnostics;
   expect(waitUntil([&] {
-           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           std::vector<ProtocolDiagnostic> batch = runtime.takeProtocolDiagnostics();
            diagnostics.insert(diagnostics.end(),
                               std::make_move_iterator(batch.begin()),
                               std::make_move_iterator(batch.end()));
-           return std::ranges::any_of(diagnostics, [](const UiEffect &effect) {
+           return std::ranges::any_of(diagnostics, [](const ProtocolDiagnostic &effect) {
              return diagnosticField(effect, "direction") == "client error" &&
                     diagnosticField(effect, "subject") == "thread/name/set";
            });
          }),
          "request and response diagnostics cross the typed worker queue");
 
-  const UiEffect *sent = nullptr;
-  const UiEffect *failed = nullptr;
-  for (const UiEffect &effect : diagnostics) {
+  const ProtocolDiagnostic *sent = nullptr;
+  const ProtocolDiagnostic *failed = nullptr;
+  for (const ProtocolDiagnostic &effect : diagnostics) {
     if (diagnosticField(effect, "subject") != "thread/name/set")
       continue;
     if (diagnosticField(effect, "direction") == "client request")
@@ -613,7 +606,7 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
          "diagnostics preserve direction, source, semantic authority, scope, "
          "correlation, and safe errors");
 
-  for (const UiEffect &effect : diagnostics) {
+  for (const ProtocolDiagnostic &effect : diagnostics) {
     const std::string rendered = diagnosticField(effect, "subject") +
                                  diagnosticField(effect, "error") +
                                  diagnosticField(effect, "threadId");
@@ -634,14 +627,14 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
     expect(bridge.replyError(*secretRequest, -32042,
                              "Bearer sk-runtime-secret eyJabc.def.ghi"),
            "secret-shaped error reaches the runtime");
-    std::vector<UiEffect> secretDiagnostics;
+    std::vector<ProtocolDiagnostic> secretDiagnostics;
     expect(waitUntil([&] {
-             std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+             std::vector<ProtocolDiagnostic> batch = runtime.takeProtocolDiagnostics();
              secretDiagnostics.insert(secretDiagnostics.end(),
                                       std::make_move_iterator(batch.begin()),
                                       std::make_move_iterator(batch.end()));
              return std::ranges::any_of(
-                 secretDiagnostics, [](const UiEffect &effect) {
+                 secretDiagnostics, [](const ProtocolDiagnostic &effect) {
                    return diagnosticField(effect, "direction") ==
                               "client error" &&
                           diagnosticField(effect, "subject") == "thread/list";
@@ -649,7 +642,7 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
            }),
            "secret-shaped error produces bounded metadata");
     bool redactedSecretError = false;
-    for (const UiEffect &effect : secretDiagnostics) {
+    for (const ProtocolDiagnostic &effect : secretDiagnostics) {
       if (diagnosticField(effect, "subject") != "thread/list" ||
           diagnosticField(effect, "direction") != "client error")
         continue;
@@ -729,7 +722,7 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
 
     std::string authority;
     expect(waitUntil([&] {
-             for (UiEffect &effect : runtime.takeProtocolDiagnostics()) {
+             for (ProtocolDiagnostic &effect : runtime.takeProtocolDiagnostics()) {
                if (diagnosticField(effect, "direction") == "client result" &&
                    diagnosticField(effect, "subject") == "thread/turns/list")
                  authority = diagnosticField(effect, "authority");
@@ -751,21 +744,21 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
   expect(bridge.appServerNotification("thread/goal/cleared",
                                       {{"threadId", "runtime-thread"}}),
          "authoritative removal notification is delivered");
-  std::vector<UiEffect> notificationDiagnostics;
+  std::vector<ProtocolDiagnostic> notificationDiagnostics;
   expect(waitUntil([&] {
-           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           std::vector<ProtocolDiagnostic> batch = runtime.takeProtocolDiagnostics();
            notificationDiagnostics.insert(
                notificationDiagnostics.end(),
                std::make_move_iterator(batch.begin()),
                std::make_move_iterator(batch.end()));
            return std::ranges::any_of(notificationDiagnostics,
-                                      [](const UiEffect &effect) {
+                                      [](const ProtocolDiagnostic &effect) {
                                         return diagnosticField(effect,
                                                                "subject") ==
                                                "skills/changed";
                                       }) &&
                   std::ranges::any_of(
-                      notificationDiagnostics, [](const UiEffect &effect) {
+                      notificationDiagnostics, [](const ProtocolDiagnostic &effect) {
                         return diagnosticField(effect, "subject") ==
                                "thread/goal/cleared";
                       });
@@ -773,7 +766,7 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
          "notification diagnostics preserve semantic authority");
   const auto authorityFor = [&](std::string_view subject) {
     const auto found = std::ranges::find_if(
-        notificationDiagnostics, [subject](const UiEffect &effect) {
+        notificationDiagnostics, [subject](const ProtocolDiagnostic &effect) {
           return diagnosticField(effect, "subject") == subject;
         });
     return found == notificationDiagnostics.end()
@@ -795,14 +788,14 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
              automaticClockResponse->value("id", std::string{}) ==
                  "diagnostic-clock",
          "reverse-request diagnostic fixture consumes its automatic response");
-  std::vector<UiEffect> reverseDiagnostics;
+  std::vector<ProtocolDiagnostic> reverseDiagnostics;
   expect(waitUntil([&] {
-           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           std::vector<ProtocolDiagnostic> batch = runtime.takeProtocolDiagnostics();
            reverseDiagnostics.insert(reverseDiagnostics.end(),
                                      std::make_move_iterator(batch.begin()),
                                      std::make_move_iterator(batch.end()));
            return std::ranges::any_of(
-               reverseDiagnostics, [](const UiEffect &effect) {
+               reverseDiagnostics, [](const ProtocolDiagnostic &effect) {
                  return diagnosticField(effect, "direction") ==
                             "server result" &&
                         diagnosticField(effect, "correlation") ==
@@ -810,9 +803,9 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
                });
          }),
          "reverse request and automatic response are both diagnosed");
-  const UiEffect *reverseRequest = nullptr;
-  const UiEffect *reverseResult = nullptr;
-  for (const UiEffect &effect : reverseDiagnostics) {
+  const ProtocolDiagnostic *reverseRequest = nullptr;
+  const ProtocolDiagnostic *reverseResult = nullptr;
+  for (const ProtocolDiagnostic &effect : reverseDiagnostics) {
     if (diagnosticField(effect, "correlation") != "diagnostic-clock")
       continue;
     if (diagnosticField(effect, "direction") == "server request")
@@ -842,14 +835,14 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
              sensitiveClockResponse->value("id", std::string{}) ==
                  SensitiveRequestId,
          "sensitive request-id fixture consumes its automatic response");
-  std::vector<UiEffect> sensitiveIdDiagnostics;
+  std::vector<ProtocolDiagnostic> sensitiveIdDiagnostics;
   expect(waitUntil([&] {
-           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           std::vector<ProtocolDiagnostic> batch = runtime.takeProtocolDiagnostics();
            sensitiveIdDiagnostics.insert(sensitiveIdDiagnostics.end(),
                                          std::make_move_iterator(batch.begin()),
                                          std::make_move_iterator(batch.end()));
            return std::ranges::any_of(
-               sensitiveIdDiagnostics, [](const UiEffect &effect) {
+               sensitiveIdDiagnostics, [](const ProtocolDiagnostic &effect) {
                  return diagnosticField(effect, "direction") ==
                             "server result" &&
                         diagnosticField(effect, "correlation") ==
@@ -857,7 +850,7 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
                });
          }),
          "sensitive request ids remain visible only as redacted chronology");
-  for (const UiEffect &effect : sensitiveIdDiagnostics) {
+  for (const ProtocolDiagnostic &effect : sensitiveIdDiagnostics) {
     std::string visibleMetadata;
     for (const auto &[key, value] : effect.details) {
       visibleMetadata += key;
@@ -892,14 +885,14 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
          "a blank-name rename can enter the typed mailbox");
   expect(!bridge.receiveAppServer(100ms),
          "worker validation blocks an empty rename name");
-  std::vector<UiEffect> localRejections;
+  std::vector<ProtocolDiagnostic> localRejections;
   expect(waitUntil([&] {
-           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           std::vector<ProtocolDiagnostic> batch = runtime.takeProtocolDiagnostics();
            localRejections.insert(localRejections.end(),
                                   std::make_move_iterator(batch.begin()),
                                   std::make_move_iterator(batch.end()));
            return std::ranges::count_if(
-                      localRejections, [](const UiEffect &effect) {
+                      localRejections, [](const ProtocolDiagnostic &effect) {
                         return diagnosticField(effect, "direction") ==
                                    "local result" &&
                                diagnosticField(effect, "subject") ==
@@ -910,7 +903,7 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
   const auto localRenameRejection = [&localRejections](
                                         std::string_view correlation) {
     return std::ranges::any_of(localRejections, [correlation](
-                                                    const UiEffect &effect) {
+                                                    const ProtocolDiagnostic &effect) {
       return diagnosticField(effect, "direction") == "local result" &&
              diagnosticField(effect, "subject") == "thread/name/set" &&
              diagnosticField(effect, "authority") == "none" &&
@@ -1459,7 +1452,7 @@ void staleHistoryFailureIsSemanticallyInert(UnixBridge &bridge,
                           std::move(state));
     static_cast<void>(write.finish());
   }
-  static_cast<void>(runtime.takeUiEffects());
+  static_cast<void>(runtime.takeProtocolDiagnostics());
 
   NodeAction action{thread, NodeActionKind::LoadHistory};
   expect(sendAction(runtime.channels(), std::move(action)),
@@ -1479,7 +1472,7 @@ void staleHistoryFailureIsSemanticallyInert(UnixBridge &bridge,
   }
   expect(operationRetired(runtime.graph(), request->at("id")),
          "removing the history target cascades its pending Operation");
-  static_cast<void>(runtime.takeUiEffects());
+  static_cast<void>(runtime.takeProtocolDiagnostics());
   expect(bridge.replyError(*request, -32055, std::string(ErrorText)),
          "the retired history request receives its late provider failure");
   expect(bridge.appServerNotification(
@@ -1493,23 +1486,27 @@ void staleHistoryFailureIsSemanticallyInert(UnixBridge &bridge,
              }),
          "a later wire frame proves the late callback has settled");
 
-  const std::vector<UiEffect> effects = runtime.takeUiEffects();
+  const std::vector<ProtocolDiagnostic> effects =
+      runtime.takeProtocolDiagnostics();
   expect(std::ranges::any_of(
              effects,
-             [](const UiEffect &effect) {
-               return effect.kind == UiEffectKind::ProtocolDiagnostic &&
-                      diagnosticField(effect, "direction") == "client error" &&
+             [](const ProtocolDiagnostic &effect) {
+               return diagnosticField(effect, "direction") == "client error" &&
                       diagnosticField(effect, "subject") == "thread/turns/list";
              }),
          "the late history failure remains visible to protocol diagnostics");
-  expect(std::ranges::none_of(effects,
-                              [&](const UiEffect &effect) {
-                                return effect.kind ==
-                                           UiEffectKind::ShowNotice &&
-                                       effect.text.find(ErrorText) !=
-                                           std::string::npos;
-                              }),
-         "a stale history failure emits no user-visible notice");
+  const NodeRef notice =
+      findNode(runtime.graph(), {NodeKind::Notice, "local-worker-notice"});
+  const std::optional<NodeGraph::ReadAccess> noticeRead =
+      runtime.graph().tryRead();
+  const Value *noticeMessage =
+      notice && noticeRead
+          ? valueMember(*noticeRead->state(notice), "message")
+          : nullptr;
+  expect(!noticeMessage || !noticeMessage->asString() ||
+             noticeMessage->asString()->find(ErrorText) == std::string::npos,
+         "a stale history failure cannot become authoritative visible notice "
+         "state");
   expect(!findNode(runtime.graph(), {NodeKind::Thread, std::string(ThreadId)}),
          "the stale history result cannot recreate its retired thread");
 }

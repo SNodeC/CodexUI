@@ -663,11 +663,11 @@ void graphNotificationSaturationCoalesces() {
   bool statusesAccepted = true;
   for (std::size_t attempt = 0; attempt <= ThreadChannels::WorkerToQtCapacity;
        ++attempt) {
-    UiEffect effect{UiEffectKind::ShowNotice,
-                    std::nullopt,
-                    "fill-" + std::to_string(attempt),
-                    {}};
-    const ChannelSendStatus status = channels.sendUiEffect(effect);
+    ProtocolDiagnostic diagnostic{
+        Value::Object{{"sequence", Value(static_cast<std::int64_t>(attempt))}},
+        {}};
+    const ChannelSendStatus status =
+        channels.sendProtocolDiagnostic(diagnostic);
     if (status == ChannelSendStatus::QueueFull) {
       reachedLimit = true;
       break;
@@ -749,7 +749,7 @@ void uiDetachAcknowledgementIsRevisionNeutral() {
           "retired node dies after the acknowledgement releases its last pin");
 }
 
-void saturatedEffectsHaveCurrentGraphFallbacks() {
+void authoritativeUiStateSurvivesQueueSaturation() {
   NodeGraph graph;
   ThreadChannels channels;
   WorkerLogic logic(graph, channels);
@@ -762,8 +762,10 @@ void saturatedEffectsHaveCurrentGraphFallbacks() {
     static_cast<void>(write.finish());
   }
   while (true) {
-    UiEffect filler{UiEffectKind::ShowNotice, std::nullopt, "filler", {}};
-    if (channels.sendUiEffect(filler) == ChannelSendStatus::QueueFull)
+    ProtocolDiagnostic filler{Value::Object{{"subject", Value("filler")}},
+                              {}};
+    if (channels.sendProtocolDiagnostic(filler) ==
+        ChannelSendStatus::QueueFull)
       break;
   }
 
@@ -771,10 +773,10 @@ void saturatedEffectsHaveCurrentGraphFallbacks() {
               ChannelSendStatus::CoalescedRescan,
           "a saturated notice becomes current graph state and an explicit "
           "rescan");
-  require(logic.selectThread(first) == ChannelSendStatus::Accepted,
-          "the reserved critical slot admits the first selection");
+  require(logic.selectThread(first) == ChannelSendStatus::CoalescedRescan,
+          "a saturated selection remains authoritative graph state");
   require(logic.selectThread(second) == ChannelSendStatus::CoalescedRescan,
-          "a second saturated critical selection has a graph fallback");
+          "a later saturated selection replaces the authoritative target");
   {
     auto read = graph.tryRead();
     const NodeRef notice =
@@ -786,8 +788,8 @@ void saturatedEffectsHaveCurrentGraphFallbacks() {
                 runtime &&
                 read->related(runtime, RelationKind::UiSelectionTarget) ==
                     std::vector<NodeRef>{second},
-            "Qt can reconstruct the latest saturated notice and exact stable "
-            "selection target from the shared graph");
+            "Qt reconstructs the latest notice and exact stable selection "
+            "target from the sole authoritative graph state");
   }
   require(logic.sendWorkerStopped("terminal") == ChannelSendStatus::Accepted,
           "terminal delivery still uses the final reserved slot");
@@ -1733,18 +1735,12 @@ void stalePromptTargetsRetainAuthoredInputInRecoveryNodes() {
   PromptTransition retained = logic.admitPrompt(std::move(action));
   require(!retained.command,
           "a stale target is never dispatched by canonical id");
-  const std::vector<WorkerToQtMessage> messages = takeWorkerMessages(channels);
-  require(std::ranges::any_of(messages,
-                              [](const WorkerToQtMessage &message) {
-                                const auto *effect =
-                                    std::get_if<UiEffect>(&message);
-                                return effect &&
-                                       effect->kind == UiEffectKind::ShowNotice;
-                              }),
-          "the rejected stale target is reported visibly");
+  static_cast<void>(takeWorkerMessages(channels));
 
   auto read = graph.tryRead();
   const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+  const NodeRef notice =
+      read->find({NodeKind::Notice, "local-worker-notice"});
   const std::vector<NodeRef> roots =
       read->related(runtime, RelationKind::RootThread);
   const NodeRef recovery =
@@ -1759,7 +1755,10 @@ void stalePromptTargetsRetainAuthoredInputInRecoveryNodes() {
       turn && read->childCount(turn) != 0 ? read->childAt(turn, 0) : NodeRef{};
   const auto state = prompt ? read->state(prompt) : nullptr;
   const Value *attachments = state ? field(state, "attachments") : nullptr;
-  require(recovery && turn && prompt && state &&
+  require(notice &&
+              stringFieldEquals(read->state(notice), "message",
+                                "The destination thread is no longer available") &&
+              recovery && turn && prompt && state &&
               state->status == NodeStatus::Failed &&
               stringFieldEquals(state, "text", "retain this authored prompt") &&
               stringFieldEquals(state, "dispatchState", "failed") &&
@@ -1767,8 +1766,8 @@ void stalePromptTargetsRetainAuthoredInputInRecoveryNodes() {
               attachments->asArray()->size() == 1 &&
               read->related(runtime, RelationKind::PendingPrompt) ==
                   std::vector<NodeRef>{prompt},
-          "worker-side rejection keeps exact authored text and attachment "
-          "metadata in a visible recovery graph node");
+          "worker-side rejection exposes one authoritative notice and keeps "
+          "exact authored input in a visible recovery graph node");
 }
 
 void recoveryOnlyTargetsCannotDispatchAndRetainAuthoredInput() {
@@ -1799,17 +1798,11 @@ void recoveryOnlyTargetsCannotDispatchAndRetainAuthoredInput() {
   PromptTransition retained = logic.admitPrompt(std::move(action));
   require(!retained.command,
           "a live recovery-only target cannot produce a provider command");
-  const std::vector<WorkerToQtMessage> messages = takeWorkerMessages(channels);
-  require(std::ranges::any_of(
-              messages,
-              [](const WorkerToQtMessage &message) {
-                const auto *effect = std::get_if<UiEffect>(&message);
-                return effect && effect->kind == UiEffectKind::ShowNotice &&
-                       effect->text.find("Restore") != std::string::npos;
-              }),
-          "worker-side recovery-only rejection is reported visibly");
+  static_cast<void>(takeWorkerMessages(channels));
 
   auto read = graph.tryRead();
+  const NodeRef notice =
+      read->find({NodeKind::Notice, "local-worker-notice"});
   NodeRef retainedPrompt;
   for (const NodeRef &node : read->orderedNodes()) {
     if (node->id().kind != NodeKind::Item)
@@ -1829,7 +1822,11 @@ void recoveryOnlyTargetsCannotDispatchAndRetainAuthoredInput() {
   const Value *attachments = state ? field(state, "attachments") : nullptr;
   const Value *requiresRecovery =
       state ? field(state, "requiresExplicitRecovery") : nullptr;
-  require(retainedPrompt && retainedThread &&
+  require(notice &&
+              stringFieldEquals(
+                  read->state(notice), "message",
+                  "Restore this unsent prompt before sending it again") &&
+              retainedPrompt && retainedThread &&
               retainedThread != recoveryOnlyThread &&
               retainedThread->id().canonical.starts_with(
                   "local-recovery-thread:") &&
@@ -1916,22 +1913,15 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
   const NodeRef draft = admitted.command ? admitted.command->thread : NodeRef{};
   const NodeRef localPrompt =
       admitted.command ? admitted.command->localPrompt : NodeRef{};
-  const std::vector<WorkerToQtMessage> admissionMessages =
-      takeWorkerMessages(channels);
-  require(std::ranges::any_of(
-              admissionMessages,
-              [&](const auto &message) {
-                const UiEffect *effect = std::get_if<UiEffect>(&message);
-                return effect && effect->kind == UiEffectKind::SelectThread &&
-                       effect->target == std::optional<NodeRef>(draft);
-              }),
-          "new-thread admission selects its materialized local draft NodeRef");
+  static_cast<void>(takeWorkerMessages(channels));
   {
     auto read = graph.tryRead();
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(
         draft && draft->id().canonical.starts_with("local-thread:") &&
             read->related(runtime, RelationKind::RootThread).front() == draft &&
+            read->related(runtime, RelationKind::UiSelectionTarget) ==
+                std::vector<NodeRef>{draft} &&
             read->parent(read->parent(localPrompt)) == draft &&
             stringFieldEquals(read->state(draft), "name", "Named locally") &&
             stringFieldEquals(read->state(draft), "cwd", "/workspace") &&
@@ -1952,8 +1942,7 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
               logic.attachCreatedThread(*admitted.command, "created-thread") ==
                   ChannelSendStatus::Accepted,
           "thread/start result migrates the draft prompt atomically");
-  const std::vector<WorkerToQtMessage> migrationMessages =
-      takeWorkerMessages(channels);
+  static_cast<void>(takeWorkerMessages(channels));
   {
     auto read = graph.tryRead();
     const NodeRef actual = read->find({NodeKind::Thread, "created-thread"});
@@ -1971,13 +1960,9 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
             stringFieldEquals(read->state(actual), "cwd", "/workspace") &&
             stringFieldEquals(read->state(actual), "creationCorrelation",
                               admitted.command->creationCorrelation) &&
-            std::ranges::any_of(
-                migrationMessages,
-                [&](const auto &message) {
-                  const UiEffect *effect = std::get_if<UiEffect>(&message);
-                  return effect && effect->kind == UiEffectKind::SelectThread &&
-                         effect->target == std::optional<NodeRef>(actual);
-                }),
+            read->related(read->find({NodeKind::Runtime, "runtime"}),
+                          RelationKind::UiSelectionTarget) ==
+                std::vector<NodeRef>{actual},
         "migration removes the draft shell, preserves presentation identity, "
         "name, and workspace, selects the canonical thread, and changes the "
         "retained command to turn/start");
@@ -2343,7 +2328,7 @@ void providerGenerationResetIsAtomicAndKeepsOnlyRecoveryPrompts() {
   }
 }
 
-void providerTurnErrorsKeepTheirTypedNoticeEffect() {
+void providerTurnErrorsKeepTheirAuthoritativeNotice() {
   NodeGraph graph;
   ThreadChannels channels;
   WorkerLogic logic(graph, channels);
@@ -2358,26 +2343,22 @@ void providerTurnErrorsKeepTheirTypedNoticeEffect() {
                    {"willRetry", Value(false)}}}) ==
               ChannelSendStatus::Accepted,
           "an addressed provider error publishes normally");
-  const std::vector<WorkerToQtMessage> messages = takeWorkerMessages(channels);
-  const auto effect =
-      std::ranges::find_if(messages, [](const WorkerToQtMessage &message) {
-        const UiEffect *candidate = std::get_if<UiEffect>(&message);
-        return candidate && candidate->kind == UiEffectKind::ShowNotice;
-      });
-  require(effect != messages.end() &&
-              std::get<UiEffect>(*effect).text == "provider retry failed",
-          "the turn-error graph handler preserves the visible typed notice "
-          "effect and its provider message");
+  static_cast<void>(takeWorkerMessages(channels));
 
   auto read = graph.tryRead();
+  const NodeRef notice =
+      read->find({NodeKind::Notice, "local-worker-notice"});
   const NodeRef turn =
       read->find(scopedTurnNodeId("notice-error-thread", "notice-error-turn"));
   const auto state = turn ? read->state(turn) : nullptr;
   const Value *willRetry = field(state, "willRetry");
-  require(turn && field(state, "error") && willRetry && willRetry->asBool() &&
+  require(notice &&
+              stringFieldEquals(read->state(notice), "message",
+                                "provider retry failed") &&
+              turn && field(state, "error") && willRetry && willRetry->asBool() &&
               !*willRetry->asBool(),
-          "the same worker transaction retains the addressed turn error "
-          "facts behind the notice effect");
+          "the worker retains one authoritative notice beside the addressed "
+          "turn error facts");
 }
 
 void workerStoppedDeliveryIsExplicit() {
@@ -2419,7 +2400,7 @@ int main() {
   hydrationCompletionWorkIsIndependentOfRetainedItems();
   graphNotificationSaturationCoalesces();
   uiDetachAcknowledgementIsRevisionNeutral();
-  saturatedEffectsHaveCurrentGraphFallbacks();
+  authoritativeUiStateSurvivesQueueSaturation();
   reverseInteractionResolutionUpdatesTheGraph();
   threadActivityAndPromptOrderingStayInTheGraph();
   localPromptsAreGraphNodesAndDispatchPerThread();
@@ -2436,7 +2417,7 @@ int main() {
   firstPromptCreatesAndMigratesOneDraftThread();
   creationCorrelationSharesExactlyOneDraft();
   providerGenerationResetIsAtomicAndKeepsOnlyRecoveryPrompts();
-  providerTurnErrorsKeepTheirTypedNoticeEffect();
+  providerTurnErrorsKeepTheirAuthoritativeNotice();
   workerStoppedDeliveryIsExplicit();
 
   if (failures != 0) {

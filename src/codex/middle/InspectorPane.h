@@ -42,6 +42,7 @@ public:
   using RequestAction = std::function<void(const nodegraph::NodeRef &)>;
 
   explicit InspectorPane(QWidget *parent = nullptr);
+  static void prepareMarkdown(ui::InspectorSnapshot &snapshot);
 
   void setHideAction(std::function<void()> hide);
   void setRefreshRequestedAction(std::function<void()> refresh);
@@ -54,7 +55,11 @@ public:
   [[nodiscard]] ui::InspectorRowRequest
   rowRequest(ui::InspectorProjection projection) const;
   void appendProtocolFrame(const nlohmann::json &frame);
-  void appendProtocolDiagnostic(const nodegraph::UiEffect &effect);
+  [[nodiscard]] bool
+  appendProtocolDiagnostic(const nodegraph::ProtocolDiagnostic &diagnostic);
+  void flushProtocolPresentation();
+  [[nodiscard]] bool
+  retainsTarget(const nodegraph::NodeRef &target) const noexcept;
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
@@ -101,6 +106,7 @@ private:
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;
+  std::deque<QString> pendingProtocolLines;
   std::uint64_t observedSequence = 0;
   std::size_t protocolTelemetryCount = 0;
   bool protocolFollowsTail = true;

@@ -8,6 +8,7 @@
 #include "codex/nodegraph/ThreadChannels.h"
 
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <span>
@@ -30,8 +31,9 @@ class FrontendSession final {
 public:
   using RuntimeStoppedHandler = std::function<void()>;
   using GraphChangedHandler =
-      std::function<void(const nodegraph::GraphChanged &)>;
-  using GraphUiEffectHandler = std::function<void(const nodegraph::UiEffect &)>;
+      std::function<bool(const nodegraph::GraphChanged &)>;
+  using ProtocolDiagnosticHandler =
+      std::function<void(const nodegraph::ProtocolDiagnostic &)>;
 
   explicit FrontendSession(Configuration &configuration);
   ~FrontendSession();
@@ -45,7 +47,7 @@ public:
 
   void setRuntimeStoppedHandler(RuntimeStoppedHandler handler);
   void setGraphChangedHandler(GraphChangedHandler handler);
-  void setGraphUiEffectHandler(GraphUiEffectHandler handler);
+  void setProtocolDiagnosticHandler(ProtocolDiagnosticHandler handler);
 
   // Qt receives read-only access and must use NodeGraph::tryRead().
   [[nodiscard]] const nodegraph::NodeGraph &nodeGraph() const noexcept;
@@ -58,10 +60,16 @@ public:
   [[nodiscard]] nodegraph::ChannelSendStatus
   sendRuntimeAction(nodegraph::RuntimeAction &action);
 
+  // Presentation owners call this only after every Qt reference to the
+  // retired identities has been detached. The worker keeps the retired graph
+  // nodes readable until this explicit lifetime acknowledgement arrives.
+  void acknowledgeUiDetached(std::span<const nodegraph::NodeRef> nodes);
+
 private:
   friend class FrontendSessionTestPeer;
 
   void drainWorkerMessages();
+  [[nodiscard]] bool graphDeliveryQuiescent() const noexcept;
   void scheduleWorkerMessageDrain();
   void requireRescanRetirementCollection();
   void collectRescanRetirements();
@@ -78,7 +86,8 @@ private:
   std::thread clientThread;
   RuntimeStoppedHandler runtimeStoppedHandler;
   GraphChangedHandler graphChangedHandler;
-  GraphUiEffectHandler graphUiEffectHandler;
+  ProtocolDiagnosticHandler protocolDiagnosticHandler;
+  std::deque<nodegraph::GraphChanged> deferredGraphChanges;
   std::vector<nodegraph::NodeAction> pendingNodeAcknowledgements;
   std::unordered_map<nodegraph::Node *, std::uint8_t>
       pendingNodeAcknowledgementKinds;

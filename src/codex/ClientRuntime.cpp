@@ -649,15 +649,32 @@ private:
                     nodegraph::Value(generations_.connection));
     details.emplace("providerGeneration",
                     nodegraph::Value(generations_.provider));
-    if (dropped_ != 0)
+    if (dropped_ != 0 && pending_.empty())
       details.emplace("droppedBefore", nodegraph::Value(dropped_));
-    nodegraph::UiEffect effect{nodegraph::UiEffectKind::ProtocolDiagnostic,
-                               std::nullopt,
-                               {},
-                               std::move(details)};
-    const nodegraph::ChannelSendStatus status = channels.sendUiEffect(effect);
-    if (status == nodegraph::ChannelSendStatus::QueueFull) {
+    if (pending_.size() >= MaximumDiagnosticBatch) {
       ++dropped_;
+      return;
+    }
+    pending_.push_back(std::move(details));
+    if (flushScheduled_)
+      return;
+    flushScheduled_ = true;
+    core::EventReceiver::atNextTick(
+        [this, &channels] { flush(channels); });
+  }
+
+  void flush(nodegraph::ThreadChannels &channels) {
+    flushScheduled_ = false;
+    if (pending_.empty())
+      return;
+    nodegraph::ProtocolDiagnostic diagnostic;
+    diagnostic.diagnosticBatch = std::move(pending_);
+    pending_.clear();
+    const std::size_t delivered = diagnostic.diagnosticBatch.size();
+    const nodegraph::ChannelSendStatus status =
+        channels.sendProtocolDiagnostic(diagnostic);
+    if (status == nodegraph::ChannelSendStatus::QueueFull) {
+      dropped_ += delivered;
       return;
     }
     dropped_ = 0;
@@ -722,6 +739,7 @@ private:
   }
 
   static constexpr std::size_t MaximumPendingCorrelations = 4096;
+  static constexpr std::size_t MaximumDiagnosticBatch = 64;
   CorrelationMap clientRequests_;
   CorrelationMap serverRequests_;
   CorrelationOrder clientRequestOrder_;
@@ -730,6 +748,8 @@ private:
   std::uint64_t correlationOrder_ = 0;
   std::uint64_t sequence_ = 0;
   std::uint64_t dropped_ = 0;
+  std::vector<nodegraph::Value::Object> pending_;
+  bool flushScheduled_ = false;
   bool generationsKnown_ = false;
 };
 
@@ -864,7 +884,10 @@ std::string dispatchRequestHandled(codex::frontend::CodexBridge &sdk,
         outcome.requestId,
         std::move(outcome.payload),
         publication->operation,
-        threadActivityAt(Operation::method)};
+        threadActivityAt(Operation::method),
+        {},
+        {},
+        {}};
     completed(std::move(outcome), std::move(decoded));
   };
   const std::string requestId = sdk.request<Operation>(
@@ -878,7 +901,8 @@ std::string dispatchRequestHandled(codex::frontend::CodexBridge &sdk,
                                                            : raw);
         RequestOutcome outcome{ok, decodedRequestId(response.jsonRpcId()),
                                decodedObject(payload),
-                               ok ? std::string{} : resultError(raw)};
+                               ok ? std::string{} : resultError(raw),
+                               {}, {}, {}, false};
         identifyResultEntities(outcome);
         if (publication->requestPublished)
           process(std::move(outcome));
@@ -892,7 +916,10 @@ std::string dispatchRequestHandled(codex::frontend::CodexBridge &sdk,
       typedRequestId,
       decodedObject(parameters),
       {},
-      threadActivityAt(Operation::method)};
+      threadActivityAt(Operation::method),
+      {},
+      {},
+      {}};
   decodedRequest.requestTarget = std::move(requestTarget);
   nodegraph::WorkerApplyResult applied =
       workerLogic.applyDetailed(std::move(decodedRequest));
@@ -1123,6 +1150,10 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
           *method,
           std::nullopt,
           decodedObject(payload),
+          {},
+          {},
+          {},
+          {},
           {}}));
       return;
     }
@@ -1146,6 +1177,10 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         *method,
         std::nullopt,
         decodedObject(payload),
+        {},
+        {},
+        {},
+        {},
         {}}));
   });
   sdk.onBridgeEvent([&channels, &clearTransientState, &hydrateProvider,
@@ -1164,7 +1199,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   });
 
   const auto registerServerRequest = [&]<typename Operation>() {
-    sdk.onServerRequest<Operation>([&pendingServerRequests, &sdk, &workerLogic](
+    sdk.onServerRequest<Operation>([&pendingServerRequests, &workerLogic](
                                        typename Operation::Params &request) {
       const auto requestId = decodedRequestId(request.jsonRpcId());
       if (!requestId)
@@ -1183,7 +1218,10 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
               requestId,
               decodedObject(request.getPayload()),
               {},
-              threadActivityAt(Operation::method)});
+              threadActivityAt(Operation::method),
+              {},
+              {},
+              {}});
       if (!applied.primary)
         return;
       pendingServerRequests.emplace(
@@ -1236,7 +1274,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
             codex::generated::server_notifications::OperationName::method),    \
         std::nullopt, decodedObject(notification.getPayload()), expected,      \
         threadActivityAt(                                                      \
-            codex::generated::server_notifications::OperationName::method)})); \
+            codex::generated::server_notifications::OperationName::method),    \
+        {}, {}, {}}));                                                         \
     constexpr std::string_view appliedMethod =                                 \
         codex::generated::server_notifications::OperationName::method;         \
     if (hydrateHistoricalChildren && (appliedMethod == "item/started" ||       \
@@ -1270,7 +1309,10 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                                   requestId,
                                   decodedObject(request.getPayload()),
                                   {},
-                                  threadActivityAt(CurrentTimeRead::method)});
+                                  threadActivityAt(CurrentTimeRead::method),
+                                  {},
+                                  {},
+                                  {}});
     const std::int64_t currentTime =
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -1302,7 +1344,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
             decodedObject(notification.getPayload()),                          \
             {},                                                                \
             threadActivityAt(current_protocol::server_notifications::          \
-                                 OperationName::method)}));                    \
+                                 OperationName::method),                       \
+            {}, {}, {}}));                                                     \
       });
   CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryStarted)
   CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryCompleted)
@@ -2520,7 +2563,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
               // the same bounded page path in parallel.
               static_cast<void>(workerLogic.selectThread(fork));
               loadHistory(nodegraph::NodeAction{
-                  fork, nodegraph::NodeActionKind::LoadHistory});
+                  fork, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
             });
       else if (action.kind == Archive)
         dispatchRequest<codex::generated::client_requests::ThreadArchive>(

@@ -50,26 +50,16 @@ void ExpandingPromptEditor::changeEvent(QEvent *event) {
 }
 
 bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const {
-  const QString content = toPlainText();
-  if (content.isEmpty())
+  if (document()->isEmpty())
     return false;
-  if (content.contains(QLatin1Char('\n')))
+  if (document()->blockCount() > 1)
     return true;
 
   const int viewportReduction = std::max(0, width() - viewport()->width());
   const qreal contentWidth = std::max<qreal>(
       1, widgetWidth - viewportReduction - 2 * document()->documentMargin());
-  QTextLayout layout(content, font());
-  QTextOption option = document()->defaultTextOption();
-  option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-  layout.setTextOption(option);
-  layout.beginLayout();
-  QTextLine firstLine = layout.createLine();
-  if (firstLine.isValid())
-    firstLine.setLineWidth(contentWidth);
-  const bool wraps = layout.createLine().isValid();
-  layout.endLayout();
-  return wraps;
+  const QTextLayout *layout = document()->firstBlock().layout();
+  return layout && layout->maximumWidth() > contentWidth;
 }
 
 void ExpandingPromptEditor::focusInEvent(QFocusEvent *event) {
@@ -145,12 +135,15 @@ void ExpandingPromptEditor::remeasure() {
 
   const int maximumContentHeight =
       fontMetrics().lineSpacing() * maximumVisibleLineCount() + 10;
-  document()->setTextWidth(viewport()->width());
+  QAbstractTextDocumentLayout *layout = document()->documentLayout();
   qreal laidOutHeight = 0;
-  QAbstractTextDocumentLayout *documentLayout = document()->documentLayout();
   for (QTextBlock block = document()->begin(); block.isValid();
-       block = block.next())
-    laidOutHeight += documentLayout->blockBoundingRect(block).height();
+       block = block.next()) {
+    const QRectF bounds = layout->blockBoundingRect(block);
+    laidOutHeight += bounds.height();
+    if (laidOutHeight >= maximumContentHeight)
+      break;
+  }
   const int documentHeight = static_cast<int>(std::ceil(laidOutHeight)) + 10;
   const int wanted =
       std::clamp(documentHeight, compactHeight(), maximumContentHeight);

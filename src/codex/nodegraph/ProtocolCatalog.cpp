@@ -2,6 +2,7 @@
 
 #include "codex/nodegraph/ProtocolCatalog.h"
 
+#include <algorithm>
 #include <array>
 
 namespace codexui::nodegraph {
@@ -27,10 +28,10 @@ namespace {
     methodName, ProtocolDirection::ServerNotification,                         \
         MessageDisposition::IntentionallyStateNeutral                          \
   }
-#define CODEXUI_UI_NOTIFICATION(methodName)                                    \
+#define CODEXUI_NOTICE_NOTIFICATION(methodName)                                \
   MethodDescriptor {                                                           \
     methodName, ProtocolDirection::ServerNotification,                         \
-        MessageDisposition::TypedUiEffect                                      \
+        MessageDisposition::NoticeGraphUpdate                                  \
   }
 #define CODEXUI_CLIENT_NOTIFICATION(methodName)                                \
   MethodDescriptor {                                                           \
@@ -209,7 +210,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_SERVER_REQUEST("applyPatchApproval"),
     CODEXUI_SERVER_REQUEST("execCommandApproval"),
 
-    CODEXUI_UI_NOTIFICATION("error"),
+    CODEXUI_NOTICE_NOTIFICATION("error"),
     CODEXUI_GRAPH_NOTIFICATION("thread/started"),
     CODEXUI_GRAPH_NOTIFICATION("thread/status/changed"),
     CODEXUI_GRAPH_NOTIFICATION("thread/archived"),
@@ -272,10 +273,10 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_GRAPH_NOTIFICATION("modelProvider/authRecoveryCompleted"),
     CODEXUI_GRAPH_NOTIFICATION("turn/moderationMetadata"),
     CODEXUI_GRAPH_NOTIFICATION("model/safetyBuffering/updated"),
-    CODEXUI_UI_NOTIFICATION("warning"),
-    CODEXUI_UI_NOTIFICATION("guardianWarning"),
-    CODEXUI_UI_NOTIFICATION("deprecationNotice"),
-    CODEXUI_UI_NOTIFICATION("configWarning"),
+    CODEXUI_NOTICE_NOTIFICATION("warning"),
+    CODEXUI_NOTICE_NOTIFICATION("guardianWarning"),
+    CODEXUI_NOTICE_NOTIFICATION("deprecationNotice"),
+    CODEXUI_NOTICE_NOTIFICATION("configWarning"),
     CODEXUI_GRAPH_NOTIFICATION("fuzzyFileSearch/sessionUpdated"),
     CODEXUI_GRAPH_NOTIFICATION("fuzzyFileSearch/sessionCompleted"),
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/started"),
@@ -289,7 +290,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/sdp"),
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/error"),
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/closed"),
-    CODEXUI_UI_NOTIFICATION("windows/worldWritableWarning"),
+    CODEXUI_NOTICE_NOTIFICATION("windows/worldWritableWarning"),
     CODEXUI_GRAPH_NOTIFICATION("windowsSandbox/setupCompleted"),
     CODEXUI_GRAPH_NOTIFICATION("account/login/completed"),
 
@@ -298,7 +299,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
 
 #undef CODEXUI_CLIENT_REQUEST
 #undef CODEXUI_SERVER_REQUEST
-#undef CODEXUI_UI_NOTIFICATION
+#undef CODEXUI_NOTICE_NOTIFICATION
 #undef CODEXUI_GRAPH_NOTIFICATION
 #undef CODEXUI_NEUTRAL_NOTIFICATION
 #undef CODEXUI_CLIENT_NOTIFICATION
@@ -322,16 +323,23 @@ countDisposition(MessageDisposition disposition) noexcept {
   return count;
 }
 
-constexpr bool hasUniqueKeys() noexcept {
-  for (std::size_t left = 0; left < Methods.size(); ++left) {
-    if (Methods[left].method.empty())
+consteval bool hasUniqueKeys() {
+  std::array<const MethodDescriptor *, Methods.size()> ordered{};
+  for (std::size_t index = 0; index < Methods.size(); ++index) {
+    if (Methods[index].method.empty())
       return false;
-    for (std::size_t right = left + 1; right < Methods.size(); ++right) {
-      if (Methods[left].direction == Methods[right].direction &&
-          Methods[left].method == Methods[right].method)
-        return false;
-    }
+    ordered[index] = &Methods[index];
   }
+  std::sort(ordered.begin(), ordered.end(), [](const auto *left,
+                                                const auto *right) {
+    return left->direction != right->direction
+               ? left->direction < right->direction
+               : left->method < right->method;
+  });
+  for (std::size_t index = 1; index < ordered.size(); ++index)
+    if (ordered[index - 1]->direction == ordered[index]->direction &&
+        ordered[index - 1]->method == ordered[index]->method)
+      return false;
   return true;
 }
 
@@ -346,7 +354,7 @@ static_assert(countDisposition(MessageDisposition::ReverseInteraction) == 11);
 static_assert(countDisposition(MessageDisposition::GraphUpdate) == 75);
 static_assert(countDisposition(MessageDisposition::IntentionallyStateNeutral) ==
               2);
-static_assert(countDisposition(MessageDisposition::TypedUiEffect) == 6);
+static_assert(countDisposition(MessageDisposition::NoticeGraphUpdate) == 6);
 static_assert(hasUniqueKeys());
 
 } // namespace

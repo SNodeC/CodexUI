@@ -143,10 +143,9 @@ QString accessibleCardText(const VisibleCardData &card) {
 }
 
 bool structurallyCompatible(const CardKey &beforeKey, CardKind beforeKind,
-                            const nodegraph::NodeRef &beforeTarget,
                             const VisibleCardData &after) noexcept {
   return beforeKey == after.key &&
-         ((beforeKind == after.kind && beforeTarget == after.target) ||
+         (beforeKind == after.kind ||
           (beforeKind == CardKind::LocalPrompt &&
            after.kind == CardKind::UserMessage));
 }
@@ -259,8 +258,7 @@ ConversationItemModel::replaceConversation(ConversationSnapshot snapshot) {
 
   beginResetModel();
   clearRows();
-  for (Row &row : desired)
-    insertRow(nodeCount(rows_), std::move(row));
+  rows_ = buildRows(desired, 0, desired.size());
   threadId_ = nextThreadId;
   hasMore_ = nextHasMore;
   rebuildIndexes();
@@ -281,6 +279,75 @@ ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
 
   const bool chromeChanged = nextHasMore != hasMore_;
   hasMore_ = nextHasMore;
+  const std::size_t currentCount = nodeCount(rows_);
+  if (currentCount != 0 && desired.size() >= currentCount) {
+    struct InsertionRun {
+      std::size_t first = 0;
+      std::size_t count = 0;
+    };
+    std::vector<InsertionRun> insertions;
+    std::vector<RowNode *> retainedNodes;
+    std::vector<std::size_t> retainedPositions;
+    retainedNodes.reserve(currentCount);
+    retainedPositions.reserve(currentCount);
+    RowNode *current = nodeAt(0);
+    std::size_t desiredPosition = 0;
+    bool insertionOnly = true;
+    while (current && insertionOnly) {
+      const std::size_t insertionFirst = desiredPosition;
+      while (desiredPosition < desired.size() &&
+             desired[desiredPosition].stableKey != current->value.stableKey)
+        ++desiredPosition;
+      if (desiredPosition == desired.size()) {
+        insertionOnly = false;
+        break;
+      }
+      if (desiredPosition != insertionFirst)
+        insertions.push_back(
+            {insertionFirst, desiredPosition - insertionFirst});
+      const Row &replacement = desired[desiredPosition];
+      insertionOnly =
+          structurallyCompatible(current->value.card.key,
+                                 current->value.card.kind, replacement.card);
+      retainedNodes.push_back(current);
+      retainedPositions.push_back(desiredPosition);
+      ++desiredPosition;
+      current = nextNode(current);
+    }
+    if (insertionOnly && retainedPositions.size() == currentCount) {
+      if (desiredPosition != desired.size())
+        insertions.push_back(
+            {desiredPosition, desired.size() - desiredPosition});
+      for (const InsertionRun &insertion : insertions) {
+        const int firstRow = static_cast<int>(insertion.first);
+        beginInsertRows({}, firstRow,
+                        firstRow + static_cast<int>(insertion.count) - 1);
+        auto [before, after] =
+            splitRows(std::move(rows_), insertion.first);
+        rows_ = mergeRows(
+            mergeRows(std::move(before),
+                      buildRows(desired, insertion.first,
+                                insertion.first + insertion.count)),
+            std::move(after));
+        rebuildIndexes();
+        endInsertRows();
+        incrementProperty("modelInsertCount");
+      }
+      bool rowsUpdated = false;
+      for (std::size_t index = 0; index < currentCount; ++index) {
+        const std::size_t position = retainedPositions[index];
+        RowNode *retained = retainedNodes[index];
+        if (retained->value == desired[position])
+          continue;
+        updateRow(retained, static_cast<int>(position),
+                  std::move(desired[position]));
+        rowsUpdated = true;
+      }
+      return !insertions.empty() || rowsUpdated || chromeChanged
+                 ? StructuralChangeResult::Changed
+                 : StructuralChangeResult::Unchanged;
+    }
+  }
   std::unordered_set<std::string> desiredKeys;
   desiredKeys.reserve(desired.size());
   for (const Row &row : desired)
@@ -366,8 +433,7 @@ ConversationItemModel::cardUpdateResult(const VisibleCardData &card) const {
   if (!modelRow)
     return CardUpdateResult::Missing;
   const Row &current = found->second->value;
-  if (current.card.key != card.key || current.card.kind != card.kind ||
-      current.card.target != card.target)
+  if (current.card.key != card.key || current.card.kind != card.kind)
     return CardUpdateResult::Incompatible;
   if (current.card == card)
     return CardUpdateResult::Unchanged;
@@ -384,18 +450,14 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   const auto found = stableRows_.find(key);
   const std::optional<int> modelRow = rowOf(found->second);
   Row &current = found->second->value;
-
-  Row replacement;
-  replacement.card = std::move(card);
-  replacement.stableKey = current.stableKey;
-  replacement.sectionKey = current.sectionKey;
-  replacement.turnRoot = current.turnRoot;
-  replacement.nested = current.nested;
-  replacement.firstInTurn = current.firstInTurn;
-  replacement.lastInTurn = current.lastInTurn;
-  replacement.presented = isPresented(replacement.card);
-  replacement.activeTurn = current.activeTurn;
-  updateRow(*modelRow, std::move(replacement));
+  const bool wasPresented = current.presented;
+  current.card = std::move(card);
+  current.presented = isPresented(current.card);
+  QList<int> roles{PresentationRole, Qt::AccessibleTextRole};
+  if (wasPresented != current.presented)
+    roles.push_back(PresentedRole);
+  emit dataChanged(index(*modelRow), index(*modelRow), roles);
+  incrementProperty("modelDataChangeCount");
   return CardUpdateResult::Changed;
 }
 
@@ -403,6 +465,9 @@ std::optional<ConversationItemModel::StructuralDeltaPlan>
 ConversationItemModel::planStructuralDelta(
     std::span<const ConversationRowChange> rows,
     std::span<const nodegraph::NodeRef> removals) const {
+  const auto reject = [&](const char *) -> std::optional<StructuralDeltaPlan> {
+    return std::nullopt;
+  };
   struct VirtualRow {
     CardKey key;
     CardKind kind = CardKind::GenericActivity;
@@ -706,25 +771,23 @@ ConversationItemModel::planStructuralDelta(
     const std::optional<int> stable = sequence.locateStable(key);
     const std::optional<int> target = sequence.locateTarget(card.target);
     if (stable && target && *stable != *target)
-      return std::nullopt;
+      return reject("stable-target-disagree");
     if (!stable && target)
-      return std::nullopt;
+      return reject("target-without-stable");
 
     const int source = stable ? *stable : -1;
     const std::optional<VirtualRow> current =
         source >= 0 ? sequence.at(source) : std::nullopt;
     if (current && (!current->target ||
                     !structurallyCompatible(current->key, current->kind,
-                                            current->target, card)))
-      return std::nullopt;
+                                            card)))
+      return reject("incompatible-current");
     const bool materializesLocalPrompt =
         current && current->kind == CardKind::LocalPrompt &&
         card.kind == CardKind::UserMessage;
     if (current && !materializesLocalPrompt &&
-        (current->turnRoot != change.placement.turnRoot ||
-         (current->turnRoot &&
-          current->sectionKey != change.placement.sectionKey)))
-      return std::nullopt;
+        current->sectionKey != change.placement.sectionKey)
+      return reject("section-change");
 
     const auto pending = [&](const std::optional<CardKey> &neighbor) {
       if (!neighbor)
@@ -767,10 +830,10 @@ ConversationItemModel::planStructuralDelta(
     }
 
     if (source >= 0 && !removeVirtual(source))
-      return std::nullopt;
+      return reject("invalid-destination");
     if (destination < 0 || destination > sequence.size() ||
         sequence.locateStable(key) || sequence.locateTarget(card.target))
-      return std::nullopt;
+      return reject("invalid-current-placement");
 
     VirtualRow replacement{card.key,
                            card.kind,
@@ -792,9 +855,9 @@ ConversationItemModel::planStructuralDelta(
         validSectionPlacement(replacement.turnRoot, replacement.nested,
                               owner.count, owner.hasRoot, previousInSection,
                               nextInSection);
-    if (!valid)
-      return std::nullopt;
-    if (current && current->turnRoot && source != destination)
+    if (!valid && !current)
+      continue;
+    if (!valid && current->sectionKey != replacement.sectionKey)
       return std::nullopt;
     insertVirtual(destination, std::move(replacement));
     StructuralDeltaPlan::Operation operation;
@@ -812,8 +875,9 @@ ConversationItemModel::planStructuralDelta(
   }
 
   for (std::size_t index = 0; index < rows.size(); ++index) {
-    if (!settled[index])
-      return std::nullopt;
+    if (!settled[index]) {
+      return reject("unsettled");
+    }
   }
 
   for (const StructuralDeltaPlan::Operation &operation : result.operations) {
@@ -823,10 +887,10 @@ ConversationItemModel::planStructuralDelta(
     const std::optional<int> position =
         sequence.locateStable(stableKey(change.placement.card.key));
     if (!position)
-      return std::nullopt;
+      return reject("missing-after-plan");
     if ((!change.previousCardKey && *position != 0) ||
         (!change.nextCardKey && *position != sequence.size() - 1))
-      return std::nullopt;
+      return reject("edge-mismatch");
     const auto adjacent = [&](const std::optional<CardKey> &neighbor,
                               int offset) {
       if (!neighbor)
@@ -838,8 +902,9 @@ ConversationItemModel::planStructuralDelta(
              *neighborPosition + offset == *position;
     };
     if (!adjacent(change.previousCardKey, 1) ||
-        !adjacent(change.nextCardKey, -1))
-      return std::nullopt;
+        !adjacent(change.nextCardKey, -1)) {
+      return reject("adjacency-mismatch");
+    }
   }
 
   return result;
@@ -1258,6 +1323,22 @@ void ConversationItemModel::rebuildIndexes() {
   incrementProperty("modelIndexRebuildCount");
 }
 
+std::unique_ptr<ConversationItemModel::RowNode>
+ConversationItemModel::buildRows(std::vector<Row> &rows, std::size_t first,
+                                 std::size_t last, std::uint64_t depth) {
+  if (first >= last)
+    return {};
+  const std::size_t middle = first + (last - first) / 2;
+  auto node = std::make_unique<RowNode>(
+      std::move(rows[middle]),
+      std::numeric_limits<std::uint64_t>::max() - depth);
+  node->left = buildRows(rows, first, middle, depth + 1);
+  node->right = buildRows(rows, middle + 1, last, depth + 1);
+  updateNode(node.get());
+  node->parent = nullptr;
+  return node;
+}
+
 ConversationItemModel::RowNode *
 ConversationItemModel::nodeAt(std::size_t row) const noexcept {
   RowNode *current = rows_.get();
@@ -1318,7 +1399,7 @@ ConversationItemModel::takeRow(std::size_t row) {
     return {};
   eraseRowIdentity(removed->value);
   removed->parent = nullptr;
-  return removed;
+  return std::move(removed);
 }
 
 void ConversationItemModel::clearRows() noexcept {
@@ -1515,6 +1596,11 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
   RowNode *node = nodeAt(static_cast<std::size_t>(rowIndex));
   if (!node)
     return;
+  updateRow(node, rowIndex, std::move(replacement));
+}
+
+void ConversationItemModel::updateRow(RowNode *node, int rowIndex,
+                                      Row replacement) {
   Row &before = node->value;
   QList<int> roles;
   if (before.card.threadId != replacement.card.threadId)

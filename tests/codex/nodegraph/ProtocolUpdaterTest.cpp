@@ -179,7 +179,7 @@ void catalogIsComplete() {
     case MessageDisposition::ReverseInteraction:
       ++interactions;
       break;
-    case MessageDisposition::TypedUiEffect:
+    case MessageDisposition::NoticeGraphUpdate:
       ++effects;
       break;
     case MessageDisposition::IntentionallyStateNeutral:

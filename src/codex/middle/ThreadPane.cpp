@@ -147,6 +147,7 @@ class ThreadTreeWidget final : public QTreeWidget {
 public:
   explicit ThreadTreeWidget(ThreadPane *owner)
       : QTreeWidget(owner), owner_(owner), collator_(effectiveLocale()) {
+    setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     collator_.setCaseSensitivity(Qt::CaseInsensitive);
     collator_.setIgnorePunctuation(true);
     collator_.setNumericMode(true);
@@ -909,7 +910,6 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   setObjectName(QStringLiteral("sidebar"));
   setStyleSheet(QStringLiteral("QFrame#sidebar{background:%1;}")
                     .arg(QString::fromLatin1(UiStyle::sidebar)));
-  setMinimumWidth(220);
   setMaximumWidth(440);
   auto *layout = new QVBoxLayout(this);
   layout->setContentsMargins(10, 14, 10, 17);
@@ -921,12 +921,11 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   auto *sectionTitle =
       UiStyle::makeLabel(QStringLiteral("THREADS"), "panelHeader");
   sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   header->addWidget(sectionTitle);
   header->addStretch();
   auto *hide = new QPushButton(QStringLiteral("Hide"));
   hide->setProperty("kind", "subtle");
-  hide->setFixedSize(52, 24);
+  hide->setMinimumSize(52, 24);
   connect(hide, &QPushButton::clicked, this, [this] {
     if (actions.hide)
       actions.hide();
@@ -942,7 +941,7 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 
   auto *create = new QPushButton(QStringLiteral("+  New thread"));
   create->setObjectName(QStringLiteral("threadNewButton"));
-  create->setFixedHeight(36);
+  create->setMinimumHeight(36);
   create->setStyleSheet(
       QStringLiteral(
           "QPushButton{background:%1;color:%2;border:1px solid %3;"
@@ -973,7 +972,7 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   sortButton->setProperty("kind", "subtle");
   sortButton->setProperty("codexChevron", true);
   sortButton->setPopupMode(QToolButton::InstantPopup);
-  sortButton->setFixedHeight(28);
+  sortButton->setMinimumHeight(28);
   auto *sortMenu = new QMenu(sortButton);
   auto *sortGroup = new QActionGroup(sortMenu);
   sortGroup->setExclusive(true);
@@ -1217,6 +1216,52 @@ void ThreadPane::sortRootItems() {
   updateAnimationTimer();
   if (tree->isVisible())
     requestMoreNearListEnd();
+}
+
+bool ThreadPane::repositionRootItem(ThreadTreeItem *item) {
+  if (!item || item->parent())
+    return false;
+  const int current = tree->indexOfTopLevelItem(item);
+  if (current < 0)
+    return false;
+  auto *previous = current > 0
+                       ? tree->threadItem(tree->topLevelItem(current - 1))
+                       : nullptr;
+  auto *next = current + 1 < tree->topLevelItemCount()
+                   ? tree->threadItem(tree->topLevelItem(current + 1))
+                   : nullptr;
+  if ((!previous || !(*item < *previous)) &&
+      (!next || !(*next < *item)))
+    return false;
+
+  const QModelIndex anchorIndex =
+      tree->isVisible()
+          ? tree->indexAt(QPoint(tree->viewport()->width() / 2, 0))
+          : QModelIndex{};
+  ThreadTreeItem *anchorItem = tree->threadItem(anchorIndex);
+  const int anchorY =
+      anchorIndex.isValid() ? tree->visualRect(anchorIndex).top() : 0;
+  QSignalBlocker blocked(tree);
+  QSignalBlocker scrollBlocked(tree->verticalScrollBar());
+  tree->takeTopLevelItem(current);
+  int position = 0;
+  while (position < tree->topLevelItemCount()) {
+    auto *candidate = tree->threadItem(tree->topLevelItem(position));
+    if (candidate && *item < *candidate)
+      break;
+    ++position;
+  }
+  tree->insertTopLevelItem(position, item);
+  if (tree->isVisible()) {
+    tree->doItemsLayout();
+    tree->restoreViewportY(anchorItem, anchorY);
+  }
+  blocked.unblock();
+  scrollBlocked.unblock();
+  updateAnimationTimer();
+  if (tree->isVisible())
+    requestMoreNearListEnd();
+  return true;
 }
 
 void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
@@ -1475,12 +1520,11 @@ bool ThreadPane::applyRowPresentation(const ui::ThreadListRow &row) {
        : sortCriterion == SortCriterion::Created
            ? priorCreated != item->createdAt
            : priorRecency != item->recencyAt);
-  if (orderingChanged)
-    sortRootItems();
+  const bool repositioned = orderingChanged && repositionRootItem(item);
   if (contextMenu && item->presentationKey == contextPresentationKey &&
       item->archived != contextArchived)
     contextMenu->close();
-  if (!orderingChanged)
+  if (!repositioned)
     updateAnimationTimer();
   return true;
 }
@@ -1551,6 +1595,17 @@ ThreadPane::visiblySelectedThread() const {
     return std::nullopt;
   const ThreadTreeItem *item = tree->threadItem(selected.front());
   return VisibleThread{item->id, item->presentationKey, item->target};
+}
+
+bool ThreadPane::retainsTarget(
+    const nodegraph::NodeRef &target) const noexcept {
+  if (!target)
+    return false;
+  if (contextTarget == target)
+    return true;
+  return std::ranges::any_of(rows, [&target](const auto &entry) {
+    return entry.second && entry.second->target == target;
+  });
 }
 
 void ThreadPane::updateContextRow(const std::string &presentationKey) {

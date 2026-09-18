@@ -62,6 +62,7 @@ public:
   void
   setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
   void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
+  void setNoticeAction(std::function<void(QString, bool)> action);
   void setReconciliationFinishedAction(
       std::function<void(const std::string &, ReconciliationResult, bool)>
           action);
@@ -96,14 +97,15 @@ public:
   // Provider pagination remains graph-owned; the view only projects whether
   // the current request is pending.
   void setHistoryRequestPending(const std::string &threadId, bool pending);
+  void setProviderHasMore(const std::string &threadId, bool hasMore);
   void forgetThreadPresentation(const std::string &threadId,
                                 std::uint64_t incarnation = 0);
   [[nodiscard]] const std::string &presentedThreadId() const noexcept {
     return threadId_;
   }
+  [[nodiscard]] bool
+  retainsTarget(const nodegraph::NodeRef &target) const noexcept;
 
-  void setTrailingSpaceHeight(int height);
-  void prepareForLocalPromptAdmission();
   // QSplitter live drags can produce one resize per pointer movement. Keep
   // the panel geometry live while bounding rich-text reflow to display-frame
   // cadence, then reconcile every cached row once the drag finishes.
@@ -113,9 +115,6 @@ public:
   [[nodiscard]] Mode mode() const noexcept { return mode_; }
   [[nodiscard]] Mode modeForThread(const std::string &threadId) const noexcept;
   [[nodiscard]] bool isAtBottom() const noexcept;
-  [[nodiscard]] int trailingSpaceHeight() const noexcept {
-    return trailingSpaceHeight_;
-  }
   [[nodiscard]] const ConversationItemModel *
   conversationModel() const noexcept {
     return model_;
@@ -162,7 +161,6 @@ private:
   struct ThreadScrollState {
     Mode mode = Mode::Following;
     Anchor anchor;
-    bool pausedByComposerGrowth = false;
     bool pausedByCommandOutput = false;
   };
 
@@ -205,7 +203,8 @@ private:
                              bool selectionCommitted,
                              std::vector<nodegraph::NodeRef> acknowledged);
   [[nodiscard]] std::optional<PresentationImpact>
-  applyCardPresentationOwned(VisibleCardData card);
+  applyCardPresentationOwned(VisibleCardData card, int &damageTop,
+                             bool &geometryChanged);
   void updateHistoryControls();
   void finishStructuralDelta(
       const Anchor &anchor,
@@ -252,6 +251,7 @@ private:
   [[nodiscard]] QRect rowRect(int row) const;
   [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
                                           bool preserveAnchor);
+  [[nodiscard]] bool setMeasuredHeight(int row, int cardHeight);
   void updateScrollRange();
   enum class ReflowCause { ResizeFrame, ResizeExact, Environment };
   void reflowAfterResize(ReflowCause cause);
@@ -308,6 +308,7 @@ private:
   std::function<void()> loadMoreAction_;
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
   std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
+  std::function<void(QString, bool)> noticeAction_;
   std::function<void(const std::string &, ReconciliationResult, bool)>
       reconciliationFinishedAction_;
 
@@ -325,11 +326,9 @@ private:
   std::vector<std::string> pendingStructuralCardKeys_;
 
   Mode mode_ = Mode::Following;
-  int trailingSpaceHeight_ = 0;
   bool applying_ = false;
   bool programmaticScroll_ = false;
   bool userActionPending_ = false;
-  bool pausedByComposerGrowth_ = false;
   bool pausedByCommandOutput_ = false;
   bool materializing_ = false;
   bool adjustingScrollRange_ = false;

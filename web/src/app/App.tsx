@@ -382,14 +382,6 @@ function planMarkdown(plan: PlanData): string {
     return rows.join("\n");
 }
 
-const MaximumGenericActivityCharacters = 4096;
-
-function boundedGenericActivity(raw: unknown): string {
-    const rendered = JSON.stringify(raw, null, 2) ?? "";
-    return rendered.length <= MaximumGenericActivityCharacters ? rendered
-        : `${rendered.slice(0, MaximumGenericActivityCharacters)}\n\n[Activity details truncated]`;
-}
-
 function commandMetadata(command: CommandExecutionData): string {
     const values: string[] = [];
     if (command.exitCode !== undefined) values.push(`exit ${command.exitCode}`);
@@ -450,7 +442,7 @@ export function cardCopyContent(card: VisibleCardData): CardCopyContent {
         return {text: joinCopyText([data.revisedPrompt, data.path]), markdown: false};
     }
     const data = card.payload as GenericActivityData;
-    return {text: boundedGenericActivity(data.raw), markdown: false};
+    return {text: data.displayDetail, markdown: false};
 }
 
 export async function writeCardClipboard(content: CardCopyContent): Promise<"copied" | "unsupported" | "failed"> {
@@ -539,7 +531,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as PlanData; title = "Plan"; body = <SafeMarkdown text={planMarkdown(data)} />;
     } else {
         const data = card.payload as GenericActivityData; title = data.type ? humanize(data.type) : "Activity";
-        body = <pre className="generic-activity-data">{boundedGenericActivity(data.raw)}</pre>;
+        body = <pre className="generic-activity-data">{data.displayDetail}</pre>;
     }
     const copyContent = cardCopyContent(card);
     const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "plan", "genericActivity"].includes(card.kind)

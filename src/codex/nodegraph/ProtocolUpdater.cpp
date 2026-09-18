@@ -1757,7 +1757,7 @@ AppliedMessage ProtocolUpdater::applyInto(NodeGraph::WriteAccess &write,
     primary = applyInteraction(write, message);
     break;
   case MessageDisposition::GraphUpdate:
-  case MessageDisposition::TypedUiEffect:
+  case MessageDisposition::NoticeGraphUpdate:
     applyGraphUpdate(write, message, {}, &advancesActivity);
     break;
   case MessageDisposition::IntentionallyStateNeutral:

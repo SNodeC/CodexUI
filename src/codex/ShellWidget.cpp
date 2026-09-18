@@ -25,6 +25,7 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -33,16 +34,19 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QStringList>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTimer>
+#include <QThreadPool>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -54,6 +58,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -68,7 +73,9 @@ using nodegraph::valueMember;
 
 constexpr auto DraftThreadId = "draft:new-thread";
 constexpr int GraphRetryDelayMilliseconds = 8;
+constexpr qint64 PaneCommitBudgetMilliseconds = 8;
 constexpr std::size_t ConversationPresentationRowsPerPass = 8;
+constexpr int ConversationProjectionQuietMilliseconds = 500;
 
 bool containsKind(const nodegraph::GraphChanged &change,
                   std::initializer_list<nodegraph::NodeKind> kinds) {
@@ -115,16 +122,22 @@ struct ThreadPaneRoute {
   bool affected = false;
   bool structural = false;
   std::vector<nodegraph::NodeRef> rows;
+  std::uint64_t graphRevision = 0;
 };
 
 enum class ThreadSelectionOrigin { Graph, User };
 
 ThreadPaneRoute
 threadPaneRoute(const nodegraph::GraphChanged &change,
-                const nodegraph::NodeGraph &graph,
-                middle::ThreadPane::SortCriterion sortCriterion) {
-  if (change.rescanRequired ||
-      containsKind(change, {nodegraph::NodeKind::Connection,
+                const nodegraph::NodeGraph::ReadAccess &access,
+                middle::ThreadPane::SortCriterion sortCriterion,
+                std::uint64_t lastRoutedRevision) {
+  if (lastRoutedRevision != 0 && change.revision != 0 &&
+      change.revision <= lastRoutedRevision)
+    return {};
+  if (change.rescanRequired)
+    return {true, true, {}, access.revision()};
+  if (containsKind(change, {nodegraph::NodeKind::Connection,
                             nodegraph::NodeKind::Interaction}) ||
       std::ranges::any_of(change.removed, [](const auto &node) {
         return node && (node->id().kind == nodegraph::NodeKind::Runtime ||
@@ -132,12 +145,7 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
                         node->id().kind == nodegraph::NodeKind::Thread);
       }))
     return {true, true, {}};
-  const auto read = graph.tryRead();
-  if (!read)
-    return containsKind(change, {nodegraph::NodeKind::Runtime,
-                                 nodegraph::NodeKind::Thread})
-               ? ThreadPaneRoute{true, true, {}}
-               : ThreadPaneRoute{};
+  const auto *read = &access;
   constexpr std::array<std::string_view, 16> Fields{
       "name",
       "localNameOverlay",
@@ -156,6 +164,7 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
       "hydrationState",
       "archived"};
   ThreadPaneRoute route;
+  route.graphRevision = change.revision;
   for (const nodegraph::NodeRef &node : change.affected) {
     if (!node || !read->contains(node))
       continue;
@@ -236,7 +245,7 @@ graphAttachmentDrafts(const nodegraph::NodeState &state) {
 }
 
 bool shellChromeAffected(const nodegraph::GraphChanged &change,
-                         const nodegraph::NodeGraph &graph,
+                         const nodegraph::NodeGraph::ReadAccess &access,
                          const nodegraph::NodeRef &selectedThread) {
   if (change.rescanRequired)
     return true;
@@ -244,9 +253,7 @@ bool shellChromeAffected(const nodegraph::GraphChanged &change,
   if (change.affected.size() + change.removed.size() > MaximumFilteredNodes)
     return true;
 
-  const auto read = graph.tryRead();
-  if (!read)
-    return true;
+  const auto *read = &access;
   const auto directlyAffectsChrome = [&](const auto &node) {
     if (!node)
       return false;
@@ -310,13 +317,11 @@ bool shellChromeAffected(const nodegraph::GraphChanged &change,
 }
 
 bool graphUiFallbackAffected(const nodegraph::GraphChanged &change,
-                             const nodegraph::NodeGraph &graph) {
+                             const nodegraph::NodeGraph::ReadAccess &access) {
   if (change.rescanRequired ||
       containsKind(change, {nodegraph::NodeKind::Notice}))
     return true;
-  const auto read = graph.tryRead();
-  if (!read)
-    return containsKind(change, {nodegraph::NodeKind::Runtime});
+  const auto *read = &access;
   return std::ranges::any_of(change.affected, [&](const auto &node) {
     return node && read->contains(node) &&
            node->id().kind == nodegraph::NodeKind::Runtime &&
@@ -444,7 +449,7 @@ QFrame *statusDot() {
 struct ShellWidget::Impl final {
   Impl(ShellWidget *owner, FrontendSession &session)
       : owner(owner), session(session), uiAdapter(session.nodeGraph()),
-        alive(std::make_shared<bool>(true)) {
+        alive(std::make_shared<std::atomic_bool>(true)) {
     owner->setProperty(
         "conversationPresentationRowsPerPassBudget",
         static_cast<qulonglong>(ConversationPresentationRowsPerPass));
@@ -453,13 +458,14 @@ struct ShellWidget::Impl final {
     const auto token = alive;
     session.setGraphChangedHandler(
         [this, token](const nodegraph::GraphChanged &change) {
-          if (*token)
-            handleGraphChanged(change);
+          if (token->load(std::memory_order_acquire))
+            return handleGraphChanged(change);
+          return true;
         });
-    session.setGraphUiEffectHandler(
-        [this, token](const nodegraph::UiEffect &effect) {
-          if (*token)
-            handleUiEffect(effect);
+    session.setProtocolDiagnosticHandler(
+        [this, token](const nodegraph::ProtocolDiagnostic &diagnostic) {
+          if (token->load(std::memory_order_acquire))
+            handleProtocolDiagnostic(diagnostic);
         });
     bindGraphPanes({});
     observedProviderAuthorityRevision = middleRegion->composer()
@@ -469,9 +475,18 @@ struct ShellWidget::Impl final {
   }
 
   ~Impl() {
-    *alive = false;
+    alive->store(false, std::memory_order_release);
     session.setGraphChangedHandler({});
-    session.setGraphUiEffectHandler({});
+    session.setProtocolDiagnosticHandler({});
+    if (!pendingUiDetachments.empty()) {
+      std::vector<nodegraph::NodeRef> detached;
+      detached.reserve(pendingUiDetachments.size());
+      for (auto &[node, reference] : pendingUiDetachments) {
+        static_cast<void>(node);
+        detached.push_back(std::move(reference));
+      }
+      session.acknowledgeUiDetached(detached);
+    }
     if (qApp)
       qApp->removeEventFilter(owner);
   }
@@ -482,11 +497,28 @@ struct ShellWidget::Impl final {
   void runGraphBinding();
   void bindGraphPanes(nodegraph::NodeRef selectedThread);
   [[nodiscard]] bool refreshConversation();
+  void requestConversationSnapshot();
+  void requestConversationRescan();
+  void requestConversationProjection(bool fullSnapshot);
+  void startConversationSnapshot();
   [[nodiscard]] bool refreshInspector();
+  void requestInspectorProjection(
+      nodegraph::NodeRef thread, ui::InspectorProjection projection,
+      ui::InspectorRowRequest request);
+  void startInspectorProjection();
+  void queueConversationRoute(
+      const ui::NodeGraphUiAdapter::ConversationRoute &route);
+  void clearPendingConversationItems();
+  void popPendingConversationItem();
+  [[nodiscard]] bool
+  uiRetainsTarget(const nodegraph::NodeRef &target) const noexcept;
+  void acknowledgeDetachedTargets();
   void schedulePaneCommit(bool immediate = false);
   void commitPendingPanes();
-  void handleGraphChanged(const nodegraph::GraphChanged &change);
-  void handleUiEffect(const nodegraph::UiEffect &effect);
+  [[nodiscard]] bool
+  handleGraphChanged(const nodegraph::GraphChanged &change);
+  void handleProtocolDiagnostic(
+      const nodegraph::ProtocolDiagnostic &diagnostic);
   void reconcileGraphUiFallback();
   void selectGraphThread(nodegraph::NodeRef thread,
                          ThreadSelectionOrigin origin,
@@ -533,11 +565,13 @@ struct ShellWidget::Impl final {
   ShellWidget *owner = nullptr;
   FrontendSession &session;
   ui::NodeGraphUiAdapter uiAdapter;
-  std::shared_ptr<bool> alive;
+  std::shared_ptr<std::atomic_bool> alive;
   std::optional<NewThreadDraft> newThreadDraft;
   std::string creationDraftCorrelation;
   std::uint64_t nextCreationDraftSerial = 1;
   std::uint64_t observedProviderAuthorityRevision = 0;
+  std::uint64_t routedThreadRevision = 0;
+  std::uint64_t routedConversationRevision = 0;
   std::string selectedGraphThreadId;
   nodegraph::NodeRef boundGraphThread;
   std::map<const nodegraph::Node *, std::pair<nodegraph::NodeRef, QString>>
@@ -553,8 +587,25 @@ struct ShellWidget::Impl final {
   std::vector<nodegraph::NodeRef> pendingThreadRows;
   bool pendingConversation = false;
   bool pendingConversationAuthorityReplacement = false;
+  bool conversationProjectionInFlight = false;
+  bool conversationFullProjectionInFlight = false;
+  bool conversationProjectionRequested = false;
+  bool conversationFullProjectionRequested = false;
+  bool conversationProjectionStartScheduled = false;
+  std::uint64_t conversationProjectionScheduleGeneration = 0;
+  std::optional<middle::ConversationDelta> pendingStructuralConversationDelta;
   std::deque<nodegraph::NodeRef> pendingConversationItems;
+  std::unordered_set<const nodegraph::Node *> pendingConversationItemKeys;
+  std::unordered_map<const nodegraph::Node *, nodegraph::NodeRef>
+      pendingUiDetachments;
   bool pendingInspector = false;
+  bool inspectorProjectionInFlight = false;
+  bool inspectorProjectionRequested = false;
+  std::uint64_t inspectorProjectionGeneration = 0;
+  nodegraph::NodeRef requestedInspectorThread;
+  ui::InspectorProjection requestedInspectorProjection =
+      ui::InspectorProjection::Plan;
+  ui::InspectorRowRequest requestedInspectorRows;
   bool pendingChrome = false;
   bool graphFallbackScheduled = false;
   std::uint64_t lastNoticeSerial = 0;
@@ -588,7 +639,7 @@ void ShellWidget::Impl::buildUi() {
 
   auto *top = new QFrame;
   top->setObjectName(QStringLiteral("topBar"));
-  top->setFixedHeight(64);
+  top->setMinimumHeight(64);
   auto *topLayout = new QHBoxLayout(top);
   topLayout->setContentsMargins(18, 0, 18, 0);
   topLayout->setSpacing(12);
@@ -596,7 +647,7 @@ void ShellWidget::Impl::buildUi() {
 
   restoreSidebarButton = new QPushButton(QStringLiteral("Show threads"));
   restoreSidebarButton->setProperty("kind", "subtle");
-  restoreSidebarButton->setFixedHeight(32);
+  restoreSidebarButton->setMinimumHeight(32);
   restoreSidebarButton->hide();
   topLayout->addSpacing(12);
   topLayout->addWidget(restoreSidebarButton);
@@ -610,14 +661,14 @@ void ShellWidget::Impl::buildUi() {
 
   restoreInspectorButton = new QPushButton(QStringLiteral("Show inspector"));
   restoreInspectorButton->setProperty("kind", "subtle");
-  restoreInspectorButton->setFixedHeight(32);
+  restoreInspectorButton->setMinimumHeight(32);
   restoreInspectorButton->hide();
   requestButton = new QPushButton;
   requestButton->setProperty("kind", "request");
-  requestButton->setFixedHeight(32);
+  requestButton->setMinimumHeight(32);
   requestButton->hide();
   controllerButton = new QPushButton(QStringLiteral("Claim control"));
-  controllerButton->setFixedHeight(32);
+  controllerButton->setMinimumHeight(32);
   topLayout->addWidget(restoreInspectorButton);
   topLayout->addWidget(requestButton);
   topLayout->addWidget(controllerButton);
@@ -630,7 +681,7 @@ void ShellWidget::Impl::buildUi() {
   connectionButton->setProperty("kind", "subtle");
   connectionButton->setProperty("codexChevron", true);
   connectionButton->setPopupMode(QToolButton::InstantPopup);
-  connectionButton->setFixedHeight(32);
+  connectionButton->setMinimumHeight(32);
   auto *connectionMenu = new QMenu(connectionButton);
   connectionMenu->addAction(QStringLiteral("Configure..."), owner, [this] {
     nlohmann::json settings = nlohmann::json::object();
@@ -673,19 +724,19 @@ void ShellWidget::Impl::buildUi() {
   connectAction =
       connectionMenu->addAction(QStringLiteral("Connect"), owner, [this] {
         static_cast<void>(sendRuntimeAction(
-            {nodegraph::RuntimeActionKind::Connect},
+            {nodegraph::RuntimeActionKind::Connect, {}, {}, {}, {}},
             QStringLiteral("Connect request was not admitted; try again.")));
       });
   disconnectAction =
       connectionMenu->addAction(QStringLiteral("Disconnect"), owner, [this] {
         static_cast<void>(sendRuntimeAction(
-            {nodegraph::RuntimeActionKind::Disconnect},
+            {nodegraph::RuntimeActionKind::Disconnect, {}, {}, {}, {}},
             QStringLiteral("Disconnect request was not admitted; try again.")));
       });
   reconnectAction =
       connectionMenu->addAction(QStringLiteral("Reconnect"), owner, [this] {
         static_cast<void>(sendRuntimeAction(
-            {nodegraph::RuntimeActionKind::Reconnect},
+            {nodegraph::RuntimeActionKind::Reconnect, {}, {}, {}, {}},
             QStringLiteral("Reconnect request was not admitted; try again.")));
       });
   connectionButton->setMenu(connectionMenu);
@@ -703,7 +754,7 @@ void ShellWidget::Impl::buildUi() {
 
   auto *statusBar = new QFrame;
   statusBar->setObjectName(QStringLiteral("customStatusBar"));
-  statusBar->setFixedHeight(40);
+  statusBar->setMinimumHeight(40);
   auto *statusLayout = new QHBoxLayout(statusBar);
   statusLayout->setContentsMargins(18, 0, 24, 0);
   statusLayout->setSpacing(10);
@@ -726,7 +777,8 @@ void ShellWidget::Impl::buildUi() {
   attribution->setOpenExternalLinks(true);
   attribution->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
                                        Qt::LinksAccessibleByKeyboard);
-  attribution->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  attribution->setMinimumWidth(0);
+  attribution->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   statusLayout->addWidget(attribution);
   statusLayout->addStretch();
   auto *statusCaption = makeStatusLabel(
@@ -747,7 +799,7 @@ void ShellWidget::Impl::connectUi() {
   threadActions.newThread = [this] { beginNewThreadDialog(); };
   threadActions.loadMore = [this] {
     static_cast<void>(sendRuntimeAction(
-        {nodegraph::RuntimeActionKind::LoadMoreThreads},
+        {nodegraph::RuntimeActionKind::LoadMoreThreads, {}, {}, {}, {}},
         QStringLiteral("More threads could not be requested; try again.")));
   };
   threadActions.hide = [this] { middleRegion->showSidebar(false); };
@@ -757,7 +809,8 @@ void ShellWidget::Impl::connectUi() {
   threadActions.reload = [this](const nodegraph::NodeRef &thread) {
     if (!thread)
       return;
-    nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Reload};
+    nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Reload,
+                                 {}, {}, {}, {}};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("Thread reload was not admitted; try again.")));
@@ -793,7 +846,8 @@ void ShellWidget::Impl::connectUi() {
     }
     nodegraph::NodeAction action{thread,
                                  archived ? nodegraph::NodeActionKind::Unarchive
-                                          : nodegraph::NodeActionKind::Archive};
+                                          : nodegraph::NodeActionKind::Archive,
+                                 {}, {}, {}, {}};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("Archive request was not admitted; try again.")));
@@ -816,7 +870,8 @@ void ShellWidget::Impl::connectUi() {
       return;
     }
     nodegraph::NodeAction action{turn,
-                                 nodegraph::NodeActionKind::InterruptTurn};
+                                 nodegraph::NodeActionKind::InterruptTurn,
+                                 {}, {}, {}, {}};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("Stop request was not admitted; try again.")));
@@ -846,7 +901,8 @@ void ShellWidget::Impl::connectUi() {
     if (info->historyRequestPending || !info->providerHasMore)
       return;
     nodegraph::NodeAction action{boundGraphThread,
-                                 nodegraph::NodeActionKind::LoadHistory};
+                                 nodegraph::NodeActionKind::LoadHistory,
+                                 {}, {}, {}, {}};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("History request was not admitted; try again.")));
@@ -855,7 +911,8 @@ void ShellWidget::Impl::connectUi() {
       [this](nodegraph::NodeRef localPrompt) {
         nodegraph::NodeAction action{
             std::move(localPrompt),
-            nodegraph::NodeActionKind::PromptMaterialized};
+            nodegraph::NodeActionKind::PromptMaterialized,
+            {}, {}, {}, {}};
         return sendNodeAction(std::move(action), {});
       });
   middleRegion->conversation().setPromptRecoveryAction(
@@ -927,7 +984,8 @@ void ShellWidget::Impl::connectUi() {
     read.reset();
     static_cast<void>(sendRuntimeAction(
         {controller ? nodegraph::RuntimeActionKind::ReleaseController
-                    : nodegraph::RuntimeActionKind::ClaimController},
+                    : nodegraph::RuntimeActionKind::ClaimController,
+         {}, {}, {}, {}},
         QStringLiteral("Controller request was not admitted; try again.")));
   });
   qApp->installEventFilter(owner);
@@ -944,7 +1002,7 @@ void ShellWidget::Impl::scheduleGraphBinding(bool immediate) {
   const auto token = alive;
   const int delay = immediate ? 0 : GraphRetryDelayMilliseconds;
   QTimer::singleShot(delay, owner, [this, token] {
-    if (!*token)
+    if (!token->load(std::memory_order_acquire))
       return;
     graphBindingScheduled = false;
     runGraphBinding();
@@ -970,7 +1028,8 @@ void ShellWidget::Impl::runGraphBinding() {
   bindGraphPanes(std::move(selectedThread));
   if (reboundSelectedThread) {
     nodegraph::NodeAction action{boundGraphThread,
-                                 nodegraph::NodeActionKind::Hydrate};
+                                 nodegraph::NodeActionKind::Hydrate,
+                                 {}, {}, {}, {}};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral(
@@ -987,12 +1046,17 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
     middleRegion->conversation().beginThreadSelection(
         selectedThread->id().canonical, selectedThread->incarnation());
   pendingConversationAuthorityReplacement = false;
+  pendingStructuralConversationDelta.reset();
   boundGraphThread = std::move(selectedThread);
+  routedThreadRevision = 0;
+  routedConversationRevision = 0;
   graphPanesBound = true;
   pendingConversation = false;
-  pendingConversationItems.clear();
-  if (auto threads = uiAdapter.threads(boundGraphThread)) {
+  clearPendingConversationItems();
+  std::uint64_t threadRevision = 0;
+  if (auto threads = uiAdapter.threads(boundGraphThread, &threadRevision)) {
     middleRegion->threads().refresh(*threads);
+    routedThreadRevision = threadRevision;
   }
   const bool conversationReady = refreshConversation();
   pendingInspector = false;
@@ -1017,6 +1081,7 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
 bool ShellWidget::Impl::refreshConversation() {
   if (!boundGraphThread) {
     static_cast<void>(middleRegion->conversation().reconcile({}));
+    routedConversationRevision = 0;
     return true;
   }
 
@@ -1041,15 +1106,150 @@ bool ShellWidget::Impl::refreshConversation() {
     return true;
   }
 
-  auto snapshot = uiAdapter.conversation(boundGraphThread);
-  if (!snapshot)
-    return false;
   middleRegion->conversation().setEmptyMessage(
       QStringLiteral("No materialized activity."));
-  const middle::ConversationView::SnapshotDisposition disposition =
-      middleRegion->conversation().reconcileStaged(std::move(*snapshot));
-  return disposition !=
-         middle::ConversationView::SnapshotDisposition::Retryable;
+  requestConversationSnapshot();
+  return true;
+}
+
+void ShellWidget::Impl::requestConversationSnapshot() {
+  requestConversationProjection(true);
+}
+
+void ShellWidget::Impl::requestConversationRescan() {
+  const bool needsSnapshot =
+      !boundGraphThread ||
+      middleRegion->conversation().presentedThreadId() !=
+          boundGraphThread->id().canonical ||
+      routedConversationRevision == 0;
+  requestConversationProjection(needsSnapshot);
+}
+
+void ShellWidget::Impl::requestConversationProjection(bool fullSnapshot) {
+  conversationProjectionRequested = true;
+  conversationFullProjectionRequested |= fullSnapshot;
+  ++conversationProjectionScheduleGeneration;
+  if (conversationProjectionInFlight)
+    return;
+  conversationProjectionStartScheduled = true;
+  const auto token = alive;
+  const std::uint64_t generation = conversationProjectionScheduleGeneration;
+  QTimer::singleShot(ConversationProjectionQuietMilliseconds,
+                     Qt::PreciseTimer, owner, [this, token, generation] {
+    if (!token->load(std::memory_order_acquire))
+      return;
+    if (generation != conversationProjectionScheduleGeneration)
+      return;
+    conversationProjectionStartScheduled = false;
+    startConversationSnapshot();
+  });
+}
+
+void ShellWidget::Impl::startConversationSnapshot() {
+  if (!boundGraphThread)
+    return;
+  if (conversationProjectionInFlight) {
+    conversationProjectionRequested = true;
+    return;
+  }
+  const auto info = uiAdapter.conversationInfo(boundGraphThread);
+  if (!info || info->historyRequestPending) {
+    if (info)
+      middleRegion->conversation().setHistoryRequestPending(
+          boundGraphThread->id().canonical, info->historyRequestPending);
+    conversationProjectionRequested = true;
+    return;
+  }
+  middleRegion->conversation().setHistoryRequestPending(
+      boundGraphThread->id().canonical, false);
+  middleRegion->conversation().setProviderHasMore(
+      boundGraphThread->id().canonical, info->providerHasMore);
+  conversationProjectionInFlight = true;
+  conversationProjectionRequested = false;
+  const bool fullSnapshot = conversationFullProjectionRequested;
+  conversationFullProjectionRequested = false;
+  conversationFullProjectionInFlight = fullSnapshot;
+  const std::uint64_t afterRevision = routedConversationRevision;
+  const nodegraph::NodeRef requestedThread = boundGraphThread;
+  const ui::NodeGraphUiAdapter adapter = uiAdapter;
+  const auto token = alive;
+  QThreadPool::globalInstance()->start(
+      [this, requestedThread, adapter, token, fullSnapshot, afterRevision] {
+        std::uint64_t graphRevision = 0;
+        auto snapshot =
+            fullSnapshot
+                ? adapter.conversation(requestedThread, &graphRevision)
+                : std::optional<middle::ConversationSnapshot>{};
+        auto delta =
+            fullSnapshot
+                ? std::optional<middle::ConversationDelta>{}
+                : adapter.conversationDeltaSince(
+                      requestedThread, afterRevision, &graphRevision);
+        QMetaObject::invokeMethod(
+            qApp,
+            [this, requestedThread, graphRevision,
+             snapshot = std::move(snapshot), delta = std::move(delta),
+             fullSnapshot, token]() mutable {
+              if (!token->load(std::memory_order_acquire))
+                return;
+              conversationProjectionInFlight = false;
+              conversationFullProjectionInFlight = false;
+              if (requestedThread != boundGraphThread) {
+                if (conversationProjectionRequested)
+                  requestConversationSnapshot();
+                return;
+              }
+              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta)) {
+                conversationProjectionRequested = true;
+                conversationFullProjectionRequested |= fullSnapshot;
+                QTimer::singleShot(
+                    GraphRetryDelayMilliseconds, owner,
+                    [this] { requestConversationProjection(false); });
+                return;
+              }
+              const auto currentInfo =
+                  uiAdapter.conversationInfo(requestedThread);
+              if (!currentInfo || currentInfo->historyRequestPending) {
+                conversationProjectionRequested = true;
+                return;
+              }
+              if (conversationProjectionRequested) {
+                requestConversationProjection(false);
+                return;
+              }
+
+              // A complete snapshot initializes or replaces authority. A
+              // rescan uses graph revision stamps to project only changed
+              // rows, keeping the full graph scan off the QWidget thread.
+              pendingConversation = false;
+              pendingConversationAuthorityReplacement = false;
+              pendingStructuralConversationDelta.reset();
+              clearPendingConversationItems();
+              if (fullSnapshot) {
+                const auto disposition =
+                    middleRegion->conversation().reconcileStaged(
+                        std::move(*snapshot));
+                if (disposition != middle::ConversationView::
+                                       SnapshotDisposition::Retryable) {
+                  routedConversationRevision = graphRevision;
+                } else {
+                  conversationProjectionRequested = true;
+                  conversationFullProjectionRequested = true;
+                }
+              } else {
+                middleRegion->conversation().setProviderHasMore(
+                    requestedThread->id().canonical, delta->providerHasMore);
+                if (!delta->rows.empty() || !delta->removals.empty()) {
+                  pendingStructuralConversationDelta = std::move(*delta);
+                  pendingConversation = true;
+                  schedulePaneCommit();
+                }
+              }
+              if (conversationProjectionRequested)
+                requestConversationProjection(false);
+            },
+            Qt::QueuedConnection);
+      });
 }
 
 bool ShellWidget::Impl::refreshInspector() {
@@ -1083,12 +1283,168 @@ bool ShellWidget::Impl::refreshInspector() {
     if (!info->readyForDisplay)
       inspectorThread.reset();
   }
-  if (auto snapshot = uiAdapter.inspector(inspectorThread, *projection,
-                                          pane.rowRequest(*projection))) {
-    pane.refresh(*snapshot, *projection);
-    return true;
+  requestInspectorProjection(inspectorThread, *projection,
+                             pane.rowRequest(*projection));
+  return true;
+}
+
+void ShellWidget::Impl::requestInspectorProjection(
+    nodegraph::NodeRef thread, ui::InspectorProjection projection,
+    ui::InspectorRowRequest request) {
+  requestedInspectorThread = std::move(thread);
+  requestedInspectorProjection = projection;
+  requestedInspectorRows = std::move(request);
+  inspectorProjectionRequested = true;
+  ++inspectorProjectionGeneration;
+  if (!inspectorProjectionInFlight)
+    startInspectorProjection();
+}
+
+void ShellWidget::Impl::startInspectorProjection() {
+  if (!inspectorProjectionRequested || inspectorProjectionInFlight)
+    return;
+  inspectorProjectionRequested = false;
+  inspectorProjectionInFlight = true;
+  const std::uint64_t generation = inspectorProjectionGeneration;
+  const nodegraph::NodeRef thread = requestedInspectorThread;
+  const ui::InspectorProjection projection = requestedInspectorProjection;
+  const ui::InspectorRowRequest request = requestedInspectorRows;
+  const ui::NodeGraphUiAdapter adapter = uiAdapter;
+  const auto token = alive;
+  QThreadPool::globalInstance()->start(
+      [this, thread, projection, request, adapter, token, generation] {
+        auto snapshot = adapter.inspector(thread, projection, request);
+        if (snapshot)
+          middle::InspectorPane::prepareMarkdown(*snapshot);
+        QMetaObject::invokeMethod(
+            qApp,
+            [this, thread, projection, snapshot = std::move(snapshot), token,
+             generation]() mutable {
+              if (!token->load(std::memory_order_acquire))
+                return;
+              inspectorProjectionInFlight = false;
+              middle::InspectorPane &pane = middleRegion->inspector();
+              const std::optional currentProjection = pane.currentProjection();
+              const bool current = generation == inspectorProjectionGeneration &&
+                                   thread == boundGraphThread &&
+                                   currentProjection &&
+                                   *currentProjection == projection;
+              if (current && snapshot) {
+                pane.refresh(*snapshot, projection);
+              } else if (current && !snapshot) {
+                inspectorProjectionRequested = true;
+              }
+              if (inspectorProjectionRequested)
+                startInspectorProjection();
+            },
+            Qt::QueuedConnection);
+      });
+}
+
+void ShellWidget::Impl::queueConversationRoute(
+    const ui::NodeGraphUiAdapter::ConversationRoute &route) {
+  if (route.historyRequestPending && boundGraphThread)
+    middleRegion->conversation().setHistoryRequestPending(
+        boundGraphThread->id().canonical, *route.historyRequestPending);
+  if (route.providerHasMore && boundGraphThread)
+    middleRegion->conversation().setProviderHasMore(
+        boundGraphThread->id().canonical, *route.providerHasMore);
+  if (route.historyRequestPending && !*route.historyRequestPending &&
+      conversationProjectionRequested)
+    requestConversationSnapshot();
+  if (route.authorityReplacement) {
+    pendingConversation = false;
+    pendingConversationAuthorityReplacement = false;
+    pendingStructuralConversationDelta.reset();
+    clearPendingConversationItems();
+    requestConversationSnapshot();
+    return;
   }
-  return false;
+  const bool snapshotNeedsFull =
+      boundGraphThread &&
+      (middleRegion->conversation().presentedThreadId() !=
+           boundGraphThread->id().canonical ||
+       middleRegion->conversation().structuralStagingActive() ||
+       conversationFullProjectionInFlight ||
+       conversationFullProjectionRequested);
+  const bool snapshotOwnsStructure =
+      boundGraphThread &&
+      (snapshotNeedsFull ||
+       conversationProjectionRequested || conversationProjectionInFlight ||
+       conversationProjectionStartScheduled);
+  if (snapshotOwnsStructure && route.affected) {
+    pendingStructuralConversationDelta.reset();
+    clearPendingConversationItems();
+    requestConversationProjection(snapshotNeedsFull);
+    return;
+  }
+  routedConversationRevision =
+      std::max(routedConversationRevision, route.graphRevision);
+  if (route.structural && !route.items.empty()) {
+    pendingConversation = true;
+    pendingConversationAuthorityReplacement = false;
+  }
+  if (route.affected && !pendingConversationAuthorityReplacement) {
+    for (const nodegraph::NodeRef &item : route.items) {
+      if (item && pendingConversationItemKeys.insert(item.get()).second)
+        pendingConversationItems.push_back(item);
+    }
+  }
+}
+
+void ShellWidget::Impl::clearPendingConversationItems() {
+  pendingConversationItems.clear();
+  pendingConversationItemKeys.clear();
+}
+
+void ShellWidget::Impl::popPendingConversationItem() {
+  pendingConversationItemKeys.erase(pendingConversationItems.front().get());
+  pendingConversationItems.pop_front();
+}
+
+bool ShellWidget::Impl::uiRetainsTarget(
+    const nodegraph::NodeRef &target) const noexcept {
+  if (!target)
+    return false;
+  if (boundGraphThread == target || retainedRenames.contains(target.get()) ||
+      localPendingRequests.contains(target))
+    return true;
+  if (std::ranges::find(pendingThreadRows, target) != pendingThreadRows.end() ||
+      pendingConversationItemKeys.contains(target.get()))
+    return true;
+  if (pendingStructuralConversationDelta) {
+    const middle::ConversationDelta &delta = *pendingStructuralConversationDelta;
+    if (std::ranges::any_of(delta.presentations, [&target](const auto &card) {
+          return card.target == target;
+        }) ||
+        std::ranges::any_of(delta.rows, [&target](const auto &row) {
+          return row.placement.card.target == target;
+        }) ||
+        std::ranges::find(delta.removals, target) != delta.removals.end() ||
+        std::ranges::any_of(delta.materializedPrompts,
+                            [&target](const auto &prompt) {
+                              return prompt.prompt == target;
+                            }))
+      return true;
+  }
+  return middleRegion->threads().retainsTarget(target) ||
+         middleRegion->conversation().retainsTarget(target) ||
+         middleRegion->inspector().retainsTarget(target);
+}
+
+void ShellWidget::Impl::acknowledgeDetachedTargets() {
+  std::vector<nodegraph::NodeRef> detached;
+  for (auto iterator = pendingUiDetachments.begin();
+       iterator != pendingUiDetachments.end();) {
+    if (uiRetainsTarget(iterator->second)) {
+      ++iterator;
+      continue;
+    }
+    detached.push_back(std::move(iterator->second));
+    iterator = pendingUiDetachments.erase(iterator);
+  }
+  if (!detached.empty())
+    session.acknowledgeUiDetached(detached);
 }
 
 void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
@@ -1098,7 +1454,7 @@ void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
   const auto token = alive;
   QTimer::singleShot(immediate ? 0 : 16, Qt::PreciseTimer, owner,
                      [this, token] {
-                       if (!*token)
+                       if (!token->load(std::memory_order_acquire))
                          return;
                        paneCommitScheduled = false;
                        commitPendingPanes();
@@ -1106,13 +1462,20 @@ void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
 }
 
 void ShellWidget::Impl::commitPendingPanes() {
+  QElapsedTimer commitTiming;
+  commitTiming.start();
+  const auto hasFrameBudget = [&] {
+    return commitTiming.elapsed() < PaneCommitBudgetMilliseconds;
+  };
   owner->setProperty("paneCommitInvocations",
                      owner->property("paneCommitInvocations").toULongLong() +
                          1);
   owner->setProperty("conversationPresentationRowsInLastPass", qulonglong{0});
   bool retry = false;
   bool waitingForConversationStage = false;
-  if (!pendingThreadPane && !pendingThreadRows.empty()) {
+  middleRegion->inspector().flushProtocolPresentation();
+  if (hasFrameBudget() && !pendingThreadPane &&
+      !pendingThreadRows.empty()) {
     std::vector<nodegraph::NodeRef> rows = std::move(pendingThreadRows);
     pendingThreadRows.clear();
     bool structuralFallback = false;
@@ -1134,10 +1497,13 @@ void ShellWidget::Impl::commitPendingPanes() {
           owner->property("targetedThreadPaneRoutes").toULongLong() + 1);
     }
   }
-  if (pendingThreadPane) {
-    if (auto threads = uiAdapter.threads(boundGraphThread)) {
+  if (hasFrameBudget() && pendingThreadPane) {
+    std::uint64_t graphRevision = 0;
+    if (auto threads =
+            uiAdapter.threads(boundGraphThread, &graphRevision)) {
       pendingThreadPane = false;
       pendingThreadRows.clear();
+      routedThreadRevision = graphRevision;
       ++threadPaneRoutes;
       owner->setProperty("threadPaneRoutes",
                          static_cast<qulonglong>(threadPaneRoutes));
@@ -1146,7 +1512,8 @@ void ShellWidget::Impl::commitPendingPanes() {
       retry = true;
     }
   }
-  if (!pendingConversation && !pendingConversationItems.empty() &&
+  if (hasFrameBudget() && !pendingConversation &&
+      !pendingConversationItems.empty() &&
       boundGraphThread) {
     const std::size_t requestedRows = std::min(
         ConversationPresentationRowsPerPass, pendingConversationItems.size());
@@ -1165,11 +1532,18 @@ void ShellWidget::Impl::commitPendingPanes() {
       appliedRows = 0;
     if (applied) {
       for (std::size_t index = 0; index < requestedRows; ++index)
-        pendingConversationItems.pop_front();
+        popPendingConversationItem();
     } else if (projected) {
-      pendingConversation = true;
-      pendingConversationAuthorityReplacement = true;
-      pendingConversationItems.clear();
+      auto structural =
+          uiAdapter.conversationDelta(boundGraphThread, items, true);
+      if (structural) {
+        pendingStructuralConversationDelta = std::move(*structural);
+        pendingConversation = true;
+        for (std::size_t index = 0; index < requestedRows; ++index)
+          popPendingConversationItem();
+      } else {
+        retry = true;
+      }
     } else {
       retry = true;
     }
@@ -1199,19 +1573,14 @@ void ShellWidget::Impl::commitPendingPanes() {
                   .toULongLong() +
               1);
   }
-  if (pendingConversation && !pendingConversationAuthorityReplacement &&
-      !pendingConversationItems.empty() && boundGraphThread &&
+  if (hasFrameBudget() && pendingStructuralConversationDelta &&
       !middleRegion->conversation().structuralStagingActive()) {
-    std::vector<nodegraph::NodeRef> items(pendingConversationItems.begin(),
-                                          pendingConversationItems.end());
-    auto delta = uiAdapter.conversationDelta(boundGraphThread, items, true);
-    if (!delta) {
-      retry = true;
-    } else if (middleRegion->conversation().applyConversationDelta(
-                   std::move(*delta))) {
-      pendingConversation = false;
+    middle::ConversationDelta delta =
+        std::move(*pendingStructuralConversationDelta);
+    pendingStructuralConversationDelta.reset();
+    if (middleRegion->conversation().applyConversationDelta(std::move(delta))) {
+      pendingConversation = !pendingConversationItems.empty();
       pendingConversationAuthorityReplacement = false;
-      pendingConversationItems.clear();
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
                          static_cast<qulonglong>(conversationRoutes));
@@ -1219,15 +1588,40 @@ void ShellWidget::Impl::commitPendingPanes() {
           "targetedConversationRoutes",
           owner->property("targetedConversationRoutes").toULongLong() + 1);
     } else {
-      pendingConversationAuthorityReplacement = true;
-      pendingConversationItems.clear();
+      pendingConversation = false;
+      pendingConversationAuthorityReplacement = false;
+      clearPendingConversationItems();
+      requestConversationRescan();
     }
   }
-  if (pendingConversation && pendingConversationAuthorityReplacement) {
+  if (hasFrameBudget() && pendingConversation &&
+      !pendingConversationAuthorityReplacement &&
+      !pendingStructuralConversationDelta &&
+      !pendingConversationItems.empty() && boundGraphThread &&
+      !middleRegion->conversation().structuralStagingActive()) {
+    const std::size_t requestedRows = pendingConversationItems.size();
+    std::vector<nodegraph::NodeRef> items;
+    items.reserve(requestedRows);
+    auto pending = pendingConversationItems.begin();
+    for (std::size_t index = 0; index < requestedRows; ++index, ++pending)
+      items.push_back(*pending);
+    auto delta = uiAdapter.conversationDelta(boundGraphThread, items, true);
+    if (delta) {
+      pendingStructuralConversationDelta = std::move(*delta);
+      for (std::size_t index = 0; index < requestedRows; ++index)
+        popPendingConversationItem();
+    } else {
+      retry = true;
+    }
+  }
+  if (hasFrameBudget() && pendingConversation &&
+      pendingConversationAuthorityReplacement &&
+      !middleRegion->conversation().structuralStagingActive()) {
     const bool authorityReplacement = pendingConversationAuthorityReplacement;
     pendingConversation = false;
     pendingConversationAuthorityReplacement = false;
-    pendingConversationItems.clear();
+    pendingStructuralConversationDelta.reset();
+    clearPendingConversationItems();
     if (refreshConversation()) {
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
@@ -1240,14 +1634,9 @@ void ShellWidget::Impl::commitPendingPanes() {
   }
   waitingForConversationStage =
       middleRegion->conversation().structuralStagingActive() &&
-      (pendingConversation || !pendingConversationItems.empty());
-  std::optional<ui::PendingRequestsSummary> projectedRequests;
-  if (pendingChrome) {
-    projectedRequests = pendingRequestSummary();
-    if (!projectedRequests)
-      retry = true;
-  }
-  if (pendingInspector) {
+      (pendingConversation || pendingStructuralConversationDelta ||
+       !pendingConversationItems.empty());
+  if (hasFrameBudget() && pendingInspector) {
     pendingInspector = false;
     if (refreshInspector()) {
       ++inspectorRoutes;
@@ -1258,24 +1647,35 @@ void ShellWidget::Impl::commitPendingPanes() {
       retry = true;
     }
   }
-  if (pendingChrome && projectedRequests) {
-    pendingChrome = false;
-    render(&*projectedRequests);
+  if (hasFrameBudget() && pendingChrome) {
+    const std::optional<ui::PendingRequestsSummary> projectedRequests =
+        pendingRequestSummary();
+    if (projectedRequests) {
+      pendingChrome = false;
+      render(&*projectedRequests);
+    } else {
+      retry = true;
+    }
   }
+  acknowledgeDetachedTargets();
   if (retry || pendingThreadPane || !pendingThreadRows.empty() ||
       (!waitingForConversationStage &&
-       (pendingConversation || !pendingConversationItems.empty())) ||
+       (pendingConversation || pendingStructuralConversationDelta ||
+        !pendingConversationItems.empty())) ||
       pendingInspector || pendingChrome)
     schedulePaneCommit();
 }
 
-void ShellWidget::Impl::handleGraphChanged(
+bool ShellWidget::Impl::handleGraphChanged(
     const nodegraph::GraphChanged &change) {
-  const bool requestsChanged = uiAdapter.inspectorAffected(
-      change, boundGraphThread, ui::InspectorProjection::Requests);
+  auto read = session.nodeGraph().tryRead();
+  if (!read)
+    return false;
+  const bool requestsChanged =
+      uiAdapter.inspectorAffected(change, boundGraphThread,
+                                  ui::InspectorProjection::Requests, *read);
   const bool updateChrome =
-      requestsChanged ||
-      shellChromeAffected(change, session.nodeGraph(), boundGraphThread);
+      requestsChanged || shellChromeAffected(change, *read, boundGraphThread);
   const bool providerReset = change.providerAuthorityRevision != 0;
   const bool authorityAdvanced =
       change.providerAuthorityRevision > observedProviderAuthorityRevision;
@@ -1284,6 +1684,7 @@ void ShellWidget::Impl::handleGraphChanged(
   for (const nodegraph::NodeRef &removed : change.removed) {
     if (!removed)
       continue;
+    pendingUiDetachments.insert_or_assign(removed.get(), removed);
     if (removed->id().kind == nodegraph::NodeKind::Thread) {
       middleRegion->conversation().forgetThreadPresentation(
           removed->id().canonical, removed->incarnation());
@@ -1296,9 +1697,7 @@ void ShellWidget::Impl::handleGraphChanged(
   }
   bool staleBoundThread = false;
   if (authorityAdvanced && change.rescanRequired && boundGraphThread) {
-    auto read = session.nodeGraph().tryRead();
-    staleBoundThread =
-        read && read->find(boundGraphThread->id()) != boundGraphThread;
+    staleBoundThread = read->find(boundGraphThread->id()) != boundGraphThread;
   }
   const nodegraph::NodeRef removedBoundThread =
       boundGraphThread &&
@@ -1307,11 +1706,14 @@ void ShellWidget::Impl::handleGraphChanged(
                    change.removed.end())
           ? boundGraphThread
           : nodegraph::NodeRef{};
-  const ui::NodeGraphUiAdapter::ConversationRoute conversation =
-      uiAdapter.conversationRoute(change, boundGraphThread);
-  if (conversation.historyRequestPending && boundGraphThread)
-    middleRegion->conversation().setHistoryRequestPending(
-        boundGraphThread->id().canonical, *conversation.historyRequestPending);
+  if (change.rescanRequired) {
+    if (boundGraphThread) {
+      requestConversationRescan();
+    }
+  } else {
+    queueConversationRoute(uiAdapter.conversationRoute(
+        change, boundGraphThread, *read, routedConversationRevision));
+  }
   middle::InspectorPane &inspectorPane = middleRegion->inspector();
   const std::optional<ui::InspectorProjection> inspectorProjection =
       inspectorPane.isVisible() ? inspectorPane.currentProjection()
@@ -1319,8 +1721,9 @@ void ShellWidget::Impl::handleGraphChanged(
   const ThreadPaneRoute threads =
       requestsChanged && !change.childListsChanged.empty()
           ? ThreadPaneRoute{true, true, {}}
-          : threadPaneRoute(change, session.nodeGraph(),
-                            middleRegion->threads().currentSortCriterion());
+          : threadPaneRoute(change, *read,
+                            middleRegion->threads().currentSortCriterion(),
+                            routedThreadRevision);
   if (threads.structural) {
     pendingThreadPane = true;
     pendingThreadRows.clear();
@@ -1330,37 +1733,20 @@ void ShellWidget::Impl::handleGraphChanged(
           pendingThreadRows.end())
         pendingThreadRows.push_back(thread);
   }
-  if (conversation.authorityReplacement) {
-    pendingConversation = true;
-    pendingConversationAuthorityReplacement = true;
-    pendingConversationItems.clear();
-  } else {
-    if (conversation.structural) {
-      pendingConversation = true;
-      pendingConversationAuthorityReplacement = false;
-    }
-    if (conversation.affected && !pendingConversationAuthorityReplacement) {
-      for (const nodegraph::NodeRef &item : conversation.items)
-        if (std::ranges::find(pendingConversationItems, item) ==
-            pendingConversationItems.end())
-          pendingConversationItems.push_back(item);
-      if (pendingConversationItems.size() >
-          ui::NodeGraphUiAdapter::MaximumConversationDeltaItems) {
-        pendingConversation = true;
-        pendingConversationAuthorityReplacement = true;
-        pendingConversationItems.clear();
-      }
-    }
-  }
+  if (!threads.structural)
+    routedThreadRevision =
+        std::max(routedThreadRevision, threads.graphRevision);
   pendingInspector =
       pendingInspector ||
       (inspectorProjection &&
        (*inspectorProjection == ui::InspectorProjection::Requests
             ? requestsChanged
-            : uiAdapter.inspectorAffected(change, boundGraphThread,
-                                          *inspectorProjection)));
+            : uiAdapter.inspectorAffected(
+                  change, boundGraphThread, *inspectorProjection, *read)));
   pendingChrome = pendingChrome || updateChrome;
-  if (graphUiFallbackAffected(change, session.nodeGraph()))
+  const bool fallbackAffected = graphUiFallbackAffected(change, *read);
+  read.reset();
+  if (fallbackAffected)
     reconcileGraphUiFallback();
 
   // Promotion may already have rebound a removed optimistic thread. Otherwise
@@ -1373,13 +1759,13 @@ void ShellWidget::Impl::handleGraphChanged(
     bindGraphPanes({});
   }
 
-  // Retirement must not outlive presentation references. Ordinary state
-  // traffic is merged to one old-UI reconciliation per display interval.
-  if (!change.removed.empty() || authorityAdvanced)
-    commitPendingPanes();
-  else if (pendingThreadPane || !pendingThreadRows.empty() ||
-           pendingConversation || !pendingConversationItems.empty() ||
-           pendingInspector || pendingChrome)
+  // The graph retains removed identities until commitPendingPanes has
+  // detached every presentation reference and acknowledges that lifetime.
+  // Visible reconciliation therefore remains frame-coalesced for removals as
+  // well as ordinary state traffic.
+  if (pendingThreadPane || !pendingThreadRows.empty() || pendingConversation ||
+      !pendingConversationItems.empty() || pendingInspector || pendingChrome ||
+      !pendingUiDetachments.empty())
     schedulePaneCommit();
   if (authorityAdvanced)
     observedProviderAuthorityRevision = std::max(
@@ -1403,6 +1789,7 @@ void ShellWidget::Impl::handleGraphChanged(
       });
   if (selectedChanged)
     scheduleGraphBinding();
+  return true;
 }
 
 void ShellWidget::Impl::reconcileGraphUiFallback() {
@@ -1453,7 +1840,7 @@ void ShellWidget::Impl::reconcileGraphUiFallback() {
       graphFallbackScheduled = true;
       const auto token = alive;
       QTimer::singleShot(GraphRetryDelayMilliseconds, owner, [this, token] {
-        if (!*token)
+        if (!token->load(std::memory_order_acquire))
           return;
         graphFallbackScheduled = false;
         reconcileGraphUiFallback();
@@ -1536,43 +1923,10 @@ void ShellWidget::Impl::selectGraphThread(nodegraph::NodeRef thread,
     hydrateSelectedThreadIfNeeded(std::move(thread));
 }
 
-void ShellWidget::Impl::handleUiEffect(const nodegraph::UiEffect &effect) {
-  switch (effect.kind) {
-  case nodegraph::UiEffectKind::ShowNotice: {
-    const std::int64_t rawSerial =
-        signedIntegerFromValue(valueMember(effect.details, "serial"))
-            .value_or(0);
-    if (rawSerial > 0) {
-      const auto serial = static_cast<std::uint64_t>(rawSerial);
-      if (serial <= lastNoticeSerial)
-        break;
-      lastNoticeSerial = serial;
-    }
-    showNotice(text(effect.text),
-               exactStringFromValue(valueMember(effect.details, "severity")) !=
-                   "warning");
-    break;
-  }
-  case nodegraph::UiEffectKind::SelectThread: {
-    const std::int64_t rawSerial =
-        signedIntegerFromValue(valueMember(effect.details, "serial"))
-            .value_or(0);
-    std::uint64_t serial = 0;
-    if (rawSerial > 0) {
-      serial = static_cast<std::uint64_t>(rawSerial);
-      if (serial <= lastSelectionSerial)
-        break;
-      lastSelectionSerial = serial;
-    }
-    if (effect.target &&
-        (*effect.target)->id().kind == nodegraph::NodeKind::Thread)
-      selectGraphThread(*effect.target, ThreadSelectionOrigin::Graph, serial);
-    break;
-  }
-  case nodegraph::UiEffectKind::ProtocolDiagnostic:
-    middleRegion->inspector().appendProtocolDiagnostic(effect);
-    return;
-  }
+void ShellWidget::Impl::handleProtocolDiagnostic(
+    const nodegraph::ProtocolDiagnostic &diagnostic) {
+  if (middleRegion->inspector().appendProtocolDiagnostic(diagnostic))
+    schedulePaneCommit();
 }
 
 bool ShellWidget::Impl::sendNodeAction(nodegraph::NodeAction action,
@@ -1625,7 +1979,8 @@ void ShellWidget::Impl::hydrateSelectedThreadIfNeeded(
   if (recoveryOnly)
     return;
   nodegraph::NodeAction action{std::move(thread),
-                               nodegraph::NodeActionKind::Hydrate};
+                               nodegraph::NodeActionKind::Hydrate,
+                               {}, {}, {}, {}};
   static_cast<void>(sendNodeAction(
       std::move(action),
       QStringLiteral(
@@ -2080,7 +2435,8 @@ void ShellWidget::Impl::forkThread(const nodegraph::NodeRef &thread,
         "The source thread is no longer available; no fork was sent."));
     return;
   }
-  nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork};
+  nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork,
+                               {}, {}, {}, {}};
   const QString requestedName = draft.name.trimmed();
   if (!draft.ephemeral && !requestedName.isEmpty())
     action.payload.emplace("requestedName", utf8(requestedName));
@@ -2160,7 +2516,8 @@ void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {
       return;
     }
   }
-  nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Rename};
+  nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Rename,
+                               {}, {}, {}, {}};
   action.payload.emplace("name", utf8(name));
   const nodegraph::ChannelSendStatus status = session.sendNodeAction(action);
   if (!nodegraph::deliveryGuaranteed(status)) {
@@ -2191,7 +2548,7 @@ void ShellWidget::Impl::confirmDeleteThread(const nodegraph::NodeRef &thread) {
     return;
   }
   static_cast<void>(sendNodeAction(
-      {thread, nodegraph::NodeActionKind::Delete},
+      {thread, nodegraph::NodeActionKind::Delete, {}, {}, {}, {}},
       QStringLiteral("Delete request was not admitted; try again.")));
 }
 
@@ -2265,7 +2622,8 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
     middleRegion->composer().setTurnSettingsContext(
         std::move(*settingsContext));
     nodegraph::NodeAction action{target,
-                                 nodegraph::NodeActionKind::SubmitPrompt};
+                                 nodegraph::NodeActionKind::SubmitPrompt,
+                                 {}, {}, {}, {}};
     action.promptText = utf8(prompt);
     action.attachments = std::move(ownedAttachments);
     action.payload =
@@ -2318,8 +2676,6 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
     showNotice(QStringLiteral(
         "No destination thread is selected. Your message was not sent."));
   }
-  if (admitted)
-    middleRegion->conversation().prepareForLocalPromptAdmission();
   return admitted;
 }
 
@@ -2438,7 +2794,8 @@ bool ShellWidget::Impl::submitPending(const PendingRequestDescriptor &request,
   }
 
   nodegraph::NodeAction action{request.target,
-                               nodegraph::NodeActionKind::ResolveInteraction};
+                               nodegraph::NodeActionKind::ResolveInteraction,
+                               {}, {}, {}, {}};
   action.payload.emplace("choice", nodegraph::Value(submission.choice));
   if (!submission.input.is_null())
     action.payload.emplace("input", valueFromJson(submission.input));

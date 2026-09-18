@@ -12,7 +12,6 @@
 #include <functional>
 #include <vector>
 
-class QEvent;
 class QFrame;
 class QGridLayout;
 class QLabel;
@@ -30,9 +29,7 @@ class TurnSettingsWidget;
 
 namespace middle {
 
-// A bottom-aligned overlay.  Only canonicalReserve() participates in the
-// center layout; all height above that reserve is reported as trailing
-// conversation space.
+// The center layout is the sole composer geometry owner.
 class ComposerPane final : public QWidget {
 public:
   struct Actions {
@@ -44,11 +41,10 @@ public:
     std::function<void()> deny;
   };
 
-  explicit ComposerPane(QWidget *anchor);
+  explicit ComposerPane(QWidget *parent = nullptr);
   ~ComposerPane() override;
 
   void setActions(Actions actions);
-  void setExtraOverlayHeightAction(std::function<void(int)> action);
   void setAttachments(std::vector<AttachmentDraft> attachments);
   [[nodiscard]] const std::vector<AttachmentDraft> &
   attachments() const noexcept;
@@ -63,13 +59,6 @@ public:
   void setSettingsEnabled(bool enabled);
   void setTurnSettingsContext(TurnSettingsContext context);
   void clearDraft();
-  void synchronizeGeometry();
-
-  [[nodiscard]] QWidget *canonicalReserve() const noexcept { return reserve_; }
-  [[nodiscard]] int canonicalReserveHeight() const noexcept {
-    return canonicalHeight_;
-  }
-  [[nodiscard]] int extraOverlayHeight() const noexcept { return extraHeight_; }
   [[nodiscard]] codexui::ExpandingPromptEditor *promptEditor() const noexcept {
     return promptEditor_;
   }
@@ -77,19 +66,14 @@ public:
     return turnSettingsPolicy_;
   }
 
-protected:
-  bool event(QEvent *event) override;
-  bool eventFilter(QObject *watched, QEvent *event) override;
-
 private:
   void submitDraft();
   void refreshAttachments();
+  void refreshAttachmentGeometry();
   void refreshAdaptiveLayout();
   void refreshActionStyle();
   void refreshSubmissionEnabled();
 
-  QWidget *anchor_ = nullptr;
-  QWidget *reserve_ = nullptr;
   QFrame *attention_ = nullptr;
   QLabel *attentionTitle_ = nullptr;
   QLabel *attentionDetail_ = nullptr;
@@ -110,15 +94,10 @@ private:
   QPushButton *stopButton_ = nullptr;
 
   Actions actions_;
-  std::function<void(int)> extraOverlayHeightAction_;
   std::vector<AttachmentDraft> attachments_;
-  int canonicalHeight_ = 0;
-  int extraHeight_ = 0;
   bool activeTurn_ = false;
   bool canSubmit_ = false;
   bool expanded_ = false;
-  bool synchronizing_ = false;
-  bool canonicalCaptureEnabled_ = false;
 };
 
 } // namespace middle

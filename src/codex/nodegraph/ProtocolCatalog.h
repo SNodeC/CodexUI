@@ -20,9 +20,9 @@ enum class ProtocolDirection {
 
 enum class MessageDisposition {
   GraphUpdate,
+  NoticeGraphUpdate,
   WorkerOperationResult,
   ReverseInteraction,
-  TypedUiEffect,
   IntentionallyStateNeutral,
 };
 

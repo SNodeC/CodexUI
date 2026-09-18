@@ -50,6 +50,7 @@ public:
                             bool preserveSoftLineBreaks = false);
 
   bool setContent(const QString &markdown);
+  bool setPreparedContent(const QString &markdown, const QString &html);
   void invalidateGeometryEnvironment();
   [[nodiscard]] const QString &markdownSource() const noexcept;
   [[nodiscard]] presentation::MarkdownTailState markdownTailState() const;
@@ -68,11 +69,14 @@ private:
   QString renderedMarkdown_;
   presentation::MarkdownTailState markdownTail_;
   bool preserveSoftLineBreaks_ = false;
+  mutable bool preparedLayoutDisabled_ = false;
   mutable int preferredDocumentWidth_ = 0;
   mutable int preferredHeight_ = 0;
 };
 
 namespace presentation {
+
+[[nodiscard]] QString prepareMarkdownHtml(const QString &markdown);
 
 struct CardHeaderMetrics final {
   // Keep the Codex Update header aligned with the card header controls.
@@ -107,6 +111,8 @@ private:
 };
 
 class DisclosureButton final : public QToolButton {
+  Q_OBJECT
+
 public:
   DisclosureButton(QString expandAccessibleName, QString collapseAccessibleName,
                    QWidget *parent = nullptr);
@@ -134,6 +140,9 @@ void applyStatusLabel(QLabel &label, const UiStatus &status);
 // Keep the supported-version contract silent for semantic no-ops.
 void setAccessibleNameIfChanged(QWidget &widget, QString name);
 void setAccessibleDescriptionIfChanged(QWidget &widget, QString description);
+// Announce a completed semantic action through the strongest API provided by
+// the supported Qt version. The widget remains the sole accessible object.
+void announce(QWidget &widget, const QString &message);
 // User-authored prompt newlines are intentional visual line breaks. Preserve
 // them in the Markdown presentation without changing the canonical source
 // retained for copy or protocol reconciliation.

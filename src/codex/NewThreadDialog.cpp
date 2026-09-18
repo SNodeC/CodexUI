@@ -57,8 +57,6 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   const QString heading = forFork ? QStringLiteral("Fork with options")
                                   : QStringLiteral("New thread");
   setWindowTitle(heading);
-  setMinimumSize(540, 480);
-
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(24, 22, 24, 20);
   root->setSpacing(14);
@@ -89,7 +87,7 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   workspaceLayout->setContentsMargins(0, 0, 0, 0);
   workspaceLayout->setSpacing(8);
   auto *browse = new QPushButton(QStringLiteral("Browse"));
-  browse->setFixedHeight(34);
+  browse->setMinimumHeight(34);
   workspaceLayout->addWidget(workspace, 1);
   workspaceLayout->addWidget(browse);
   form->addWidget(field(QStringLiteral("Workspace"), workspaceRow));
@@ -144,18 +142,16 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   footer->addStretch();
   auto *cancel = new QPushButton(QStringLiteral("Cancel"));
   cancel->setProperty("kind", "cancel");
-  cancel->setFixedHeight(34);
+  cancel->setMinimumHeight(34);
   auto *create = new QPushButton(QStringLiteral("Continue"));
   create->setProperty("kind", "primary");
-  create->setFixedHeight(34);
+  create->setMinimumHeight(34);
   footer->addWidget(cancel);
   footer->addWidget(create);
   root->addLayout(footer);
 
   connect(browse, &QPushButton::clicked, this, [this] { chooseWorkspace(); });
   connect(ephemeral, &QCheckBox::toggled, this, [this](bool checked) {
-    if (checked)
-      name->clear();
     name->setEnabled(!checked);
   });
   connect(cancel, &QPushButton::clicked, this, &QDialog::reject);

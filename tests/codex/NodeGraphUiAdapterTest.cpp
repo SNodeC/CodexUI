@@ -2201,6 +2201,7 @@ bool projectsBoundedInspectorPagesFromCanonicalGraph() {
       return snapshot->requests;
     case InspectorProjection::Changes:
     case InspectorProjection::State:
+    case InspectorProjection::Protocol:
       return InspectorPageSnapshot{};
     }
     return InspectorPageSnapshot{};

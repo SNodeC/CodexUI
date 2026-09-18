@@ -7,9 +7,9 @@
 #include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
 
-#include <QAbstractItemView>
 #include <QAbstractTextDocumentLayout>
 #include <QColor>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -26,6 +26,7 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPixmapCache>
+#include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScopedValueRollback>
@@ -35,9 +36,11 @@
 #include <QStyle>
 #include <QStyleOptionFocusRect>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QThreadPool>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -48,6 +51,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <string_view>
 #include <type_traits>
@@ -149,19 +153,23 @@ ImageFileIdentity imageFileIdentity(const QString &path) {
           info.metadataChangeTime().toMSecsSinceEpoch(), info.isFile()};
 }
 
-QString thumbnailCacheKey(const ImageFileIdentity &identity) {
-  return QStringLiteral("codexui-thumbnail:%1:%2:%3:%4")
+QString thumbnailCacheKey(const ImageFileIdentity &identity,
+                          qreal devicePixelRatio) {
+  return QStringLiteral("codexui-thumbnail:%1:%2:%3:%4:%5")
       .arg(identity.absolutePath)
       .arg(identity.size)
       .arg(identity.modifiedMilliseconds)
-      .arg(identity.metadataChangedMilliseconds);
+      .arg(identity.metadataChangedMilliseconds)
+      .arg(qRound(devicePixelRatio * 1000.0));
 }
 
 class ImageThumbnail final : public QLabel {
 public:
-  ImageThumbnail(QString path, QWidget *parent)
+  ImageThumbnail(QString path, std::function<void()> geometryChanged,
+                 QWidget *parent)
       : QLabel(parent), path_(std::move(path)),
-        identity_(imageFileIdentity(path_)) {
+        identity_(imageFileIdentity(path_)),
+        geometryChanged_(std::move(geometryChanged)) {
     setObjectName(QStringLiteral("messageImageThumbnail"));
     setProperty("kind", "imageThumbnail");
     setCursor(Qt::PointingHandCursor);
@@ -170,43 +178,7 @@ public:
     setAlignment(Qt::AlignCenter);
     setMinimumSize(72, 48);
     setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
-
-    QPixmap pixmap;
-    const bool cacheHit =
-        identity_.file &&
-        QPixmapCache::find(thumbnailCacheKey(identity_), &pixmap);
-    setProperty("imageCacheHit", cacheHit);
-    if (!cacheHit) {
-      QImageReader reader(identity_.absolutePath);
-      reader.setAutoTransform(true);
-      const QSize source = reader.size();
-      if (source.isValid())
-        reader.setScaledSize(source.scaled(ThumbnailMaximumWidth - 8,
-                                           ThumbnailMaximumHeight - 8,
-                                           Qt::KeepAspectRatio));
-      const QImage image = reader.read();
-      setProperty("imageDecodePerformed", true);
-      if (!image.isNull()) {
-        pixmap = QPixmap::fromImage(image);
-        QPixmapCache::insert(thumbnailCacheKey(identity_), pixmap);
-      }
-    }
-    if (pixmap.isNull()) {
-      setAccessibleName(QStringLiteral("Image unavailable: %1")
-                            .arg(QFileInfo(path_).fileName()));
-      setText(QStringLiteral("Image unavailable\n%1")
-                  .arg(QFileInfo(path_).fileName()));
-      setProperty("imageAvailable", false);
-      setFocusPolicy(Qt::NoFocus);
-      unsetCursor();
-      return;
-    }
-    setAccessibleName(
-        QStringLiteral("Open image: %1").arg(QFileInfo(path_).fileName()));
-    setFocusPolicy(Qt::StrongFocus);
-    setProperty("imageAvailable", true);
-    setPixmap(pixmap);
-    setFixedSize(pixmap.size() + QSize(8, 8));
+    loadPixmap();
   }
 
   [[nodiscard]] bool represents(const QString &path) const {
@@ -214,6 +186,12 @@ public:
   }
 
 protected:
+  bool event(QEvent *event) override {
+    if (event->type() == QEvent::DevicePixelRatioChange)
+      loadPixmap();
+    return QLabel::event(event);
+  }
+
   void mousePressEvent(QMouseEvent *event) override {
     if (event->button() == Qt::LeftButton && !pixmap().isNull()) {
       leftPressArmed_ = true;
@@ -247,6 +225,87 @@ protected:
   }
 
 private:
+  void loadPixmap() {
+    const qreal devicePixelRatio = std::max<qreal>(1.0, devicePixelRatioF());
+    const QString cacheKey = thumbnailCacheKey(identity_, devicePixelRatio);
+    QPixmap loaded;
+    const bool cacheHit =
+        identity_.file && QPixmapCache::find(cacheKey, &loaded);
+    if (cacheHit) {
+      pendingCacheKey_.clear();
+      applyPixmap(std::move(loaded), false);
+      return;
+    }
+    if (!identity_.file) {
+      pendingCacheKey_.clear();
+      applyUnavailable();
+      return;
+    }
+    if (pendingCacheKey_ == cacheKey)
+      return;
+
+    pendingCacheKey_ = cacheKey;
+    const QString path = identity_.absolutePath;
+    const QSize physicalTarget(
+        qCeil((ThumbnailMaximumWidth - 8) * devicePixelRatio),
+        qCeil((ThumbnailMaximumHeight - 8) * devicePixelRatio));
+    const QPointer<ImageThumbnail> receiver(this);
+    QThreadPool::globalInstance()->start(
+        [receiver, path, cacheKey, physicalTarget, devicePixelRatio] {
+          QImageReader reader(path);
+          reader.setAutoTransform(true);
+          const QSize source = reader.size();
+          if (source.isValid())
+            reader.setScaledSize(
+                source.scaled(physicalTarget, Qt::KeepAspectRatio));
+          QImage image = reader.read();
+          QMetaObject::invokeMethod(
+              QCoreApplication::instance(),
+              [receiver, cacheKey, devicePixelRatio,
+               image = std::move(image)]() mutable {
+                if (!receiver || receiver->pendingCacheKey_ != cacheKey)
+                  return;
+                receiver->pendingCacheKey_.clear();
+                QPixmap loaded;
+                if (!image.isNull()) {
+                  loaded = QPixmap::fromImage(std::move(image));
+                  loaded.setDevicePixelRatio(devicePixelRatio);
+                  QPixmapCache::insert(cacheKey, loaded);
+                }
+                if (loaded.isNull())
+                  receiver->applyUnavailable();
+                else
+                  receiver->applyPixmap(std::move(loaded), true);
+              },
+              Qt::QueuedConnection);
+        });
+  }
+
+  void applyUnavailable() {
+    const QString name = QStringLiteral("Image unavailable: %1")
+                             .arg(QFileInfo(path_).fileName());
+    if (accessibleName() != name)
+      setAccessibleName(name);
+    setPixmap({});
+    setText(QStringLiteral("Image unavailable\n%1")
+                .arg(QFileInfo(path_).fileName()));
+    setFocusPolicy(Qt::NoFocus);
+    unsetCursor();
+  }
+
+  void applyPixmap(QPixmap loaded, bool notifyGeometry) {
+    const QString name =
+        QStringLiteral("Open image: %1").arg(QFileInfo(path_).fileName());
+    if (accessibleName() != name)
+      setAccessibleName(name);
+    setText({});
+    setFocusPolicy(Qt::StrongFocus);
+    setPixmap(loaded);
+    setFixedSize(loaded.deviceIndependentSize().toSize() + QSize(8, 8));
+    if (notifyGeometry)
+      geometryChanged_();
+  }
+
   bool activate() {
     if (pixmap().isNull())
       return false;
@@ -256,12 +315,16 @@ private:
 
   QString path_;
   ImageFileIdentity identity_;
+  std::function<void()> geometryChanged_;
+  QString pendingCacheKey_;
   bool leftPressArmed_ = false;
 };
 
 class ImageRibbon final : public QScrollArea {
 public:
-  explicit ImageRibbon(QWidget *parent = nullptr) : QScrollArea(parent) {
+  explicit ImageRibbon(std::function<void()> geometryChanged,
+                       QWidget *parent = nullptr)
+      : QScrollArea(parent), geometryChanged_(std::move(geometryChanged)) {
     setObjectName(QStringLiteral("messageImages"));
     setFrameShape(QFrame::StyledPanel);
     setWidgetResizable(false);
@@ -294,7 +357,10 @@ public:
         delete item;
       }
       layout_->insertWidget(static_cast<int>(index),
-                            new ImageThumbnail(paths.at(index), strip_), 0,
+                            new ImageThumbnail(paths.at(index),
+                                               [this] { imageSizeChanged(); },
+                                               strip_),
+                            0,
                             Qt::AlignVCenter);
       changed = true;
     }
@@ -336,6 +402,17 @@ protected:
   }
 
 private:
+  void imageSizeChanged() {
+    const int previousHeight = height();
+    layout_->invalidate();
+    layout_->activate();
+    naturalSize_ = layout_->sizeHint().expandedTo(QSize(0, 0));
+    strip_->setFixedSize(naturalSize_);
+    refreshHeight();
+    if (height() != previousHeight)
+      geometryChanged_();
+  }
+
   void refreshHeight() {
     const int availableWidth = std::max(0, viewport()->width());
     const bool overflows = naturalSize_.width() > availableWidth;
@@ -349,6 +426,7 @@ private:
 
   QWidget *strip_ = nullptr;
   QHBoxLayout *layout_ = nullptr;
+  std::function<void()> geometryChanged_;
   QSize naturalSize_;
 };
 
@@ -600,23 +678,32 @@ std::optional<std::string> visibleCommandOutput(const VisibleCardData &card) {
              : std::nullopt;
 }
 
-class FileChangesView final : public QPlainTextEdit {
+class FileChangesView final : public QTextBrowser {
 public:
-  explicit FileChangesView(QWidget *parent = nullptr) : QPlainTextEdit(parent) {
+  explicit FileChangesView(std::function<void(QString)> openFailed,
+                           QWidget *parent = nullptr)
+      : QTextBrowser(parent), openFailed_(std::move(openFailed)) {
     setObjectName(QStringLiteral("fileChangesList"));
     setProperty("kind", "body");
     setFrameShape(QFrame::NoFrame);
     setReadOnly(true);
     setUndoRedoEnabled(false);
-    setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    setLineWrapMode(QTextEdit::WidgetWidth);
     setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     setMinimumSize(0, 0);
     setFocusPolicy(Qt::StrongFocus);
+    setTextInteractionFlags(
+        Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard |
+        Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+    setOpenLinks(false);
+    setOpenExternalLinks(false);
     setAccessibleName(QStringLiteral("Changed files"));
     document()->setDocumentMargin(0);
+    connect(this, &QTextBrowser::anchorClicked, this,
+            [this](const QUrl &link) { activateLink(link.toString()); });
   }
 
   void setContent(FileChangesRendering rendering) {
@@ -632,6 +719,8 @@ public:
     for (std::size_t index = 0; index < rendering.links.size(); ++index) {
       const FileChangesRendering::Link &link = rendering.links[index];
       linkFormat.setAnchorHref(QStringLiteral("codexui-file:%1").arg(index));
+      linkFormat.setToolTip(QDir::toNativeSeparators(
+          rendering.openPaths.value(static_cast<qsizetype>(index))));
       cursor.setPosition(link.start);
       cursor.setPosition(link.start + link.length, QTextCursor::KeepAnchor);
       cursor.mergeCharFormat(linkFormat);
@@ -657,60 +746,13 @@ public:
   }
 
   [[nodiscard]] QSize sizeHint() const override {
-    QSize result = QPlainTextEdit::sizeHint();
+    QSize result = QTextBrowser::sizeHint();
     result.setHeight(
         preferredHeight(std::max(1, maximumViewportSize().width())));
     return result;
   }
 
   [[nodiscard]] QSize minimumSizeHint() const override { return {0, 0}; }
-
-protected:
-  void mousePressEvent(QMouseEvent *event) override {
-    pressedLink_ = event->button() == Qt::LeftButton
-                       ? anchorAt(event->position().toPoint())
-                       : QString{};
-    QPlainTextEdit::mousePressEvent(event);
-  }
-
-  void mouseMoveEvent(QMouseEvent *event) override {
-    const QString link = anchorAt(event->position().toPoint());
-    viewport()->setCursor(link.isEmpty() ? Qt::IBeamCursor
-                                         : Qt::PointingHandCursor);
-    if (!link.isEmpty())
-      setToolTip(linkPath(link));
-    else
-      setToolTip({});
-    QPlainTextEdit::mouseMoveEvent(event);
-  }
-
-  void mouseReleaseEvent(QMouseEvent *event) override {
-    const QString releasedLink = event->button() == Qt::LeftButton
-                                     ? anchorAt(event->position().toPoint())
-                                     : QString{};
-    QPlainTextEdit::mouseReleaseEvent(event);
-    if (!pressedLink_.isEmpty() && releasedLink == pressedLink_ &&
-        !textCursor().hasSelection())
-      static_cast<void>(activateLink(releasedLink));
-    pressedLink_.clear();
-  }
-
-  void keyPressEvent(QKeyEvent *event) override {
-    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
-        event->key() == Qt::Key_Space) {
-      QTextCursor cursor = textCursor();
-      QString link = cursor.charFormat().anchorHref();
-      if (link.isEmpty() && cursor.position() > 0) {
-        cursor.setPosition(cursor.position() - 1);
-        link = cursor.charFormat().anchorHref();
-      }
-      if (activateLink(link)) {
-        event->accept();
-        return;
-      }
-    }
-    QPlainTextEdit::keyPressEvent(event);
-  }
 
 private:
   [[nodiscard]] QString linkPath(const QString &link) const {
@@ -724,9 +766,13 @@ private:
                : QString{};
   }
 
-  bool activateLink(const QString &link) {
+  void activateLink(const QString &link) {
     const QString path = linkPath(link);
-    return !path.isEmpty() && openLocalFile(path);
+    if (path.isEmpty() || openLocalFile(path))
+      return;
+    if (openFailed_)
+      openFailed_(QStringLiteral("Could not open %1")
+                      .arg(QDir::toNativeSeparators(path)));
   }
 
   int preferredHeight(int width) const {
@@ -764,7 +810,7 @@ private:
   }
 
   QStringList openPaths_;
-  QString pressedLink_;
+  std::function<void(QString)> openFailed_;
   mutable int preferredWidth_ = 0;
   mutable int preferredHeight_ = 0;
   mutable qreal widestUnwrappedLine_ = 0;
@@ -980,7 +1026,7 @@ CommandOutputView::CommandOutputView(QWidget *parent) : QTextEdit(parent) {
   setProperty("kind", "code");
   setObjectName(QStringLiteral("commandOutputView"));
   ensurePolished();
-  refreshMaximumHeight();
+  setMaximumHeight(MaximumCommandOutputHeight);
 
   connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
@@ -999,8 +1045,7 @@ CommandOutputView::CommandOutputView(QWidget *parent) : QTextEdit(parent) {
     if (suppressScrollState_)
       return;
     preservedScrollValue_ = verticalScrollBar()->sliderPosition();
-    // QPlainTextEdit scroll values are block based: one unit is a complete
-    // output line, not a one-pixel rounding tolerance.
+    // A direct scrollbar action owns the exact QTextEdit pixel position.
     setUserFollowLatest(preservedScrollValue_ >=
                         verticalScrollBar()->maximum());
   });
@@ -1012,25 +1057,19 @@ CommandOutputView::CommandOutputView(QWidget *parent) : QTextEdit(parent) {
 }
 
 void CommandOutputView::invalidateGeometryEnvironment() {
-  refreshMaximumHeight();
   preferredHeight_ = 0;
-  static_cast<void>(measureAtCurrentWidth(false));
 }
 
 void CommandOutputView::settleWidth(int width) {
   resize(std::max(1, width), std::max(1, height()));
-  static_cast<void>(measureAtCurrentWidth(true));
+  measureAtCurrentWidth();
+  if (!currentOutput_.isEmpty()) {
+    const char *counter = isHeightCapped() ? "boundedOutputMeasurements"
+                                           : "fullOutputMeasurements";
+    setProperty(counter, property(counter).toULongLong() + 1);
+  }
   settleScroll();
   scheduleScrollSettlement();
-}
-
-void CommandOutputView::refreshMaximumHeight() {
-  const int lineHeight = std::max(1, fontMetrics().lineSpacing());
-  const int contentBudget =
-      MaximumCommandOutputHeight - 2 * UiStyle::commandOutputVerticalPadding;
-  const int maximumRows = std::max(1, contentBudget / lineHeight);
-  setMaximumHeight(2 * UiStyle::commandOutputVerticalPadding +
-                   maximumRows * lineHeight);
 }
 
 QSize CommandOutputView::sizeHint() const {
@@ -1066,7 +1105,6 @@ bool CommandOutputView::setOutput(const QString &output) {
   if (currentOutput_ == displayOutput)
     return false;
 
-  const bool retainedHeightIsCapped = isHeightCapped();
   const bool appendOnly =
       !currentOutput_.isEmpty() && displayOutput.startsWith(currentOutput_);
   suppressScrollState_ = true;
@@ -1079,80 +1117,41 @@ bool CommandOutputView::setOutput(const QString &output) {
   }
   currentOutput_ = displayOutput;
   suppressScrollState_ = false;
-  // Once the output has reached its bounded height, subsequent text cannot
-  // change the enclosing card's geometry. Avoid whole-document geometry and
-  // an ancestor LayoutRequest for the common streaming case.
-  if (outputRequiresMaximumHeight(displayOutput)) {
-    static_cast<void>(setPreferredContentHeight(maximumHeight(), true));
-    setProperty("boundedOutputMeasurements",
-                property("boundedOutputMeasurements").toULongLong() + 1);
-  } else if (!retainedHeightIsCapped || !appendOnly ||
-             displayOutput.isEmpty()) {
-    static_cast<void>(measureAtCurrentWidth(true));
-    setProperty("fullOutputMeasurements",
-                property("fullOutputMeasurements").toULongLong() + 1);
-  } else {
+  // A capped append cannot change enclosing geometry. Its authoritative
+  // document still updates in place, while the card's existing scalar height
+  // and the user's selection/follow state remain valid.
+  if (isHeightCapped() && appendOnly && !displayOutput.isEmpty())
     viewport()->update();
-  }
   settleScroll();
   scheduleScrollSettlement();
   return true;
 }
 
-bool CommandOutputView::outputRequiresMaximumHeight(
-    const QString &output) const {
-  if (output.isEmpty())
-    return false;
-  const int lineHeight = std::max(1, fontMetrics().lineSpacing());
-  const int availableHeight =
-      std::max(1, maximumHeight() - 2 * UiStyle::commandOutputVerticalPadding);
-  const int requiredLines = availableHeight / lineHeight + 1;
-  const int availableWidth = std::max(1, maximumViewportSize().width());
-  int visualLines = 0;
-  qsizetype begin = 0;
-  while (begin <= output.size()) {
-    const qsizetype end = output.indexOf(QLatin1Char('\n'), begin);
-    const qsizetype length = end < 0 ? output.size() - begin : end - begin;
-    const int advance =
-        fontMetrics().horizontalAdvance(output.sliced(begin, length));
-    visualLines += std::max(1, (advance + availableWidth - 1) / availableWidth);
-    if (visualLines >= requiredLines)
-      return true;
-    if (end < 0)
-      break;
-    begin = end + 1;
+void CommandOutputView::measureAtCurrentWidth() {
+  if (currentOutput_.isEmpty()) {
+    setPreferredContentHeight(0);
+    return;
   }
-  return false;
-}
-
-bool CommandOutputView::measureAtCurrentWidth(bool notifyParent) {
-  if (currentOutput_.isEmpty())
-    return setPreferredContentHeight(0, notifyParent);
   document()->setTextWidth(std::max(1, maximumViewportSize().width()));
-  if (outputRequiresMaximumHeight(currentOutput_))
-    return setPreferredContentHeight(maximumHeight(), notifyParent);
-
-  qreal contentHeight = 2 * UiStyle::commandOutputVerticalPadding;
+  QAbstractTextDocumentLayout *layout = document()->documentLayout();
+  qreal contentHeight = UiStyle::commandOutputTopPadding;
   for (QTextBlock block = document()->begin(); block.isValid();
        block = block.next()) {
-    if (block.layout())
-      contentHeight += block.layout()->boundingRect().height();
-    if (contentHeight >= maximumHeight())
-      return setPreferredContentHeight(maximumHeight(), notifyParent);
+    contentHeight += layout->blockBoundingRect(block).height();
+    if (contentHeight >= maximumHeight()) {
+      setPreferredContentHeight(maximumHeight());
+      return;
+    }
   }
-  return setPreferredContentHeight(static_cast<int>(std::ceil(contentHeight)),
-                                   notifyParent);
+  setPreferredContentHeight(static_cast<int>(std::ceil(contentHeight)));
 }
 
-bool CommandOutputView::setPreferredContentHeight(int height,
-                                                  bool notifyParent) {
-  const int wantedHeight = std::clamp(height, 0, maximumHeight());
-  if (wantedHeight == preferredHeight_)
-    return false;
-  preferredHeight_ = wantedHeight;
-  if (notifyParent)
-    updateGeometry();
-  return true;
+void CommandOutputView::setPreferredContentHeight(int height) {
+  const int preferredHeight = std::clamp(height, 0, maximumHeight());
+  if (preferredHeight_ == preferredHeight)
+    return;
+  preferredHeight_ = preferredHeight;
+  updateGeometry();
 }
 
 void CommandOutputView::restoreState(const State &state) {
@@ -1441,10 +1440,6 @@ public:
                         nextNaturalHeight != previousNaturalHeight
                   : !cappedCommandOutputOnly && !measuredHeightUnchanged &&
                         !fileChangesLifecycleOnly;
-    if (geometryChanged) {
-      content->updateGeometry();
-      owner->updateGeometry();
-    }
     owner->update();
     return geometryChanged ? PresentationImpact::GeometryChanged
                            : PresentationImpact::PaintOnly;
@@ -1471,7 +1466,8 @@ public:
       return std::nullopt;
     return ConversationCard::TextSelection{role, cursor.position(),
                                            cursor.anchor(),
-                                           edit->verticalScrollBar()->value()};
+                                           edit->verticalScrollBar()->value(),
+                                           {}, {}};
   }
 
   static std::optional<ConversationCard::TextSelection>
@@ -1483,7 +1479,7 @@ public:
       const int anchor = label->selectionStart();
       return ConversationCard::TextSelection{
           role, anchor + static_cast<int>(label->selectedText().size()),
-          anchor};
+          anchor, 0, {}, {}};
     }
     if (const auto *edit = qobject_cast<const QTextEdit *>(widget))
       return captureTextSelection(role, edit);
@@ -1578,9 +1574,11 @@ public:
     }
 
     layout->invalidate();
-    layout->setGeometry(owner->contentsRect());
-    layout->activate();
-    const int height = naturalHeightForCurrentWidth();
+    const int layoutWidth = owner->contentsRect().width();
+    const int height =
+        layout->hasHeightForWidth()
+            ? layout->heightForWidth(layoutWidth) + 2 * owner->frameWidth()
+            : layout->sizeHint().height() + 2 * owner->frameWidth();
     owner->setFixedHeight(std::max(1, height));
     layout->setGeometry(owner->contentsRect());
     layout->activate();
@@ -1818,7 +1816,8 @@ public:
   }
 
   void createImageContainer() {
-    images = new ImageRibbon(content);
+    images = new ImageRibbon(
+        [this] { emit owner->intrinsicGeometryChanged(); }, content);
     contentLayout->addWidget(images);
   }
 
@@ -2005,7 +2004,11 @@ public:
   void createComposition(const FileChangesData &changes) {
     title->setText(QStringLiteral("File changes"));
     metadata = makeLabel({}, "meta", content);
-    fileChanges = new FileChangesView(content);
+    fileChanges = new FileChangesView(
+        [this](QString message) {
+          emit owner->noticeRequested(std::move(message), true);
+        },
+        content);
     contentLayout->addWidget(fileChanges);
     contentLayout->addWidget(metadata);
     updateComposition(changes, true, !collapsed);
@@ -2307,6 +2310,13 @@ void ConversationCard::setViewportVisible(bool visible) {
   impl_->setViewportVisible(visible);
 }
 
+void ConversationCard::setShowsKeyboardFocus(bool visible) {
+  if (showsKeyboardFocus_ == visible)
+    return;
+  showsKeyboardFocus_ = visible;
+  update();
+}
+
 void ConversationCard::invalidateGeometryEnvironment() {
   impl_->invalidateGeometryEnvironment();
 }
@@ -2372,10 +2382,11 @@ bool ConversationCard::normalizeState(State &state, const VisibleCardData &next,
 PresentationImpact
 ConversationCard::applyPresentation(const VisibleCardData &data) {
   State retained = impl_->state();
-  static_cast<void>(
-      normalizeState(retained, data, impl_->nestedConversationCard));
+  const bool releasedDetachedOwner =
+      normalizeState(retained, data, impl_->nestedConversationCard);
   const PresentationImpact impact = impl_->applyPresentation(data);
-  if (impact != PresentationImpact::None)
+  if (impact != PresentationImpact::None &&
+      (!retained.empty() || releasedDetachedOwner))
     impl_->restoreState(retained);
   return impact;
 }
@@ -2389,19 +2400,12 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   QPainter painter(this);
   painter.setRenderHint(QPainter::Antialiasing);
   const auto paintKeyboardFocus = [this, &painter] {
-    auto *view = qobject_cast<QAbstractItemView *>(
-        parentWidget() ? parentWidget()->parentWidget() : nullptr);
-    if (!view || view->visualRect(view->currentIndex()) !=
-                     QRect(mapTo(view->viewport(), QPoint{}), size()))
+    if (!showsKeyboardFocus_)
       return;
 
     const auto focusState =
         QStyle::State_HasFocus | QStyle::State_KeyboardFocusChange;
     QStyleOptionFocusRect option;
-    option.initFrom(view);
-    if (!option.state.testFlags(focusState))
-      return;
-
     option.initFrom(this);
     option.state |= focusState;
     option.rect = rect().adjusted(2, 2, -2, -2);

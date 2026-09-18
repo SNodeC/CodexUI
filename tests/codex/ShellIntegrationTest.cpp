@@ -365,6 +365,7 @@ void graphNotificationsPrecedeRetirementRelease(Configuration &configuration) {
           stringFieldEquals(read->state(node), "name",
                             "queued-before-retirement");
     }
+    return true;
   });
 
   applyThread(worker, "ordinary-removal");
@@ -426,9 +427,9 @@ void graphNotificationsPrecedeRetirementRelease(Configuration &configuration) {
 
   std::size_t fillerCount = 0;
   for (;;) {
-    UiEffect filler;
-    filler.text = "fill-" + std::to_string(fillerCount);
-    const ChannelSendStatus status = channels.sendUiEffect(filler);
+    ProtocolDiagnostic filler{{{"sequence", Value(fillerCount)}}, {}};
+    const ChannelSendStatus status =
+        channels.sendProtocolDiagnostic(filler);
     if (status == ChannelSendStatus::QueueFull)
       break;
     require(status == ChannelSendStatus::Accepted,
@@ -437,7 +438,7 @@ void graphNotificationsPrecedeRetirementRelease(Configuration &configuration) {
   }
   require(fillerCount + ThreadChannels::WorkerToQtReservedSlots + 1 ==
               ThreadChannels::WorkerToQtCapacity,
-          "worker mailbox saturation preserves critical and terminal slots");
+          "worker mailbox saturation preserves the terminal slot");
 
   const ChannelSendStatus coalescedStatus =
       worker.apply({DecodedMessageKind::ServerNotification,
@@ -511,7 +512,7 @@ void massRetirementIsSliced(Configuration &configuration) {
   bool laterOrdinaryMisclassified = false;
   session.setGraphChangedHandler([&](const GraphChanged &changed) {
     if (changed.removed.empty())
-      return;
+      return true;
     largestBatch = std::max(largestBatch, changed.removed.size());
     for (const NodeRef &node : changed.removed) {
       if (!node)
@@ -526,6 +527,7 @@ void massRetirementIsSliced(Configuration &configuration) {
             changed.providerAuthorityRevision == authorityRevision;
       }
     }
+    return true;
   });
 
   GraphChange removal;
@@ -786,7 +788,7 @@ void delayedRetirementCannotEraseRecreatedThread(Configuration &configuration) {
   if (!list || !approval || !view || !composer)
     return;
   approval->setCurrentIndex(approval->findData(QStringLiteral("never")));
-  view->setTrailingSpaceHeight(view->trailingSpaceHeight() + 1);
+  view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   require(view->modeForThread("reused-thread") ==
               middle::ConversationView::Mode::Paused,
           "the original incarnation owns paused viewport state");
@@ -824,7 +826,7 @@ void delayedRetirementCannotEraseRecreatedThread(Configuration &configuration) {
           "the latest-state rescan binds a fresh node and presentation state");
 
   approval->setCurrentIndex(approval->findData(QStringLiteral("untrusted")));
-  view->setTrailingSpaceHeight(view->trailingSpaceHeight() + 1);
+  view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   const std::vector<QtToWorkerMessage> reboundMessages =
       takeQtMessages(channels);
   const std::size_t hydrationCount =
@@ -919,7 +921,7 @@ void slicedProviderRetirementPreservesFreshSelection(
           "the fresh same-id thread binds before later retirement slices");
 
   approval->setCurrentIndex(approval->findData(QStringLiteral("untrusted")));
-  view->setTrailingSpaceHeight(view->trailingSpaceHeight() + 1);
+  view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
   const std::size_t hydrationCount =
       std::ranges::count_if(messages, [&](const auto &message) {

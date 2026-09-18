@@ -24,22 +24,14 @@ struct GraphChanged final {
   bool operator==(const GraphChanged &) const = default;
 };
 
-enum class UiEffectKind : std::uint8_t {
-  ShowNotice,
-  SelectThread,
-  // Bounded, metadata-only protocol diagnostics for the existing Inspector.
-  // This is explicitly non-authoritative UI history; current state remains in
-  // NodeGraph and raw protocol payloads never cross the worker/Qt boundary.
-  ProtocolDiagnostic,
-};
-
-struct UiEffect final {
-  UiEffectKind kind = UiEffectKind::ShowNotice;
-  std::optional<NodeRef> target;
-  std::string text;
+// Bounded, metadata-only diagnostics for the existing Inspector. This is
+// explicitly non-authoritative UI history; current state remains in NodeGraph
+// and raw protocol payloads never cross the worker/Qt boundary.
+struct ProtocolDiagnostic final {
   Value::Object details;
+  std::vector<Value::Object> diagnosticBatch;
 
-  bool operator==(const UiEffect &) const = default;
+  bool operator==(const ProtocolDiagnostic &) const = default;
 };
 
 struct WorkerStopped final {
@@ -48,7 +40,8 @@ struct WorkerStopped final {
   bool operator==(const WorkerStopped &) const = default;
 };
 
-using WorkerToQtMessage = std::variant<GraphChanged, UiEffect, WorkerStopped>;
+using WorkerToQtMessage =
+    std::variant<GraphChanged, ProtocolDiagnostic, WorkerStopped>;
 
 struct Attachment final {
   std::string path;

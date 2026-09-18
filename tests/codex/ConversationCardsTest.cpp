@@ -485,10 +485,10 @@ bool testApplicationStyleSheetContract() {
       QStringLiteral("QWidget#messageImageStrip { background: %1; }")
           .arg(token(codexui::UiStyle::codeSurface)),
       QStringLiteral("QTextEdit#commandOutputView { background: %1; color: %2; "
-                     "border-radius: 6px; padding: %3px %4px; }")
+                     "border-radius: 6px; padding: %3px %4px 0; }")
           .arg(token(codexui::UiStyle::codeSurface),
                token(codexui::UiStyle::codeText))
-          .arg(codexui::UiStyle::commandOutputVerticalPadding)
+          .arg(codexui::UiStyle::commandOutputTopPadding)
           .arg(codexui::UiStyle::commandOutputHorizontalPadding),
       QStringLiteral("QTextEdit#commandTextView { background: %1; border: 1px "
                      "solid %2; border-radius: 6px; }")
@@ -1728,7 +1728,7 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
   return result;
 }
 
-bool testThreadLocalScrollAndComposerExtent() {
+bool testThreadLocalScrollState() {
   ConversationView view;
   view.resize(620, 340);
   view.show();
@@ -1754,42 +1754,6 @@ bool testThreadLocalScrollAndComposerExtent() {
                        std::abs(restored.second - saved.second) <= 1,
                    "switching back restores that thread's own visual anchor");
 
-  const int beforeExtent = view.verticalScrollBar()->maximum();
-  const int beforeValue = view.verticalScrollBar()->value();
-  view.setTrailingSpaceHeight(137);
-  spin();
-  result &=
-      expect(view.trailingSpaceHeight() == 137 &&
-                 view.verticalScrollBar()->maximum() == beforeExtent + 137 &&
-                 view.verticalScrollBar()->value() == beforeValue &&
-                 view.mode() == ConversationView::Mode::Paused,
-             "composer growth adds exact scroll extent without moving content");
-  while (!view.isAtBottom())
-    wheel(view, -240);
-  result &= expect(view.mode() == ConversationView::Mode::Following,
-                   "reaching the extended bottom restores following");
-  view.setTrailingSpaceHeight(0);
-  spin();
-  result &=
-      expect(view.isAtBottom() && view.trailingSpaceHeight() == 0,
-             "composer contraction removes extent and accepts bottom clamp");
-
-  view.setTrailingSpaceHeight(137);
-  result &= expect(view.mode() == ConversationView::Mode::Paused,
-                   "composer growth owns its automatic pause");
-  applyConversation(view, second);
-  spin();
-  result &= expect(view.mode() == ConversationView::Mode::Following &&
-                       view.modeForThread("thread-a") ==
-                           ConversationView::Mode::Paused,
-                   "switching stores composer pause only for the inactive "
-                   "thread");
-  applyConversation(view, first);
-  spin();
-  view.prepareForLocalPromptAdmission();
-  result &= expect(view.mode() == ConversationView::Mode::Following,
-                   "returning consumes the inactive composer-pause state");
-  view.setTrailingSpaceHeight(0);
   return result;
 }
 
@@ -1801,10 +1765,7 @@ bool testPromptAdmissionFollowOwnership() {
   applyConversation(view, snapshot);
   spin();
 
-  view.setTrailingSpaceHeight(120);
-  bool result = expect(view.mode() == ConversationView::Mode::Paused,
-                       "composer growth preserves the painted viewport");
-  view.prepareForLocalPromptAdmission();
+  bool result = true;
   VisibleCardData pending{LocalPromptKey{1001},
                           CardKind::LocalPrompt,
                           "prompt-follow",
@@ -1817,7 +1778,6 @@ bool testPromptAdmissionFollowOwnership() {
                                           {}}};
   snapshot.sections.back().cards.push_back(pending);
   applyConversation(view, snapshot);
-  view.setTrailingSpaceHeight(0);
   ConversationCard *pendingCard = nullptr;
   const bool admittedPromptReady = spinUntil(
       [&] {
@@ -1830,12 +1790,10 @@ bool testPromptAdmissionFollowOwnership() {
       512);
   result &= expect(
       admittedPromptReady && view.mode() == ConversationView::Mode::Following,
-      "composer-owned pause resumes and reveals the complete admitted prompt");
+      "a following view reveals the complete admitted prompt");
 
   wheel(view, 180);
   const auto userAnchor = firstVisible(view);
-  view.setTrailingSpaceHeight(120);
-  view.prepareForLocalPromptAdmission();
   VisibleCardData later = pending;
   later.key = LocalPromptKey{1002};
   std::get<LocalPromptData>(later.payload).submissionId = 1002;
@@ -1843,7 +1801,6 @@ bool testPromptAdmissionFollowOwnership() {
       "must not displace a user-owned reading position";
   snapshot.sections.back().cards.push_back(later);
   applyConversation(view, snapshot);
-  view.setTrailingSpaceHeight(0);
   spin(40);
   const auto retainedAnchor = firstVisible(view);
   result &=
@@ -2710,7 +2667,6 @@ bool testCardFoldingGeometryAndRetention() {
   ConversationView view;
   // Folding behavior is tested with all rich editors genuinely visible.
   view.resize(700, 5000);
-  view.setTrailingSpaceHeight(500);
   view.show();
   ConversationGraphSpec promptOnly = snapshot;
   promptOnly.sections.front().cards = {user};
@@ -3140,18 +3096,6 @@ bool testCardFoldingGeometryAndRetention() {
           edgeView.isAtBottom() &&
           edgeView.mode() == ConversationView::Mode::Paused,
       "bottom-edge collapse accepts the natural range without a blank tail");
-  constexpr int ComposerOverlayHeight = 80;
-  edgeView.setTrailingSpaceHeight(ComposerOverlayHeight);
-  result &=
-      expect(setFolded(edgeCard, false), "bottom-edge command expands again");
-  spin(120);
-  result &= expect(
-      edgeView.verticalScrollBar()->maximum() ==
-              expandedScrollMaximum + ComposerOverlayHeight &&
-          edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() +
-                  edgeCard->height() <=
-              edgeView.viewport()->height() - ComposerOverlayHeight,
-      "fold round trip reveals the complete card above a grown composer");
   qApp->setStyleSheet(originalStyleSheet);
   spin();
   return result;
@@ -3541,7 +3485,7 @@ bool testInitialCommandGeometrySettlement() {
            header->height() == header->sizeHint().height() &&
            content->height() == contentHeight;
   };
-  const auto exactEditor = [](QTextEdit *editor) {
+  const auto exactEditor = [](auto *editor) {
     return editor && !editor->isHidden() &&
            editor->height() == editor->sizeHint().height() &&
            editor->height() < editor->maximumHeight() &&
@@ -4489,6 +4433,15 @@ bool testMessageImagePresentation() {
            right->mapTo(ribbon, QPoint{}).x();
   });
   auto *thumbnail = thumbnails.empty() ? nullptr : thumbnails.front();
+  result &= expect(
+      spinUntil(
+          [&] {
+            return std::ranges::all_of(thumbnails, [](QLabel *image) {
+              return image && !image->pixmap().isNull();
+            });
+          },
+          256),
+      "image decoding completes without blocking the GUI event loop");
   const QPixmap thumbnailPixmap = thumbnail ? thumbnail->pixmap() : QPixmap{};
   const auto hasEvenVerticalGap = [ribbon](QLabel *image) {
     if (!ribbon || !image)
@@ -4501,8 +4454,8 @@ bool testMessageImagePresentation() {
   result &= expect(ribbon && thumbnails.size() == 3 && thumbnail,
                    "the image ribbon owns all three thumbnail widgets");
   result &=
-      expect(thumbnail && thumbnail->property("imageAvailable").toBool() &&
-                 !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
+      expect(thumbnail && !thumbnailPixmap.isNull() &&
+                 thumbnailPixmap.width() <= 280 &&
                  thumbnailPixmap.height() <= 180,
              "the first image is available and canonically bounded");
   const bool thumbnailsCentered =
@@ -4583,6 +4536,16 @@ bool testMessageImagePresentation() {
                        changedThumbnails.at(2) == retainedLast &&
                        replacedMiddle.isNull(),
                    "changing one attachment reconstructs only its thumbnail");
+  result &= expect(
+      spinUntil(
+          [&] {
+            return changedThumbnails.size() == 3 &&
+                   std::ranges::all_of(changedThumbnails, [](QLabel *image) {
+                     return image && !image->pixmap().isNull();
+                   });
+          },
+          256),
+      "a changed attachment completes its replacement decode");
   thumbnail = changedThumbnails.empty() ? nullptr : changedThumbnails.front();
   result &= expect(thumbnail && thumbnail->focusPolicy() == Qt::StrongFocus &&
                        !thumbnail->accessibleName().isEmpty(),
@@ -4606,7 +4569,7 @@ bool testMessageImagePresentation() {
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
   result &= expect(
       retainedGuard.isNull() && missingThumbnail &&
-          !missingThumbnail->property("imageAvailable").toBool() &&
+          missingThumbnail->pixmap().isNull() &&
           missingThumbnail->text().contains(QStringLiteral("unavailable")) &&
           missingThumbnail->focusPolicy() == Qt::NoFocus &&
           !missingThumbnail->accessibleName().isEmpty(),
@@ -4619,9 +4582,14 @@ bool testMessageImagePresentation() {
   static_cast<void>(card->applyPresentation(message));
   auto *recreatedThumbnail =
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
-  result &= expect(missingGuard.isNull() && recreatedThumbnail &&
-                       recreatedThumbnail->property("imageAvailable").toBool(),
-                   "recreating an attachment replaces its placeholder");
+  result &= expect(
+      spinUntil(
+          [&] {
+            return missingGuard.isNull() && recreatedThumbnail &&
+                   !recreatedThumbnail->pixmap().isNull();
+          },
+          256),
+      "recreating an attachment replaces its placeholder");
 
   result &= expect(QFile::remove(missingPath),
                    "the recreated attachment can be deleted");
@@ -4631,7 +4599,7 @@ bool testMessageImagePresentation() {
   auto *deletedThumbnail =
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
   result &= expect(recreatedGuard.isNull() && deletedThumbnail &&
-                       !deletedThumbnail->property("imageAvailable").toBool(),
+                       deletedThumbnail->pixmap().isNull(),
                    "deleting an attachment restores its placeholder");
 
   payload.imagePaths = {utf8(path)};
@@ -4689,8 +4657,9 @@ bool testGeneratedImagePresentationAndGenericBound() {
   spin();
   auto *thumbnail = generatedCard.findChild<QLabel *>(
       QStringLiteral("messageImageThumbnail"));
-  result &= expect(thumbnail && thumbnail->property("imageAvailable").toBool(),
-                   "generated-image card reuses the bounded thumbnail");
+  result &= expect(
+      spinUntil([&] { return thumbnail && !thumbnail->pixmap().isNull(); }, 256),
+      "generated-image card reuses the bounded thumbnail");
   QPointer<QLabel> retainedGenerated(thumbnail);
   auto &generatedPayload = std::get<ImageGenerationData>(generated.payload);
   generated.status = nodegraph::NodeStatus::Running;
@@ -4724,11 +4693,13 @@ bool testGeneratedImagePresentationAndGenericBound() {
                          "view",
                          ImageGenerationData{utf8(path), {}}};
   ConversationCard viewedCard(viewed, false);
+  auto *viewedThumbnail =
+      viewedCard.findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  const bool cacheReadyBeforeEvents =
+      viewedThumbnail && !viewedThumbnail->pixmap().isNull();
   viewedCard.show();
   spin();
   const auto viewedLabels = viewedCard.findChildren<QLabel *>();
-  auto *viewedThumbnail =
-      viewedCard.findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
   result &= expect(
       std::ranges::any_of(viewedLabels,
                           [](QLabel *label) {
@@ -4741,11 +4712,9 @@ bool testGeneratedImagePresentationAndGenericBound() {
               [](QLabel *label) {
                 return label->objectName() ==
                            QStringLiteral("messageImageThumbnail") &&
-                       label->property("imageAvailable").toBool();
+                       !label->pixmap().isNull();
               }) &&
-          viewedThumbnail &&
-          viewedThumbnail->property("imageCacheHit").toBool() &&
-          !viewedThumbnail->property("imageDecodePerformed").toBool(),
+          viewedThumbnail && cacheReadyBeforeEvents,
       "plain image-view cards use a neutral title and reuse the cached "
       "thumbnail without decoding");
 
@@ -4830,7 +4799,7 @@ int main(int argc, char **argv) {
   result &= testPausedExpandedCommandStaysPainted();
   result &= testCommandCompletionWithoutGeometryWork();
   result &= testStreamingAgentBecomesVisibleWithoutReselection();
-  result &= testThreadLocalScrollAndComposerExtent();
+  result &= testThreadLocalScrollState();
   result &= testPromptAdmissionFollowOwnership();
   result &= testCardCopyControls();
   result &= testAgentActivityLifecycleLabelRetention();

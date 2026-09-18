@@ -61,6 +61,8 @@ public:
   void setSortCriterion(SortCriterion criterion);
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
   [[nodiscard]] std::optional<VisibleThread> visiblySelectedThread() const;
+  [[nodiscard]] bool
+  retainsTarget(const nodegraph::NodeRef &target) const noexcept;
 
 private:
   struct SortAction {
@@ -75,6 +77,7 @@ private:
   void retireOptimisticThread();
   void updateSortButton();
   void sortRootItems();
+  [[nodiscard]] bool repositionRootItem(ThreadTreeItem *item);
   void updateAnimationTimer(bool repaint = false);
   void requestMoreNearListEnd();
   void updateContextRow(const std::string &presentationKey);

@@ -166,7 +166,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
 
   conversationRegion = new QFrame;
   conversationRegion->setObjectName(QStringLiteral("conversation"));
-  conversationRegion->setMinimumWidth(480);
   auto *center = new QVBoxLayout(conversationRegion);
   center->setContentsMargins(10, 14, 10, 12);
   center->setSpacing(0);
@@ -175,7 +174,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   context->addStrut(24);
   auto *sectionTitle = makeLabel(QStringLiteral("CONVERSATION"), "panelHeader");
   sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   context->addWidget(sectionTitle);
   context->addStretch();
   const QSettings settings;
@@ -318,14 +316,17 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationLayerLayout->setContentsMargins(0, 0, 0, 0);
   conversationLayerLayout->setSpacing(0);
   conversationView = new ConversationView(conversationLayer);
+  conversationView->setNoticeAction(
+      [this](QString message, bool error) {
+        showNotice(std::move(message), error);
+      });
   applyConversationPresentationOptions();
   conversationLayerLayout->addWidget(conversationView, 0, 0);
   conversationLayerLayout->addWidget(noticeBar, 0, 0, Qt::AlignTop);
   contentLayout->addWidget(conversationLayer, 1);
-  composerPane = new ComposerPane(conversationRegion);
-  composerPane->setExtraOverlayHeightAction(
-      [this](int height) { conversationView->setTrailingSpaceHeight(height); });
-  contentLayout->addWidget(composerPane->canonicalReserve());
+  composerPane = new ComposerPane(content);
+  contentLayout->addWidget(composerPane);
+  contentLayout->addSpacing(12);
   center->addWidget(content, 1);
   splitter->addWidget(conversationRegion);
 
@@ -458,6 +459,7 @@ void MiddleRegionWidget::alignThreadHeadingBaselines() {
 void MiddleRegionWidget::showNotice(QString message, bool error) {
   if (message.trimmed().isEmpty())
     return;
+  const QString announcement = message;
   noticeLabel->setText(std::move(message));
   const QString tone =
       error ? QStringLiteral("danger") : QStringLiteral("warning");
@@ -470,6 +472,7 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
   }
   noticeBar->show();
   noticeBar->raise();
+  presentation::announce(*noticeBar, announcement);
   noticeTimer->start(error ? 10000 : 6000);
 }
 

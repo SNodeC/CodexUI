@@ -189,7 +189,7 @@ QString applicationStyleSheet() {
         QPushButton[comboPeer="true"] { min-height: 30px; max-height: 30px; }
         QPushButton:hover, QToolButton:hover { background: %{hover}; border-color: %{dividerStrong}; }
         QPushButton:pressed, QToolButton:pressed { background: %{blueSelected}; border-color: %{blueBorder}; }
-        QPushButton:focus, QToolButton:focus { border: 2px solid %{blue}; }
+        QPushButton:focus, QToolButton:focus { border-color: %{blue}; }
         QPushButton:disabled, QToolButton:disabled { color: %{placeholder}; background: %{appBackground}; border-color: %{divider}; }
         QPushButton[kind="primary"] { background: %{blue}; border-color: %{blue}; color: %{onAccent}; }
         QPushButton[kind="primary"]:hover { background: %{blueHover}; border-color: %{blueHover}; }
@@ -323,7 +323,7 @@ QString applicationStyleSheet() {
             background: %{codeSurface};
             color: %{codeText};
             border-radius: 6px;
-            padding: %{commandOutputVerticalPadding}px %{commandOutputHorizontalPadding}px;
+            padding: %{commandOutputTopPadding}px %{commandOutputHorizontalPadding}px 0;
         }
         QTextEdit#commandTextView {
             background: %{raised};
@@ -596,8 +596,8 @@ QString applicationStyleSheet() {
   style.replace(QStringLiteral("%{section}"), section);
   style.replace(QStringLiteral("%{heading}"), heading);
   style.replace(QStringLiteral("%{panelHeader}"), panelHeader);
-  style.replace(QStringLiteral("%{commandOutputVerticalPadding}"),
-                QString::number(commandOutputVerticalPadding));
+  style.replace(QStringLiteral("%{commandOutputTopPadding}"),
+                QString::number(commandOutputTopPadding));
   style.replace(QStringLiteral("%{commandOutputHorizontalPadding}"),
                 QString::number(commandOutputHorizontalPadding));
   return style;

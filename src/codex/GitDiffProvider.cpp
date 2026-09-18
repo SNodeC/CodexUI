@@ -188,7 +188,9 @@ bool appendRepository(GitDiffSnapshot &snapshot, const QString &root,
     return false;
   GitPointer<git_repository, git_repository_free> repository(rawRepository,
                                                               git_repository_free);
-  git_diff_options options = GIT_DIFF_OPTIONS_INIT;
+  git_diff_options options{};
+  static_cast<void>(
+      git_diff_options_init(&options, GIT_DIFF_OPTIONS_VERSION));
   options.flags = GIT_DIFF_INCLUDE_UNTRACKED |
                   GIT_DIFF_RECURSE_UNTRACKED_DIRS |
                   GIT_DIFF_SHOW_UNTRACKED_CONTENT |
@@ -224,7 +226,9 @@ bool appendRepository(GitDiffSnapshot &snapshot, const QString &root,
     return false;
   }
   GitPointer<git_diff, git_diff_free> diff(rawDiff, git_diff_free);
-  git_diff_find_options findOptions = GIT_DIFF_FIND_OPTIONS_INIT;
+  git_diff_find_options findOptions{};
+  static_cast<void>(
+      git_diff_find_options_init(&findOptions, GIT_DIFF_FIND_OPTIONS_VERSION));
   findOptions.flags = GIT_DIFF_FIND_RENAMES | GIT_DIFF_FIND_COPIES |
                       GIT_DIFF_FIND_FOR_UNTRACKED;
   git_diff_find_similar(diff.get(), &findOptions);

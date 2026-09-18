@@ -18,7 +18,14 @@
 
 namespace codexui::codex::ui {
 
-enum class InspectorProjection { Plan, Agents, Changes, Requests, State };
+enum class InspectorProjection {
+  Plan,
+  Agents,
+  Changes,
+  Requests,
+  State,
+  Protocol
+};
 inline constexpr std::size_t MaximumInspectorRows = 50;
 
 struct InspectorRowRequest final {
@@ -84,8 +91,11 @@ struct InspectorAgentRow {
 struct InspectorMarkdownRow {
   std::string text;
   std::string accessibleName;
+  std::string preparedHtml;
 
-  bool operator==(const InspectorMarkdownRow &) const = default;
+  bool operator==(const InspectorMarkdownRow &other) const {
+    return text == other.text && accessibleName == other.accessibleName;
+  }
 };
 
 using InspectorRowValue =

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -39,8 +40,7 @@ using codexui::nodegraph::RuntimeAction;
 using codexui::nodegraph::RuntimeActionKind;
 using codexui::nodegraph::ShutdownRequest;
 using codexui::nodegraph::ThreadChannels;
-using codexui::nodegraph::UiEffect;
-using codexui::nodegraph::UiEffectKind;
+using codexui::nodegraph::ProtocolDiagnostic;
 using codexui::nodegraph::Value;
 using codexui::nodegraph::wakeFailed;
 using codexui::nodegraph::WorkerStopped;
@@ -198,11 +198,11 @@ bool testDescriptorsAndVariantOrder() {
                    "a graph change and its ordered-child cause are admitted "
                    "worker-to-Qt");
 
-  UiEffect effect{
-      UiEffectKind::ShowNotice, target, "focus", {{"reason", "new-thread"}}};
-  const UiEffect expectedEffect = effect;
-  passed &= expect(channels.sendUiEffect(effect) == ChannelSendStatus::Accepted,
-                   "a UI effect is admitted worker-to-Qt");
+  ProtocolDiagnostic diagnostic{{{"reason", "new-thread"}}, {}};
+  const ProtocolDiagnostic expectedDiagnostic = diagnostic;
+  passed &= expect(channels.sendProtocolDiagnostic(diagnostic) ==
+                       ChannelSendStatus::Accepted,
+                   "a protocol diagnostic is admitted worker-to-Qt");
   WorkerStopped stopped{"normal stop"};
   const WorkerStopped expectedStopped = stopped;
   passed &=
@@ -221,9 +221,12 @@ bool testDescriptorsAndVariantOrder() {
                  std::get<GraphChanged>(workerMessage) == expectedGraphChanged,
              "GraphChanged remains first in worker-to-Qt FIFO order");
   passed &= expect(channels.tryReceiveForQt(workerMessage) &&
-                       std::holds_alternative<UiEffect>(workerMessage) &&
-                       std::get<UiEffect>(workerMessage) == expectedEffect,
-                   "UiEffect remains second in worker-to-Qt FIFO order");
+                       std::holds_alternative<ProtocolDiagnostic>(
+                           workerMessage) &&
+                       std::get<ProtocolDiagnostic>(workerMessage) ==
+                           expectedDiagnostic,
+                   "ProtocolDiagnostic remains second in worker-to-Qt FIFO "
+                   "order");
   passed &=
       expect(channels.tryReceiveForQt(workerMessage) &&
                  std::holds_alternative<WorkerStopped>(workerMessage) &&
@@ -370,11 +373,10 @@ bool testGraphCoalescingAndRetiredLifetime() {
   bool allOrdinaryAdmissionsAccepted = true;
   for (std::size_t attempt = 0; attempt <= ThreadChannels::WorkerToQtCapacity;
        ++attempt) {
-    UiEffect effect{UiEffectKind::ShowNotice,
-                    std::nullopt,
-                    "ui-fill-" + std::to_string(attempt),
-                    {}};
-    const ChannelSendStatus status = channels.sendUiEffect(effect);
+    ProtocolDiagnostic diagnostic{
+        {{"sequence", codexui::nodegraph::Value(attempt)}}, {}};
+    const ChannelSendStatus status =
+        channels.sendProtocolDiagnostic(diagnostic);
     if (status == ChannelSendStatus::QueueFull) {
       reachedOrdinaryLimit = true;
       break;
@@ -388,15 +390,7 @@ bool testGraphCoalescingAndRetiredLifetime() {
                  ordinaryAdmissions + ThreadChannels::WorkerToQtReservedSlots ==
                      ThreadChannels::WorkerToQtCapacity &&
                  channels.workerToQtSizeApprox() == ordinaryAdmissions,
-             "ordinary worker notifications preserve critical and terminal "
-             "slots");
-
-  UiEffect selection{
-      UiEffectKind::SelectThread, std::nullopt, "critical selection", {}};
-  passed &= expect(
-      channels.sendUiEffect(selection) == ChannelSendStatus::Accepted &&
-          channels.workerToQtSizeApprox() == ordinaryAdmissions + 1,
-      "critical selection uses its reserved slot under ordinary saturation");
+             "protocol diagnostics preserve the terminal slot");
 
   WorkerStopped stopped{"worker finished while Qt was saturated"};
   passed &= expect(
@@ -455,7 +449,7 @@ bool testGraphCoalescingAndRetiredLifetime() {
   const EventFd::DrainResult wake = channels.drainWorkerToQtWake();
   passed &=
       expect(wake.status == EventFd::DrainStatus::Drained &&
-                 wake.count == ordinaryAdmissions + 4,
+                 wake.count == ordinaryAdmissions + 3,
              "coalesced rescan still wakes Qt without queue payload copies");
 
   WorkerToQtMessage message;
@@ -474,19 +468,20 @@ bool testGraphCoalescingAndRetiredLifetime() {
   bool fifoOrder = true;
   for (std::size_t index = 0; index < ordinaryAdmissions; ++index) {
     const bool received = channels.tryReceiveForQt(message);
-    const UiEffect *effect =
-        received ? std::get_if<UiEffect>(&message) : nullptr;
-    fifoOrder = fifoOrder && effect &&
-                effect->text == "ui-fill-" + std::to_string(index);
+    const ProtocolDiagnostic *diagnostic =
+        received ? std::get_if<ProtocolDiagnostic>(&message) : nullptr;
+    const auto sequence =
+        diagnostic ? diagnostic->details.find("sequence")
+                   : codexui::nodegraph::Value::Object::const_iterator{};
+    fifoOrder = fifoOrder && diagnostic &&
+                sequence != diagnostic->details.end() &&
+                codexui::nodegraph::unsignedIntegerFromValue(&sequence->second)
+                        .value_or(std::numeric_limits<std::uint64_t>::max()) ==
+                    index;
   }
   passed &=
       expect(fifoOrder,
              "queued worker notifications preserve FIFO order after rescan");
-  passed &=
-      expect(channels.tryReceiveForQt(message) &&
-                 std::holds_alternative<UiEffect>(message) &&
-                 std::get<UiEffect>(message).kind == UiEffectKind::SelectThread,
-             "critical selection follows ordinary notifications");
   passed &= expect(channels.tryReceiveForQt(message) &&
                        std::holds_alternative<WorkerStopped>(message) &&
                        std::get<WorkerStopped>(message).reason ==
@@ -521,9 +516,10 @@ bool testGraphCoalescingAndRetiredLifetime() {
         "provider replacement can queue directly behind older graph traffic");
 
     for (std::size_t index = 0;; ++index) {
-      UiEffect filler{UiEffectKind::ShowNotice, std::nullopt,
-                      "ordered-fill-" + std::to_string(index), {}};
-      if (orderedChannels.sendUiEffect(filler) == ChannelSendStatus::QueueFull)
+      ProtocolDiagnostic filler{
+          {{"sequence", codexui::nodegraph::Value(index)}}, {}};
+      if (orderedChannels.sendProtocolDiagnostic(filler) ==
+          ChannelSendStatus::QueueFull)
         break;
     }
     GraphChange newest;
@@ -612,9 +608,10 @@ bool testGraphCoalescingAndRetiredLifetime() {
             ChannelSendStatus::Accepted,
         "the first provider boundary is queued directly");
     for (std::size_t index = 0;; ++index) {
-      UiEffect filler{UiEffectKind::ShowNotice, std::nullopt,
-                      "reset-fill-" + std::to_string(index), {}};
-      if (resetChannels.sendUiEffect(filler) == ChannelSendStatus::QueueFull)
+      ProtocolDiagnostic filler{
+          {{"sequence", codexui::nodegraph::Value(index)}}, {}};
+      if (resetChannels.sendProtocolDiagnostic(filler) ==
+          ChannelSendStatus::QueueFull)
         break;
     }
     GraphChange secondReset;
@@ -754,8 +751,9 @@ bool testWakeFailureAfterAdmission() {
 
   ThreadChannels workerChannels;
   workerChannels.failNextWorkerToQtWakeForTest();
-  UiEffect effect{UiEffectKind::ShowNotice, {}, "fallback notice", {}};
-  const ChannelSendStatus workerStatus = workerChannels.sendUiEffect(effect);
+  ProtocolDiagnostic diagnostic{{{"subject", "fallback diagnostic"}}, {}};
+  const ChannelSendStatus workerStatus =
+      workerChannels.sendProtocolDiagnostic(diagnostic);
   WorkerToQtMessage workerMessage;
   passed &=
       expect(workerStatus == ChannelSendStatus::AcceptedWakeFailed &&
@@ -763,7 +761,7 @@ bool testWakeFailureAfterAdmission() {
                  workerChannels.drainWorkerToQtWake().status ==
                      EventFd::DrainStatus::Empty &&
                  workerChannels.tryReceiveForQt(workerMessage) &&
-                 std::holds_alternative<UiEffect>(workerMessage),
+                 std::holds_alternative<ProtocolDiagnostic>(workerMessage),
              "Qt can recover one admitted worker message after a failed wake");
 
   ThreadChannels closedChannels;

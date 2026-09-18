@@ -82,12 +82,15 @@ export function projectTurnPlan(turn: TurnPresentation, threadStatus: Presentati
 }
 
 function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPresentation,
-    visualKey: CardKey): VisibleCardData {
+    visualKey: CardKey, threadCwd: string): VisibleCardData {
     const item = presentation.raw;
     const type = stringMember(item, "type");
     let kind: CardKind = "genericActivity";
     let status = statusFromValue(member(item, "status"));
-    let payload: CardPayload = {type, raw: structuredClone(item)} satisfies GenericActivityData;
+    const rawDetail = JSON.stringify(item, null, 2) ?? "";
+    const displayDetail = rawDetail.length <= 4096 ? rawDetail
+        : `${rawDetail.slice(0, 4096)}\n\n[Activity details truncated]`;
+    let payload: CardPayload = {type, displayDetail} satisfies GenericActivityData;
     if (type === "userMessage") {
         status = UnknownStatus;
         kind = "userMessage"; payload = {text: messageText(item), imagePaths: messageImagePaths(item)} satisfies UserMessageData;
@@ -129,7 +132,7 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
             const [additions, deletions] = unifiedDiffCounts(diff);
             return {path: stringMember(change, "path"), kind: stringMember(change, "kind"), additions, deletions};
         }) : [];
-        payload = {changes} satisfies FileChangesData;
+        payload = {changes, cwd: stringMember(item, "cwd") || threadCwd} satisfies FileChangesData;
     } else if (type === "imageGeneration" || type === "imageView") {
         kind = "imageGeneration";
         if (type === "imageView") status = statusFromValue("completed");
@@ -205,7 +208,7 @@ export function projectConversation(
         }
         nodes.push({position, tieBreaker, sectionKey: sectionComponent("turn:", authoritativeItems.threadId, item.key.turnId),
             turnId: item.key.turnId, turnRoot: authoritativeItems.turnRoots.get(item.key.turnId) === index,
-            card: authoritativeCard(item.key, item.presentation, visualKey)});
+            card: authoritativeCard(item.key, item.presentation, visualKey, authoritativeThread?.cwd ?? "")});
     }
     for (const submission of localSubmissions) {
         if (!localCardVisible(submission)) continue;
@@ -221,8 +224,8 @@ export function projectConversation(
             state: submission.state === "queued" ? "inFlight" : submission.state,
             showPendingAnimation: (submission.state === "queued" || submission.state === "inFlight")
                 && nowMilliseconds - submission.admittedAtMilliseconds >= PendingAnimationDelayMilliseconds,
-            error: submission.error,
-            imagePaths: localImagePaths(submission),
+            error: submission.error, imagePaths: localImagePaths(submission),
+            admittedAtMilliseconds: submission.admittedAtMilliseconds, requiresExplicitRecovery: false,
         };
         const turnRootPosition = authoritativeItems.turnRoots.get(turnId);
         const turnRoot = turnRootPosition !== undefined

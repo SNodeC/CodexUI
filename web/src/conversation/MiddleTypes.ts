@@ -1,4 +1,3 @@
-import type {JsonObject} from "../presentation/PresentationProtocol.js";
 import type {PresentationStatus} from "../presentation/PresentationStatus.js";
 
 export const PendingAnimationDelayMilliseconds = 1000;
@@ -22,14 +21,14 @@ export interface AgentActivityData {
 }
 export interface ReasoningData {summary: string}
 export interface FileChangeData {path: string; kind: string; additions?: number; deletions?: number}
-export interface FileChangesData {changes: FileChangeData[]}
+export interface FileChangesData {changes: FileChangeData[]; cwd: string}
 export interface ImageGenerationData {path: string; revisedPrompt: string}
 export interface PlanStepData {text: string; status: PresentationStatus}
 export interface PlanData {explanation: string; steps: PlanStepData[]; legacyText: string}
-export interface GenericActivityData {type: string; raw: JsonObject}
+export interface GenericActivityData {type: string; displayDetail: string}
 export interface LocalPromptData {
     submissionId: number; prompt: string; state: PromptState; showPendingAnimation: boolean;
-    error: string; imagePaths: string[];
+    error: string; imagePaths: string[]; admittedAtMilliseconds?: number; requiresExplicitRecovery: boolean;
 }
 export type CardPayload = UserMessageData | AgentMessageData | CommandExecutionData | AgentActivityData
     | ReasoningData | FileChangesData | ImageGenerationData | PlanData | GenericActivityData | LocalPromptData;

@@ -6,6 +6,8 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QAccessible>
+#include <QAccessibleWidget>
 #include <QBuffer>
 #include <QClipboard>
 #include <QEvent>
@@ -33,6 +35,54 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int MarkdownBottomPaintGuard = 4;
+
+#if QT_CONFIG(accessibility)
+class DisclosureAccessible final : public QAccessibleWidget {
+public:
+  explicit DisclosureAccessible(presentation::DisclosureButton *button)
+      : QAccessibleWidget(button, QAccessible::Button) {}
+
+  QAccessible::State state() const override {
+    QAccessible::State result = QAccessibleWidget::state();
+    const auto *button = dynamic_cast<const presentation::DisclosureButton *>(
+        widget());
+    result.expandable = button != nullptr;
+    result.expanded = button && button->isExpanded();
+    result.collapsed = button && !button->isExpanded();
+    return result;
+  }
+
+  QStringList actionNames() const override {
+    return {QAccessibleActionInterface::pressAction(),
+            QAccessibleActionInterface::setFocusAction()};
+  }
+
+  void doAction(const QString &action) override {
+    auto *button = dynamic_cast<presentation::DisclosureButton *>(widget());
+    if (!button || !button->isEnabled())
+      return;
+    if (action == QAccessibleActionInterface::pressAction())
+      button->click();
+    else if (action == QAccessibleActionInterface::setFocusAction())
+      button->setFocus(Qt::OtherFocusReason);
+  }
+
+  QStringList keyBindingsForAction(const QString &action) const override {
+    return action == QAccessibleActionInterface::pressAction()
+               ? QStringList{QStringLiteral("Space"), QStringLiteral("Enter")}
+               : QStringList{};
+  }
+};
+
+QAccessibleInterface *presentationAccessibleFactory(const QString &,
+                                                    QObject *object) {
+  auto *button = dynamic_cast<presentation::DisclosureButton *>(object);
+  return button ? new DisclosureAccessible(button) : nullptr;
+}
+
+[[maybe_unused]] const bool PresentationAccessibleFactoryInstalled =
+    (QAccessible::installFactory(presentationAccessibleFactory), true);
+#endif
 
 } // namespace
 
@@ -77,6 +127,10 @@ void MarkdownTextView::configureDocument() {
 bool MarkdownTextView::setContent(const QString &markdown) {
   if (markdown_ == markdown)
     return false;
+  if (preparedLayoutDisabled_) {
+    document()->setLayoutEnabled(true);
+    preparedLayoutDisabled_ = false;
+  }
   const QString rendered = preserveSoftLineBreaks_
                                ? presentation::userMessageMarkdown(markdown)
                                : markdown;
@@ -87,11 +141,26 @@ bool MarkdownTextView::setContent(const QString &markdown) {
   }
   markdown_ = markdown;
   renderedMarkdown_ = rendered;
-  preferredDocumentWidth_ = 0;
   preferredHeight_ = 0;
   refreshPreferredHeight(std::max(1, width()));
   updateGeometry();
-  viewport()->update();
+  return true;
+}
+
+bool MarkdownTextView::setPreparedContent(const QString &markdown,
+                                          const QString &html) {
+  if (markdown_ == markdown)
+    return false;
+  if (html.isEmpty())
+    return setContent(markdown);
+  document()->setLayoutEnabled(false);
+  preparedLayoutDisabled_ = true;
+  document()->setHtml(html);
+  markdown_ = markdown;
+  renderedMarkdown_ = markdown;
+  markdownTail_ = presentation::markdownTailState(*document(), markdown);
+  preferredHeight_ = 0;
+  updateGeometry();
   return true;
 }
 
@@ -156,6 +225,10 @@ QMimeData *MarkdownTextView::createMimeDataFromSelection() const {
 }
 
 void MarkdownTextView::refreshPreferredHeight(int documentWidth) const {
+  if (preparedLayoutDisabled_) {
+    document()->setLayoutEnabled(true);
+    preparedLayoutDisabled_ = false;
+  }
   if (preferredDocumentWidth_ == documentWidth && preferredHeight_ > 0)
     return;
   document()->setTextWidth(documentWidth);
@@ -198,12 +271,12 @@ QString displayChangeKind(std::string_view kind) {
 
 qsizetype lastSimpleMarkdownParagraphStart(QStringView source) {
   qsizetype paragraphStart = 0;
-  qsizetype candidateStart = 0;
-  qsizetype lineStart = 0;
-  while (lineStart <= source.size()) {
-    qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
-    if (lineEnd < 0)
-      lineEnd = source.size();
+  qsizetype lineEnd = source.size();
+  bool foundContent = false;
+  while (lineEnd > 0) {
+    const qsizetype separator =
+        source.lastIndexOf(QLatin1Char('\n'), lineEnd - 1);
+    const qsizetype lineStart = separator + 1;
     QStringView line = source.sliced(lineStart, lineEnd - lineStart);
     if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
       line.chop(1);
@@ -215,15 +288,17 @@ qsizetype lastSimpleMarkdownParagraphStart(QStringView source) {
       }
     }
     if (blank) {
-      candidateStart = std::min(source.size(), lineEnd + 1);
-    } else if (candidateStart > paragraphStart) {
-      paragraphStart = candidateStart;
+      if (foundContent)
+        return paragraphStart;
+    } else {
+      foundContent = true;
+      paragraphStart = lineStart;
     }
-    if (lineEnd == source.size())
+    if (separator < 0)
       break;
-    lineStart = lineEnd + 1;
+    lineEnd = separator;
   }
-  return paragraphStart;
+  return foundContent ? paragraphStart : 0;
 }
 
 bool simpleMarkdownParagraphs(QStringView source) {
@@ -336,6 +411,7 @@ void CopyButton::showCopiedFeedback() {
   QToolTip::showText(mapToGlobal(QPoint(width() / 2, height())),
                      QStringLiteral("Copied"), this, rect(),
                      CopyCheckHoldMilliseconds);
+  announce(*this, QStringLiteral("Copied"));
   update();
 }
 
@@ -399,6 +475,9 @@ void CopyButton::finishFeedback() {
   returningToCopy_ = false;
   morphProgress_ = 0.0;
   feedbackActive_ = false;
+#if QT_VERSION < QT_VERSION_CHECK(6, 8, 0)
+  setAccessibleDescriptionIfChanged(*this, {});
+#endif
   update();
 }
 
@@ -423,6 +502,12 @@ void DisclosureButton::setExpanded(bool expanded) {
   expanded_ = expanded;
   setAccessibleName(expanded ? collapseAccessibleName_ : expandAccessibleName_);
   setToolTip(accessibleName());
+#if QT_CONFIG(accessibility)
+  QAccessible::State changed;
+  changed.expanded = changed.collapsed = true;
+  QAccessibleStateChangeEvent event(this, changed);
+  QAccessible::updateAccessibility(&event);
+#endif
   update();
 }
 
@@ -476,6 +561,21 @@ void setAccessibleNameIfChanged(QWidget &widget, QString name) {
 void setAccessibleDescriptionIfChanged(QWidget &widget, QString description) {
   if (widget.accessibleDescription() != description)
     widget.setAccessibleDescription(std::move(description));
+}
+
+void announce(QWidget &widget, const QString &message) {
+#if QT_CONFIG(accessibility)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+  QAccessibleAnnouncementEvent event(&widget, message);
+#else
+  setAccessibleDescriptionIfChanged(widget, message);
+  QAccessibleEvent event(&widget, QAccessible::Alert);
+#endif
+  QAccessible::updateAccessibility(&event);
+#else
+  static_cast<void>(widget);
+  static_cast<void>(message);
+#endif
 }
 
 QString userMessageMarkdown(QStringView source) {
@@ -670,6 +770,19 @@ void allowPreformattedMarkdownWrapping(QTextDocument &document) {
   }
 }
 
+void allowPreformattedMarkdownWrappingFrom(QTextDocument &document,
+                                           int position) {
+  for (QTextBlock block = document.findBlock(std::max(0, position));
+       block.isValid(); block = block.next()) {
+    QTextBlockFormat format = block.blockFormat();
+    if (!format.nonBreakableLines())
+      continue;
+    format.setNonBreakableLines(false);
+    QTextCursor cursor(block);
+    cursor.setBlockFormat(format);
+  }
+}
+
 MarkdownTailState markdownTailState(const QTextDocument &document,
                                     QStringView markdown) {
   if (markdown.isEmpty())
@@ -689,6 +802,15 @@ void replaceMarkdownDocument(QTextDocument &document, const QString &markdown,
   tailState = markdownTailState(document, QStringView(markdown));
 }
 
+QString prepareMarkdownHtml(const QString &markdown) {
+  if (markdown.isEmpty())
+    return {};
+  QTextDocument document;
+  MarkdownTailState tail;
+  replaceMarkdownDocument(document, markdown, tail);
+  return document.toHtml();
+}
+
 bool markdownAppendTailIsIndependent(QStringView next,
                                      const MarkdownTailState &tailState) {
   return tailState.valid() && tailState.sourceOffset <= next.size() &&
@@ -706,7 +828,8 @@ bool appendMarkdownDocument(QTextDocument &document, QStringView previous,
   cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
   cursor.removeSelectedText();
   cursor.insertMarkdown(reparsedTail.toString(), MarkdownFeatures);
-  allowPreformattedMarkdownWrapping(document);
+  allowPreformattedMarkdownWrappingFrom(document,
+                                        tailState.documentPosition);
   tailState = markdownTailState(document, next);
   return true;
 }

@@ -171,6 +171,9 @@ private:
                              std::vector<ConversationRowChange> &rows,
                              std::span<const nodegraph::NodeRef> removals);
   void rebuildIndexes();
+  [[nodiscard]] static std::unique_ptr<RowNode>
+  buildRows(std::vector<Row> &rows, std::size_t first, std::size_t last,
+            std::uint64_t depth = 0);
   [[nodiscard]] RowNode *nodeAt(std::size_t row) const noexcept;
   [[nodiscard]] std::optional<int> rowOf(const RowNode *node) const noexcept;
   RowNode *insertRow(std::size_t row, Row value);
@@ -189,6 +192,7 @@ private:
   void removeSectionIdentity(RowNode *node);
   void incrementProperty(const char *name);
   void updateRow(int row, Row replacement);
+  void updateRow(RowNode *node, int row, Row replacement);
   void eraseRowIdentity(const Row &row);
 
   std::unique_ptr<RowNode> rows_;

@@ -142,9 +142,9 @@ constexpr std::array<std::string_view, 62> VerifiedNewerClientRequests{
 // These assertions deliberately couple this integration test to the installed
 // generated schema.  An AISuite protocol update must therefore be reconciled
 // with the explicit CodexUI compatibility surface and the graph catalog.
-static_assert(GeneratedClientRequests.size() == 95);
-static_assert(GeneratedServerRequests.size() == 10);
-static_assert(GeneratedServerNotifications.size() == 76);
+static_assert(GeneratedClientRequests.size() == 159);
+static_assert(GeneratedServerRequests.size() == 11);
+static_assert(GeneratedServerNotifications.size() == 81);
 static_assert(GeneratedClientNotifications.size() == 1);
 static_assert(CompatibilityClientRequests.size() == 2);
 static_assert(CompatibilityServerRequests.size() == 1);

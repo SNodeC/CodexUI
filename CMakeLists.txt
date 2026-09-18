@@ -42,6 +42,62 @@ find_package(Qt6 6.6 REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
 
+function(configure_codexui_transports target)
+    if(TARGET snodec::net-in-stream-tls AND TARGET snodec::net-in6-stream-tls)
+        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)
+        target_link_libraries(
+            ${target} PRIVATE snodec::net-in-stream-tls snodec::net-in6-stream-tls
+        )
+    endif()
+    if(TARGET snodec::net-rc-stream-legacy AND TARGET snodec::net-rc-stream-tls)
+        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_RFCOMM=1)
+        target_link_libraries(
+            ${target} PRIVATE snodec::net-rc-stream-legacy snodec::net-rc-stream-tls
+        )
+    endif()
+    if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
+        target_compile_definitions(
+            ${target} PRIVATE CODEXUI_CODEX_FRONTEND_WEBSOCKET=1
+        )
+        target_link_libraries(
+            ${target} PRIVATE snodec::http-client snodec::websocket-client
+        )
+    endif()
+endfunction()
+
+add_library(codexui-build-options INTERFACE)
+if(MSVC)
+    target_compile_options(codexui-build-options INTERFACE /W4 /WX)
+else()
+    target_compile_options(codexui-build-options INTERFACE -Wall -Wextra -Werror)
+endif()
+
+add_library(
+    codexui-client-runtime STATIC
+    src/codex/ClientRuntime.cpp
+    src/codex/ClientRuntime.h
+    src/codex/Configuration.cpp
+    src/codex/Configuration.h
+    src/codex/CurrentProtocolAdapters.h
+    src/codex/WorkerMailboxReceiver.cpp
+    src/codex/WorkerMailboxReceiver.h
+)
+target_compile_features(codexui-client-runtime PUBLIC cxx_std_20)
+target_include_directories(codexui-client-runtime PUBLIC src)
+target_link_libraries(
+    codexui-client-runtime
+    PUBLIC
+        AISuite::OpenAICodex
+        codexui-nodegraph
+        Qt6::Core
+        Threads::Threads
+        snodec::net-un-stream-legacy
+        snodec::net-in-stream-legacy
+        snodec::net-in6-stream-legacy
+    PRIVATE codexui-build-options
+)
+configure_codexui_transports(codexui-client-runtime)
+
 add_library(
     codexui-conversation-height-index STATIC
     src/codex/middle/ConversationHeightIndex.cpp
@@ -75,47 +131,18 @@ add_library(
 target_compile_features(codexui-turn-settings-policy PUBLIC cxx_std_20)
 target_include_directories(codexui-turn-settings-policy PUBLIC src)
 
-set(
-    CODEXUI_CODEX_COMMON_SOURCES
-    src/codex/AttachmentDraft.h
-    src/codex/ClientRuntime.cpp
-    src/codex/ClientRuntime.h
-    src/codex/Configuration.cpp
-    src/codex/Configuration.h
-    src/codex/CurrentProtocolAdapters.h
-    src/codex/ConnectionDialog.cpp
-    src/codex/ConnectionDialog.h
-    src/codex/DiffViewer.cpp
-    src/codex/DiffViewer.h
-    src/codex/FrontendSession.cpp
-    src/codex/FrontendSession.h
-    src/codex/GitDiffProvider.cpp
-    src/codex/GitDiffProvider.h
-    src/codex/FileSelectionDialog.cpp
-    src/codex/FileSelectionDialog.h
-    src/codex/ForkNaming.h
-    src/codex/MainWindow.cpp
-    src/codex/MainWindow.h
-    src/codex/NewThreadDialog.cpp
-    src/codex/NewThreadDialog.h
-    src/codex/UiStatus.h
-    src/codex/WorkerMailboxReceiver.cpp
-    src/codex/WorkerMailboxReceiver.h
-    src/codex/main.cpp
-    src/codex/ui/ExpandingPromptEditor.cpp
-    src/codex/ui/ExpandingPromptEditor.h
-    src/codex/ui/BrandMark.cpp
-    src/codex/ui/BrandMark.h
+add_library(
+    codexui-ui-style STATIC
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
 )
+target_compile_features(codexui-ui-style PUBLIC cxx_std_20)
+target_include_directories(codexui-ui-style PUBLIC src)
+target_link_libraries(codexui-ui-style PUBLIC Qt6::Widgets)
+target_link_libraries(codexui-ui-style PRIVATE codexui-build-options)
 
-set(
-    CODEXUI_SHELL_SOURCES
-    src/codex/ShellWidget.cpp
-    src/codex/ShellWidget.h
-    src/codex/middle/ComposerPane.cpp
-    src/codex/middle/ComposerPane.h
+add_library(
+    codexui-conversation-ui STATIC
     src/codex/middle/ConversationCards.cpp
     src/codex/middle/ConversationCards.h
     src/codex/middle/ConversationPresentation.cpp
@@ -124,27 +151,129 @@ set(
     src/codex/middle/ConversationItemModel.h
     src/codex/middle/ConversationView.cpp
     src/codex/middle/ConversationView.h
-    src/codex/middle/InspectorPane.cpp
-    src/codex/middle/InspectorPane.h
-    src/codex/middle/MiddleRegionWidget.cpp
-    src/codex/middle/MiddleRegionWidget.h
     src/codex/middle/MiddleTypes.cpp
     src/codex/middle/MiddleTypes.h
-    src/codex/middle/ThreadPane.cpp
-    src/codex/middle/ThreadPane.h
+)
+target_compile_features(codexui-conversation-ui PUBLIC cxx_std_20)
+target_include_directories(codexui-conversation-ui PUBLIC src)
+target_link_libraries(
+    codexui-conversation-ui
+    PUBLIC
+        codexui-conversation-height-index
+        codexui-nodegraph
+        codexui-ui-style
+        Qt6::Widgets
+    PRIVATE codexui-build-options
+)
+
+add_library(
+    codexui-ui-adapter STATIC
     src/codex/ui/NodeGraphUiAdapter.cpp
     src/codex/ui/NodeGraphUiAdapter.h
     src/codex/ui/UiViewState.h
 )
+target_compile_features(codexui-ui-adapter PUBLIC cxx_std_20)
+target_include_directories(codexui-ui-adapter PUBLIC src)
+target_link_libraries(
+    codexui-ui-adapter
+    PUBLIC
+        codexui-conversation-ui
+        codexui-nodegraph-json
+        codexui-nodegraph
+        codexui-pending-request-policy
+        codexui-turn-settings-policy
+    PRIVATE codexui-build-options
+)
+
+add_library(
+    codexui-diff-viewer STATIC
+    src/codex/DiffViewer.cpp
+    src/codex/DiffViewer.h
+    src/codex/GitDiffProvider.cpp
+    src/codex/GitDiffProvider.h
+)
+target_compile_features(codexui-diff-viewer PUBLIC cxx_std_20)
+target_include_directories(codexui-diff-viewer PUBLIC src)
+target_link_libraries(
+    codexui-diff-viewer
+    PUBLIC PkgConfig::LIBGIT2 codexui-ui-style Qt6::Widgets
+    PRIVATE codexui-build-options
+)
+
+add_library(
+    codexui-middle-ui STATIC
+    src/codex/FileSelectionDialog.cpp
+    src/codex/FileSelectionDialog.h
+    src/codex/TurnSettingsWidget.cpp
+    src/codex/TurnSettingsWidget.h
+    src/codex/ui/ExpandingPromptEditor.cpp
+    src/codex/ui/ExpandingPromptEditor.h
+    src/codex/middle/ComposerPane.cpp
+    src/codex/middle/ComposerPane.h
+    src/codex/middle/InspectorPane.cpp
+    src/codex/middle/InspectorPane.h
+    src/codex/middle/MiddleRegionWidget.cpp
+    src/codex/middle/MiddleRegionWidget.h
+    src/codex/middle/ThreadPane.cpp
+    src/codex/middle/ThreadPane.h
+)
+target_compile_features(codexui-middle-ui PUBLIC cxx_std_20)
+target_include_directories(codexui-middle-ui PUBLIC src)
+target_link_libraries(
+    codexui-middle-ui
+    PUBLIC
+        AISuite::OpenAICodex
+        codexui-conversation-ui
+        codexui-diff-viewer
+        codexui-pending-request-policy
+        codexui-turn-settings-policy
+        codexui-ui-adapter
+        codexui-ui-style
+        Qt6::Widgets
+    PRIVATE codexui-build-options
+)
+
+add_library(
+    codexui-shell-ui STATIC
+    src/codex/AttachmentDraft.h
+    src/codex/ConnectionDialog.cpp src/codex/ConnectionDialog.h
+    src/codex/FrontendSession.cpp
+    src/codex/FrontendSession.h
+    src/codex/ForkNaming.h
+    src/codex/NewThreadDialog.cpp
+    src/codex/NewThreadDialog.h
+    src/codex/PendingRequestDialog.cpp
+    src/codex/PendingRequestDialog.h
+    src/codex/ShellWidget.cpp
+    src/codex/ShellWidget.h
+    src/codex/UiStatus.h
+    src/codex/ui/BrandMark.cpp
+    src/codex/ui/BrandMark.h
+)
+target_compile_features(codexui-shell-ui PUBLIC cxx_std_20)
+target_include_directories(codexui-shell-ui PUBLIC src)
+target_link_libraries(
+    codexui-shell-ui
+    PUBLIC
+        AISuite::OpenAICodex
+        codexui-client-runtime
+        codexui-middle-ui
+        codexui-nodegraph-json
+        codexui-nodegraph
+        codexui-pending-request-policy
+        codexui-turn-settings-policy
+        codexui-ui-adapter
+        codexui-ui-style
+        Qt6::Widgets
+        Threads::Threads
+    PRIVATE codexui-build-options
+)
 
 qt_add_executable(
     codex-ui
-    ${CODEXUI_CODEX_COMMON_SOURCES}
-    ${CODEXUI_SHELL_SOURCES}
-    src/codex/PendingRequestDialog.cpp
-    src/codex/PendingRequestDialog.h
-    src/codex/TurnSettingsWidget.cpp
-    src/codex/TurnSettingsWidget.h
+    src/codex/MainWindow.cpp
+    src/codex/MainWindow.h
+    src/codex/main.cpp
 )
 function(configure_codexui_target target)
     target_compile_features(${target} PRIVATE cxx_std_20)
@@ -153,11 +282,18 @@ function(configure_codexui_target target)
         ${target}
         PRIVATE
             AISuite::OpenAICodex
+            codexui-client-runtime
+            codexui-diff-viewer
+            codexui-middle-ui
+            codexui-conversation-ui
             codexui-conversation-height-index
             codexui-nodegraph-json
             codexui-nodegraph
             codexui-pending-request-policy
+            codexui-shell-ui
             codexui-turn-settings-policy
+            codexui-ui-adapter
+            codexui-ui-style
             PkgConfig::LIBGIT2
             Qt6::Widgets
             Threads::Threads
@@ -168,6 +304,7 @@ function(configure_codexui_target target)
 endfunction()
 
 configure_codexui_target(codex-ui)
+target_link_libraries(codex-ui PRIVATE codexui-build-options)
 
 option(CODEXUI_INSTALL_WEB "Require and install the CodexWebUI production artifact" ON)
 if(CODEXUI_INSTALL_WEB)
@@ -176,33 +313,12 @@ else()
     message(STATUS "CodexWebUI packaging disabled by CODEXUI_INSTALL_WEB=OFF")
 endif()
 
-if(TARGET snodec::net-in-stream-tls AND TARGET snodec::net-in6-stream-tls)
-    target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)
-    target_link_libraries(
-        codex-ui PRIVATE snodec::net-in-stream-tls snodec::net-in6-stream-tls
-    )
-endif()
-
-if(TARGET snodec::net-rc-stream-legacy AND TARGET snodec::net-rc-stream-tls)
-    target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_RFCOMM=1)
-    target_link_libraries(
-        codex-ui PRIVATE snodec::net-rc-stream-legacy snodec::net-rc-stream-tls
-    )
-endif()
-
-if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
-    target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_WEBSOCKET=1)
-    target_link_libraries(codex-ui PRIVATE snodec::http-client snodec::websocket-client)
-endif()
+configure_codexui_transports(codex-ui)
 
 if(BUILD_TESTING)
     add_executable(
         codexui-nodegraph-ui-adapter-test
         tests/codex/NodeGraphUiAdapterTest.cpp
-        src/codex/ui/NodeGraphUiAdapter.cpp
-        src/codex/ui/NodeGraphUiAdapter.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
     )
     target_compile_features(
         codexui-nodegraph-ui-adapter-test PRIVATE cxx_std_20
@@ -217,10 +333,7 @@ if(BUILD_TESTING)
     target_link_libraries(
         codexui-nodegraph-ui-adapter-test
         PRIVATE
-            codexui-nodegraph-json
-            codexui-nodegraph
-            codexui-pending-request-policy
-            codexui-turn-settings-policy
+            codexui-ui-adapter
     )
     add_test(
         NAME codexui-nodegraph-ui-adapter
@@ -233,20 +346,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-nodegraph-conversation-ui-test
         tests/codex/NodeGraphConversationUiTest.cpp
-        src/codex/ui/NodeGraphUiAdapter.cpp
-        src/codex/ui/NodeGraphUiAdapter.h
-        src/codex/middle/ConversationCards.cpp
-        src/codex/middle/ConversationCards.h
-        src/codex/middle/ConversationPresentation.cpp
-        src/codex/middle/ConversationPresentation.h
-        src/codex/middle/ConversationView.cpp
-        src/codex/middle/ConversationView.h
-        src/codex/middle/ConversationItemModel.cpp
-        src/codex/middle/ConversationItemModel.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(
         codexui-nodegraph-conversation-ui-test PRIVATE cxx_std_20
@@ -257,9 +356,7 @@ if(BUILD_TESTING)
     target_link_libraries(
         codexui-nodegraph-conversation-ui-test
         PRIVATE
-            codexui-nodegraph-json
-            codexui-nodegraph
-            codexui-pending-request-policy
+            codexui-ui-adapter
             codexui-conversation-height-index
             Qt6::Widgets
     )
@@ -275,15 +372,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-nodegraph-thread-pane-ui-test
         tests/codex/NodeGraphThreadPaneUiTest.cpp
-        src/codex/ui/NodeGraphUiAdapter.cpp
-        src/codex/ui/NodeGraphUiAdapter.h
-        src/codex/ui/UiViewState.h
-        src/codex/middle/ThreadPane.cpp
-        src/codex/middle/ThreadPane.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(
         codexui-nodegraph-thread-pane-ui-test PRIVATE cxx_std_20
@@ -294,9 +382,12 @@ if(BUILD_TESTING)
     target_link_libraries(
         codexui-nodegraph-thread-pane-ui-test
         PRIVATE
+            codexui-middle-ui
+            codexui-ui-adapter
             codexui-nodegraph-json
             codexui-nodegraph
             codexui-pending-request-policy
+            codexui-conversation-ui
             Qt6::Widgets
     )
     add_test(
@@ -391,15 +482,9 @@ if(BUILD_TESTING)
     add_executable(
         codexui-client-runtime-dispatch-test
         tests/codex/ClientRuntimeDispatchTest.cpp
-        src/codex/ClientRuntime.cpp
-        src/codex/ClientRuntime.h
-        src/codex/Configuration.cpp
-        src/codex/Configuration.h
-        src/codex/CurrentProtocolAdapters.h
-        src/codex/WorkerMailboxReceiver.cpp
-        src/codex/WorkerMailboxReceiver.h
     )
     configure_codexui_target(codexui-client-runtime-dispatch-test)
+    configure_codexui_transports(codexui-client-runtime-dispatch-test)
     add_test(
         NAME codexui-client-runtime-dispatch
         COMMAND codexui-client-runtime-dispatch-test
@@ -434,18 +519,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-conversation-cards-test
         tests/codex/ConversationCardsTest.cpp
-        src/codex/middle/ConversationCards.cpp
-        src/codex/middle/ConversationCards.h
-        src/codex/middle/ConversationPresentation.cpp
-        src/codex/middle/ConversationPresentation.h
-        src/codex/middle/ConversationView.cpp
-        src/codex/middle/ConversationView.h
-        src/codex/middle/ConversationItemModel.cpp
-        src/codex/middle/ConversationItemModel.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(
         codexui-conversation-cards-test PRIVATE cxx_std_20
@@ -453,7 +526,7 @@ if(BUILD_TESTING)
     target_include_directories(codexui-conversation-cards-test PRIVATE src)
     target_link_libraries(
         codexui-conversation-cards-test
-        PRIVATE codexui-conversation-height-index codexui-nodegraph Qt6::Widgets
+        PRIVATE codexui-conversation-ui
     )
     add_test(
         NAME codexui-conversation-cards
@@ -467,10 +540,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-conversation-item-model-test
         tests/codex/ConversationItemModelTest.cpp
-        src/codex/middle/ConversationItemModel.cpp
-        src/codex/middle/ConversationItemModel.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
     )
     target_compile_features(
         codexui-conversation-item-model-test PRIVATE cxx_std_20
@@ -480,7 +549,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(
         codexui-conversation-item-model-test
-        PRIVATE codexui-conversation-height-index codexui-nodegraph Qt6::Widgets
+        PRIVATE codexui-conversation-ui
     )
     add_test(
         NAME codexui-conversation-item-model
@@ -494,18 +563,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-conversation-virtualization-test
         tests/codex/ConversationVirtualizationTest.cpp
-        src/codex/middle/ConversationCards.cpp
-        src/codex/middle/ConversationCards.h
-        src/codex/middle/ConversationPresentation.cpp
-        src/codex/middle/ConversationPresentation.h
-        src/codex/middle/ConversationItemModel.cpp
-        src/codex/middle/ConversationItemModel.h
-        src/codex/middle/ConversationView.cpp
-        src/codex/middle/ConversationView.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(
         codexui-conversation-virtualization-test PRIVATE cxx_std_20
@@ -515,7 +572,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(
         codexui-conversation-virtualization-test
-        PRIVATE codexui-conversation-height-index codexui-nodegraph Qt6::Widgets
+        PRIVATE codexui-conversation-ui
     )
     add_test(
         NAME codexui-conversation-virtualization
@@ -552,18 +609,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-conversation-view-benchmark
         tests/codex/ConversationViewBenchmark.cpp
-        src/codex/middle/ConversationCards.cpp
-        src/codex/middle/ConversationCards.h
-        src/codex/middle/ConversationPresentation.cpp
-        src/codex/middle/ConversationPresentation.h
-        src/codex/middle/ConversationView.cpp
-        src/codex/middle/ConversationView.h
-        src/codex/middle/ConversationItemModel.cpp
-        src/codex/middle/ConversationItemModel.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(
         codexui-conversation-view-benchmark PRIVATE cxx_std_20
@@ -573,7 +618,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(
         codexui-conversation-view-benchmark
-        PRIVATE codexui-conversation-height-index codexui-nodegraph Qt6::Widgets
+        PRIVATE codexui-conversation-ui
     )
     foreach(benchmark_rows IN ITEMS 320 1280 10000)
         foreach(benchmark_dpr IN ITEMS 1 1.25 1.5 2)
@@ -601,36 +646,6 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-application-layout-test
         tests/codex/EstablishedUiUxTest.cpp
-        src/codex/DiffViewer.cpp
-        src/codex/DiffViewer.h
-        src/codex/GitDiffProvider.cpp
-        src/codex/GitDiffProvider.h
-        src/codex/FileSelectionDialog.cpp
-        src/codex/FileSelectionDialog.h
-        src/codex/TurnSettingsWidget.cpp
-        src/codex/TurnSettingsWidget.h
-        src/codex/ui/ExpandingPromptEditor.cpp
-        src/codex/ui/ExpandingPromptEditor.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
-        src/codex/middle/ComposerPane.cpp
-        src/codex/middle/ComposerPane.h
-        src/codex/middle/ConversationCards.cpp
-        src/codex/middle/ConversationCards.h
-        src/codex/middle/ConversationPresentation.cpp
-        src/codex/middle/ConversationPresentation.h
-        src/codex/middle/ConversationView.cpp
-        src/codex/middle/ConversationView.h
-        src/codex/middle/ConversationItemModel.cpp
-        src/codex/middle/ConversationItemModel.h
-        src/codex/middle/InspectorPane.cpp
-        src/codex/middle/InspectorPane.h
-        src/codex/middle/MiddleRegionWidget.cpp
-        src/codex/middle/MiddleRegionWidget.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/middle/ThreadPane.cpp
-        src/codex/middle/ThreadPane.h
     )
     target_compile_features(
         codexui-application-layout-test PRIVATE cxx_std_20
@@ -640,6 +655,9 @@ if(BUILD_TESTING)
         codexui-application-layout-test
         PRIVATE
             AISuite::OpenAICodex
+            codexui-conversation-ui
+            codexui-diff-viewer
+            codexui-middle-ui
             codexui-conversation-height-index
             codexui-nodegraph
             codexui-pending-request-policy
@@ -682,27 +700,17 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-inspector-graph-test
         tests/codex/NodeGraphInspectorUiTest.cpp
-        src/codex/DiffViewer.cpp
-        src/codex/DiffViewer.h
-        src/codex/GitDiffProvider.cpp
-        src/codex/GitDiffProvider.h
-        src/codex/middle/InspectorPane.cpp
-        src/codex/middle/InspectorPane.h
-        src/codex/middle/ConversationPresentation.cpp
-        src/codex/middle/ConversationPresentation.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/ui/NodeGraphUiAdapter.cpp
-        src/codex/ui/NodeGraphUiAdapter.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(codexui-inspector-graph-test PRIVATE cxx_std_20)
     target_include_directories(codexui-inspector-graph-test PRIVATE src)
     target_link_libraries(
         codexui-inspector-graph-test
         PRIVATE
+            codexui-ui-adapter
+            codexui-diff-viewer
+            codexui-middle-ui
             codexui-nodegraph-json
+            codexui-conversation-ui
             codexui-conversation-height-index
             codexui-nodegraph
             codexui-pending-request-policy
@@ -756,17 +764,12 @@ if(BUILD_TESTING)
     qt_add_executable(
         codexui-git-changes-live-test
         tests/codex/GitChangesLiveTest.cpp
-        src/codex/DiffViewer.cpp
-        src/codex/DiffViewer.h
-        src/codex/GitDiffProvider.cpp
-        src/codex/GitDiffProvider.h
-        src/codex/ui/UiStyle.cpp
-        src/codex/ui/UiStyle.h
     )
     target_compile_features(codexui-git-changes-live-test PRIVATE cxx_std_20)
     target_include_directories(codexui-git-changes-live-test PRIVATE src)
     target_link_libraries(
-        codexui-git-changes-live-test PRIVATE PkgConfig::LIBGIT2 Qt6::Widgets
+        codexui-git-changes-live-test
+        PRIVATE codexui-diff-viewer
     )
     add_test(
         NAME codexui-git-changes-live
@@ -777,24 +780,12 @@ if(BUILD_TESTING)
         PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
-    set(CODEXUI_SHELL_TEST_SOURCES ${CODEXUI_CODEX_COMMON_SOURCES})
-    list(
-        REMOVE_ITEM CODEXUI_SHELL_TEST_SOURCES
-        src/codex/main.cpp
-        src/codex/MainWindow.cpp
-        src/codex/MainWindow.h
-    )
     qt_add_executable(
         codexui-shell-integration-test
         tests/codex/ShellIntegrationTest.cpp
-        ${CODEXUI_SHELL_TEST_SOURCES}
-        ${CODEXUI_SHELL_SOURCES}
-        src/codex/PendingRequestDialog.cpp
-        src/codex/PendingRequestDialog.h
-        src/codex/TurnSettingsWidget.cpp
-        src/codex/TurnSettingsWidget.h
     )
     configure_codexui_target(codexui-shell-integration-test)
+    configure_codexui_transports(codexui-shell-integration-test)
     add_test(
         NAME codexui-shell-integration
         COMMAND codexui-shell-integration-test

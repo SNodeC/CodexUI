@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -23,8 +24,6 @@ namespace codexui::codex::ui {
 // values, and releases the graph before any QWidget code runs.
 class NodeGraphUiAdapter final {
 public:
-  static constexpr std::size_t MaximumConversationDeltaItems = 64;
-
   struct ConversationInfo {
     bool readyForDisplay = false;
     bool hydrationFailed = false;
@@ -38,12 +37,15 @@ public:
     bool authorityReplacement = false;
     std::vector<nodegraph::NodeRef> items;
     std::optional<bool> historyRequestPending;
+    std::optional<bool> providerHasMore;
+    std::uint64_t graphRevision = 0;
   };
 
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
-  conversation(const nodegraph::NodeRef &thread) const;
+  conversation(const nodegraph::NodeRef &thread,
+               std::uint64_t *graphRevision = nullptr) const;
 
   [[nodiscard]] std::optional<ConversationInfo>
   conversationInfo(const nodegraph::NodeRef &thread) const;
@@ -54,6 +56,10 @@ public:
   [[nodiscard]] ConversationRoute
   conversationRoute(const nodegraph::GraphChanged &change,
                     const nodegraph::NodeRef &thread) const;
+  [[nodiscard]] ConversationRoute conversationRoute(
+      const nodegraph::GraphChanged &change, const nodegraph::NodeRef &thread,
+      const nodegraph::NodeGraph::ReadAccess &read,
+      std::uint64_t lastRoutedRevision = 0) const;
 
   // Projects a coalesced bounded set through one graph read. Presentation-only
   // values and canonically ordered structural rows share graphCardData and the
@@ -62,9 +68,14 @@ public:
   conversationDelta(const nodegraph::NodeRef &thread,
                     std::span<const nodegraph::NodeRef> items,
                     bool structural) const;
+  [[nodiscard]] std::optional<middle::ConversationDelta>
+  conversationDeltaSince(const nodegraph::NodeRef &thread,
+                         std::uint64_t afterRevision,
+                         std::uint64_t *graphRevision = nullptr) const;
 
   [[nodiscard]] std::optional<ThreadListSnapshot>
-  threads(const nodegraph::NodeRef &selectedThread) const;
+  threads(const nodegraph::NodeRef &selectedThread,
+          std::uint64_t *graphRevision = nullptr) const;
 
   [[nodiscard]] std::optional<ThreadListRow>
   threadRow(const nodegraph::NodeRef &thread) const;
@@ -97,6 +108,10 @@ public:
   inspectorAffected(const nodegraph::GraphChanged &change,
                     const nodegraph::NodeRef &selectedThread,
                     InspectorProjection projection) const;
+  [[nodiscard]] bool inspectorAffected(
+      const nodegraph::GraphChanged &change,
+      const nodegraph::NodeRef &selectedThread, InspectorProjection projection,
+      const nodegraph::NodeGraph::ReadAccess &read) const;
 
 private:
   [[nodiscard]] static std::optional<middle::ConversationRowChange>

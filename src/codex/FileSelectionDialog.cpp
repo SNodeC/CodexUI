@@ -279,7 +279,7 @@ void FileSelectionDialog::addSelectedFiles() {
       break;
     }
     const QString mime =
-        mimeDatabase.mimeTypeForFile(info, QMimeDatabase::MatchContent).name();
+        mimeDatabase.mimeTypeForFile(info, QMimeDatabase::MatchExtension).name();
     auto *item = new QListWidgetItem(
         QStringLiteral("%1  |  %2")
             .arg(info.fileName(), readableSize(info.size())));

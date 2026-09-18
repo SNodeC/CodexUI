@@ -13,7 +13,6 @@ namespace codexui::codex {
 MainWindow::MainWindow(FrontendSession &session, QWidget *parent)
     : QMainWindow(parent) {
   setWindowTitle(QStringLiteral("CodexUI"));
-  setMinimumSize(1100, 700);
   resize(1536, 960);
 
   const QIcon applicationIcon = codexui::BrandMark::icon();

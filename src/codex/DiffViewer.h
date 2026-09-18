@@ -17,6 +17,8 @@ class QLabel;
 class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
+class QHideEvent;
+class QShowEvent;
 class QTimer;
 
 namespace codexui::codex {
@@ -32,6 +34,10 @@ public:
                             QStringList changedPaths);
   void refreshRepository();
   [[nodiscard]] const GitDiffSnapshot &currentSnapshot() const noexcept;
+
+protected:
+  void showEvent(QShowEvent *event) override;
+  void hideEvent(QHideEvent *event) override;
 
 private:
   void applySnapshot(const GitDiffSnapshot &snapshot);

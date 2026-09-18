@@ -5,18 +5,18 @@
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QDir>
-#include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QStyle>
-#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -28,24 +28,14 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int ControlHeight = 32;
-constexpr int HorizontalInset = 24;
 constexpr int DividerOutset = 10;
-constexpr int BottomInset = 12;
 constexpr int AttachmentRowHeight = 28;
 constexpr int MaximumVisibleAttachments = 4;
 
+using UiStyle::makeLabel;
+
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
-}
-
-QLabel *makeLabel(QString value, const char *kind) {
-  auto *label = new QLabel(std::move(value));
-  label->setProperty("kind", kind);
-  label->setTextFormat(Qt::PlainText);
-  label->setWordWrap(true);
-  label->setMinimumWidth(0);
-  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  return label;
 }
 
 void clearLayout(QLayout *layout) {
@@ -63,17 +53,10 @@ void repolish(QWidget *widget) {
 
 } // namespace
 
-ComposerPane::ComposerPane(QWidget *anchor)
-    : QWidget(anchor), anchor_(anchor), reserve_(new QWidget(anchor)) {
-  Q_ASSERT(anchor_);
+ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   setObjectName(QStringLiteral("composerOverlay"));
   setAttribute(Qt::WA_StyledBackground, true);
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-  anchor_->installEventFilter(this);
-
-  reserve_->setObjectName(QStringLiteral("composerCanonicalReserve"));
-  reserve_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-  reserve_->setFixedHeight(0);
 
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(0, 8, 0, 0);
@@ -169,7 +152,6 @@ ComposerPane::ComposerPane(QWidget *anchor)
   composerLayout->addWidget(attachmentPanel_);
 
   composerBody_ = new QWidget(composer_);
-  composerBody_->installEventFilter(this);
   composerGrid_ = new QGridLayout(composerBody_);
   composerGrid_->setContentsMargins(0, 0, 0, 0);
   composerGrid_->setHorizontalSpacing(8);
@@ -208,7 +190,6 @@ ComposerPane::ComposerPane(QWidget *anchor)
   connect(promptEditor_, &QPlainTextEdit::textChanged, this, [this] {
     refreshSubmissionEnabled();
     refreshAdaptiveLayout();
-    synchronizeGeometry();
   });
   connect(promptEditor_, &codexui::ExpandingPromptEditor::focusStateChanged,
           this, [this](bool focused) {
@@ -218,7 +199,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   connect(promptEditor_, &codexui::ExpandingPromptEditor::editorHeightChanged,
           this, [this](int) {
             refreshAdaptiveLayout();
-            synchronizeGeometry();
+            updateGeometry();
           });
   connect(stopButton_, &QPushButton::clicked, this, [this] {
     if (actions_.stop)
@@ -231,15 +212,6 @@ ComposerPane::ComposerPane(QWidget *anchor)
 
   refreshAttachments();
   refreshSubmissionEnabled();
-  synchronizeGeometry();
-  QTimer::singleShot(0, this, [this] {
-    // The compact reserve is measured only after the splitter has assigned
-    // the center pane its real width. Until then the overlay may be placed,
-    // but its construction-time size must not become canonical.
-    canonicalCaptureEnabled_ = true;
-    synchronizeGeometry();
-  });
-  raise();
 }
 
 ComposerPane::~ComposerPane() { delete turnSettings_; }
@@ -248,17 +220,10 @@ void ComposerPane::setActions(Actions actions) {
   actions_ = std::move(actions);
 }
 
-void ComposerPane::setExtraOverlayHeightAction(
-    std::function<void(int)> action) {
-  extraOverlayHeightAction_ = std::move(action);
-  if (extraOverlayHeightAction_)
-    extraOverlayHeightAction_(extraHeight_);
-}
-
 void ComposerPane::setAttachments(std::vector<AttachmentDraft> attachments) {
   attachments_ = std::move(attachments);
   refreshAttachments();
-  synchronizeGeometry();
+  updateGeometry();
 }
 
 const std::vector<AttachmentDraft> &ComposerPane::attachments() const noexcept {
@@ -274,7 +239,7 @@ void ComposerPane::setAttentionVisible(bool visible) {
   attention_->setVisible(visible);
   if (transferFocus)
     promptEditor_->setFocus();
-  synchronizeGeometry();
+  updateGeometry();
 }
 
 void ComposerPane::setAttentionRequest(QString title, QString detail,
@@ -318,7 +283,7 @@ void ComposerPane::setAttentionRequest(QString title, QString detail,
     promptEditor_->setFocus();
   else if (transferToReview)
     attentionReviewButton_->setFocus();
-  synchronizeGeometry();
+  updateGeometry();
 }
 
 void ComposerPane::setAttentionActionEnabled(bool acceptEnabled,
@@ -348,7 +313,7 @@ void ComposerPane::setActiveTurn(bool active) {
                               : QStringLiteral("Send"));
   refreshActionStyle();
   refreshAdaptiveLayout();
-  synchronizeGeometry();
+  updateGeometry();
 }
 
 void ComposerPane::setCanSubmit(bool canSubmit) {
@@ -377,78 +342,7 @@ void ComposerPane::clearDraft() {
   promptEditor_->clear();
   attachments_.clear();
   refreshAttachments();
-  synchronizeGeometry();
-}
-
-void ComposerPane::synchronizeGeometry() {
-  if (synchronizing_ || !anchor_ || !layout())
-    return;
-  synchronizing_ = true;
-
-  const int overlayInset = HorizontalInset - DividerOutset;
-  const int width = std::max(0, anchor_->width() - 2 * overlayInset);
-  if (this->width() != width)
-    resize(width, std::max(0, height()));
-  layout()->activate();
-  refreshAdaptiveLayout();
-  layout()->activate();
-
-  const int availableHeight = std::max(0, anchor_->height() - BottomInset);
-  const int naturalHeight = sizeHint().height();
-  const int wantedHeight = std::min(naturalHeight, availableHeight);
-  if (canonicalCaptureEnabled_ && canonicalHeight_ == 0 && naturalHeight > 0) {
-    // The reserve describes the compact surface, not the amount which happened
-    // to fit into an unlaid-out parent during construction.
-    canonicalHeight_ = naturalHeight;
-    reserve_->setFixedHeight(canonicalHeight_);
-  }
-  const int wantedExtra = canonicalCaptureEnabled_ && canonicalHeight_ > 0
-                              ? std::max(0, wantedHeight - canonicalHeight_)
-                              : 0;
-  const QRect wantedGeometry(overlayInset, availableHeight - wantedHeight,
-                             width, wantedHeight);
-  const bool geometryChanged = geometry() != wantedGeometry;
-  if (geometryChanged)
-    setGeometry(wantedGeometry);
-  // The natural height was calculated after the prompt layout changed, while
-  // the child layout still had the previous overlay geometry. Lay out the
-  // children once against the final rectangle so fixed surfaces cannot remain
-  // compressed and leave a false gap during upward growth.
-  if (geometryChanged) {
-    layout()->invalidate();
-    layout()->activate();
-  }
-  raise();
-
-  if (wantedExtra != extraHeight_) {
-    extraHeight_ = wantedExtra;
-    if (extraOverlayHeightAction_)
-      extraOverlayHeightAction_(extraHeight_);
-  }
-  synchronizing_ = false;
-}
-
-bool ComposerPane::event(QEvent *event) {
-  const bool result = QWidget::event(event);
-  if ((event->type() == QEvent::LayoutRequest ||
-       event->type() == QEvent::Show) &&
-      !synchronizing_)
-    synchronizeGeometry();
-  return result;
-}
-
-bool ComposerPane::eventFilter(QObject *watched, QEvent *event) {
-  if (watched == anchor_ &&
-      (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
-       event->type() == QEvent::LayoutRequest))
-    synchronizeGeometry();
-  if (watched == composerBody_ &&
-      (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
-       event->type() == QEvent::LayoutRequest)) {
-    refreshAdaptiveLayout();
-    synchronizeGeometry();
-  }
-  return QWidget::eventFilter(watched, event);
+  updateGeometry();
 }
 
 void ComposerPane::submitDraft() {
@@ -463,15 +357,14 @@ void ComposerPane::submitDraft() {
 
 void ComposerPane::refreshAttachments() {
   clearLayout(attachmentListLayout_);
-  const bool hasAttachments = !attachments_.empty();
-  attachmentPanel_->setVisible(hasAttachments);
-  if (!hasAttachments) {
-    attachmentListScroll_->setFixedHeight(0);
+  if (attachments_.empty()) {
+    refreshAttachmentGeometry();
     return;
   }
 
-  for (std::size_t index = 0; index < attachments_.size(); ++index) {
-    const AttachmentDraft &attachment = attachments_[index];
+  for (const AttachmentDraft &attachment : attachments_) {
+    const std::string attachmentPath = attachment.path;
+    const QString attachmentName = text(attachment.name);
     auto *row = new QWidget;
     row->setFixedHeight(AttachmentRowHeight);
     auto *rowLayout = new QHBoxLayout(row);
@@ -480,17 +373,35 @@ void ComposerPane::refreshAttachments() {
 
     auto *remove = new QPushButton(QStringLiteral("X"), row);
     remove->setAccessibleName(
-        QStringLiteral("Remove %1").arg(text(attachment.name)));
+        QStringLiteral("Remove %1").arg(attachmentName));
     remove->setToolTip(QStringLiteral("Remove attachment"));
     remove->setFixedSize(18, 18);
     remove->setProperty("kind", "destructiveCompact");
-    connect(remove, &QPushButton::clicked, this, [this, index] {
-      if (index >= attachments_.size())
+    connect(remove, &QPushButton::clicked, this,
+            [this, row, attachmentPath, attachmentName] {
+      const auto attachment = std::ranges::find(
+          attachments_, attachmentPath, &AttachmentDraft::path);
+      if (attachment == attachments_.end())
         return;
-      attachments_.erase(attachments_.begin() +
-                         static_cast<std::ptrdiff_t>(index));
-      refreshAttachments();
-      synchronizeGeometry();
+      attachments_.erase(attachment);
+      const int rowIndex = attachmentListLayout_->indexOf(row);
+      if (QLayoutItem *item = attachmentListLayout_->takeAt(rowIndex))
+        delete item;
+      row->hide();
+      row->deleteLater();
+      refreshAttachmentGeometry();
+      QWidget *focusTarget = nullptr;
+      if (rowIndex >= 0 && rowIndex < attachmentListLayout_->count())
+        focusTarget = attachmentListLayout_->itemAt(rowIndex)->widget();
+      else if (rowIndex > 0)
+        focusTarget = attachmentListLayout_->itemAt(rowIndex - 1)->widget();
+      if (focusTarget)
+        focusTarget = focusTarget->findChild<QPushButton *>();
+      (focusTarget ? focusTarget : attachmentButton_)->setFocus();
+      presentation::announce(
+          *attachmentButton_,
+          QStringLiteral("Removed attachment %1").arg(attachmentName));
+      updateGeometry();
     });
 
     auto *fileBox = new QFrame(row);
@@ -505,8 +416,18 @@ void ComposerPane::refreshAttachments() {
     attachmentListLayout_->addWidget(row);
   }
 
+  refreshAttachmentGeometry();
+}
+
+void ComposerPane::refreshAttachmentGeometry() {
+  const bool hasAttachments = !attachments_.empty();
+  attachmentPanel_->setVisible(hasAttachments);
+  if (!hasAttachments) {
+    attachmentListScroll_->setFixedHeight(0);
+    return;
+  }
   const int visibleRows = std::min<int>(static_cast<int>(attachments_.size()),
-                                        MaximumVisibleAttachments);
+                                       MaximumVisibleAttachments);
   attachmentListScroll_->setFixedHeight(visibleRows * AttachmentRowHeight +
                                         (visibleRows - 1) * 4);
 }
@@ -558,8 +479,9 @@ void ComposerPane::refreshActionStyle() {
 }
 
 void ComposerPane::refreshSubmissionEnabled() {
-  sendButton_->setEnabled(canSubmit_ &&
-                          !promptEditor_->toPlainText().trimmed().isEmpty());
+  static const QRegularExpression NonWhitespace(QStringLiteral("\\S"));
+  sendButton_->setEnabled(
+      canSubmit_ && !promptEditor_->document()->find(NonWhitespace).isNull());
 }
 
 } // namespace codexui::codex::middle

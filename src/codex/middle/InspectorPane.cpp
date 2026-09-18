@@ -13,6 +13,7 @@
 #include <QAbstractScrollArea>
 #include <QApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QHideEvent>
@@ -537,8 +538,11 @@ public:
     setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
     verticalScrollBar()->setSingleStep(20);
     connect(qApp, &QApplication::focusChanged, this,
-            [this](QWidget *old, QWidget *) {
+            [this](QWidget *old, QWidget *current) {
               Resident *source = residentFor(old);
+              Resident *destination = residentFor(current);
+              if (!source && !destination)
+                return;
               const QScopedValueRollback dispatching(
                   dispatchingRow_, source ? source->widget : nullptr);
               synchronize();
@@ -560,6 +564,18 @@ public:
       result.retainedKeys.assign(owner_->expandedAgentIds.begin(),
                                  owner_->expandedAgentIds.end());
     return result;
+  }
+
+  [[nodiscard]] bool
+  retainsTarget(const nodegraph::NodeRef &target) const noexcept {
+    if (!target)
+      return false;
+    const auto retains = [&target](const ui::InspectorRow &row) {
+      const auto *request = std::get_if<PendingRequestDescriptor>(&row.value);
+      return request && request->target == target;
+    };
+    return std::ranges::any_of(pageData_.rows, retains) ||
+           (pageData_.focused && retains(*pageData_.focused));
   }
 
   void setActive(bool active) {
@@ -609,6 +625,7 @@ public:
         if (current != old && patch(iterator->widget, current) &&
             !orderChanged) {
           static_cast<void>(measure(*iterator));
+          iterator->measured = true;
         }
         ++iterator;
       }
@@ -679,7 +696,10 @@ protected:
     synchronize();
   }
 
-  void scrollContentsBy(int, int) override { synchronize(); }
+  void scrollContentsBy(int dx, int dy) override {
+    QAbstractScrollArea::scrollContentsBy(dx, dy);
+    synchronize();
+  }
 
   bool eventFilter(QObject *watched, QEvent *event) override {
     if (!active_ || event->type() != QEvent::Wheel)
@@ -758,6 +778,7 @@ private:
     std::string key;
     std::size_t row = 0;
     QWidget *widget = nullptr;
+    bool measured = false;
   };
 
   struct Anchor {
@@ -910,7 +931,7 @@ private:
       return ui::InspectorRow{
           std::string(messageKey()),
           ui::InspectorMarkdownRow{page.emptyMessage,
-                                   std::string(pageStyle().accessibleName)}};
+                                   std::string(pageStyle().accessibleName), {}}};
     }
     if (row >= page.first && row - page.first < page.rows.size())
       return page.rows[row - page.first];
@@ -928,7 +949,9 @@ private:
         label->setObjectName(QString::fromLatin1(pageStyle().objectName));
         widget = label;
       } else {
-        auto *view = new MarkdownTextView(text(markdown->text));
+        auto *view = new MarkdownTextView({});
+        view->setPreparedContent(text(markdown->text),
+                                 text(markdown->preparedHtml));
         widget = view;
       }
     } else if (std::holds_alternative<PlanStepData>(row.value)) {
@@ -953,8 +976,8 @@ private:
       if (row.key == messageKey())
         static_cast<QLabel *>(widget)->setText(text(markdown->text));
       else
-        static_cast<MarkdownTextView *>(widget)->setContent(
-            text(markdown->text));
+        static_cast<MarkdownTextView *>(widget)->setPreparedContent(
+            text(markdown->text), text(markdown->preparedHtml));
       return true;
     }
     if (const auto *step = std::get_if<PlanStepData>(&row.value)) {
@@ -979,8 +1002,10 @@ private:
     {
       const QScopedValueRollback synchronizing(synchronizing_, true);
       const Anchor anchor = captureAnchor();
-      if (remeasure)
+      if (remeasure) {
         static_cast<void>(measure(*remeasure));
+        remeasure->measured = true;
+      }
       needsPage = reconcile(anchor, false);
     }
     if (needsPage && owner_->refreshRequested)
@@ -988,15 +1013,21 @@ private:
   }
 
   bool reconcile(const Anchor &anchor, bool remeasureResidents) {
-    for (;;) {
+    constexpr int MaximumSettlementPasses = 3;
+    constexpr qint64 AdmissionBudgetMilliseconds = 3;
+    QElapsedTimer admissionTiming;
+    admissionTiming.start();
+    for (int pass = 0; pass < MaximumSettlementPasses; ++pass) {
       bool heightChanged = false;
       if (indexedWidth_ != rowWidth()) {
         rebuildHeightIndex();
         remeasureResidents = true;
       }
       if (remeasureResidents) {
-        for (Resident &resident : residents_)
+        for (Resident &resident : residents_) {
           heightChanged |= measure(resident);
+          resident.measured = true;
+        }
         remeasureResidents = false;
       }
       updateScrollRange();
@@ -1012,23 +1043,50 @@ private:
         const ui::InspectorRow model = *modelRow(pageData_, row);
         Resident *resident = residentForKey(model.key);
         if (!resident) {
-          residents_.push_back({model.key, row, create(model)});
+          residents_.push_back({model.key, row, create(model), false});
           resident = &residents_.back();
           created = true;
-          heightChanged |= measure(*resident);
+          updateScrollRange();
+          restoreAnchor(anchor);
+          layoutResidents();
+          scheduleAdmission();
+          return false;
         } else {
           resident->row = row;
+        }
+        if (!resident->measured) {
+          heightChanged |= measure(*resident);
+          resident->measured = true;
+          if (row + 1 < last &&
+              admissionTiming.elapsed() >= AdmissionBudgetMilliseconds) {
+            updateScrollRange();
+            restoreAnchor(anchor);
+            layoutResidents();
+            scheduleAdmission();
+            return false;
+          }
         }
       }
       if (heightChanged) {
         updateScrollRange();
         restoreAnchor(anchor);
       }
-      if (!created && indexedWidth_ == rowWidth())
+      if ((!created && indexedWidth_ == rowWidth()) ||
+          pass + 1 == MaximumSettlementPasses)
         break;
     }
     layoutResidents();
     return false;
+  }
+
+  void scheduleAdmission() {
+    if (admissionScheduled_)
+      return;
+    admissionScheduled_ = true;
+    QTimer::singleShot(1, Qt::PreciseTimer, this, [this] {
+      admissionScheduled_ = false;
+      synchronize();
+    });
   }
 
   [[nodiscard]] bool pageCovers(std::size_t first, std::size_t last) const {
@@ -1158,8 +1216,10 @@ private:
           static_cast<int>(std::clamp<qint64>(top64, INT_MIN, INT_MAX));
       const QRect geometry(InspectorRowMargin, top, width, height);
       resident.widget->setGeometry(geometry);
-      resident.widget->setVisible(geometry.intersects(viewport()->rect()) ||
-                                  ownsFocus(resident.widget, focused));
+      resident.widget->setVisible(
+          resident.measured &&
+          (geometry.intersects(viewport()->rect()) ||
+           ownsFocus(resident.widget, focused)));
     }
   }
 
@@ -1225,6 +1285,7 @@ private:
   int indexedWidth_ = -1;
   bool active_ = false;
   bool synchronizing_ = false;
+  bool admissionScheduled_ = false;
   QWidget *dispatchingRow_ = nullptr;
 };
 
@@ -1255,9 +1316,24 @@ InspectorPane::RequestFrame *InspectorPane::requestFrame() {
   return new RequestFrame(this);
 }
 
+void InspectorPane::prepareMarkdown(ui::InspectorSnapshot &snapshot) {
+  const auto prepare = [](ui::InspectorRow &row) {
+    auto *markdown = std::get_if<ui::InspectorMarkdownRow>(&row.value);
+    if (!markdown || !markdown->preparedHtml.empty())
+      return;
+    markdown->preparedHtml =
+        presentation::prepareMarkdownHtml(text(markdown->text))
+            .toUtf8()
+            .toStdString();
+  };
+  for (ui::InspectorRow &row : snapshot.plan.rows)
+    prepare(row);
+  if (snapshot.plan.focused)
+    prepare(*snapshot.plan.focused);
+}
+
 InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   setObjectName(QStringLiteral("inspector"));
-  setMinimumWidth(300);
   setMaximumWidth(520);
 
   auto *outer = new QVBoxLayout(this);
@@ -1267,12 +1343,11 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   heading->addStrut(24);
   auto *sectionTitle = makeLabel(QStringLiteral("INSPECTOR"), "panelHeader");
   sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   heading->addWidget(sectionTitle);
   heading->addStretch();
   auto *hide = new QPushButton(QStringLiteral("Hide"));
   hide->setProperty("kind", "subtle");
-  hide->setFixedSize(58, 24);
+  hide->setMinimumSize(58, 24);
   connect(hide, &QPushButton::clicked, this, [this] {
     if (hideAction)
       hideAction();
@@ -1414,6 +1489,7 @@ InspectorPane::rowRequest(ui::InspectorProjection projection) const {
     return requestRows->rowRequest();
   case ui::InspectorProjection::Changes:
   case ui::InspectorProjection::State:
+  case ui::InspectorProjection::Protocol:
     return {};
   }
   return {};
@@ -1429,7 +1505,9 @@ InspectorPane::currentProjection() const {
     return projections[static_cast<std::size_t>(tab)];
   if (tab == 4 && (infoStack->currentIndex() == StatePage ||
                    infoStack->currentIndex() == ProtocolPage))
-    return ui::InspectorProjection::State;
+    return infoStack->currentIndex() == StatePage
+               ? ui::InspectorProjection::State
+               : ui::InspectorProjection::Protocol;
   return std::nullopt;
 }
 
@@ -1444,6 +1522,9 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
       (initial || threadChanged || changes != snapshot.changes);
   const bool stateChanged =
       projection == ui::InspectorProjection::State &&
+      (initial || threadChanged || state != snapshot.state);
+  const bool protocolChanged =
+      projection == ui::InspectorProjection::Protocol &&
       (initial || threadChanged || state != snapshot.state);
   if (threadChanged) {
     retireThreadPresentation();
@@ -1472,7 +1553,8 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
     changes = snapshot.changes;
   else if (projection == ui::InspectorProjection::Requests)
     requestRows->apply(snapshot.requests);
-  else if (projection == ui::InspectorProjection::State)
+  else if (projection == ui::InspectorProjection::State ||
+           projection == ui::InspectorProjection::Protocol)
     state = snapshot.state;
 
   if (!isVisible() || currentProjection() != projection)
@@ -1487,6 +1569,9 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
     refreshState();
   else if (projection == ui::InspectorProjection::State &&
            infoStack->currentIndex() == ProtocolPage) {
+    showProtocolTail();
+    refreshProtocolStats();
+  } else if (protocolChanged) {
     showProtocolTail();
     refreshProtocolStats();
   }
@@ -1535,6 +1620,9 @@ void InspectorPane::refreshCurrentTab() {
       showProtocolTail();
       refreshProtocolStats();
     }
+  } else if (*projection == ui::InspectorProjection::Protocol) {
+    showProtocolTail();
+    refreshProtocolStats();
   }
 }
 
@@ -1587,12 +1675,42 @@ void InspectorPane::showProtocolTail() {
   for (const QString &line : protocolLines)
     lines << line;
   const QString value = lines.join(QLatin1Char('\n'));
-  if (protocolLog->toPlainText() == value)
+  if (protocolLog->toPlainText() == value) {
+    pendingProtocolLines.clear();
     return;
+  }
   const ScrollPosition position{protocolFollowsTail, protocolPausedScrollValue};
   mutatingProtocolLog = true;
   protocolLog->setPlainText(value);
+  pendingProtocolLines.clear();
   restoreProtocolScroll(position.followsTail, position.value);
+}
+
+void InspectorPane::flushProtocolPresentation() {
+  if (pendingProtocolLines.empty())
+    return;
+  const bool visibleProtocol = isVisible() &&
+                               inspectorTabs->currentIndex() == 4 &&
+                               infoStack->currentIndex() == ProtocolPage;
+  if (!visibleProtocol) {
+    pendingProtocolLines.clear();
+    return;
+  }
+  QStringList lines;
+  lines.reserve(static_cast<qsizetype>(pendingProtocolLines.size()));
+  for (QString &line : pendingProtocolLines)
+    lines.push_back(std::move(line));
+  pendingProtocolLines.clear();
+  const ScrollPosition position{protocolFollowsTail, protocolPausedScrollValue};
+  mutatingProtocolLog = true;
+  protocolLog->appendPlainText(lines.join(QLatin1Char('\n')));
+  restoreProtocolScroll(position.followsTail, position.value);
+  refreshProtocolStats();
+}
+
+bool InspectorPane::retainsTarget(
+    const nodegraph::NodeRef &target) const noexcept {
+  return requestRows && requestRows->retainsTarget(target);
 }
 
 void InspectorPane::restoreProtocolScroll(bool followsTail, int pausedValue) {
@@ -1611,18 +1729,20 @@ void InspectorPane::restoreProtocolScroll(bool followsTail, int pausedValue) {
 }
 
 void InspectorPane::appendProtocolFrame(const nlohmann::json &frame) {
-  nodegraph::UiEffect effect;
-  effect.kind = nodegraph::UiEffectKind::ProtocolDiagnostic;
-  const auto copyUnsigned = [&frame, &effect](const char *from,
-                                              const char *to) {
+  nodegraph::ProtocolDiagnostic diagnostic;
+  const auto copyUnsigned = [&frame, &diagnostic](const char *from,
+                                                  const char *to) {
     const auto found = frame.find(from);
     if (found != frame.end() && found->is_number_unsigned())
-      effect.details.emplace(to, nodegraph::Value(found->get<std::uint64_t>()));
+      diagnostic.details.emplace(to,
+                                 nodegraph::Value(found->get<std::uint64_t>()));
   };
-  const auto copyString = [&frame, &effect](const char *from, const char *to) {
+  const auto copyString = [&frame, &diagnostic](const char *from,
+                                                const char *to) {
     const auto found = frame.find(from);
     if (found != frame.end() && found->is_string())
-      effect.details.emplace(to, nodegraph::Value(found->get<std::string>()));
+      diagnostic.details.emplace(to,
+                                 nodegraph::Value(found->get<std::string>()));
   };
   copyUnsigned("sequence", "sequence");
   copyUnsigned("generation", "connectionGeneration");
@@ -1637,28 +1757,36 @@ void InspectorPane::appendProtocolFrame(const nlohmann::json &frame) {
          {"threadId", "turnId", "itemId", "requestId", "processId"}) {
       const auto found = scope->find(key);
       if (found != scope->end() && found->is_string())
-        effect.details.emplace(key,
-                               nodegraph::Value(found->get<std::string>()));
+        diagnostic.details.emplace(
+            key, nodegraph::Value(found->get<std::string>()));
     }
   }
   if (frame.value("kind", std::string{}) == "result") {
-    effect.details.emplace(
+    diagnostic.details.emplace(
         "outcome", nodegraph::Value(frame.value("ok", false) ? "ok" : "ERROR"));
     const auto error = frame.find("error");
     if (error != frame.end() && error->is_object()) {
       const auto message = error->find("message");
       if (message != error->end() && message->is_string())
-        effect.details.emplace("error",
-                               nodegraph::Value(message->get<std::string>()));
+        diagnostic.details.emplace(
+            "error", nodegraph::Value(message->get<std::string>()));
     }
   }
-  appendProtocolDiagnostic(effect);
+  static_cast<void>(appendProtocolDiagnostic(diagnostic));
 }
 
-void InspectorPane::appendProtocolDiagnostic(
-    const nodegraph::UiEffect &effect) {
-  if (effect.kind != nodegraph::UiEffectKind::ProtocolDiagnostic)
-    return;
+bool InspectorPane::appendProtocolDiagnostic(
+    const nodegraph::ProtocolDiagnostic &diagnostic) {
+  if (!diagnostic.diagnosticBatch.empty()) {
+    bool visible = false;
+    for (const nodegraph::Value::Object &details :
+         diagnostic.diagnosticBatch) {
+      nodegraph::ProtocolDiagnostic entry;
+      entry.details = details;
+      visible = appendProtocolDiagnostic(entry) || visible;
+    }
+    return visible;
+  }
   const QString timestamp =
       QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"));
   std::vector<QString> recorded;
@@ -1669,7 +1797,7 @@ void InspectorPane::appendProtocolDiagnostic(
     recorded.push_back(std::move(line));
   };
   const std::optional<std::uint64_t> sequence =
-      unsignedIntegerFromValue(valueMember(effect.details, "sequence"));
+      unsignedIntegerFromValue(valueMember(diagnostic.details, "sequence"));
   if (sequence && *sequence != 0) {
     if (observedSequence != 0 && *sequence != observedSequence + 1) {
       record(QStringLiteral("[%1]  %2  expected=%3  received=%4")
@@ -1682,7 +1810,7 @@ void InspectorPane::appendProtocolDiagnostic(
     observedSequence = std::max(observedSequence, *sequence);
   }
   if (const auto dropped = unsignedIntegerFromValue(
-          valueMember(effect.details, "droppedBefore"));
+          valueMember(diagnostic.details, "droppedBefore"));
       dropped && *dropped != 0)
     record(QStringLiteral("[%1]  DROPPED %2 DIAGNOSTICS before #%3")
                .arg(timestamp)
@@ -1693,13 +1821,14 @@ void InspectorPane::appendProtocolDiagnostic(
   if (sequence && *sequence != 0)
     parts << QStringLiteral("#%1").arg(*sequence);
   if (const auto connection = unsignedIntegerFromValue(
-          valueMember(effect.details, "connectionGeneration")))
+          valueMember(diagnostic.details, "connectionGeneration")))
     parts << QStringLiteral("g%1").arg(*connection);
   if (const auto provider = unsignedIntegerFromValue(
-          valueMember(effect.details, "providerGeneration")))
+          valueMember(diagnostic.details, "providerGeneration")))
     parts << QStringLiteral("p%1").arg(*provider);
   for (std::string_view key : {"direction", "subject", "source"}) {
-    const QString value = protocolMetadata(valueMember(effect.details, key));
+    const QString value =
+        protocolMetadata(valueMember(diagnostic.details, key));
     if (!value.isEmpty())
       parts << value;
   }
@@ -1707,16 +1836,17 @@ void InspectorPane::appendProtocolDiagnostic(
        {"authority", "outcome", "threadId", "turnId", "itemId", "requestId",
         "processId", "connectionId", "targetId", "role", "state", "event",
         "correlation", "error", "errorCategory", "errorCode"}) {
-    const QString value = protocolMetadata(valueMember(effect.details, key));
+    const QString value =
+        protocolMetadata(valueMember(diagnostic.details, key));
     if (!value.isEmpty())
       parts << QStringLiteral("%1=%2").arg(text(key), value);
   }
   record(parts.join(QStringLiteral("  ")));
 
   const std::string direction =
-      scalarTextFromValue(valueMember(effect.details, "direction"));
+      scalarTextFromValue(valueMember(diagnostic.details, "direction"));
   const std::string authority =
-      scalarTextFromValue(valueMember(effect.details, "authority"));
+      scalarTextFromValue(valueMember(diagnostic.details, "authority"));
   if (authority == "none" &&
       (direction.find("notification") != std::string::npos ||
        direction.find("event") != std::string::npos ||
@@ -1724,19 +1854,13 @@ void InspectorPane::appendProtocolDiagnostic(
     protocolTelemetryCount =
         std::min<std::size_t>(256, protocolTelemetryCount + 1);
 
-  const bool visibleProtocol = isVisible() &&
-                               inspectorTabs->currentIndex() == 4 &&
-                               infoStack->currentIndex() == ProtocolPage;
-  if (visibleProtocol) {
-    const ScrollPosition position{protocolFollowsTail,
-                                  protocolPausedScrollValue};
-    mutatingProtocolLog = true;
-    for (const QString &line : recorded)
-      protocolLog->appendPlainText(line);
-    restoreProtocolScroll(position.followsTail, position.value);
-    if (currentThreadIncarnation)
-      refreshProtocolStats();
+  for (QString &line : recorded) {
+    while (pendingProtocolLines.size() >= MaximumProtocolLines)
+      pendingProtocolLines.pop_front();
+    pendingProtocolLines.push_back(std::move(line));
   }
+  return isVisible() && inspectorTabs->currentIndex() == 4 &&
+         infoStack->currentIndex() == ProtocolPage;
 }
 
 } // namespace codexui::codex::middle

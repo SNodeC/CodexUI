@@ -76,15 +76,15 @@ ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
   return wakeWorkerToQt(true);
 }
 
-ChannelSendStatus ThreadChannels::sendUiEffect(UiEffect &effect) {
+ChannelSendStatus
+ThreadChannels::sendProtocolDiagnostic(ProtocolDiagnostic &diagnostic) {
   if (closed_.load(std::memory_order_acquire))
     return ChannelSendStatus::QueueFull;
-  const std::size_t limit = effect.kind == UiEffectKind::SelectThread
-                                ? WorkerToQtCapacity - 1
-                                : WorkerToQtCapacity - WorkerToQtReservedSlots;
-  if (workerToQt_.sizeApprox() >= limit)
+  if (workerToQt_.sizeApprox() >=
+      WorkerToQtCapacity - WorkerToQtReservedSlots)
     return ChannelSendStatus::QueueFull;
-  if (!workerToQt_.tryEmplace(std::in_place_type<UiEffect>, std::move(effect)))
+  if (!workerToQt_.tryEmplace(std::in_place_type<ProtocolDiagnostic>,
+                              std::move(diagnostic)))
     return ChannelSendStatus::QueueFull;
   return wakeWorkerToQt(false);
 }

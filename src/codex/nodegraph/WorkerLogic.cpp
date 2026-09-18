@@ -162,7 +162,6 @@ ChannelSendStatus WorkerLogic::apply(DecodedMessage message) {
 }
 
 WorkerApplyResult WorkerLogic::applyDetailed(DecodedMessage message) {
-  std::optional<UiEffect> noticeEffect;
   if (isProviderNotice(message)) {
     const std::uint64_t serial = nextNoticeSerial_++;
     const std::string severity =
@@ -171,9 +170,6 @@ WorkerApplyResult WorkerLogic::applyDetailed(DecodedMessage message) {
     message.payload.insert_or_assign("noticeSerial", Value(serial));
     message.payload.insert_or_assign("noticeText", Value(notice));
     message.payload.insert_or_assign("severity", Value(severity));
-    noticeEffect = UiEffect{UiEffectKind::ShowNotice, std::nullopt, notice,
-                            Value::Object{{"serial", Value(serial)},
-                                          {"severity", Value(severity)}}};
   }
 
   GraphChange change;
@@ -190,17 +186,7 @@ WorkerApplyResult WorkerLogic::applyDetailed(DecodedMessage message) {
     change = write.finish();
   }
   forgetRemoved(change);
-  // Queue the transient notice ahead of its GraphChanged wake. The graph is
-  // already fully committed and unlocked; this FIFO order also prevents the
-  // graph fallback from skipping an earlier directly queued notice.
-  ChannelSendStatus effectStatus = ChannelSendStatus::Accepted;
-  if (noticeEffect)
-    effectStatus = channels_.sendUiEffect(*noticeEffect);
-  ChannelSendStatus graphStatus = publish(std::move(change));
-  if (noticeEffect && wakeFailed(graphStatus) && !wakeFailed(effectStatus) &&
-      effectStatus != ChannelSendStatus::QueueFull)
-    graphStatus = effectStatus;
-  return {graphStatus, std::move(primary)};
+  return {publish(std::move(change)), std::move(primary)};
 }
 
 void WorkerLogic::forgetRemoved(const GraphChange &change) {
@@ -442,14 +428,6 @@ ChannelSendStatus WorkerLogic::showNotice(std::string message) {
   if (message.empty())
     return ChannelSendStatus::Accepted;
   const std::uint64_t serial = nextNoticeSerial_++;
-  UiEffect effect{UiEffectKind::ShowNotice,
-                  std::nullopt,
-                  message,
-                  {{"serial", Value(serial)}}};
-  const ChannelSendStatus direct = channels_.sendUiEffect(effect);
-  if (direct != ChannelSendStatus::QueueFull)
-    return direct;
-
   GraphChange change;
   {
     auto write = graph_.write();
@@ -466,12 +444,6 @@ ChannelSendStatus WorkerLogic::selectThread(const NodeRef &thread) {
   if (!thread || thread->id().kind != NodeKind::Thread)
     return ChannelSendStatus::Accepted;
   const std::uint64_t serial = nextSelectionSerial_++;
-  UiEffect effect{
-      UiEffectKind::SelectThread, thread, {}, {{"serial", Value(serial)}}};
-  const ChannelSendStatus direct = channels_.sendUiEffect(effect);
-  if (direct != ChannelSendStatus::QueueFull)
-    return direct;
-
   GraphChange change;
   {
     auto write = graph_.write();
@@ -502,11 +474,8 @@ WorkerLogic::admitPrompt(NodeAction action,
                          std::optional<std::int64_t> activityAt,
                          std::optional<std::int64_t> admittedAtMs) {
   if (action.kind != NodeActionKind::SubmitPrompt || !action.target) {
-    UiEffect effect{UiEffectKind::ShowNotice,
-                    std::nullopt,
-                    "The prompt has no current destination thread",
-                    {}};
-    return {showNotice(std::move(effect.text)), std::nullopt};
+    return {showNotice("The prompt has no current destination thread"),
+            std::nullopt};
   }
   PendingPrompt pending;
   pending.localPrompt = {};
@@ -523,11 +492,8 @@ WorkerLogic::admitFirstPrompt(RuntimeAction action,
                               std::optional<std::int64_t> activityAt,
                               std::optional<std::int64_t> admittedAtMs) {
   if (action.kind != RuntimeActionKind::CreateThread) {
-    UiEffect effect{UiEffectKind::ShowNotice,
-                    std::nullopt,
-                    "The new-thread prompt could not be admitted",
-                    {}};
-    return {showNotice(std::move(effect.text)), std::nullopt};
+    return {showNotice("The new-thread prompt could not be admitted"),
+            std::nullopt};
   }
   PendingPrompt pending;
   pending.createsThread = true;
@@ -548,11 +514,8 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
                                     std::optional<std::int64_t> activityAt,
                                     std::optional<std::int64_t> admittedAtMs) {
   if (pending.promptText.empty() && pending.attachments.empty()) {
-    UiEffect effect{UiEffectKind::ShowNotice,
-                    std::nullopt,
-                    "Enter a message or attach a file before sending",
-                    {}};
-    return {showNotice(std::move(effect.text)), std::nullopt};
+    return {showNotice("Enter a message or attach a file before sending"),
+            std::nullopt};
   }
 
   const std::uint64_t submission = nextSubmissionId_++;
@@ -652,9 +615,7 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
       selectedDraft = pending.thread;
     }
 
-    if (!pending.thread) {
-      change = write.finish();
-    } else {
+    if (pending.thread) {
       NodeRef turn = activeTurn(write, pending.thread);
       const bool startsTurn = !turn;
       if (!turn) {
@@ -732,15 +693,22 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
         promptQueues_[pending.thread.get()].emplace_back(std::move(pending));
         command = takeNextPrompt(write, ownerThread);
       }
-      change = write.finish();
     }
-  }
-
-  if (selectedDraft) {
-    static_cast<void>(selectThread(selectedDraft));
-  }
-  if (invalidTarget) {
-    static_cast<void>(showNotice(std::move(invalidTargetReason)));
+    if (selectedDraft) {
+      NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
+      const std::array<NodeRef, 1> target{selectedDraft};
+      write.replaceRelated(runtime, RelationKind::UiSelectionTarget, target);
+      write.setField(runtime, "uiSelectionSerial",
+                     Value(nextSelectionSerial_++));
+    }
+    if (invalidTarget) {
+      NodeRef notice =
+          write.upsert({NodeKind::Notice, "local-worker-notice"});
+      write.setField(notice, "local", Value(true));
+      write.setField(notice, "message", Value(invalidTargetReason));
+      write.setField(notice, "noticeSerial", Value(nextNoticeSerial_++));
+    }
+    change = write.finish();
   }
   return {publish(std::move(change)), std::move(command)};
 }

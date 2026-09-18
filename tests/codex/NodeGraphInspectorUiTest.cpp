@@ -142,6 +142,7 @@ struct WindowedInspectorData final {
       break;
     case ui::InspectorProjection::Changes:
     case ui::InspectorProjection::State:
+    case ui::InspectorProjection::Protocol:
       return {};
     }
     ui::InspectorPageSnapshot result;
@@ -206,6 +207,7 @@ struct WindowedInspectorData final {
       break;
     case ui::InspectorProjection::Changes:
     case ui::InspectorProjection::State:
+    case ui::InspectorProjection::Protocol:
       break;
     }
     pane.refresh(snapshot, projection);
@@ -256,6 +258,7 @@ struct AdapterInspectorData final {
       return 2;
     case ui::InspectorProjection::Changes:
     case ui::InspectorProjection::State:
+    case ui::InspectorProjection::Protocol:
       return std::nullopt;
     }
     return std::nullopt;
@@ -288,6 +291,7 @@ struct AdapterInspectorData final {
       break;
     case ui::InspectorProjection::Changes:
     case ui::InspectorProjection::State:
+    case ui::InspectorProjection::Protocol:
       break;
     }
     valid &= result && result->total == expectedTotals[*page] &&
@@ -325,6 +329,7 @@ struct AdapterInspectorData final {
       break;
     case ui::InspectorProjection::Changes:
     case ui::InspectorProjection::State:
+    case ui::InspectorProjection::Protocol:
       return;
     }
     pane.refresh(snapshot, projection);
@@ -2250,8 +2255,7 @@ bool stateAndProtocolRemainUsefulBoundedAndRedacted() {
   middle::InspectorPane pane;
   pane.resize(440, 700);
   pane.refresh(*snapshot, ui::InspectorProjection::State);
-  nodegraph::UiEffect diagnostic;
-  diagnostic.kind = nodegraph::UiEffectKind::ProtocolDiagnostic;
+  nodegraph::ProtocolDiagnostic diagnostic;
   diagnostic.details = {{"sequence", nodegraph::Value(std::uint64_t{7})},
                         {"direction", nodegraph::Value("server notification")},
                         {"subject", nodegraph::Value("item/completed")},
@@ -2259,7 +2263,7 @@ bool stateAndProtocolRemainUsefulBoundedAndRedacted() {
                         {"threadId", nodegraph::Value("state-thread")},
                         {"correlation", nodegraph::Value("corr-7")},
                         {"error", nodegraph::Value("Bearer secret-value")}};
-  pane.appendProtocolDiagnostic(diagnostic);
+  static_cast<void>(pane.appendProtocolDiagnostic(diagnostic));
   auto *protocol =
       pane.findChild<QPlainTextEdit *>(QStringLiteral("protocolInfoLog"));
   result &= expect(protocol && protocol->toPlainText().isEmpty(),

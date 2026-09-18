@@ -45,7 +45,7 @@ inline constexpr QRgb pendingSteeringSweepCenter = qRgba(92, 180, 184, 105);
 inline constexpr QRgb pendingPromptSweepEdge = qRgba(47, 111, 235, 0);
 inline constexpr QRgb pendingPromptSweepCenter = qRgba(117, 160, 239, 105);
 inline constexpr int commandOutputHorizontalPadding = 7;
-inline constexpr int commandOutputVerticalPadding = 4;
+inline constexpr int commandOutputTopPadding = 4;
 // Semantic ramps are precomputed from shared OKLCH role targets. Equivalent
 // roles have the same perceptual lightness/chroma and retain the family hue.
 // base .550/.090; hover .490/.080; pressed .430/.070;

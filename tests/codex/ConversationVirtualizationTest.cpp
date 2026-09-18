@@ -4008,15 +4008,12 @@ bool multipleDetachedCommandsShareOneOuterPauseCause() {
   if (!firstOutput || !secondOutput)
     return false;
 
-  view.setTrailingSpaceHeight(80);
   firstOutput->verticalScrollBar()->triggerAction(
       QAbstractSlider::SliderSingleStepSub);
-  view.prepareForLocalPromptAdmission();
   settle();
   result &= expect(!firstOutput->followsLatest() &&
                        view.mode() == ConversationView::Mode::Paused,
-                   "releasing a composer-growth pause cannot release a "
-                   "coexisting detached-output pause");
+                   "detaching command output pauses the following view");
   firstOutput->verticalScrollBar()->triggerAction(
       QAbstractSlider::SliderToMaximum);
   result &=
@@ -4026,23 +4023,7 @@ bool multipleDetachedCommandsShareOneOuterPauseCause() {
                           view.mode() == ConversationView::Mode::Following;
                  },
                  500),
-             "the command cause can release after composer admission");
-  view.setTrailingSpaceHeight(0);
-
-  firstOutput->verticalScrollBar()->triggerAction(
-      QAbstractSlider::SliderSingleStepSub);
-  view.setTrailingSpaceHeight(80);
-  firstOutput->verticalScrollBar()->triggerAction(
-      QAbstractSlider::SliderToMaximum);
-  settle();
-  result &= expect(firstOutput->followsLatest() &&
-                       view.mode() == ConversationView::Mode::Paused,
-                   "releasing a command pause cannot release coexisting "
-                   "composer-growth ownership");
-  view.setTrailingSpaceHeight(0);
-  result &= expect(view.mode() == ConversationView::Mode::Following,
-                   "releasing the final automatic pause cause resumes "
-                   "following");
+             "the command-owned pause releases after output reattaches");
 
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   firstOutput->verticalScrollBar()->triggerAction(

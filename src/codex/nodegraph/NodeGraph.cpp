@@ -236,6 +236,15 @@ NodeGraph::ReadAccess::orderedNodes() const noexcept {
   return graph_->orderedNodes_;
 }
 
+const std::vector<NodeRef> &
+NodeGraph::ReadAccess::orderedNodes(NodeKind kind) const noexcept {
+  const std::size_t index = static_cast<std::size_t>(kind);
+  static const std::vector<NodeRef> empty;
+  return index < graph_->orderedNodesByKind_.size()
+             ? graph_->orderedNodesByKind_[index]
+             : empty;
+}
+
 std::size_t NodeGraph::ReadAccess::retiredCount() const noexcept {
   return graph_->retiredNodes_.size();
 }
@@ -533,6 +542,10 @@ NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
   // roll these transaction-local entries back before propagating the error.
   graph_->nodes_.reserve(graph_->nodes_.size() + 1);
   ensureAppendCapacity(graph_->orderedNodes_, 1);
+  const std::size_t kindIndex = static_cast<std::size_t>(node->id_.kind);
+  if (kindIndex >= graph_->orderedNodesByKind_.size())
+    throw std::invalid_argument("node kind is outside the graph index");
+  ensureAppendCapacity(graph_->orderedNodesByKind_[kindIndex], 1);
   pendingStateRevisions_.reserve(pendingStateRevisions_.size() + 1);
   affectedIndex_.reserve(affectedIndex_.size() + 1);
   ensureAppendCapacity(affected_, 1);
@@ -558,6 +571,7 @@ NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
     throw;
   }
   graph_->orderedNodes_.emplace_back(node);
+  graph_->orderedNodesByKind_[kindIndex].emplace_back(node);
   ++graph_->nextInsertionOrder_;
   dirty_ = true;
   return node;
@@ -1314,6 +1328,19 @@ void NodeGraph::WriteAccess::removeMany(std::span<const NodeRef> nodes) {
                        return removalSet.contains(node.get());
                      }),
       graph_->orderedNodes_.end());
+  std::array<bool, NodeGraph::NodeKindCount> removedKinds{};
+  for (const NodeRef &node : removalOrder)
+    removedKinds[static_cast<std::size_t>(node->id_.kind)] = true;
+  for (std::size_t kind = 0; kind < removedKinds.size(); ++kind) {
+    if (!removedKinds[kind])
+      continue;
+    auto &nodes = graph_->orderedNodesByKind_[kind];
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                               [&removalSet](const NodeRef &node) {
+                                 return removalSet.contains(node.get());
+                               }),
+                nodes.end());
+  }
 }
 
 void NodeGraph::WriteAccess::releaseRetired(std::span<const NodeRef> nodes) {

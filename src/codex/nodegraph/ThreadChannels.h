@@ -38,10 +38,9 @@ public:
   // Larger transactions are already committed and are cheaper for Qt to
   // rediscover through its bounded graph scans than to process as one event.
   static constexpr std::size_t MaximumDirectGraphReferences = 64;
-  // Graph bursts and ordinary notices stop before the final two slots. One
-  // remains available for a critical selection effect and one for terminal
-  // WorkerStopped delivery.
-  static constexpr std::size_t WorkerToQtReservedSlots = 2;
+  // Graph bursts and non-authoritative diagnostics stop before the final slot,
+  // which remains available for terminal WorkerStopped delivery.
+  static constexpr std::size_t WorkerToQtReservedSlots = 1;
 
   ThreadChannels() = default;
   ThreadChannels(const ThreadChannels &) = delete;
@@ -55,7 +54,8 @@ public:
 
   // Worker-thread producer operations.
   [[nodiscard]] ChannelSendStatus sendGraphChanged(GraphChange change);
-  [[nodiscard]] ChannelSendStatus sendUiEffect(UiEffect &effect);
+  [[nodiscard]] ChannelSendStatus
+  sendProtocolDiagnostic(ProtocolDiagnostic &diagnostic);
   [[nodiscard]] ChannelSendStatus sendWorkerStopped(WorkerStopped &stopped);
 
   // Qt-thread consumer operations.

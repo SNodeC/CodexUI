@@ -305,6 +305,8 @@ public:
     [[nodiscard]] std::uint64_t structureRevision(NodeKind kind) const noexcept;
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
+    [[nodiscard]] const std::vector<NodeRef> &
+    orderedNodes(NodeKind kind) const noexcept;
     [[nodiscard]] std::size_t retiredCount() const noexcept;
     [[nodiscard]] NodeRef retiredAt(std::size_t index) const;
     // Changes only when an existing retirement is released. Appending a
@@ -499,6 +501,7 @@ private:
   mutable std::shared_mutex mutex_;
   std::unordered_map<NodeId, NodeRef, NodeIdHash> nodes_;
   std::vector<NodeRef> orderedNodes_;
+  std::array<std::vector<NodeRef>, NodeKindCount> orderedNodesByKind_;
   std::vector<NodeRef> retiredNodes_;
   std::uint64_t retiredOrderGeneration_ = 0;
   std::uint64_t pendingInteractionOrderRevision_ = 0;

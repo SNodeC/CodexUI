@@ -15,6 +15,7 @@
 #include <QFontDatabase>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPainter>
@@ -24,6 +25,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -35,6 +37,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <utility>
 
 namespace codexui::codex {
@@ -230,6 +233,37 @@ struct SideBySideText {
   QString right;
 };
 
+struct TextViewportState {
+  int position = 0;
+  int anchor = 0;
+  int vertical = 0;
+  int horizontal = 0;
+};
+
+TextViewportState textViewportState(const QPlainTextEdit &view) {
+  const QTextCursor cursor = view.textCursor();
+  return {cursor.position(), cursor.anchor(),
+          view.verticalScrollBar()->value(),
+          view.horizontalScrollBar()->value()};
+}
+
+void restoreTextViewport(QPlainTextEdit &view,
+                         const TextViewportState &state) {
+  const int maximum = std::max(0, view.document()->characterCount() - 1);
+  QTextCursor cursor(view.document());
+  cursor.setPosition(std::clamp(state.anchor, 0, maximum));
+  cursor.setPosition(std::clamp(state.position, 0, maximum),
+                     QTextCursor::KeepAnchor);
+  view.setTextCursor(cursor);
+  view.verticalScrollBar()->setValue(state.vertical);
+  view.horizontalScrollBar()->setValue(state.horizontal);
+}
+
+void setDocumentText(QPlainTextEdit &view, const QString &text) {
+  if (view.toPlainText() != text)
+    view.setPlainText(text);
+}
+
 QString sideLine(QChar marker, int number, const QString &content) {
   return QStringLiteral("%1%2 │ %3")
       .arg(marker)
@@ -311,16 +345,13 @@ QPushButton *modeButton(const QString &text) {
 
 class GitDiffReviewWindow final : public QDialog {
 public:
-  explicit GitDiffReviewWindow(QWidget *parent = nullptr) : QDialog(parent) {
+  explicit GitDiffReviewWindow(std::function<void()> requestRefresh,
+                               QWidget *parent = nullptr)
+      : QDialog(parent), requestRefresh(std::move(requestRefresh)) {
     setWindowTitle(QStringLiteral("Change Review"));
     setAttribute(Qt::WA_DeleteOnClose);
     setWindowModality(Qt::NonModal);
     resize(1200, 780);
-    provider = new GitDiffProvider(this);
-    repositoryTimer = new QTimer(this);
-    repositoryTimer->setInterval(RepositoryPollingIntervalMs);
-    repositoryTimer->start();
-
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(14, 14, 14, 14);
     root->setSpacing(10);
@@ -389,24 +420,13 @@ public:
       context = GitDiffContext::Compact;
       QSettings().setValue(QStringLiteral("diff/context"),
                            QStringLiteral("compact"));
-      reload();
+      this->requestRefresh();
     });
     connect(expanded, &QPushButton::clicked, this, [this] {
       context = GitDiffContext::Expanded;
       QSettings().setValue(QStringLiteral("diff/context"),
                            QStringLiteral("expanded"));
-      reload();
-    });
-    connect(
-        provider, &GitDiffProvider::loadingChanged, this, [this](bool value) {
-          if (value && (!snapshot || snapshot->files.empty()))
-            subtitle->setText(QStringLiteral("Loading repository changes…"));
-        });
-    connect(provider, &GitDiffProvider::snapshotReady, this,
-            [this](const GitDiffSnapshot &value) { apply(value); });
-    connect(repositoryTimer, &QTimer::timeout, this, [this] {
-      if (isVisible())
-        reload();
+      this->requestRefresh();
     });
     connect(leftView->verticalScrollBar(), &QScrollBar::valueChanged,
             rightView->verticalScrollBar(), &QScrollBar::setValue);
@@ -432,31 +452,35 @@ public:
     context = full ? GitDiffContext::Expanded : GitDiffContext::Compact;
   }
 
-  void setSource(QString nextWorkspace, QStringList nextDirectories,
-                 QStringList nextPaths, QString nextRepository,
-                 bool nextIncludeHiddenRepositories, GitDiffScope nextScope,
-                 QString preferredPath) {
-    provider->cancel();
-    workspace = std::move(nextWorkspace);
-    commandDirectories = std::move(nextDirectories);
-    changedPaths = std::move(nextPaths);
-    selectedRepository = std::move(nextRepository);
-    includeHiddenRepositories = nextIncludeHiddenRepositories;
-    scope = nextScope;
+  [[nodiscard]] GitDiffContext requestedContext() const noexcept {
+    return context;
+  }
+
+  void setLoading(bool loading) {
+    if (loading && (!snapshot || snapshot->files.empty()))
+      subtitle->setText(QStringLiteral("Loading repository changes…"));
+  }
+
+  void setSnapshot(const GitDiffSnapshot &value, QString preferredPath) {
+    const bool selectionChanged = requestedPath != preferredPath;
     requestedPath = std::move(preferredPath);
-    reload();
+    if (snapshot && *snapshot == value) {
+      if (selectionChanged) {
+        const auto selected = std::ranges::find_if(
+            value.files, [this](const GitDiffFile &file) {
+              return file.absolutePath == requestedPath;
+            });
+        if (selected != value.files.end())
+          reviewFiles->setCurrentRow(
+              static_cast<int>(selected - value.files.begin()));
+      }
+      return;
+    }
+    apply(value);
   }
 
 private:
-  void reload() {
-    provider->request(workspace, commandDirectories, changedPaths,
-                      selectedRepository, includeHiddenRepositories, scope,
-                      context);
-  }
-
   void apply(const GitDiffSnapshot &value) {
-    if (snapshot && *snapshot == value)
-      return;
     snapshot = value;
     subtitle->setText(value.error.isEmpty() ? QStringLiteral("%1  |  %2")
                                                   .arg(scopeName(value.scope),
@@ -494,30 +518,42 @@ private:
         static_cast<std::size_t>(index) >= snapshot->files.size())
       return;
     const GitDiffFile &file = snapshot->files[static_cast<std::size_t>(index)];
+    const bool sameFile = requestedPath == file.absolutePath;
+    const TextViewportState unifiedState = textViewportState(*unifiedView);
+    const TextViewportState leftState = textViewportState(*leftView);
+    const TextViewportState rightState = textViewportState(*rightView);
     requestedPath = file.absolutePath;
     title->setText(fileTitle(file, snapshot->repositoryRoots.size() > 1));
     const QString content =
         file.patch.isEmpty()
             ? QStringLiteral("No textual patch is available for this file.")
             : file.patch;
-    unifiedView->setPlainText(content);
-    unifiedView->moveCursor(QTextCursor::Start);
+    if (views->currentIndex() == 0) {
+      setDocumentText(*leftView, {});
+      setDocumentText(*rightView, {});
+      setDocumentText(*unifiedView, content);
+      if (sameFile)
+        restoreTextViewport(*unifiedView, unifiedState);
+      else
+        unifiedView->moveCursor(QTextCursor::Start);
+      return;
+    }
+    setDocumentText(*unifiedView, {});
     const SideBySideText sides = sideBySide(content);
-    leftView->setPlainText(sides.left);
-    rightView->setPlainText(sides.right);
-    leftView->moveCursor(QTextCursor::Start);
-    rightView->moveCursor(QTextCursor::Start);
+    setDocumentText(*leftView, sides.left);
+    setDocumentText(*rightView, sides.right);
+    if (sameFile) {
+      restoreTextViewport(*leftView, leftState);
+      restoreTextViewport(*rightView, rightState);
+    } else {
+      leftView->moveCursor(QTextCursor::Start);
+      rightView->moveCursor(QTextCursor::Start);
+    }
   }
 
-  GitDiffProvider *provider = nullptr;
+  std::function<void()> requestRefresh;
   std::optional<GitDiffSnapshot> snapshot;
-  QString workspace;
-  QStringList commandDirectories;
-  QStringList changedPaths;
-  QString selectedRepository;
-  bool includeHiddenRepositories = false;
   QString requestedPath;
-  GitDiffScope scope = GitDiffScope::Unstaged;
   GitDiffContext context = GitDiffContext::Compact;
   QLabel *title = nullptr;
   QLabel *subtitle = nullptr;
@@ -530,7 +566,6 @@ private:
   QPushButton *split = nullptr;
   QPushButton *compact = nullptr;
   QPushButton *expanded = nullptr;
-  QTimer *repositoryTimer = nullptr;
 };
 
 DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
@@ -541,7 +576,6 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   refreshTimer->setInterval(RepositoryRefreshDelayMs);
   repositoryTimer = new QTimer(this);
   repositoryTimer->setInterval(RepositoryPollingIntervalMs);
-  repositoryTimer->start();
 
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(0, 0, 0, 0);
@@ -639,13 +673,17 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   connect(refreshTimer, &QTimer::timeout, this, [this] {
     provider->request(workspace, repositoryCandidates(), changedPaths,
                       selectedRepository, hiddenRepositories->isChecked(),
-                      scopeValue(scope), GitDiffContext::Compact);
+                      scopeValue(scope),
+                      reviewWindow ? reviewWindow->requestedContext()
+                                   : GitDiffContext::Compact);
   });
   connect(provider, &GitDiffProvider::loadingChanged, this,
           [this](bool loading) {
             if (loading && !snapshot) {
               summary->setText(QStringLiteral("Loading changes…"));
             }
+            if (reviewWindow)
+              reviewWindow->setLoading(loading);
           });
   connect(provider, &GitDiffProvider::snapshotReady, this,
           [this](const GitDiffSnapshot &value) { applySnapshot(value); });
@@ -657,7 +695,9 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
     if (isVisible())
       provider->request(workspace, repositoryCandidates(), changedPaths,
                         selectedRepository, hiddenRepositories->isChecked(),
-                        scopeValue(scope), GitDiffContext::Compact);
+                        scopeValue(scope),
+                        reviewWindow ? reviewWindow->requestedContext()
+                                     : GitDiffContext::Compact);
   });
   connect(repositories, &QComboBox::currentIndexChanged, this, [this](int) {
     selectedRepository = repositories->currentData().toString();
@@ -721,6 +761,16 @@ void DiffViewer::setRepositoryContext(QString nextThreadId,
   refreshRepository();
 }
 
+void DiffViewer::showEvent(QShowEvent *event) {
+  QWidget::showEvent(event);
+  repositoryTimer->start();
+}
+
+void DiffViewer::hideEvent(QHideEvent *event) {
+  repositoryTimer->stop();
+  QWidget::hideEvent(event);
+}
+
 const GitDiffSnapshot &DiffViewer::currentSnapshot() const noexcept {
   static const GitDiffSnapshot empty;
   return snapshot ? *snapshot : empty;
@@ -728,10 +778,6 @@ const GitDiffSnapshot &DiffViewer::currentSnapshot() const noexcept {
 
 void DiffViewer::refreshRepository() {
   refreshTimer->start();
-  if (reviewWindow)
-    reviewWindow->setSource(workspace, repositoryCandidates(), changedPaths,
-                            selectedRepository, hiddenRepositories->isChecked(),
-                            scopeValue(scope), selectedPath());
 }
 
 QStringList DiffViewer::repositoryCandidates() const {
@@ -752,18 +798,20 @@ QString DiffViewer::selectedPath() const {
 void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
   if (snapshot && *snapshot == value) {
     updateFileWatches();
+    if (reviewWindow)
+      reviewWindow->setSnapshot(value, selectedPath());
     return;
   }
   const QString previous = selectedPath();
-  const int previousScroll = diff->verticalScrollBar()->value();
+  const TextViewportState previousViewport = textViewportState(*diff);
   snapshot = value;
   updateFileWatches();
-  if (!threadId.isEmpty() && !value.repositoryRoots.isEmpty()) {
+  if (!threadId.isEmpty() && !value.repositoryRoots.isEmpty() &&
+      persistedRepositoryRoots != value.repositoryRoots) {
     persistedRepositoryRoots = value.repositoryRoots;
     QSettings settings;
     settings.setValue(settingsBase(threadId) + QStringLiteral("/roots"),
                       persistedRepositoryRoots);
-    settings.sync();
   }
   {
     const QSignalBlocker blocked(repositories);
@@ -824,13 +872,15 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
   if (!value.files.empty()) {
     files->setCurrentRow(selected >= 0 ? selected : 0);
     if (selected >= 0)
-      diff->verticalScrollBar()->setValue(previousScroll);
+      restoreTextViewport(*diff, previousViewport);
   } else {
     selectedFile->setText(QStringLiteral("Select a changed file"));
     diff->setPlainText(value.error);
   }
   copyButton->setEnabled(!value.files.empty());
   reviewButton->setEnabled(!value.files.empty());
+  if (reviewWindow)
+    reviewWindow->setSnapshot(value, selectedPath());
 }
 
 void DiffViewer::updateFileWatches() {
@@ -880,22 +930,31 @@ void DiffViewer::showSelectedFile() {
     return;
   }
   const GitDiffFile &file = snapshot->files[static_cast<std::size_t>(index)];
-  selectedFile->setText(fileTitle(file, snapshot->repositoryRoots.size() > 1));
-  diff->setPlainText(
+  const QString title =
+      fileTitle(file, snapshot->repositoryRoots.size() > 1);
+  if (selectedFile->text() != title)
+    selectedFile->setText(title);
+  const QString content =
       file.patch.isEmpty()
           ? QStringLiteral("No textual patch is available for this file.")
-          : file.patch);
+          : file.patch;
+  if (diff->toPlainText() == content)
+    return;
+  diff->setPlainText(content);
   diff->moveCursor(QTextCursor::Start);
 }
 
 void DiffViewer::openReview() {
   if (selectedPath().isEmpty())
     return;
-  if (!reviewWindow)
-    reviewWindow = new GitDiffReviewWindow(window());
-  reviewWindow->setSource(workspace, repositoryCandidates(), changedPaths,
-                          selectedRepository, hiddenRepositories->isChecked(),
-                          scopeValue(scope), selectedPath());
+  if (!reviewWindow) {
+    reviewWindow = new GitDiffReviewWindow(
+        [this] { refreshRepository(); }, window());
+    connect(reviewWindow, &QObject::destroyed, this,
+            [this] { refreshRepository(); });
+  }
+  if (snapshot)
+    reviewWindow->setSnapshot(*snapshot, selectedPath());
   reviewWindow->show();
   reviewWindow->raise();
   reviewWindow->activateWindow();

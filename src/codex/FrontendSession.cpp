@@ -100,12 +100,18 @@ void FrontendSession::setGraphChangedHandler(GraphChangedHandler handler) {
   graphChangedHandler = std::move(handler);
 }
 
-void FrontendSession::setGraphUiEffectHandler(GraphUiEffectHandler handler) {
-  graphUiEffectHandler = std::move(handler);
+void FrontendSession::setProtocolDiagnosticHandler(
+    ProtocolDiagnosticHandler handler) {
+  protocolDiagnosticHandler = std::move(handler);
 }
 
 const nodegraph::NodeGraph &FrontendSession::nodeGraph() const noexcept {
   return graph;
+}
+
+bool FrontendSession::graphDeliveryQuiescent() const noexcept {
+  return deferredGraphChanges.empty() && channels.workerToQtSizeApprox() == 0 &&
+         !channels.rescanPending() && !rescanRetirementPending;
 }
 
 nodegraph::ChannelSendStatus
@@ -144,6 +150,13 @@ FrontendSession::sendRuntimeAction(nodegraph::RuntimeAction &action) {
   return status;
 }
 
+void FrontendSession::acknowledgeUiDetached(
+    std::span<const nodegraph::NodeRef> nodes) {
+  queueRetirementAcknowledgements(nodes);
+  if (!pendingNodeAcknowledgements.empty())
+    scheduleWorkerMessageDrain();
+}
+
 void FrontendSession::drainWorkerMessages() {
   if (stopping)
     return;
@@ -152,16 +165,6 @@ void FrontendSession::drainWorkerMessages() {
   if (!wake.accepted()) {
     if (workerNotifier)
       workerNotifier->setEnabled(false);
-    if (graphUiEffectHandler) {
-      try {
-        graphUiEffectHandler(nodegraph::UiEffect{
-            nodegraph::UiEffectKind::ShowNotice,
-            std::nullopt,
-            "Worker-to-Qt wake-up failed; CodexUI is shutting down",
-            {}});
-      } catch (...) {
-      }
-    }
     // The application quit path calls shutdown(), which uses the independently
     // owned Qt-to-worker eventfd before joining the worker.
     notifyRuntimeStopped();
@@ -178,7 +181,11 @@ void FrontendSession::drainWorkerMessages() {
   nodegraph::WorkerToQtMessage message;
   while (processed < MaximumMessagesPerPass &&
          (processed == 0 || drainBudget.elapsed() < MaximumDrainMilliseconds) &&
-         channels.tryReceiveForQt(message)) {
+         (!deferredGraphChanges.empty() || channels.tryReceiveForQt(message))) {
+    if (!deferredGraphChanges.empty()) {
+      message = std::move(deferredGraphChanges.front());
+      deferredGraphChanges.pop_front();
+    }
     ++processed;
     std::visit(
         [this](auto &payload) {
@@ -186,19 +193,22 @@ void FrontendSession::drainWorkerMessages() {
           if constexpr (std::is_same_v<Message, nodegraph::GraphChanged>) {
             if (graphChangedHandler) {
               try {
-                graphChangedHandler(payload);
+                if (!graphChangedHandler(payload))
+                  deferredGraphChanges.push_front(std::move(payload));
               } catch (...) {
               }
             }
-            queueRetirementAcknowledgements(payload.removed);
+            if (!graphChangedHandler)
+              queueRetirementAcknowledgements(payload.removed);
             if (payload.rescanRequired) {
               requireRescanRetirementCollection();
               collectRescanRetirements();
             }
-          } else if constexpr (std::is_same_v<Message, nodegraph::UiEffect>) {
-            if (graphUiEffectHandler) {
+          } else if constexpr (std::is_same_v<
+                                   Message, nodegraph::ProtocolDiagnostic>) {
+            if (protocolDiagnosticHandler) {
               try {
-                graphUiEffectHandler(payload);
+                protocolDiagnosticHandler(payload);
               } catch (...) {
               }
             }
@@ -207,14 +217,15 @@ void FrontendSession::drainWorkerMessages() {
           }
         },
         message);
+    if (!deferredGraphChanges.empty())
+      break;
   }
 
   // A synthesized rescan is deliberately delivered ahead of older queued
   // notifications. Keep retired nodes graph-readable until that entire older
   // backlog has passed Qt; queued NodeRefs alone pin lifetime but do not keep
   // ReadAccess membership after releaseRetired().
-  const bool workerBacklogDrained =
-      channels.workerToQtSizeApprox() == 0 && !channels.rescanPending();
+  const bool workerBacklogDrained = graphDeliveryQuiescent();
   if (workerBacklogDrained && !rescanRetirementPending)
     flushNodeAcknowledgements();
   if (workerFinished.load(std::memory_order_acquire))
@@ -301,15 +312,18 @@ void FrontendSession::collectRescanRetirements() {
       if (nodes.empty())
         return;
       try {
-        graphChangedHandler(nodegraph::GraphChanged{
-            revision, {}, nodes, false, {}, authorityRevision});
+        nodegraph::GraphChanged change{
+            revision, {}, nodes, false, {}, authorityRevision};
+        if (!graphChangedHandler(change))
+          deferredGraphChanges.push_back(std::move(change));
       } catch (...) {
       }
     };
     notify(providerRetired, providerAuthorityRevision);
     notify(ordinaryRetired, 0);
   }
-  queueRetirementAcknowledgements(retired);
+  if (!graphChangedHandler)
+    queueRetirementAcknowledgements(retired);
 
   if (!complete) {
     retirementScanOffset = end;
@@ -326,7 +340,8 @@ void FrontendSession::queueRetirementAcknowledgements(
   for (const nodegraph::NodeRef &node : nodes) {
     if (!node)
       continue;
-    queueNodeAcknowledgement({node, nodegraph::NodeActionKind::UiDetached});
+    queueNodeAcknowledgement(
+        {node, nodegraph::NodeActionKind::UiDetached, {}, {}, {}, {}});
   }
 }
 

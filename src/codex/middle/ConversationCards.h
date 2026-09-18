@@ -83,15 +83,12 @@ protected:
   void wheelEvent(QWheelEvent *event) override;
 
 private:
-  [[nodiscard]] bool measureAtCurrentWidth(bool notifyParent);
-  [[nodiscard]] bool setPreferredContentHeight(int height, bool notifyParent);
-  void refreshMaximumHeight();
+  void measureAtCurrentWidth();
+  void setPreferredContentHeight(int height);
   void settleScroll();
   void scheduleScrollSettlement();
   void setUserFollowLatest(bool followsLatest);
   [[nodiscard]] bool isAtBottom() const;
-  [[nodiscard]] bool outputRequiresMaximumHeight(const QString &output) const;
-
   bool followsLatest_ = true;
   bool suppressScrollState_ = false;
   bool scrollSettlementPending_ = false;
@@ -168,6 +165,7 @@ public:
   // ConversationView uses this to pause local feedback timers while a card is
   // not painted.
   void setViewportVisible(bool visible);
+  void setShowsKeyboardFocus(bool visible);
   // Retires renderer-local measurements after the effective font, style, or
   // device-pixel ratio changes without replacing this interactive object.
   void invalidateGeometryEnvironment();
@@ -189,7 +187,9 @@ public:
 
 signals:
   void foldRequested(bool collapsed);
+  void intrinsicGeometryChanged();
   void recoveryRequested();
+  void noticeRequested(QString message, bool error);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -197,6 +197,7 @@ protected:
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;
+  bool showsKeyboardFocus_ = false;
 };
 
 } // namespace codexui::codex::middle

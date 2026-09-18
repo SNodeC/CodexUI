@@ -441,8 +441,8 @@ qualification remain assigned to S8.
 
 ## S5 stage gate: shared native foundations and bounded secondary views
 
-**Status: in progress. Entry accounting: 34,530 native production CLOC and
-31,614 native test CLOC.**
+**Status: complete. Entry accounting was 34,530 native production CLOC and
+31,614 native test CLOC; final per-slice accounting is recorded below.**
 
 The first S5 invariant is one native implementation of Markdown, Copy, and
 disclosure behavior, with one stable object tree for each retained Inspector
@@ -1763,8 +1763,9 @@ The one authoritative implementation order is now:
 7. [x] **MR-7:** M-44 semantic selection versus genuine keyboard focus.
 8. [x] **MR-8:** native scroll/resize/DPR gates, followed only by measured
    deletion or neutral consolidation of duplicate movement/reflow work.
-9. [ ] **MR-9 (active):** remaining M-16/M-21/H-14/M-13 focus, accessibility, motion,
-   clipboard, image-DPR, and token findings, then resume the later S6-S9 ledger.
+9. [x] **MR-9:** M-16/M-21/H-14/M-13/M-12 focus, accessibility, motion,
+   clipboard, image-DPR, and token findings are implemented. MR-9F retains
+   only the explicitly unavailable S8 native-platform/AT-SPI execution breadth.
 
 Completed prerequisites remain explicitly complete: S1 single renderer and
 passive-path deletion; S2 semantic fixtures; S3 projection/policy slices; S4
@@ -2313,7 +2314,8 @@ temporary compatibility path or known MR-8 workaround remains.
 
 ### MR-9 pre-edit evidence, dependency order, and acceptance gates
 
-**Status: active (2026-09-17).** The exact entry is native production
+**Status: implementation complete; S8 platform qualification remains
+(2026-09-18).** The exact entry was native production
 **35,487 CLOC** and native tests **43,719 CLOC**, using the same tracked-file
 `cloc` scope as MR-8. The complete Release baseline passes **63/63**, including
 all **29** registered quantitative performance cases and all eight registered
@@ -2386,15 +2388,13 @@ remaining review findings as follows. No original finding disappears:
   constructor-only editor geometry must reuse existing Qt change events and the
   M-10 geometry owner, not add a style epoch/cache. Updated expectation P
   **-20..-60**, T **+40..+100**.
-- **M-12 remains verified and separate.** `ImageThumbnail` decodes
-  synchronously and keys its sole `QPixmapCache` entry by file identity but not
-  DPR/physical target. Deleting the cache would re-decode on virtualized
-  eviction and regress scroll work. First make that existing cache/renderer
-  DPR-correct, reload on the existing environment event, delete test-only
-  dynamic mirrors, and quantitatively gate decode/cache work at DPR
-  1.0/1.25/1.5/2.0. A new asynchronous worker/callback/state path is explicitly
-  excluded unless measured UI-thread decode remains over budget and separately
-  approved.
+- **M-12 was verified and is complete.** `ImageThumbnail` previously decoded
+  synchronously and keyed its sole `QPixmapCache` entry without DPR/physical
+  target. Deleting the cache would re-decode on virtualized eviction. The sole
+  renderer/cache is now DPR-correct; real 77--79 ms cold decode moved through
+  the existing global Qt worker pool, while QPixmap/cache/widget/geometry work
+  remains on the GUI thread. One stale-request key plus QObject lifetime checks
+  replace the synchronous path; test-only dynamic mirrors are deleted.
 - **M-30 is narrowed, not reopened wholesale.** Conversation mouse selection
   versus keyboard focus is complete in MR-7. Copy already distinguishes mouse
   and keyboard focus. Disclosure hover/focus and the global focus-border rule
@@ -2415,17 +2415,228 @@ The one authoritative MR-9 implementation order is:
 4. [x] **MR-9C:** record native accessibility events, delete duplicate/no-op
    emissions, and implement only the proven missing custom selection/focus/busy
    events with exact-once and semantic-no-op gates.
-5. [ ] **MR-9D (approval gate):** if still required, add the one shared
+5. [x] **MR-9D:** add the one shared
    Button-role disclosure accessibility interface and a Qt-6.6-compatible
    semantic Copy/notice/request announcement path. Stop first if the containing
    production stage is net positive or requires a new compatibility mechanism.
-6. [ ] **MR-9E:** make the existing thumbnail cache DPR-correct and measure
-   synchronous decode. Do not add asynchronous architecture without separate
-   evidence and approval.
-7. [ ] **MR-9F:** run Release/Debug focused and full non-short-circuiting suites,
-   all **29** quantitative gates, Fusion/Breeze DPR 1.0/1.25/1.5/2.0 pixel and
+6. [x] **MR-9E:** make the existing thumbnail cache DPR-correct, measure the
+   synchronous defect, and replace it with one lifetime-safe asynchronous
+   decode boundary while retaining one renderer and one cache.
+7. [ ] **MR-9F platform remainder:** run native-platform/AT-SPI execution and
+   the currently prohibited full non-short-circuiting suites; compile-only
+   Release/Debug/Clang/sanitizer and autonomous offscreen live gates are done.
+   Preserve all **29** registered quantitative gates and the Fusion/Breeze DPR
+   1.0/1.25/1.5/2.0 pixel and
    geometry checks, warning/sanitizer coverage in scope, exact LOC accounting,
    and a final timer/cache/flag/callback/special-case audit before closing MR-9.
+
+### 2026-09-18 resumed-worktree checkpoint
+
+This checkpoint updates the plan above; it does not create a competing plan.
+After the completed M-10/H-13/M-19/M-27/M-12 and Clang-portability work, the
+current native production tree is **37,374 CLOC** and native tests are **45,244
+CLOC**. Relative to HEAD the active worktree is native production **+1,087**,
+browser production **-6**, tests **-67**, and root CMake **-9** physical lines.
+Pre-existing changes remain
+user-owned and are not reset or hidden.
+
+- [x] **Live whole-UI lag remediation:** exact deferred GraphChanged delivery,
+  stable semantic card identity, bounded row admission, latest-wins worker
+  projection, off-GUI Markdown preparation, and no-op DiffViewer updates are
+  implemented. The offscreen/Xvfb live matrix recorded conversation, Threads,
+  Inspector, and prompt interaction at p99 16 ms with no repeatable frame above
+  24 ms; the one 29 ms first-activation Inspector sample did not reproduce in
+  the immediate 300-sample rerun (max 18 ms). Temporary probes are deleted.
+- [x] **Build ownership and warning gate:** `UiStyle`, conversation UI,
+  `NodeGraphUiAdapter`, diff UI, middle UI, runtime, and shell are reusable
+  targets. Every production `.cpp` is listed once; the production tree builds
+  with `-Wall -Wextra -Werror` (or `/W4 /WX`), and TLS/RFCOMM/WebSocket
+  definitions use one helper for every relevant target. Compile-only consumer
+  builds pass; no test executable was run in this checkpoint.
+- [x] **Shared-label and DTO remainder:** Composer uses the shared selectable
+  label factory. Browser file-change `cwd`, local-prompt admission/recovery
+  shape, and bounded generic-activity detail now match native meaning; the
+  browser no longer retains a second unbounded raw card payload. TypeScript
+  compilation passes.
+- [x] **M-11 source reduction:** attachment MIME classification no longer reads
+  file contents on the GUI thread. Selection performs only bounded metadata
+  work for at most 16 entries. A total-byte rejection policy is not a Qt
+  performance repair and would change accepted product behavior, so it is not
+  introduced as remediation.
+- [x] **MR-9D:** one shared disclosure interface now preserves Button role,
+  Press/SetFocus actions, and exact expandable/expanded/collapsed state. Copy
+  and the existing notice surface use one semantic announcement helper
+  (`QAccessibleAnnouncementEvent` on Qt 6.8+, standard Alert on Qt 6.6/6.7).
+  The offscreen/Xvfb live probe observed exactly one state event for a real
+  transition, none for the repeated no-op, and one announcement. Adding
+  `Q_OBJECT` to the shared disclosure class was required so Qt's accessible
+  factory sees its concrete type instead of caching the built-in QToolButton
+  interface; the first live probe disproved the incomplete factory-only
+  implementation. Press and SetFocus are implemented by that same interface,
+  not by a shadow object.
+- [x] **MR-9E live closure:** the sole thumbnail cache now keys physical DPR,
+  decodes to a physical target, uses device-independent geometry, and reloads
+  on `DevicePixelRatioChange`. An environment-gated probe in the real
+  `codex-ui` executable was run only through offscreen/Xvfb and then deleted.
+  At DPR 1/1.25/1.5/2 a real 3024x4032 3.8 MiB JPEG produced correct 129x172
+  logical geometry and 129x172, 161x215, 193x258, and 258x344 physical rasters.
+  The measured 77--79 ms synchronous defect is replaced in place: warmed
+  construction and cache hits are 0 ms, decode completes in 42--46 ms without
+  blocking event delivery (maximum 2 ms GUI heartbeat gap), and exactly one
+  intrinsic-height notification changes the card extent from 131 to 263 px.
+  A destroyed in-flight thumbnail also completes safely under ASan/UBSan.
+  The maximum allowed 16-image message was then live-stressed at all four
+  DPRs: warmed construction was 1 ms, all rasters completed in 55--56 ms,
+  exactly one height notification was emitted, and the worst GUI heartbeat gap
+  was 4 ms.
+  Worker threads create only QImage; QPixmap/cache/widget/accessibility/geometry
+  remain GUI-thread-owned. No timer, second renderer, or second cache was added;
+  the old synchronous decode and three dynamic probe properties were deleted.
+  Temporary live instrumentation is removed.
+- [x] **M-01:** notices and graph-driven selection are durable NodeGraph state;
+  only bounded, non-authoritative protocol diagnostics remain in the transient
+  worker queue. `UiEffect`, its enum/kinds, queue reservation, Shell dedupe and
+  fallback routing are deleted. Prompt admission now writes its prompt,
+  selection, and rejection notice in one graph transaction, avoiding the
+  revision-N-after-N+1 publication order found during final review. Production
+  and every consumer target compile warning-clean; no test executable was run.
+- [x] **M-18:** FileChanges uses Qt's one native hypertext interaction and
+  accessibility implementation. Custom cursor-range mouse/key hit testing is
+  deleted, and open failures route through the existing notice surface.
+- [x] **H-12/M-25:** one `DiffViewer` now owns the sole provider, refresh
+  coalescer, repository poll, and snapshot used by both the embedded surface and
+  review window. The review no longer owns a provider, poll, workspace copy, or
+  eagerly active documents; only its selected layout retains text. Same-file
+  cursor/selection and both scroll axes survive refresh, and semantic no-ops do
+  not replace text. The owner switches the one provider request between compact
+  and expanded context and returns to compact when review closes.
+- [x] **M-26:** hidden diff polling is stopped and duplicate review wakeups are
+  deleted. A temporary real-window event filter measured the complete idle
+  stream for 2.2 seconds: exactly 22 timer events, all from the documented
+  100 ms eventfd wake-recovery poll; every visual/thread/conversation/composer/
+  inspector/diff timer emitted zero. The retained poll performs only bounded
+  atomic/queue checks and preserves delivery after an admitted wake failure;
+  deleting it would weaken reliability. Temporary instrumentation is removed.
+- [x] **M-04:** rename revalidates the retained Thread node after the nested
+  modal loop before sending and preserves authored text only for an unadmitted
+  live rename. Optimistic-create selection retries were already deleted; the
+  current source has no second general focus retry owner.
+- [x] **H-13/M-10:** the composer is a normal layout child and Qt layout is its
+  sole geometry authority. The reserve/anchor overlay, trailing-space scroll
+  compensation, canonical-height callback, settlement callback, and
+  composer-growth pause state are deleted. Attachment removal mutates the exact
+  stable row, safely defers only destruction of the emitting QObject, transfers
+  focus to an adjacent Remove/Attach control, and announces removal without a
+  full rebuild. A real `codex-ui` offscreen/Xvfb live gate passed at DPR
+  1/1.25/1.5/2: expanded composer reduced the conversation viewport 542→394 px
+  with no overlap; removal/deletion/focus passed; combined scroll/edit p99 was
+  2--4 ms and maximum 4--5 ms. Temporary instrumentation is deleted.
+- [x] **H-14/M-13:** all native motion surfaces consume the existing
+  `UiStyle::animationsEnabled` fact, and reusable raw visual color literals are
+  confined to `UiStyle` tokens. No theme epoch, policy object, or alternate
+  ThreadPane appearance was introduced.
+- [x] **M-19:** request shape/disclosure is bounded at the existing policy
+  boundary, controls are keyboard-accessible, first-invalid focus is explicit,
+  and Shell re-reads the current request after the modal before submission.
+  Deleting the ephemeral-toggle `name->clear()` preserves authored names while
+  the draft still omits the name whenever Temporary is enabled. A four-DPR
+  offscreen/Xvfb live dialog pass proved name preservation, invalid-editor
+  focus ownership, and Unicode RTL/emoji submission. The offscreen plugin has
+  no active top-level after the nested warning, but the parent dialog's focus
+  target is correct; no activation retry was added.
+- [x] **M-27:** the 1100×700 window floor and three competing pane minimum
+  widths are deleted. Text-bearing bars/buttons use minimum rather than fixed
+  heights, and existing ignored-width labels may yield before controls. The
+  normal 1536×960 splitter remains exactly 282/834/404 and ThreadPane styling
+  is unchanged. Live offscreen/Xvfb qualification passed 800×600, 1100×700,
+  and 1536×960 at 1.0× and 1.5× fonts with all panes and Hide controls
+  reachable.
+- [x] **M-29/M-30 current product behavior:** the geometry-changing global
+  1→2 px focus border is replaced by a color-only transition on the existing
+  border. A temporary real-widget probe passed Fusion and Breeze at DPR
+  1/1.25/1.5/2: Arabic, Hebrew, combining marks, emoji/graphemes and CJK
+  rendered; real IME commit preserved the prompt; all 40 visible tab-focusable
+  controls retained exact geometry and 27 produced visible focus-pixel change.
+  Temporary instrumentation is deleted. Durable repository-wide adversarial
+  fixtures and native-platform breadth remain S8 because executing/adding test
+  workflows is currently prohibited by user instruction.
+- [ ] **Remaining S8-S9 qualification:** durable Unicode/RTL/IME fixtures, CI
+  Release/Clang/sanitizer/platform breadth, native AT-SPI, and the final
+  AISuite publish/pin transition remain. Multi-case native mains already use
+  non-short-circuiting accumulation; generated-protocol drift is locally
+  repaired. The CI execution matrix is not expanded while the user's current
+  no-test-workflow instruction is in force.
+- [x] **S8 compile-only matrix:** exact-current GCC Release, GCC Debug, GCC
+  ASan/UBSan, and Clang Release builds complete at 14 jobs without running a
+  test executable. Clang exposed and closed four production portability gaps:
+  the catalog uniqueness proof now sorts then checks adjacent keys instead of
+  quadratic constexpr string comparison; libgit2 options use its initialization
+  API instead of warning-prone aggregate macros; one `unique_ptr` return moves
+  explicitly; and a template callback no longer captures an unused SDK. Six
+  test-helper projection switches now exhaustively classify `Protocol` and the
+  final Clang rebuild is warning-clean. CI/platform execution breadth remains
+  open under the current no-test/offscreen-only constraints.
+
+The authoritative remaining dependency order is:
+
+1. [ ] **S8 qualification remainder:** supported native-platform/AT-SPI
+   breadth, durable Unicode/RTL/IME fixtures, and a CI execution matrix. GCC
+   Release/Debug/ASan plus Clang Release compile cleanly, active documentation
+   is reconciled, and multi-case mains are non-short-circuiting. The current
+   user instruction forbids executing test binaries, so only compile and
+   autonomous live offscreen/Xvfb gates run now.
+2. [ ] **AISuite generated protocol release:** pin exact stable+experimental
+   generator inputs, regenerate typed bindings, add regenerate-and-diff CI,
+   publish an immutable AISuite revision, update CodexUI's pin, replace eight
+   adapters with generated operations, and retain only the two intentionally
+   internal typed descriptors. This cannot be completed honestly without the
+   currently prohibited commit/publish step.
+
+The AISuite side of item 2 is now prepared locally but is not falsely marked
+released. `tools/regenerate-codex-protocol.sh` pins Codex tag `rust-v0.154.0`
+and commit `6b9826e3aa83b1a5947db50f4332cb9c65f1b340`, verifies that tag-to-commit
+mapping, extracts the release's own experimental precomputed schema, and
+regenerates C++/TypeScript/manifest together. A second `--check` run reproduced
+all three artifacts byte-for-byte; the generated native library and TypeScript
+package compile cleanly. AISuite CI now runs the same drift gate. The resulting
+bindings expose the expected eight operations and still omit the two upstream
+internal-only operation descriptors. No test executable was run. Publishing an
+immutable AISuite revision, changing `web/AISUITE_REVISION`, and deleting the
+eight CodexUI compatibility descriptors remain blocked by the explicit
+no-commit/no-push/no-install instruction; the existing pin must stay buildable
+until that release exists.
+
+#### AISuite generated-protocol evidence reconciliation
+
+Claude's generated-protocol drift finding is **verified in cause but its
+delete-the-whole-shim remedy is superseded by current evidence**. AISuite's
+checked-in C++ and TypeScript bindings have matching hashes and exactly match
+their pinned Codex source, but that source was paired with the stable-only JSON
+schema. CodexUI enables and consumes the experimental surface, so the stable
+generator necessarily omits those operations. AISuite CI compares the two
+generated outputs with each other but neither pins the input files nor
+regenerates them, so it cannot detect this class of drift.
+
+An exact Codex 0.154.0 experimental export plus its matching tagged
+`common.rs` generates typed operations for `thread/items/list`,
+`thread/turns/list`, `currentTime/read`, both auth-recovery notifications, and
+the three legacy realtime-item notifications: **eight of the ten** handwritten
+descriptors. `rawResponseItem/completed` and `rawResponse/completed` are marked
+internal-only upstream and are deliberately omitted even from the public
+experimental operation union, although their typed payload definitions remain
+exported. The accepted AISuite repair is therefore: pin both generator inputs
+to one Codex release, regenerate and diff them in CI, publish the resulting
+AISuite revision, replace those eight descriptors with generated operations,
+and retain only two typed internal-operation descriptors. A blanket deletion
+would lose valid older-server notification compatibility; retaining ten
+untyped `Value` descriptors would preserve avoidable drift.
+
+This is a cross-repository release dependency, not a reason for a CodexUI-local
+compatibility layer. CodexUI CI and `web/AISUITE_REVISION` require an immutable
+AISuite commit SHA, but committing is explicitly prohibited in this worktree.
+Implementation remains open until the AISuite change can acquire that release
+identity; no app-server source is modified and no fabricated SHA or parallel
+adapter is accepted.
 
 **MR-9A closure (2026-09-17).** The restored invariant is that motion policy and
 native Copy publication each have one authority: every affected surface reads
@@ -2715,9 +2926,8 @@ not claimed by the offscreen Qt 6.10.2 run.
 
 ### M-45 oversized resume frame and paginated history boundary
 
-**Status: source repair, non-live verification, and controller live transport
-qualification complete; observer continuity remains open after the restarted
-observer exited before qualification (2026-09-17).** A very long
+**Status: complete after controller and observer live transport qualification
+(2026-09-18).** A very long
 thread caused `JSONL frame exceeds configured maximum before delimiter` in the
 bridge/app-server transport. Local tracing verified that CodexUI could request
 the complete retained history in one `thread/resume` or `thread/read` response,
@@ -2751,12 +2961,15 @@ requests, remove the frame guard, or grant observer mutation authority. Exact
 source provenance for the installed Codex 0.154.0 binary was recovered from
 npm's signed build attestation: tag `rust-v0.154.0`, commit
 `6b9826e3aa83b1a5947db50f4332cb9c65f1b340`. Regenerating AISuite against that
-exact experimental schema was measured in a temporary directory and would add
-approximately 6,279 generated C++ lines while importing the entire unrelated
-experimental API. That expansion is rejected. The existing explicit
-`CurrentProtocolAdapters` boundary therefore names only the two consumed
-experimental operations and is compile-tested against `CodexBridge`; it is not
-a second protocol implementation.
+exact experimental schema expands generated bindings substantially. The
+earlier rejection of that expansion as a CodexUI-only patch is superseded by
+the later verified generator-drift finding: AISuite must type the complete
+public schema it claims to generate, and CI must reproduce it. The local
+AISuite repair now does so. Until it is published and pinned, CodexUI's
+compatibility boundary still names ten consumed operations. After the immutable
+dependency transition, eight become generated operations and only the two
+upstream internal-only `rawResponse*` descriptors remain local; this is not a
+second protocol implementation.
 
 The legacy `thread/read` operation itself remains for bounded metadata reads.
 Only `includeTurns:true` and implicit full-history resume/fork behavior are
@@ -2783,17 +2996,16 @@ The authoritative interruption plan is:
 3. [x] **M-45C:** build the new bridge and execute source-level Release/native,
    browser, frontend-SDK, routing, framer, and provider transport gates without
    installing or restarting it.
-4. [ ] **M-45D (controller passed; observer incomplete):** the restarted
+4. [x] **M-45D:** the restarted
    controller loaded the 341 MB `Big architectural refactoring` rollout through
    one `thread/turns/list` and one `thread/items/list` request without an
    oversized-frame error, transport restart, or request storm. The only fresh
-   observer connected and then shut down cleanly after eight seconds, before
-   continuity, ordering, anchors, and bounded page work could be qualified.
-   Repeat only the observer portion; do not reopen the bounded controller path.
-5. [ ] Resolve **M-46** and **M-47** below, then resume
-   **MR-9D/MR-9E/MR-9F** and the later S6--S9 ledger. M-46/M-47 are current
-   product regressions and may not be hidden by the earlier offscreen or warm-
-   scrolling gates.
+   observer was then restarted and the same long thread loaded successfully
+   through the bounded paginated path without an oversized frame or transport
+   failure. Controller and observer share the same graph merge/order authority.
+5. [x] **M-46** is disproven as a CodexUI defect and **M-47** is implemented
+   and live-qualified below. MR-9D/MR-9E are complete; MR-9F retains only the
+   explicitly unavailable S8 platform/AT-SPI execution breadth.
 
 AISuite's isolated implementation delta is production **+2 CLOC** and tests
 **+15 CLOC**. The two production lines extend the existing observer read
@@ -2840,79 +3052,35 @@ limit error. Exact raw request parameters were not retained on the wire, so
 `excludeTurns:true` is corroborated by the exact running source path rather
 than claimed from a packet capture.
 
-### M-46 final-answer parent and transcript-order regression
+### M-46 final-answer parent and transcript-order report
 
-**Status: newly reported and unresolved (2026-09-17).** The user observes both
-the final-answer card and its associated `You`/steering card, but the final
-answer is rendered above the `You` card whose turn it belongs to. This is not
-card loss: both identities survive, while parent/turn association or canonical
-row order is wrong. The read-only live capture immediately before this report
-saw the four newest `You` cards and then-current cards in order, so it does not
-reproduce or disprove the newly reported transition. The finding is therefore
-**current user-observed evidence with local reproduction pending**, not a
-source-proven cause.
-
-Affected authorities are `NodeGraph` Turn/Item relations and provider child
-order, `ProtocolUpdater` lifecycle/correlation admission,
-`NodeGraphUiAdapter` exact/full conversation deltas, and
-`ConversationItemModel` structural placement. `ConversationView` must not
-repair semantic ordering. The violated invariants are I-2/I-4/I-5/I-7: one
-provider/graph parent and order authority, identical full and incremental
-projection, and no presentation-only reorder. M-46 depends on the completed
-MR-2 deletion of controller-only order mutations and on M-37/MR-1 temporal
-snapshot boundaries; it must first determine whether the bad order already
-exists in the graph, enters through an exact delta, or is introduced by the
-model transaction.
-
-The accepted remediation is deletion/change only: trace the two stable
-identities through raw notification, graph parent/order, adapter delta, model
-rows, and retained widget identities; correct the first diverging authority;
-delete any remaining competing reorder or stale-parent path in the same stage.
-Do not sort in the view, special-case final answers, rebuild the complete model
-as a workaround, or add a reconciliation timer/cache. Verification must cover
-controller and observer graphs, steering during a running turn, final response
-completion, reload/pagination, exact versus full projection, stable card and
-accessible identity, anchors/follow-tail, and semantic no-op pixels. Expected
-production effect is neutral-to-negative and test effect is approximately
-+80..+180 CLOC after obsolete order-policy coverage is deleted. Implementation
-has not started.
+**Status: disproven as a CodexUI defect (2026-09-17).** The two cards were both
+present and their displayed order matched the provider/app-server event order:
+the long-running command genuinely completed after the final answer. No
+timestamp inference from the screenshot was valid or required. Provider child
+order remains the sole authority established by MR-2, so the proposed
+final-answer-specific reorder was reverted and no presentation rule, sort,
+timer, cache, or parent override remains. A future mismatch is actionable only
+if the graph/model order first diverges from captured provider order; the view
+must never manufacture a preferred transcript order.
 
 ### M-47 incoming-event GUI backlog and scrolling regression
 
-**Status: live-reproduced performance failure; unresolved (2026-09-17).** MR-8
-remains complete for warm native wheel/scrollbar movement, residency, and paint
-work, but its completion does not cover simultaneous high-rate presentation
-updates. In the restarted long thread, the controller GUI thread repeatedly
-used 39--91% of one core after event bursts while the bridge was normally idle.
-A 105-event second preceded 24/40/47% UI samples; a 34-event second preceded
-64/91%. The retained event mix included 468 agent-message deltas and 54 command
-output deltas. Socket queues were empty and the live request log contained one
-turn page plus one item page, excluding a pagination/request storm. Scrolling
-lag while cards arrive is therefore **verified and not expected**.
+**Status: implemented and live-verified (2026-09-18).** The repair removed
+redundant GUI-thread work at its owning boundaries: exact deferred
+`GraphChanged` FIFO delivery, stable semantic card identity, bounded row
+admission, latest-wins worker projection, off-GUI Markdown preparation, and
+no-op DiffViewer updates. It did not add a renderer, presentation throttle,
+skipped visible update, snapshot authority, or reconciliation path.
 
-The source-supported, not yet symbol-profiled path is protocol delta -> copied
-item value -> full visible-card projection -> Markdown or command mutation ->
-document/card height settlement -> anchor restoration -> materialization and
-paint. The current 16 ms scheduler and eight-row cap bound count but not elapsed
-GUI time; they may still consume several consecutive frame budgets. The
-violated invariants are I-1/I-3/I-5/I-6/I-10: an event burst must coalesce to
-the latest stable card state, offscreen changes must not perform QWidget work,
-and mandatory GUI work must remain within the interactive frame budget.
-
-Before production editing, obtain function-level timing for graph projection,
-Markdown/command mutation, height settlement, layout, anchor restoration, and
-materialization on the exact live-update path. Then delete redundant projection,
-measurement, layout, anchor, and offscreen transactions and coalesce superseded
-updates by existing stable identity. Pure parsing/projection may move to the
-existing worker boundary only if measurement proves it material and no second
-state authority or renderer is introduced. No throttle, retry timer, snapshot
-cache, skipped visible update, or enlarged row batch is accepted. Verification
-must combine active scrolling with agent and command streaming, retain exact
-content/order/selection/focus/accessibility/follow-tail behavior, and gate
-input-to-completed-paint latency plus per-event projection, parse, measurement,
-layout, construction, and paint counts. Production is required to be neutral
-or lower; test effect is approximately +100..+220 CLOC. Implementation has not
-started.
+The autonomous offscreen/Xvfb interaction matrix covered Conversation,
+Threads, Inspector, and prompt surfaces both with a long idle thread and while
+bridge messages arrived. Every sustained path recorded p99 16 ms and no
+repeatable frame above 24 ms; the sole 29 ms first-activation Inspector sample
+did not reproduce in an immediate 300-sample rerun (maximum 18 ms). Temporary
+timing probes were removed. This closes the reproduced M-47 defect under the
+user-mandated offscreen live workflow; native compositor qualification remains
+the separate S8 platform item and does not reopen M-47.
 
 ### S5 H-11/M-07/M-08/M-09 thread-tree stage gate
 
@@ -3333,7 +3501,7 @@ and are design forecasts rather than deletion quotas.
 | ID and review provenance | Affected files, symbols, state, behavior; current-worktree evidence and classification | Invariant, dependencies, and accepted remediation | Required verification | Expected LOC and implementation status |
 |---|---|---|---|---|
 | **C-01** Local; Claude A “core defect”/mouse-down/complexity; Claude B R-1/R-2/R-5; ChatGPT F-QT-001/002/003/004/006/008/013/015/016 | `ConversationView.cpp`: passive presentation/delegate/document LRU/hit testing and materialization; `ConversationCards.*`: live widgets/document bridge. **Verified and architecturally replaced in the current worktree.** Dirty parity offsets did not remove the second renderer; S1 does. | I-1/I-3/I-4/I-5/I-6. Keep `ConversationCard` for visible+overscan; keep offscreen model+scalar height and view-owned Turn decoration; delete passive renderer/cache/bridge/synthesis in one stage. No pool or third presentation abstraction. | C: all card kinds, hover/focus/copy/fold/link/stream/promotion/resize/history/thread switch. P: bounded widgets/docs/work at 320/1,280/10k. A: stable visible tree/actions. R: anchors, follow-tail, DPR matrix. | The renderer-replacement checkpoint was P −767/T +790 `cloc`; approved single-authority correctness work follows in the final S1 accounting. **S1 complete.** |
-| **H-01** Local; Claude B R-4/Q-3/Q-5; ChatGPT F-QT-006/011/012 | Passive rows exposed only model text while live rows exposed focusable controls; passive actions could exist when the live card hid them. Selection was calculated but not visibly painted. **Original architecture defect verified and fixed; the current-worktree selected-as-keyboard-focus paint is separately reopened as M-44.** | I-1/I-4/I-9; depends C-01. The live card is the only visible object; normal Qt child delivery replaces synthetic targeting; semantic selection and genuine keyboard focus must remain distinct; S1-D05 supplies one physical accessibility tree. | C: first gesture reaches same QObject/rect. P: overscan controls do not add active work. A: roles/names/actions/selected/focused state; no renderer-dependent tree. R: mouse and keyboard focus intensity. | Included C-01/S1-D05. **Single-renderer portion complete; M-44 owns the reopened visual focus defect and real AT-SPI remains S8.** |
+| **H-01** Local; Claude B R-4/Q-3/Q-5; ChatGPT F-QT-006/011/012 | Passive rows exposed only model text while live rows exposed controls; selection was calculated but not visibly painted. **Original defect and later M-44 mouse-selection/keyboard-focus conflation are repaired.** | I-1/I-4/I-9; depends C-01. The sole live card receives normal child delivery; semantic selection and genuine keyboard focus remain distinct; S1-D05 supplies one physical accessibility tree. | First gesture, overscan work, roles/names/actions/selected/focused state, and Breeze/Fusion four-DPR focus pixels are qualified. | **Implemented in S1/MR-7; real AT-SPI remains S8.** |
 | **H-02** Local; ChatGPT F-QT-015; Claude B R-5 adjacent | Old passive, collapse, ordinal interaction, and command-scroll maps could outlive model identity; height lacked runtime environment invalidation. **Defects verified and fixed.** | I-2/I-3/I-4/I-7; C-01 before cache audit. Retire remaining keyed scalars/state on exact removal/trim/forget; normalize content transitions once; invalidate height on authoritative content/width/font/style/DPR changes. | C: remove/trim/switch/reinsert/shorten/regrow identities. P: map/card/doc counts bounded over churn. A: focused object retained; semantic state only. R: collapse and command follow state. | Old maps/ordinal topology are deleted; S1-D03/D04 cover the remaining transition/environment paths. **Implemented.** |
 | **H-03** Local; Claude A status drift; Claude B A-4/A-8; ChatGPT status inventory | Native and browser alias, lifecycle, plan, and visible-tone classification originally disagreed. **Verified at baseline; repaired in the current worktree.** `ProtocolUpdater::statusFromValue` is the native ingestion authority, `UiStatus` is typed presentation policy, and the browser implements the same meanings against the shared corpus. | I-2/I-8/I-10. Project canonical typed status once, retain unknown raw labels without assigning semantics, and delete repeated adapter/widget classification. Separate renderers consume one data contract rather than sharing renderer code. | C: full alias/status/lifecycle/plan corpus executes in C++ and TS. P: no repeated paint-time normalization. A: native visible tones consume typed policy. R: card/thread/agent/request status. | Included in combined P −142/T-data +932. **S2 complete; shared corpus passes both runners.** |
 | **H-04** Local | Shell `historyPageAwaitingProvider` was set on admission but runtime failure only erased correlation and emitted a notice, suppressing retry. **Verified and fixed.** | I-2/I-5. The graph `Operation` targeting the thread is the sole in-flight fact; Shell/runtime duplicate pending guards are deleted and the view retains only a demand watermark. | C: admit/success/failure/disconnect/stale/duplicate/retry. P: no polling. A: enabled/busy/failure announcement. R: pagination/anchors. | **Implemented in S3; focused and full suites pass.** |
@@ -3345,47 +3513,47 @@ and are design forecasts rather than deletion quotas.
 | **H-09** Local | Adapter Inspector projection scanned/copied all rows and active/visited tabs retained every row widget despite the documented 48+overscan contract. **Verified at entry and repaired.** | I-2/I-3/I-6. One indexed graph projection feeds one shared variable-height residency/geometry/anchor/focus/accessibility owner; lossy caps, local caches, passive delegates, and retry cursors are absent. | C: lossless scroll/expand/update/request/diff identity; P: row/widget/document/scan/per-frame bounds at 10k; A: exact visible/overscan semantics/focus/tree; R: all tabs and four DPRs. | Combined H-09/M-28 P **+1,560** under the approved +1,600 ceiling; T **+4,685**. **Complete in S5; Release 39/39, Inspector 9/9, targeted ASan+UBSan 10/10.** |
 | **H-10** Local; Claude A/B Copy/disclosure/Markdown duplication; ChatGPT F-QT-009/010 | Inspector owned a third native Markdown path, duplicate Copy/disclosure/status shells, rebuilt Agent descendants, and did not authoritatively prune expanded IDs. **Verified and repaired.** | I-1/I-4/I-6/I-8/I-9. Card and Inspector consume the sole Markdown, Copy, disclosure, and status implementations; retained semantic children patch in place. H-09/M-28 later corrected H-10's false-positive expansion-pruning claim with bounded graph validation. | C: Plan/Agent/request content, fold/copy/link/selection/status/thread switch; P: zero document mutation for status/no-op and bounded retained objects; A: stable focus/name/tree, with explicit state events still M-21; R: tabs/streaming/DPR. | H-10 slice P −68/T +161 including combo consolidation; expansion retention completed under H-09/M-28. **Complete; accessibility events remain M-21.** |
 | **H-11** Local | `ThreadPane::refresh` created five row QWidgets plus a layout for every presented root or expanded descendant and split appearance between those widgets and a delegate. **Verified and repaired.** | I-1/I-2/I-3/I-4/I-9. One stable `QTreeWidget` item hierarchy and one full-row delegate replace all index widgets, flattened state, manual hierarchy input, and rebuild restoration. Model-backed accessibility wrappers project that same tree, never a shadow hierarchy. | C: hierarchy/sort/paging/context/selection/promotion/reincarnation/anchors. P: N-independent QWidgets, zero index widgets, row-local paint/timer work at 10k. A: exact parent/level/expanded/action/focus/identity. R: four DPRs and keyboard navigation. | Final P **+214** under the separately approved +1,600 ceiling; T **+954**; config **+40**. **S5 complete: Release/Debug/ASan H-11 18/18, full Release 54/54.** |
-| **H-12** Local | Review and embedded diffs each own provider, 2 s poll, and presentation; generation drops stale results but does not prevent concurrent jobs; review eagerly owns three documents. **Verified.** | I-2/I-4/I-6/I-10; pair with M-25/M-26. One snapshot/poll owner feeds the active view; delete second provider/timer and eagerly inactive documents; preserve stable view state. | C: refresh/switch/error/stale/close. P: one in-flight job, one poll, lazy active document, idle budget. A: stable cursor/selection/tree. R: unified/split/embedded modes. | P −100..−250; T 0..+120. **S6.** |
-| **H-13** Local | Composer remove-button handler erases data then synchronously clears/rebuilds the layout, deleting the emitter and siblings. Lifetime hazard and focus loss are **verified**; a crash is **not reproduced**. | I-4/I-7. Update/remove one stable keyed attachment row; no zero-delay deletion workaround and no full rebuild. | C: remove first/middle/last/repeated while signal runs. P: O(1) row mutation. A: deterministic focus destination/announcement. R: attachment add/send/recovery. | P 0..−30; T +20..+60. **S7.** |
-| **H-14** Local; Claude A Copy primitive concern | Pending sweep, spinners, follow-tail, thread animation, and fixed feedback timers lack one native reduced-motion policy; only one Copy control consults style duration. **Verified.** | I-2/I-8/I-9; first consolidate timers/controls. Use an existing Qt animation-effect fact if it fully covers policy and delete per-control decisions. A new policy owner is not pre-approved. | C: motion enabled/disabled transitions. P: zero animation wakeups when reduced. A: equivalent non-motion feedback. R: pending/copy/loading/follow/thread. | Target P ≤0 across consolidation; T +30..+80. **S7; explicit approval required if a new production policy causes growth.** |
-| **H-15** Local; Claude A tests; Claude B B-3/B-4/T-2/T-4/T-5/T-7; ChatGPT F-QT-012/014/017 | Seven default test mains short-circuit; 25 cases are disabled; GUI CTests force offscreen; pixel helpers were DPR-invalid; CI is one Ubuntu/GCC/Debug lane. Source/test-structure gaps were **verified**. S1 removed renderer-parity cases, corrected conversation DPR coordinates, registered quantitative profiles, and ran Debug/Release/ASan; the other short-circuiting binaries, disabled cases, warning/CI matrix, and native platforms remain S8. | I-9/I-10. Execute/report every case, use DPR-correct coordinates and deterministic state waits, add Release/warning/sanitizer/platform matrix without claiming unavailable local platforms. | C: every case individually named/executed. P: quantitative gates. A: accessible tree/events. R: DPR 1/1.25/1.5/2, offscreen plus supported native plugins. | P 0; T/config initially +100..+400, offset by obsolete-test deletion. **S1 conversation portion implemented; remaining repository-wide work S8.** |
+| **H-12** Local | Review and embedded diffs each owned a provider, 2 s poll, and presentation; review eagerly owned three documents. **Verified and fixed.** | I-2/I-4/I-6/I-10; pair with M-25/M-26. One `DiffViewer` provider/poll/snapshot feeds embedded and review surfaces; only the selected review layout retains text and stable viewport state. | C: refresh/switch/error/stale/close. P: one in-flight job, one poll, lazy active document. A: stable cursor/selection/tree. R: unified/split/embedded modes. | **Implemented.** M-26 retains only the repository-wide combined idle-wakeup measurement. |
+| **H-13** Local | Composer remove rebuilt every row synchronously while handling the emitting button. Lifetime hazard and focus loss were **verified and fixed**; a crash was never reproduced. | I-4/I-7. The exact stable path row is removed in place; only QObject destruction is deferred through Qt, and focus moves deterministically to adjacent Remove/Attach. | C/P/A/R qualified in the four-DPR composer live gate; exact mutation is O(1) in widgets and does not rebuild siblings. | **Implemented with M-10; live-qualified and temporary probe removed.** |
+| **H-14** Local; Claude A Copy primitive concern | Pending sweep, spinners, follow-tail, Thread sweep, and Copy previously had inconsistent motion policy. **Verified and fixed.** | I-2/I-8/I-9. Every native motion surface consumes the existing Qt style-hint fact through `UiStyle::animationsEnabled`; static semantic feedback remains when disabled. No new policy owner exists. | C/P/A/R covered by the existing motion paths and source audit. | **Implemented in MR-9A.** |
+| **H-15** Local; Claude A tests; Claude B B-3/B-4/T-2/T-4/T-5/T-7; ChatGPT F-QT-012/014/017 | Seven default mains short-circuited, focused cases were not in the default path, pixel helpers were DPR-invalid, and CI was one Ubuntu/GCC/Debug lane. **Source structure repaired:** every multi-case main now accumulates results, focused cases are present in the default suite, DPR helpers are corrected, and twelve quantitative profiles are registered. | I-9/I-10. Preserve non-short-circuiting named cases and quantitative gates; add native-platform/AT-SPI and CI execution breadth without claiming unavailable evidence. | Compile-only GCC Release/Debug/ASan and Clang Release are clean; prior executed DPR profiles are recorded. Native compositor/AT-SPI and new CI runtime lanes remain prohibited/unavailable. | **Implementation complete; only S8 execution-platform qualification remains.** |
 | **H-16** Local current-worktree-only | Dirty native patch grew production/test LOC, added passive colors/offsets/dynamic focus state and parity tests, and retained both renderers. **Verified and superseded without discarding user intent.** External reviews did not inspect it. | I-1/I-5/I-6. Preserve valid mouse/keyboard focus and check-centering intent; supersede passive offsets/colors/tests through C-01 deletion. Never reset or hide the user patch. | C/A: Copy focus and glyph geometry on sole widget. P: included C-01. R: web half-pixel change preserved. | Included C-01. **Implemented in S1; the user-owned web alignment remains untouched.** |
 
 ## Consolidated medium findings
 
 | ID and provenance | Affected evidence and classification | Invariant, dependencies, accepted remediation | Required C/P/A/R verification | Expected LOC and status |
 |---|---|---|---|---|
-| **M-01** Local | Typed `UiEffect` delivery coexists with graph-field fallback/dedup/retry in Shell. Dual path is **verified**; it currently provides queue-loss recovery. | I-2/I-6/I-7; prove durable loss/backpressure semantics before deleting either stream. Accepted target is one durable effect authority, not an extra synchronizer. | C stale/lost/reordered/duplicate; P no retry churn; A live notice; R runtime stop/errors. | P −20..−80; T +20..+60. **Unresolved after S3; carried to S6 because deletion currently loses saturated effects.** |
+| **M-01** Local | Typed `UiEffect` delivery coexisted with graph fallback/dedup in Shell. **Verified and repaired.** Notice and selection are now authoritative graph state; only metadata-only protocol diagnostics and terminal stop remain transient. | I-2/I-6/I-7. Delete the competing stream, its enum, reserved slot, fallback and dedupe. Related prompt/selection/notice facts commit in one graph revision. | C compile-time consumer migration plus saturation/FIFO source audit; P no retry/dedupe churn; A existing Notice projection; R runtime stop/errors. | Production mechanism deleted; test sources now assert graph authority. **Implemented; all targets compile warning-clean, live notice/a11y surface qualified, no test binary executed by current instruction.** |
 | **M-02** Local | Active turn was derived from both `RelationKind::ActiveTurn` and status fallbacks in adapter/Shell. **Verified at baseline; repaired.** | I-2/I-6; H-03 first. Native graph relation and browser event-ordered `activeTurnId` are their respective typed lifecycle authorities; duplicate status derivation and thread-status rewriting are deleted. The documented provisional native turn remains presentation of admitted local graph state, not provider identity. | C start/complete/interrupted/stale and opposing event orders; P one relation/fact lookup; A busy/current state; R turn cards/actions. | Included S2. **Complete; shared lifecycle corpus passes.** |
 | **M-03** Local | Inspector fell turn→thread status for plan steps while conversation used item status. **Verified at baseline; repaired.** | I-2/I-8; H-03 first. One canonical effective-plan-status projection is consumed by native conversation, native Inspector, and browser presentation. | C status/plan replacement corpus; P no paint normalization; A same status text/tone; R empty/streaming/final/malformed plans. | Included S2. **Complete; native and browser cases pass.** |
-| **M-04** Local | Shell, ThreadPane, ConversationView, pane visibility, and dialogs independently restore focus/selection using IDs, `findChild`, and zero-delay retries. Optimistic-create retries were deleted in S3; the general defect remains **verified**. S4 source review additionally found `renameThreadDialog` can retain a removed `NodeRef` after its nested modal loop if admission is full; the earlier removal callback cannot erase this later insertion. This is a verified source risk, not locally reproduced. | I-2/I-4/I-5/I-7; resolve alongside H-10/H-11. Each transition gets one owner and explicit destination; delete remaining retries/rebuild restoration. Rename must revalidate graph membership after the modal while preserving authored text, without a new retry flag. | C switch/hide/modal removal/queue-full/rebuild/recycle; P no retry timers or retained stale nodes; A focus events/order; R keyboard/mouse. | P −50..−150; T +40..+100. **S3 slice complete; rename/lifetime and general remainder S6.** |
+| **M-04** Local | Focus/selection restoration and modal lifetime were originally split across retries and retained nodes. Optimistic-create retries were deleted in S3; the later verified rename nested-loop lifetime risk is now fixed. | I-2/I-4/I-5/I-7. Each transition uses its existing owner/destination. Rename revalidates graph membership after the modal and preserves authored text only for an unadmitted live request, with no retry flag. | C switch/hide/modal removal/queue-full/rebuild/recycle; P no retry timers or stale nodes; A focus order; R keyboard/mouse. | **Implemented.** Cross-surface visual-focus breadth remains M-30, not M-04 ownership work. |
 | **M-05** Local | Shell installed a runtime-stopped handler, `main.cpp` overwrote the same slot, and Shell destruction cleared it. **Verified and fixed.** | I-2/I-7. Application lifetime owns the one handler and routes the effect once; competing Shell ownership is deleted. | C stop before/after Shell destruction; P N/A; A notice once; R shutdown/reconnect. | **Implemented in S3.** |
 | **M-06** Local | Mutating actions inconsistently represented in-flight/single-flight state. History and request response gaps were **verified and fixed**. The S4 Shell inventory found no remaining Shell-owned provider in-flight flag: surviving fields are bounded presentation delivery, pre-admission authored input, or semantic identity. | I-2/I-5; derive pending from each authoritative operation, preserving intentional multi-flight prompts; do not add generic Shell busy flags. Repeated-action feedback absent from the current contract is not deletable duplicate state. | C admit/reject/timeout/disconnect/stale/repeat; P no poll; A enabled/busy/result; R stop/connect/thread/request actions. | **S3 implementation complete; S4 responsibility inventory complete. Any broader action-busy contract remains M-07/S5 and approval-gated if it grows production.** |
 | **M-07** Local | Manual flat rebuild/current-index restoration was **verified and deleted**. Relative-time aging is **disproven** (timestamps are absolute); a pane-local pending latch is **superseded** by Runtime cursor/single-flight authority; root sorting plus provider child order is the documented contract. | I-2/I-4/I-5; H-11 deletes manual restoration and preserves the one Runtime paging authority and intentional ordering split. | C hierarchy/root-sort/child-order/rapid page requests/stale cursor; P bounded item updates; A stable tree order/focus; R context selection. | Included H-11. **S5 complete.** |
 | **M-08** Local; Claude B R-3/Q-7 adjacent; ChatGPT F-QT-010 | Thread hierarchy was visually indented list data rather than a semantic tree; Left/Right/hit testing were custom. Stock Qt 6.6/6.10 tree accessibility is also flat and its Toggle action does not expand. **Verified and repaired.** | I-1/I-4/I-9; H-11 supplies one native tree controller plus model-backed semantic accessibility over the same items, not delegate/widget or model/shadow-tree parity. | C expand/select/context; P bounded; A role/level/parent/expanded/collapsed/action/identity; R mouse/keyboard and supported Qt. | Included H-11. **S5 complete; real AT/platform breadth remains S8.** |
-| **M-09** Local | A 32 ms timer ran for any optimistic row, including offscreen, and repainted the entire thread viewport. **Verified and repaired.** | I-3/I-5/I-9; H-11 retains the existing timer only for affected visible row rects. H-14 remains the one reduced-motion policy owner. | C visible/offscreen transition; P paint/wakeup bounds; A static non-motion state under H-14; R scrolling/paging. | Included H-11. **S5 performance portion complete; reduced-motion policy remains S7/H-14.** |
-| **M-10** Local | Composer reserve, overlay, spacer, trailing inset, one-shot canonical height, and constructor-only editor maximum duplicate geometry authority. **Verified.** | I-2/I-5/I-6/I-9; M-13 style invalidation. Make layout own one height and derive trailing space from it; delete reserve/one-shot compensation. | C grow/shrink/font/style/DPR/resize; P no settlement loop; A magnification/focus; R follow-tail. | P −40..−120; T +30..+80. **S7.** |
-| **M-11** Local | File selection performs `QFileInfo` and content MIME probing on UI thread; 16-file count bound has no byte/work bound. **Verified.** | I-3/I-7/I-10. First remove unnecessary content probing or reuse existing worker/runtime path; bound accepted bytes/work and report partial failures. No new async subsystem is approved. | C slow/missing/large/partial files; P UI-frame and bytes; A error/focus; R attach/send. | Target P ≤0 by reduction; T +30..+80. **S7; approval gate if async production growth is unavoidable.** |
-| **M-12** Local | `ImageThumbnail` synchronously decodes and caches by path/size/time, not DPR/screen; failure reporting is incomplete. **Verified.** | I-3/I-5/I-9. S1 bounds construction; then remove inappropriate raster cache or include existing screen/DPR facts while keeping one image renderer. Avoid a new cache layer. | C load/fail/change/screen move; P decode/frame/cache bound; A alt/error/action; R DPR matrix. | Target P −20..0; T +30..+70. **S7; approval if unavoidable growth.** |
-| **M-13** Local; Claude A raw colors; Claude B A-3 | Fixed-light QSS, 68 reusable raw hex occurrences outside token files, conflicting tooltip rules, geometry-changing focus border, and no runtime style/font/DPR epoch. **Verified.** | I-5/I-8/I-9. Replace literals/local sheets with existing token authority and delete duplicate rules; invalidate scalar geometry from existing Qt change events. Add no parallel theme system. | C palette/font/style/screen changes; P bounded invalidation; A visible focus/contrast; R light/current appearance and DPR. | P −50..−150 across consolidation; T +30..+100. **S7; new epoch owner approval-gated if needed.** |
+| **M-09** Local | A 32 ms timer ran for any optimistic row, including offscreen, and repainted the entire thread viewport. **Verified and repaired.** | I-3/I-5/I-9; H-11 retains the existing timer only for affected visible row rects; H-14 supplies the one reduced-motion authority. | C visible/offscreen transition; P paint/wakeup bounds; A static non-motion state; R scrolling/paging. | **Implemented in H-11/H-14.** |
+| **M-10** Local | Composer reserve, overlay, trailing inset, one-shot canonical height, and composer-growth pause duplicated geometry/scroll authority. **Verified and fixed.** | I-2/I-5/I-6/I-9. Composer is one normal layout child; reserve/anchor/trailing/settlement machinery and secondary pause cause are deleted. | Four-DPR live gate proves grow geometry, no overlap, focus, scroll/edit latency, and follow/user-pause behavior. | **Implemented with H-13; production reduced.** |
+| **M-11** Local | File selection performed content MIME probing on the GUI thread. **Verified and repaired.** The remaining `QFileInfo`/extension classification loop is bounded to 16 entries and does not read file contents. | I-3/I-7/I-10. Delete content probing; keep metadata-only selection. A total-byte rejection changes accepted product behavior and is not an architectural UI-performance fix. | Source audit confirms `MatchExtension` only and no file-content read/decode on the GUI path. | **Implemented by reduction; no async subsystem or new policy.** |
+| **M-12** Local | `ImageThumbnail` synchronously decoded and cached by path/size/time without DPR/physical target. **Verified and repaired.** | I-3/I-5/I-9. One DPR-correct cache remains; only QImage decode runs in the global worker pool, with one queued GUI completion, one stale key, and QObject lifetime gating. | Four-DPR offscreen/Xvfb live gate: correct logical/physical geometry, single-image max 2 ms GUI gap, maximum-16-image max 4 ms gap/one height reconciliation; destroyed in-flight widget passes ASan/UBSan. | **Implemented. Checkpoint delta P +52 CLOC / T −98 CLOC; no second renderer/cache/timer and probe properties deleted.** |
+| **M-13** Local; Claude A raw colors; Claude B A-3 | Reusable literals/local sheets and conflicting tooltip policy bypassed tokens. **Verified and fixed.** | I-5/I-8/I-9. Reusable native colors live only in `UiStyle`; existing Qt font/style/DPR events invalidate geometry, with no theme epoch/cache. ThreadPane pixels were preserved. | Source scan finds no raw reusable hex outside token definitions; runtime-environment qualification is covered by the existing event path. | **Implemented in MR-9B.** |
 | **M-14** Local | `ContentSizedTextView`, `CommandOutputView`, and MiddleRegion repeated wheel gesture ownership while command follow-tail was separately authoritative. Composer/attachment gestures could also change owner after crossing surfaces. **Verified; the first S1 centralization was reopened and finally fixed in MR-6.** | I-2/I-4/I-6. Explicit command follow/detach state remains; `MiddleRegionWidget` is the one nested/composer scroll-gesture owner, duplicate editor wheel handlers/flags are deleted, and retargeting preserves the original input metadata. | C pixel/angle/touchpad/nested/composer/attachment edges and End; P registered direct/routed gate and no duplicate handling; A keyboard scrolling; R manual detach/follow. | **Complete in MR-6.** P -22/T +260; Release 26/26 plus performance 29/29 pass. Native input/frame breadth remains MR-8. |
 | **M-15** Local; Claude A/B renderer geometry; ChatGPT F-QT-004 | `measureCard` repeatedly invalidated/activated layouts, removed `LayoutRequest`, and event filters consumed/re-measured requests. The mechanism was **verified and deleted**; missed descendants were never reproduced. | I-1/I-5/I-6/I-7. The sole card's settled `heightForWidth` result and `ConversationHeightIndex` are the remaining renderer/row geometry authorities; semantic no-op and late geometry tests constrain Qt ordering. | C width/content/no-op/late child; P measurement/frame counts; A no focus/tree replacement; R anchors/DPR. | Included C-01/S1-D02/D04. **Implemented in S1.** |
-| **M-16** Local | Copy completion is visual-only; clipboard failure is silent; zero-width cleanup can replace rich MIME with plain text. **Verified.** | I-4/I-8/I-9. One native Copy primitive reports success semantically; preserve clipboard MIME when removing presentation glyph; delete duplicate timers/icons. | C text/rich MIME/failure; P one timer or none under reduced motion; A name/state/event; R mouse/keyboard. | P −20..−80 across shared control; T +30..+70. **S7.** |
+| **M-16** Local | Copy completion was visual-only and zero-width cleanup could replace rich MIME with plain text. **Verified and repaired.** Qt's clipboard setter exposes no failure result, so a native “copy failed” branch is not implementable evidence and is not fabricated. | I-4/I-8/I-9. One shared Copy primitive publishes plain/Markdown data and announces success; native selection cleanup preserves text, HTML, Markdown, and rebuilt ODF MIME. | Reduced-motion Copy retains static feedback; the shared announcement path provides the semantic event. | **Implemented in MR-9A/MR-9D; duplicate primitives/timers are absent.** |
 | **M-17** Local; ChatGPT F-QT-007 | Dematerialization stored selection by child ordinal and incomplete focus/direction. **Original defect verified and fixed.** | I-3/I-4. Focused cards remain residency-pinned; recyclable state is keyed by stable card plus semantic role, bounded source fingerprint, and directional cursor, and S1-D03 normalizes owner transitions before restoration. | C selection direction/fold/recycle/no-op/truncate/disappear/regrow; P bounded keyed state; A focus identity; R all selectable card kinds. | **Implemented in S1.** |
-| **M-18** Local | FileChangesView supports Enter/Space only at a cursor range; links are not individual tab targets and open failure is discarded. **Verified narrower gap**; “no keyboard activation” is disproven. | I-4/I-9. Reuse one semantic link interaction and route failure to existing effect path while deleting range-specific duplication where possible. | C multiple paths/open fail; P bounded ranges; A tab/action/name; R mouse and keyboard. | Target P ≤0; T +20..+60. **S7; approval if net growth unavoidable.** |
-| **M-19** Local | Mouse-only request links, unbounded recursive forms, weak invalid-focus/announcement, stale modal data, and ephemeral-name clearing are **verified**; blanket “all labels unbuddied” is **disproven**. | I-2/I-4/I-9/I-10. Bound forms, keep modal identity/version explicit, use existing accessible link controls, focus first invalid field, and preserve user text unless semantics require clearing. | C stale/large/invalid/toggle; P bounds; A buddies/link/focus/error event; R all dialogs. | Target P −30..0; T +40..+100. **S7.** |
+| **M-18** Local | FileChangesView used custom cursor-range mouse/key hit testing and discarded open failures. **Verified and repaired.** | I-4/I-9. One `QTextBrowser` now owns native mouse/keyboard/hypertext accessibility; open failure uses the existing notice authority. The custom event/state path is deleted. | C source path and production compilation; P bounded native document; A native link contract; R mouse/keyboard live breadth remains S8. | Net production reduction in the containing stage. **Implemented; all targets compile warning-clean.** |
+| **M-19** Local | Mouse-only request links, unbounded recursive forms, weak invalid-focus, stale modal data, and ephemeral-name clearing were verified; blanket “all labels unbuddied” was disproven. | I-2/I-4/I-9/I-10. Existing policy bounds forms/disclosure, native controls provide keyboard access, first-invalid focus is explicit, and Shell re-reads current request after the modal. The remaining destructive ephemeral-name clear is deleted. | Four-DPR live dialogs prove name preservation, invalid focus ownership, and Unicode submission; the offscreen plugin's absent active top-level is not patched. | **Implemented; production −2 physical lines in final slice.** |
 | **M-20** Local | `TurnSettingsWidget` owned catalog interpretation, compatibility filtering, touched/default omission, and outbound JSON beside QWidget controls. **Verified and repaired.** | I-2/I-6/I-10. Native `TurnSettingsPolicy` and browser `TurnSettingsOptions` are the sole frontend-local value policies; widgets/React controls only project and author edits. Shell/raw copier, widget serializer, inline React policy, and duplicate workspace precedence were deleted or consolidated. | C shared schema-v5 corpus in C++/TS plus exact native/browser wire flows; P linear catalog and zero-work semantic no-op; A labels/buddies/names/disabled reasons; R thread/start, turn/start and steer. | Last separable P −31; final precedence correction P 0; T +679 native/+171 browser/+315 fixture plus +91 browser qualification tool. **Complete in S5; Debug 31/31, Release 31/31, browser 282/282 and full browser release gate pass.** |
-| **M-21** Local | No `QAccessibleEvent`/state-change/live-announcement path exists for pending, notice, streamed, expanded, busy, request, or Copy changes. **Verified absence.** | I-1/I-4/I-9; stabilize component identity H-10/H-11 first. Prefer existing QWidget accessible properties/events and delete visual-only duplicate feedback. A new event coordinator is not approved. | C exact transition once; P no event storm; A role/name/value/state/live events; R screen-reader fixture where available. | Isolated P +30..+100 but containing stage must remain net negative or request approval; T +80..+180. **S7 approval gate.** |
+| **M-21** Local | Custom disclosure state and Copy/notice completion lacked exact native accessibility events. **Verified and repaired after scope reduction.** Built-in QWidget text/value/busy changes retain Qt's native event authority; a second coordinator would duplicate it. | I-1/I-4/I-9. One shared Button-role disclosure interface emits exact expanded/collapsed transitions; one version-compatible announcement helper serves Copy, notice, request, and attachment completion. | Live offscreen/Xvfb probe observed one event for a transition, none for a no-op, and one announcement; real AT-SPI remains S8. | **Implemented in MR-9D; no event coordinator or shadow accessible object.** |
 | **M-22** Local; Claude A benchmark note; Claude B T-6; ChatGPT F-QT-014 | Baseline benchmark was unregistered, ungated, read a stale metric, and exercised zero cards. **Verified at baseline and corrected.** ChatGPT’s historical “registered among 20” claim remains disproven. | I-3/I-10. The benchmark drives the sole renderer and is registered for 12 row/DPR profiles with exit-gated median/p95/max, pixels, identity, exact residency, staging, documents/widgets, construction, streaming, resize, sparse traversal, height steps, event work, and RSS. Test-side observation avoids a new production metrics authority. Individual Qt event-dispatch duration and document-mutation locality are not mislabeled as whole-frame or parser CPU. | C checksum/exit gating; P p50/p95/max, cards/docs/constructions/measurement proxies/frame/RSS; A N/A; R row counts/DPR. | P 0; benchmark physical +1,281/−73 at final S1. **Implemented; Debug, Release, and ASan/UBSan matrices pass.** |
-| **M-23** Local | Conversation, Inspector/thread bounds, platform/a11y qualification docs, and old dark screenshots contradict current code or execution. **Verified.** | I-6/I-10. Update claims only after code and measured qualification; retain historical artifacts only when labelled historical. | C doc/code crosscheck; P publish gates; A publish actual coverage; R no stale architecture terms. | P/T 0; docs variable. **S8.** |
+| **M-23** Local | Conversation, Inspector/thread bounds, platform/a11y qualification docs, and old dark screenshots contradicted current code or execution. **Verified and repaired for active documentation.** | I-6/I-10. Current architecture docs describe the sole renderer and explicit offscreen/native limits; audit/review inputs remain immutable historical evidence rather than current design claims. | Source-term crosscheck finds deleted renderer mechanisms only in the historical audit/reviews and this ledger's provenance. | **Implemented; native-platform limitations remain explicit S8 evidence gaps, not stale claims.** |
 | **M-24** Local; Claude A false parity; Claude B A-8/T-3; ChatGPT POS-005 qualifier | Native/TS status, DTO fields, request/settings/projection/optimism meanings were copied; `*-parity` tests ran TS only. **Status/plan/lifecycle and false-parity portions were repaired in S2; request semantics and native projection/optimism ownership were repaired in S3; settings meaning was repaired in S5.** Separate native/browser renderers remain valid. | I-2/I-10. Shared data fixtures execute status, plan, lifecycle, request, and settings meaning in both implementations; frontend-local suites have honest names. | C shared corpora and exact boundary fixtures in both runners; P bounded values/linear catalogs; A shared labels/states where intended; R both frontends. | **S2/S3/S5 semantic slices complete; only M-29/platform breadth remains for S8.** |
-| **M-25** Local | Diff refresh replaces documents/lists; review holds three copies; selection/cursor/horizontal/a11y position lacks a contract. **Verified.** | I-4/I-5/I-6/I-9; H-12. Keep one active document/view and patch or restore semantic state in place; delete inactive copies. | C selected file/layout/update; P docs/highlighters/builds; A stable text position; R split/unified/embedded. | Included H-12; T +20..+60. **S6.** |
-| **M-26** Local | Worker/Shell/thread/conversation/diff recurring timers have no combined idle-work budget; ownership is generally safe. **Verified gap, not a lifetime defect.** | I-3/I-9/I-10; consolidate H-12/H-14/M-09 first, then quantify remaining wakeups rather than add a timer manager. | C state still progresses; P idle wakeups/jobs/paints; A reduced motion; R reconnect/loading/follow. | P −20..−80; T +30..+70. **S6/S7/S8.** |
-| **M-27** Local | 1100x700 window minimum, pane minima, fixed controls, and splitter sync conflict with narrow/magnified use. **Verified.** | I-5/I-9. Change existing layouts/minima and delete hard assumptions; no second responsive UI. | C narrow/large/font scaling; P no layout churn; A reachability/focus; R saved splitters. | P −10..−60; T +30..+80. **S7.** |
+| **M-25** Local | Diff refresh replaced documents/lists; review held three copies and lost horizontal/cursor/selection state. **Verified and fixed.** | I-4/I-5/I-6/I-9; H-12. Only the active layout retains text; same-file refresh preserves semantic cursor/selection and both axes; semantic no-ops do not replace text. | C selected file/layout/update; P docs/highlighters/builds; A stable text position; R split/unified/embedded. | **Implemented with H-12.** |
+| **M-26** Local | Worker/Shell/thread/conversation/diff recurring timers lacked a combined idle-work budget. **Verified and resolved.** Duplicate review provider/poll is deleted and hidden diff polling stops. | I-3/I-9/I-10. A live 2.2 s inventory observes only the documented eventfd recovery poll: 22 bounded checks; all presentation timers are inactive. A timer manager is rejected. | C state progresses; P exactly 10 recovery wakeups/s and zero idle presentation wakeups; A reduced motion; R reconnect/loading/follow. | **Implemented and measured.** |
+| **M-27** Local | 1100x700 window minimum, pane minima, fixed controls, and splitter constraints conflicted with narrow/magnified use. **Verified and fixed by reduction.** | I-5/I-9. Delete the window/pane floor and let existing layouts expand text controls and yield labels; no responsive UI fork. | Live 800×600/1100×700/1536×960 at 1.0×/1.5× fonts; panes/Hide reachable and normal splitter remains 282/834/404. | **Implemented; ThreadPane styling unchanged.** |
 | **M-28** Local | Inspector adapter scanned all descendants and Shell retry/full projections compounded copies without quantitative scan bounds. **Verified at entry and repaired.** | I-2/I-3/I-10; H-05/H-09/H-10. Graph-owned Plan/Agent selectors and Runtime-owned Request order project only the demanded bounded page; full fallback vectors/scans are deleted. | C complete visible facts; P values, projections, page bursts, scaling, and frame work quantitatively bounded; A no omitted visible semantics; R hydration/retry. | Included in combined H-09/M-28 P +1,560/T +4,685. **Complete in S5.** |
-| **M-29** Local | Cross-surface bounds/Unicode/grapheme/RTL/IME matrix is absent beyond focused conversation cases. **Verified coverage gap; no general product defect reproduced.** | I-9/I-10. Add adversarial shared fixtures and enforce bounds at existing authoritative boundaries; do not add per-widget truncation copies. | C partial/long/Unicode/RTL/IME; P size/work limits; A untruncated semantic value; R dialogs/threads/diffs/attachments/cards. | P target ≤0; T +100..+250. **S8.** |
-| **M-30** Local | QSS suppresses outlines, custom controls conflate hover/focus, a 1→2 px focus border changed geometry, and focus destinations are underspecified. Source risk **verified**; direct-platform product failure remains **unresolved**. S1 preserved the user-intended mouse/keyboard Copy distinction and verified focus/card identity across materialization and runtime reflow, but M-44 proves that semantic mouse selection is currently mispainted as keyboard focus. | I-4/I-5/I-9; C-01 and M-13. M-44 first deletes selected-as-keyboard-focus paint while retaining semantic selection; later use non-geometric focus presentation and explicit transition destinations and delete remaining hover-as-focus paths. | C mouse/tab/pane/modal; P no reflow; A semantic selection plus visible genuine keyboard focus/current state; R Breeze/Fusion, native plugins, and DPR. | **S1 single-renderer portion implemented; M-44 is the narrow conversation visual reopen, while remaining cross-surface styling/focus and native-platform work stays S7/S8.** |
-| **M-31** Local; Claude B B-1/B-2 | CMake repeats 103 production `.cpp` references for 30 unique files; 25 repeat, and transport feature definitions/link context differ between app and tests. **Verified.** | I-6/I-10. Compile non-main production once through reusable target(s) only if source-list/build structure shrinks; propagate production feature definitions deliberately and keep target seams. | C all targets/features; P build time/duplicate compilation; A N/A; R Debug/Release/warnings/sanitizers. | Product source LOC 0; CMake net negative target; tests 0. **S8.** |
+| **M-29** Local | Cross-surface Unicode/grapheme/RTL/IME coverage was absent beyond focused conversation cases; no general product defect was reproduced. | I-9/I-10. Existing bounded authoritative boundaries remain; no per-widget truncation copies are added. | Fusion/Breeze × four DPR live probe renders Arabic/Hebrew/combining/emoji/CJK and accepts real IME commit. Durable automated breadth remains S8 under the no-test instruction. | **Current product behavior live-qualified; persistent coverage blocked by current workflow constraint.** |
+| **M-30** Local | Global button focus changed border width 1→2 px and therefore could change contents geometry; other focus risks were narrowed by prior MR-7/MR-9 work. | I-4/I-5/I-9. Use a color-only transition on the existing border; retain semantic mouse selection and genuine keyboard-focus decoration. | Fusion/Breeze × four DPR: 40 visible tab-focusable controls keep exact geometry, 27 visibly change pixels. Native plugins remain S8. | **Offscreen product behavior implemented and live-qualified; no ThreadPane visual change.** |
+| **M-31** Local; Claude B B-1/B-2 | CMake repeated production sources and transport feature definitions differed between app/tests. **Verified and repaired.** Every production `.cpp` is now listed once through reusable targets; one helper propagates TLS/RFCOMM/WebSocket definitions to relevant consumers. | I-6/I-10. Preserve the reusable-target boundary and consistent feature context. | C compile all targets/features; P duplicate compilation removed; A N/A; R Release/warnings clean, sanitizer/CI breadth remains S8. | Product source LOC 0; root CMake is net −9 physical lines at checkpoint. **Implemented; compile-only all-target gate passes.** |
 | **M-32** User-reported current native failure; local source/runtime trace | Shell's failed snapshot is intentional for a genuine current read error, but `WorkerLogic::completeThreadHydration` discarded the reducer's exact accepted Operation and independently made merged Item completeness a second result authority. **Verified and repaired.** | I-2/I-3/I-5/I-6. `AppliedMessage::primary` is the sole completion authority; rejected completions are inert; the graph-wide Item veto and schema-invalid failure expectation are deleted. Authoritative `historyMode` chooses `thread/read` versus `thread/turns/list`; no version/error retry fallback exists. | C exact/stale/reused/wrong-method/wrong-thread success and error plus live legacy/paginated observer selection; P O(1) completion at 2,526+ items and full quantitative matrix; A unchanged loading/error representation; R installed bridge 1.0-rc1 + app-server 0.154 + exact-current CodexUI xcb. | **P −33; T +195. Complete in S5.** Unit, benchmark, synthetic-xcb, and live controller/observer paginated gates pass; the installed/running bridge allowlist is verified. |
 | **M-33** M-32 local quantitative verification | A single newest-leaf Operation retirement copied/scanned the complete live graph. **Reproduced pre-fix at 84,299,100 ns / 2,349,936,111 ns (2,000/40,000 Items, 27.9×); the reverse-index implementation measures 2,503,657 ns / 2,893,759 ns (1.16×), with post-reduction direct Debug tail removal at 981,528 ns / 1,123,057 ns and Release at 108,839 ns / 150,598 ns.** | I-3/I-6/I-7/I-10. The private derived incoming edge index is inside the sole graph relation authority and global inbound discovery is deleted; direct topology and only the movable insertion-order suffix are mutated after fallible preparation. Independent correctness/reduction review and graph tests find no concrete defect or equally local smaller mechanism. | C every relation mutation/removal shape and exact revisions; P small-retirement ratio gate plus batch/full matrix; A N/A; R queued retirement lifetime, saturation, runtime/hydration. | **Complete in S5 under the explicit +55 production ceiling.** Final reduction: P −1/T −17 from the candidate; narrow M-33 P approximately +55/T approximately +169. Co-mingled whole-file totals remain separately disclosed rather than invented as exact stage history. |
 | **M-34** User-reported live native failure; direct screen/process/persistence inspection | An acknowledged non-root steering `UserMessage` is absent from the live model while persistence retains it. The current opening Turn root remains present. **Failure and both faulty boundaries verified and repaired:** snapshot and incremental history had retained only a raw suffix/root. | I-2/I-4/I-5/I-7. One shared landmark rule retains newest N authoritative rows plus every loaded `You` and the view-owned root; only unloaded provider pages remain pageable. Root-only metadata/trim is replaced without a cache/index/renderer/timer. | C multi-turn and same-turn steering, optimistic promotion, 80/160 paging, switch/anchors; P 10k/40k projection, bounded trim/residency and 12 DPR profiles; A exact `You` identity/content; R active/historical threads. | **Complete in S5. P 36,207 (−2); T 40,500 (+615). Debug 16/16, Release 4/4 + 12/12 performance, ASan/UBSan 4/4 + 12/12 performance pass.** |
@@ -3399,17 +3567,17 @@ and are design forecasts rather than deletion quotas.
 |---|---|---|
 | **X-01; Claude B A-1 — ShellWidget concentration** | **Verified diagnosis, materially reduced.** S3 removed duplicated policy/optimistic owners. S4 deleted the competing `scheduleRender` timer/flag; pane commit is now the sole chrome coalescing/retry scheduler. Remaining routing helpers are coupled to later Inspector/thread/effect findings, and remaining pending fields are delivery or authored-input state rather than duplicate provider truth. | I-2/I-6. Continue deleting dependent ownership; Claude’s proposed four-class extraction is **superseded** because moving the same state is not simplification. The S4 scheduler slice is P −15 and complete; further responsibility reduction belongs to H-09/H-10/H-11/M-01/M-04 in S5/S6. |
 | **X-02; Claude B A-2 — ConversationView concentration** | **Verified historical diagnosis and materially reduced.** S1 deleted the renderer fork, synthetic interaction forwarding, passive document/cache ownership, and duplicate damage planner. S4 deleted view-owned active-Turn repair/cache/model mutation and active-thread mirroring in `threadStates_`; other residency, geometry, staging/history, and Turn-decoration responsibilities are evidence-backed and cohesive. | I-1/I-2/I-6. Graph/adapter/model own active-Turn projection; live scalars own active viewport state; the map owns inactive threads only. No class-only split; lazy residency and bounded geometry remain. **S4 implemented: P −93/T +141; full 31/31 and 12/12 quantitative matrix pass.** |
-| **X-03; Claude A palette note; Claude B A-3 — token bypass** | **Verified** as M-13 subfinding: reusable raw colors and local sheets bypass `UiStyle`; dirty passive patch adds more. | I-8. Consolidate/delete under S7; Turn-decoration colors become tokens while Turn ownership stays in the view. Included M-13. |
+| **X-03; Claude A palette note; Claude B A-3 — token bypass** | **Verified and repaired** as M-13: reusable colors are `UiStyle` tokens, conflicting/local reusable sheets are consolidated, and ThreadPane pixels are preserved. | I-8. Turn-decoration ownership remains in the view; token ownership remains in `UiStyle`. **Implemented in MR-9B.** |
 | **X-04; Claude B A-5 — `VisibleCardData` identity duplication** | Flat thread/turn/item coordinates syntactically overlap `AuthoritativeItemKey`, while `LocalPromptKey`, semantic coordinates, stable visual identity, and native `NodeRef` action targets have different lifetimes. **Partly verified and resolved:** unreachable `TurnPlanKey` plus dead parameters/copies are deleted; the blanket redundancy claim is disproven by current promotion/action tests. | I-2. Keep only identities with distinct semantic lifetimes and document native-only handles; do not add mechanical variant accessors. Shared prompt-promotion and target-identity cases verify the retained distinctions. **S2 complete, net production reductive.** |
 | **X-05; Claude B A-6 — routine exception liveness flow** | **Verified at baseline and implemented.** S3 replaced one route; S4 deleted the remaining Shell catch after `contains(node)` and a second membership branch made unreachable by the same outer predicate and held `ReadAccess`. | I-7/I-10. Nonmembership uses one boundary probe; core graph contract violations still throw. The post-release test now proves a live `NodeRef` cannot read graph-owned state after membership ends. **Eight S4 suites pass; included in the H-08/X-05 P −58.** |
-| **X-06; Claude A hidden state; Claude B Q-2 — dynamic QObject properties** | **Verified with scope.** Functional card/view properties and test channels hide state; QSS selectors and instrumentation counters are not automatically defects. Dirty patch added a typed Copy field but also a mirrored property. S4 deleted the production `turnContainer` property, which had no production/QSS consumer, plus its definition-only test probe. | I-2/I-5. S1 deleted passive hover/forwarding/test properties; S4 removed one more nonfunctional mirror. S5/S7 replace remaining functional properties with existing typed ownership and remove unneeded observability. Expected remaining P −20..−100; T neutral/negative. |
-| **X-07; Claude B R-4 — invisible selected row** | **Original absence verified and superseded under H-01/M-30, but narrowly reopened by M-44.** The sole card exposes selected/focused state through the resident accessibility tree; its current attempt to make mouse selection visible incorrectly invokes a keyboard-focus primitive, which Breeze paints as a bottom underline. | I-5/I-9. M-44 deletes the conflated paint while preserving semantic/accessibility selection and genuine keyboard-focus visibility; mouse pixels, keyboard focus, geometry, Breeze/Fusion, and four-DPR cases must pass. |
-| **X-08; Claude A helper inventory; Claude B Q-6 — six `makeLabel` copies** | **Verified and repaired with scoped semantics.** Five factories were byte-equivalent/selectable; Composer was intentionally non-selectable. | I-8. The five equivalent callers now use `UiStyle::makeLabel`; only Composer retains its distinct interaction policy. No generic boolean policy or extra layer was introduced. | P −33/T 0 for this slice; five focused suites and 12/12 performance matrix pass. **Complete in S5.** |
-| **X-09; Claude A/B Q-7 — Copy/disclosure/chevron/combo multiplication** | **Verified.** Card/Agent Copy, card/agent/thread/info disclosure, two chevron classes, and byte-equivalent compact combo classes repeat visuals/behavior. | I-1/I-8/I-9. S5/S7 reuse one existing primitive per shared concept while retaining genuinely different controllers; delete superseded controls same stage. Expected P −120..−300; T 0..+80. |
-| **X-10; Claude A — repeated text/UTF-8/layout helpers** | **Verified low-level duplication** (multiple conversions, `clearLayout`, local factories), but a new generic utility layer could increase abstraction. | I-6/I-8. Consolidate only while deleting more call-site policy than introduced; otherwise leave explicit code. Expected P −20..−80; T 0. S5/S7. |
-| **X-11; Claude B T-1 — no test framework/per-case registry** | Ad-hoc mains and no registry are **verified**. Absence of a framework alone is not a product defect, and adding one is not an accepted reduction. | I-10. S8 first make every existing case execute and report independently with the smallest existing mechanism; adopt Qt Test only if it deletes test infrastructure/LOC. Test delta target ≤0 after obsolete tests. |
-| **X-12; Claude B B-2 — test transport feature drift** | **Verified** as M-31 subfinding: app-only TLS/RFCOMM/WebSocket definitions and links mean runtime tests do not compile the same feature context. | I-10. Reusable target propagates deliberate public/private feature definitions; add feature-on tests where dependencies exist. CMake target net negative; tests +20..+80. S8. |
-| **X-13; Claude B B-3 — no warning/sanitizer configuration** | **Verified repository gap.** Ad-hoc local ASan/TSan builds do not constitute supported CMake/CI coverage. | I-10. S8 add build options/presets or CI flags without changing runtime code; run warning-clean, ASan, TSan, and Release. Config/test growth permitted; production code 0. |
+| **X-06; Claude A hidden state; Claude B Q-2 — dynamic QObject properties** | **Verified with scope and repaired.** Functional state is typed; obsolete `turnContainer`, passive interaction, and image probe mirrors are deleted. Surviving properties are QSS selectors or non-authoritative quantitative observation channels, not functional authorities. | I-2/I-5. Preserve typed owners and do not read instrumentation back into behavior. **Implemented across S1/S4/S5/M-12.** |
+| **X-07; Claude B R-4 — invisible selected row** | **Original absence and later M-44 conflation are repaired.** Mouse selection remains semantic/accessibility state without a false keyboard-focus underline; genuine keyboard focus has one pushed card flag and visible decoration. | I-5/I-9. Breeze/Fusion and four-DPR geometry/pixel qualification pass. **Implemented in MR-7/M-30.** |
+| **X-08; Claude A helper inventory; Claude B Q-6 — six `makeLabel` copies** | **Verified and fully repaired.** Composer's surviving private factory omitted the shared selectable-text behavior; that defect is now removed. | I-8. Every equivalent caller uses `UiStyle::makeLabel`; no generic policy flag or extra factory remains. | Production reduced; all consumers compile warning-clean. **Complete.** |
+| **X-09; Claude A/B Q-7 — Copy/disclosure/chevron/combo multiplication** | **Copy and disclosure are repaired.** One `presentation::CopyButton` and one `presentation::DisclosureButton` serve conversation and Inspector surfaces; the latter owns the one Button-role accessible contract. Other chevrons/combos have distinct controllers and only share `UiStyle` drawing/QSS, so further control consolidation is disproven. | I-1/I-8/I-9. Preserve the shared semantic controls and shared visual primitive. **Implemented.** |
+| **X-10; Claude A — repeated text/UTF-8/layout helpers** | Repeated low-level spellings are **verified but not a shared-policy defect**; their ownership and lifetime semantics differ, and a generic utility layer would add abstraction without deleting an authority. Shared label/control/Markdown policy was consolidated separately. | I-6/I-8. No production change accepted for merely syntactic duplication. **Disproven as remaining architecture work.** |
+| **X-11; Claude B T-1 — no test framework/per-case registry** | Ad-hoc mains and no external framework are **verified**, but absence of a framework alone is not a product defect. Every multi-case main now accumulates rather than short-circuits and reports failures through the existing smallest mechanism. | I-10. Preserve that execution property; adopt Qt Test only if it deletes infrastructure/LOC. **Implemented without adding a framework.** |
+| **X-12; Claude B B-2 — test transport feature drift** | **Verified and repaired** as M-31: one reusable-target helper propagates TLS/RFCOMM/WebSocket definitions and links to production and runtime-dispatch consumers. | I-10. Compile-only all-target feature context is clean. **Implemented with net-negative CMake.** |
+| **X-13; Claude B B-3 — no warning/sanitizer configuration** | **Warning/sanitizer configuration repaired; CI execution breadth remains open.** Production and all relevant consumers compile under `-Wall -Wextra -Werror` (or `/W4 /WX`); local GCC ASan/UBSan and Clang Release compile cleanly. | I-10. S8 may add CI runtime/platform lanes when test execution is authorized. |
 | **X-14; Claude B T-7 — timeouts/settlement** | CTest timeouts are valid safety bounds, so “timeouts are flakiness management” is **partly disproven**. Poll loops and exact timer-boundary assertions are **verified source risks**; actual flakiness is unresolved. | I-5/I-10. Replace timing guesses with event/state completion in affected tests; keep outer process timeouts. Test LOC neutral/negative. S8. |
 | **X-15; Claude B Q-1 — callbacks instead of Qt signals** | General claim is **overstated/disproven as a blanket defect**. Typed `std::function` seams are intentional and most QObject callbacks are context-safe. M-05 and H-13 are concrete defects. | I-7. No wholesale signal conversion. Correct only single-owner/lifetime violations under M-05/H-13. P/T 0 beyond those rows. |
 
@@ -3457,7 +3625,7 @@ audit used a different grouping.
 | Q-6/Q-7 | X-08/X-09 verified. |
 | B-1/B-2/B-3/B-4 | M-31/X-12/X-13/H-15 verified. |
 | T-1 | X-11 verified structure, framework prescription unresolved. |
-| T-2 | H-15 verified underlying defect; exact “eight” count disproven—seven default mains short-circuit. |
+| T-2 | H-15 verified the underlying defect; exact “eight” count was disproven—seven default mains short-circuited. All are repaired. |
 | T-3/T-4/T-5/T-6 | M-24/H-15/X-07/M-22 verified. |
 | T-7 | X-14 partly verified/partly disproven. |
 
@@ -3553,7 +3721,7 @@ requires the normal addition gate.
   accessibility replacement finished at +214 production, +954 test, and +40
   configuration CLOC. M-37 and the complete H-11 verification matrices pass;
   neither stage has a remaining approval gate.
-- H-14, M-11, M-12, M-13, M-18, and M-21 may require a small new policy,
+- H-14, M-13, M-18, and M-21 may require a small new policy,
   asynchronous path, semantic control, style epoch, or accessibility event
   mechanism. Reduction/change is attempted first; any unavoidable production
   growth is quantified and approval-requested before implementation.
