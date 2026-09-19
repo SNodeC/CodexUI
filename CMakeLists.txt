@@ -815,7 +815,7 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
         codexui-shell-integration
-        PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
 endif()

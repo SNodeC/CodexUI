@@ -146,9 +146,9 @@ ApplyResult applyCorrelatedResult(ProtocolUpdater &updater,
 
 void catalogIsComplete() {
   const auto methods = protocolMethods();
-  require(methods.size() == 252, "catalog has all 252 methods");
-  require(protocolMethodCount(ProtocolDirection::ClientRequest) == 157,
-          "catalog has 157 client requests");
+  require(methods.size() == 257, "catalog has all 257 methods");
+  require(protocolMethodCount(ProtocolDirection::ClientRequest) == 162,
+          "catalog has 162 client requests");
   require(protocolMethodCount(ProtocolDirection::ServerRequest) == 11,
           "catalog has 11 server requests");
   require(protocolMethodCount(ProtocolDirection::ServerNotification) == 83,
@@ -188,8 +188,8 @@ void catalogIsComplete() {
     }
   }
   require(graphUpdates == 75, "75 server notifications update graph state");
-  require(operations == 158,
-          "157 requests plus initialized are worker operations");
+  require(operations == 163,
+          "162 requests plus initialized are worker operations");
   require(interactions == 11, "all server requests are interactions");
   require(
       effects == 6,

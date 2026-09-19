@@ -32,6 +32,7 @@
 #include <QScrollBar>
 #include <QTemporaryDir>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextDocumentWriter>
 #include <QTextLayout>
@@ -2289,7 +2290,7 @@ bool testMutableCardsAndCommandOutput() {
   auto *filesStatus =
       filesCard->findChild<QLabel *>(QStringLiteral("fileChangesStatus"));
   auto *filesList =
-      filesCard->findChild<QPlainTextEdit *>(QStringLiteral("fileChangesList"));
+      filesCard->findChild<QTextBrowser *>(QStringLiteral("fileChangesList"));
   auto *planCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "plan"}})];
   auto *genericCard = identities[stableKey(
@@ -2356,11 +2357,9 @@ bool testMutableCardsAndCommandOutput() {
       "the unchanged path list");
   snapshot.sections.front().cards[5] = fileLifecycle;
   if (filesList) {
-    QTextCursor cursor(filesList->document());
-    cursor.setPosition(1);
-    filesList->setTextCursor(cursor);
-    QKeyEvent activate(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-    QApplication::sendEvent(filesList, &activate);
+    static_cast<void>(QMetaObject::invokeMethod(
+        filesList, "anchorClicked", Qt::DirectConnection,
+        Q_ARG(QUrl, QUrl(QStringLiteral("codexui-file:0")))));
   }
   result &= expect(
       openedFiles.urls.size() == 1 && openedFiles.urls.back().isLocalFile() &&
@@ -3277,7 +3276,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       "commands, images, and file changes");
   if (!update || !final || !firstCommand || !firstImage || !firstFileChanges)
     return false;
-  auto *firstFileChangesList = firstFileChanges->findChild<QPlainTextEdit *>(
+  auto *firstFileChangesList = firstFileChanges->findChild<QTextBrowser *>(
       QStringLiteral("fileChangesList"));
   view.resize(360, 5000);
   spin();

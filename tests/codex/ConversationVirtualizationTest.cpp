@@ -25,6 +25,7 @@
 #include <QStyle>
 #include <QStyleFactory>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextCursor>
 #include <QThread>
 #include <QToolButton>
@@ -4903,8 +4904,9 @@ bool collapsedAgentPhaseSettlesAuthoritativeGeometry() {
 
   VisibleCardData finalAnswer = update;
   std::get<AgentMessageData>(finalAnswer.payload).finalAnswer = true;
-  ConversationCard expected(finalAnswer, true, nullptr,
+  ConversationCard expected(finalAnswer, true, view.viewport(),
                             card ? card->width() : view.viewport()->width());
+  expected.ensurePolished();
   const int expectedHeight = expected.settleHeightForWidth(
       card ? card->width() : view.viewport()->width());
   const auto impact = applyPresentation(view, std::move(finalAnswer));
@@ -4992,7 +4994,7 @@ bool semanticSelectionsSurviveRecycling() {
   auto *commandText = commandCard ? commandCard->findChild<QTextEdit *>(
                                         QStringLiteral("commandTextView"))
                                   : nullptr;
-  auto *filesText = filesCard ? filesCard->findChild<QPlainTextEdit *>(
+  auto *filesText = filesCard ? filesCard->findChild<QTextBrowser *>(
                                     QStringLiteral("fileChangesList"))
                               : nullptr;
 
@@ -5130,7 +5132,7 @@ bool semanticSelectionsSurviveRecycling() {
   commandText = commandCard ? commandCard->findChild<QTextEdit *>(
                                   QStringLiteral("commandTextView"))
                             : nullptr;
-  filesText = filesCard ? filesCard->findChild<QPlainTextEdit *>(
+  filesText = filesCard ? filesCard->findChild<QTextBrowser *>(
                               QStringLiteral("fileChangesList"))
                         : nullptr;
   const QTextCursor restoredMarkdown =
@@ -6831,7 +6833,7 @@ bool collapsedLargeCardsSkipBodyProjection() {
   settle();
   const QModelIndex index = view.conversationModel()->index(0);
   ConversationCard *richCard = materializedCard(view, stableKey(card.key));
-  auto *fileList = richCard ? richCard->findChild<QPlainTextEdit *>(
+  auto *fileList = richCard ? richCard->findChild<QTextBrowser *>(
                                   QStringLiteral("fileChangesList"))
                             : nullptr;
   const bool bodySkipped =
@@ -6858,14 +6860,15 @@ bool collapsedLargeCardsSkipBodyProjection() {
   richCard->setCollapsed(false);
   const qint64 expansionMicros = expansionTimer.nsecsElapsed() / 1000;
   const bool boundedExpansion =
-      fileList && fileList->blockCount() == 5'000 &&
+      fileList && fileList->document()->blockCount() == 5'000 &&
       richCard->property("fileChangesBodyRebuilds").toULongLong() == 1 &&
       expansionMicros < InstrumentedTimingScale * 100'000;
   if (!boundedExpansion)
     std::cerr << "large file-change expansion us=" << expansionMicros
               << " rebuilds="
               << richCard->property("fileChangesBodyRebuilds").toULongLong()
-              << " blocks=" << (fileList ? fileList->blockCount() : -1) << '\n';
+              << " blocks="
+              << (fileList ? fileList->document()->blockCount() : -1) << '\n';
   result &= expect(
       boundedExpansion,
       "expanding a large file-change card creates one block-oriented document "

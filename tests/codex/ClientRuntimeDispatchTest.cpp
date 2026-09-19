@@ -332,8 +332,14 @@ public:
     WorkerToQtMessage message;
     while (channels_.tryReceiveForQt(message)) {
       if (ProtocolDiagnostic *diagnostic =
-              std::get_if<ProtocolDiagnostic>(&message))
-        diagnostics.emplace_back(std::move(*diagnostic));
+              std::get_if<ProtocolDiagnostic>(&message)) {
+        if (diagnostic->diagnosticBatch.empty()) {
+          diagnostics.emplace_back(std::move(*diagnostic));
+        } else {
+          for (Value::Object &details : diagnostic->diagnosticBatch)
+            diagnostics.push_back({std::move(details), {}});
+        }
+      }
       message = WorkerStopped{};
     }
     return diagnostics;

@@ -197,6 +197,31 @@ void applyThread(WorkerLogic &worker, std::string id,
                                       {"cwd", Value("/tmp")}})}}}));
 }
 
+void applyScrollableThreadContent(WorkerLogic &worker, std::string threadId,
+                                  std::string suffix) {
+  const std::string turnId = "scroll-turn-" + suffix;
+  const std::string itemId = "scroll-item-" + suffix;
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "turn/started",
+       std::nullopt,
+       {{"threadId", Value(threadId)},
+        {"turn", Value(Value::Object{{"id", Value(turnId)},
+                                     {"status", Value("completed")}})}}}));
+  std::string text;
+  for (int line = 0; line < 200; ++line)
+    text += "scrollable history line " + std::to_string(line) + '\n';
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/started",
+       std::nullopt,
+       {{"threadId", Value(std::move(threadId))},
+        {"turnId", Value(turnId)},
+        {"item", Value(Value::Object{{"id", Value(itemId)},
+                                     {"type", Value("agentMessage")},
+                                     {"text", Value(std::move(text))}})}}}));
+}
+
 void makeReady(WorkerLogic &worker) {
   static_cast<void>(worker.transportEvent("connected"));
   static_cast<void>(worker.bridgeState("test-controller", "controller",
@@ -365,6 +390,7 @@ void graphNotificationsPrecedeRetirementRelease(Configuration &configuration) {
           stringFieldEquals(read->state(node), "name",
                             "queued-before-retirement");
     }
+    session.acknowledgeUiDetached(changed.removed);
     return true;
   });
 
@@ -527,6 +553,7 @@ void massRetirementIsSliced(Configuration &configuration) {
             changed.providerAuthorityRevision == authorityRevision;
       }
     }
+    session.acknowledgeUiDetached(changed.removed);
     return true;
   });
 
@@ -685,8 +712,10 @@ void settingsDraftsRetireWithProviderAndThreadIncarnations(
                                        "test-controller", 2, "ready",
                                        "empty provider replaced"));
   FrontendSessionTestPeer::drainWorkerMessages(session);
-  require(threadItem(list, "draft:new-thread") &&
-              approval->currentData() == QStringLiteral("default"),
+  require(spinUntil([&] {
+            return threadItem(list, "draft:new-thread") &&
+                   approval->currentData() == QStringLiteral("default");
+          }),
           "a zero-thread provider replacement resets settings without losing "
           "the unsent new-thread draft or deferring invalidation");
 
@@ -768,6 +797,7 @@ void delayedRetirementCannotEraseRecreatedThread(Configuration &configuration) {
   shell.show();
   makeReady(worker);
   applyThread(worker, "reused-thread", "Old incarnation");
+  applyScrollableThreadContent(worker, "reused-thread", "old");
   markThreadReady(session, worker, "reused-thread");
 
   auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
@@ -788,6 +818,9 @@ void delayedRetirementCannotEraseRecreatedThread(Configuration &configuration) {
   if (!list || !approval || !view || !composer)
     return;
   approval->setCurrentIndex(approval->findData(QStringLiteral("never")));
+  static_cast<void>(spinUntil(
+      [&] { return view->verticalScrollBar()->maximum() > 0; }, 3000));
+  view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
   view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   require(view->modeForThread("reused-thread") ==
               middle::ConversationView::Mode::Paused,
@@ -817,6 +850,7 @@ void delayedRetirementCannotEraseRecreatedThread(Configuration &configuration) {
   }
   FrontendSessionTestPeer::deliverGraphChanged(
       session, GraphChanged{recreation.revision, {}, {}, true, {}, 0});
+  applyScrollableThreadContent(worker, "reused-thread", "new");
   require(spinUntil([&] {
             return approval->currentData() == QStringLiteral("on-request");
           }) &&
@@ -826,6 +860,9 @@ void delayedRetirementCannotEraseRecreatedThread(Configuration &configuration) {
           "the latest-state rescan binds a fresh node and presentation state");
 
   approval->setCurrentIndex(approval->findData(QStringLiteral("untrusted")));
+  static_cast<void>(spinUntil(
+      [&] { return view->verticalScrollBar()->maximum() > 0; }, 3000));
+  view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
   view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   const std::vector<QtToWorkerMessage> reboundMessages =
       takeQtMessages(channels);
@@ -864,6 +901,7 @@ void slicedProviderRetirementPreservesFreshSelection(
   shell.show();
   makeReady(worker);
   applyThread(worker, "sliced-reuse", "Provider one");
+  applyScrollableThreadContent(worker, "sliced-reuse", "provider-one");
   markThreadReady(session, worker, "sliced-reuse");
   auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
   auto *approval =
@@ -898,6 +936,7 @@ void slicedProviderRetirementPreservesFreshSelection(
   FrontendSessionTestPeer::drainWorkerMessages(session);
 
   applyThread(worker, "sliced-reuse", "Provider two");
+  applyScrollableThreadContent(worker, "sliced-reuse", "provider-two");
   markThreadReady(session, worker, "sliced-reuse");
   NodeRef replacement;
   {
@@ -921,6 +960,9 @@ void slicedProviderRetirementPreservesFreshSelection(
           "the fresh same-id thread binds before later retirement slices");
 
   approval->setCurrentIndex(approval->findData(QStringLiteral("untrusted")));
+  static_cast<void>(spinUntil(
+      [&] { return view->verticalScrollBar()->maximum() > 0; }, 3000));
+  view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
   view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
   const std::size_t hydrationCount =
@@ -1210,6 +1252,8 @@ void removedAffectedOptimisticRetryDoesNotReadReleasedNode(
   FrontendSessionTestPeer::drainWorkerMessages(session);
   static_cast<void>(contended.finish());
 
+  static_cast<void>(spinUntil(
+      [&] { return channels.qtToWorkerSizeApprox() != 0; }, 3000));
   std::vector<QtToWorkerMessage> acknowledgements = takeQtMessages(channels);
   bool released = false;
   for (QtToWorkerMessage &message : acknowledgements) {
@@ -1868,7 +1912,7 @@ void initialHydrationRetainsAllLoadedRowsWithBoundedResidency(
   require(conversation && spinUntil([&] {
             return conversation->structuralStagingActive() ||
                    conversation->conversationModel()->rowCount() == 100;
-          }),
+          }, 3000),
           "large initial history either stages rich visible rows or commits a "
           "complete resident frame immediately");
   require(!conversation || !conversation->structuralStagingActive() ||
@@ -2168,7 +2212,10 @@ void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
   middle::ConversationCard *source = nullptr;
   require(spinUntil([&] {
             source = agentMessageCard(shell, "complete A card");
-            return source && heading && heading->text() == "Complete A";
+            return source && conversation &&
+                   source->isVisibleTo(conversation->viewport()) &&
+                   !conversation->structuralStagingActive() && heading &&
+                   heading->text() == "Complete A";
           }),
           "the source conversation is complete before switching");
 
@@ -2712,7 +2759,8 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
     if (auto *ephemeral = dialog->findChild<QCheckBox *>()) {
       ephemeral->setChecked(true);
       nameDisabledForEphemeral =
-          name && !name->isEnabled() && name->text().isEmpty();
+          name && !name->isEnabled() &&
+          name->text() == QStringLiteral("Chosen advanced fork");
     }
     dialog->accept();
   });
@@ -4222,10 +4270,16 @@ void saturatedWorkerEffectsKeepNewestUiState(Configuration &configuration) {
   }
   require(worker.showNotice("newest visible notice") ==
                   ChannelSendStatus::CoalescedRescan &&
-              worker.selectThread(first) == ChannelSendStatus::Accepted &&
+              worker.selectThread(first) ==
+                  ChannelSendStatus::CoalescedRescan &&
               worker.selectThread(second) == ChannelSendStatus::CoalescedRescan,
-          "saturated effects retain a graph fallback after the critical "
-          "selection slot is used");
+          "saturated graph updates retain one reconstructable fallback");
+
+  for (int pass = 0;
+       pass < 1024 &&
+       (channels.workerToQtSizeApprox() != 0 || channels.rescanPending());
+       ++pass)
+    FrontendSessionTestPeer::drainWorkerMessages(session);
 
   require(
       spinUntil(

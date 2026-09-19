@@ -1726,7 +1726,18 @@ bool planAndRequestUpdatesRetainUnaffectedRows() {
   pane.show();
   pane.refresh(snapshot, ui::InspectorProjection::Plan);
   pane.refresh(snapshot, ui::InspectorProjection::Requests);
-  QCoreApplication::processEvents();
+  static_cast<void>(waitFor([&] {
+    return pane
+                   .findChildren<QFrame *>(
+                       QStringLiteral("inspectorPlanStepFrame"))
+                   .size() == 2 &&
+           std::ranges::any_of(
+               pane.findChildren<middle::MarkdownTextView *>(),
+               [](const middle::MarkdownTextView *view) {
+                 return view->accessibleName() ==
+                        QStringLiteral("Plan explanation");
+               });
+  }));
   auto planFrames =
       pane.findChildren<QFrame *>(QStringLiteral("inspectorPlanStepFrame"));
   QPointer<middle::MarkdownTextView> planExplanation;
@@ -1763,7 +1774,9 @@ bool planAndRequestUpdatesRetainUnaffectedRows() {
   pageValue<middle::PlanStepData>(snapshot.plan)->status =
       nodegraph::NodeStatus::Completed;
   pane.refresh(snapshot, ui::InspectorProjection::Plan);
-  QCoreApplication::processEvents();
+  static_cast<void>(waitFor([&] {
+    return firstStatus && firstStatus->text() == QStringLiteral("completed");
+  }));
   planFrames =
       pane.findChildren<QFrame *>(QStringLiteral("inspectorPlanStepFrame"));
   bool result = expect(
@@ -1798,8 +1811,10 @@ bool planAndRequestUpdatesRetainUnaffectedRows() {
   pageValue<ui::InspectorMarkdownRow>(switched.plan)->text =
       "Different thread explanation";
   pane.refresh(switched, ui::InspectorProjection::Plan);
-  QCoreApplication::processEvents();
-  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  static_cast<void>(waitFor([&] {
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    return retiredExplanation.isNull();
+  }));
   middle::MarkdownTextView *replacementExplanation = nullptr;
   for (middle::MarkdownTextView *view :
        pane.findChildren<middle::MarkdownTextView *>())
@@ -2277,7 +2292,8 @@ bool stateAndProtocolRemainUsefulBoundedAndRedacted() {
     protocolChoice->click();
   QCoreApplication::processEvents();
   result &= expect(
-      pane.currentProjection() == ui::InspectorProjection::State && protocol &&
+      pane.currentProjection() == ui::InspectorProjection::Protocol &&
+          protocol &&
           protocol->toPlainText().contains(QStringLiteral("item/completed")) &&
           protocol->toPlainText().contains(QStringLiteral("corr-7")) &&
           protocol->toPlainText().contains(
@@ -3215,23 +3231,25 @@ bool rowViewportRetiresOnlyAfterWheelDispatch() {
   pane.show();
   data.bind(pane);
   pane.tabs()->setCurrentIndex(1);
-  QCoreApplication::processEvents();
   pane.setRefreshRequestedAction(
       [&] { data.present(pane, ui::InspectorProjection::Agents); });
   auto *view = pane.findChild<QAbstractScrollArea *>(
       QStringLiteral("inspectorAgentRows"));
   QFrame *source = nullptr;
-  if (view) {
-    view->setFocus(Qt::OtherFocusReason);
+  static_cast<void>(waitFor([&] {
+    source = nullptr;
     for (QFrame *frame :
          pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame")))
-      if (!frame->isHidden() &&
+      if (view && !frame->isHidden() &&
           frame->geometry().intersects(view->viewport()->rect()) &&
           frame->findChild<middle::MarkdownTextView *>()) {
         source = frame;
         break;
       }
-  }
+    return source != nullptr;
+  }));
+  if (view)
+    view->setFocus(Qt::OtherFocusReason);
   auto *markdown =
       source ? source->findChild<middle::MarkdownTextView *>() : nullptr;
   auto *disclosure = source ? source->findChild<QToolButton *>(
@@ -3355,22 +3373,39 @@ bool requestResidencyPreservesIdentityAndSafeLifetime() {
   pane.show();
   data.bind(pane);
   pane.tabs()->setCurrentIndex(3);
-  QCoreApplication::processEvents();
   auto *view = pane.findChild<QAbstractScrollArea *>(
       QStringLiteral("inspectorRequestRows"));
+  static_cast<void>(waitFor([&] {
+    return std::ranges::any_of(
+        pane.findChildren<QFrame *>(QStringLiteral("inspectorRequestFrame")),
+        [view](const QFrame *frame) {
+          return view && !frame->isHidden() &&
+                 frame->geometry().intersects(view->viewport()->rect()) &&
+                 frame->findChild<QPushButton *>(
+                     QStringLiteral("pendingRequestAccept"));
+        });
+  }));
   if (view) {
     view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum() /
                                         2);
-    QCoreApplication::processEvents();
+    static_cast<void>(waitFor([view] {
+      return view->verticalScrollBar()->value() ==
+             view->verticalScrollBar()->maximum() / 2;
+    }));
   }
   QFrame *focusedRow = nullptr;
-  for (QFrame *frame :
-       pane.findChildren<QFrame *>(QStringLiteral("inspectorRequestFrame")))
-    if (!frame->isHidden() && view &&
-        frame->geometry().intersects(view->viewport()->rect())) {
-      focusedRow = frame;
-      break;
-    }
+  static_cast<void>(waitFor([&] {
+    focusedRow = nullptr;
+    for (QFrame *frame :
+         pane.findChildren<QFrame *>(QStringLiteral("inspectorRequestFrame")))
+      if (!frame->isHidden() && view &&
+          frame->geometry().intersects(view->viewport()->rect())) {
+        focusedRow = frame;
+        break;
+      }
+    return focusedRow && focusedRow->findChild<QPushButton *>(
+                             QStringLiteral("pendingRequestAccept"));
+  }));
   auto *accept = focusedRow ? focusedRow->findChild<QPushButton *>(
                                   QStringLiteral("pendingRequestAccept"))
                             : nullptr;

@@ -2347,13 +2347,13 @@ void providerTurnErrorsKeepTheirAuthoritativeNotice() {
 
   auto read = graph.tryRead();
   const NodeRef notice =
-      read->find({NodeKind::Notice, "local-worker-notice"});
+      read->find({NodeKind::Notice, "provider-notice"});
   const NodeRef turn =
       read->find(scopedTurnNodeId("notice-error-thread", "notice-error-turn"));
   const auto state = turn ? read->state(turn) : nullptr;
   const Value *willRetry = field(state, "willRetry");
   require(notice &&
-              stringFieldEquals(read->state(notice), "message",
+              stringFieldEquals(read->state(notice), "noticeText",
                                 "provider retry failed") &&
               turn && field(state, "error") && willRetry && willRetry->asBool() &&
               !*willRetry->asBool(),
