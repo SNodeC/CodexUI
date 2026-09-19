@@ -58,8 +58,7 @@ public:
                     const nodegraph::NodeRef &thread) const;
   [[nodiscard]] ConversationRoute conversationRoute(
       const nodegraph::GraphChanged &change, const nodegraph::NodeRef &thread,
-      const nodegraph::NodeGraph::ReadAccess &read,
-      std::uint64_t lastRoutedRevision = 0) const;
+      const nodegraph::NodeGraph::ReadAccess &read) const;
 
   // Projects a coalesced bounded set through one graph read. Presentation-only
   // values and canonically ordered structural rows share graphCardData and the

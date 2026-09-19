@@ -1134,7 +1134,7 @@ void ShellWidget::Impl::requestConversationProjection(bool fullSnapshot) {
   conversationProjectionStartScheduled = true;
   const auto token = alive;
   const std::uint64_t generation = conversationProjectionScheduleGeneration;
-  QTimer::singleShot(ConversationProjectionQuietMilliseconds,
+  QTimer::singleShot(fullSnapshot ? 0 : ConversationProjectionQuietMilliseconds,
                      Qt::PreciseTimer, owner, [this, token, generation] {
     if (!token->load(std::memory_order_acquire))
       return;
@@ -1372,7 +1372,7 @@ void ShellWidget::Impl::queueConversationRoute(
       (snapshotNeedsFull ||
        conversationProjectionRequested || conversationProjectionInFlight ||
        conversationProjectionStartScheduled);
-  if (snapshotOwnsStructure && route.affected) {
+  if (snapshotOwnsStructure && route.affected && route.structural) {
     pendingStructuralConversationDelta.reset();
     clearPendingConversationItems();
     requestConversationProjection(snapshotNeedsFull);
@@ -1579,10 +1579,9 @@ void ShellWidget::Impl::commitPendingPanes() {
           "targetedConversationRoutes",
           owner->property("targetedConversationRoutes").toULongLong() + 1);
     } else {
-      pendingConversation = false;
-      pendingConversationAuthorityReplacement = false;
+      pendingConversation = true;
+      pendingConversationAuthorityReplacement = true;
       clearPendingConversationItems();
-      requestConversationRescan();
     }
   }
   if (hasFrameBudget() && pendingConversation &&
@@ -1703,8 +1702,19 @@ bool ShellWidget::Impl::handleGraphChanged(
       requestConversationRescan();
     }
   } else {
-    queueConversationRoute(uiAdapter.conversationRoute(
-        change, boundGraphThread, *read, routedConversationRevision));
+    ui::NodeGraphUiAdapter::ConversationRoute conversationRoute =
+        uiAdapter.conversationRoute(change, boundGraphThread, *read);
+    for (const nodegraph::NodeRef &removed : change.removed) {
+      if (!removed ||
+          !middleRegion->conversation().retainsTarget(removed) ||
+          std::ranges::find(conversationRoute.items, removed) !=
+              conversationRoute.items.end())
+        continue;
+      conversationRoute.affected = true;
+      conversationRoute.structural = true;
+      conversationRoute.items.push_back(removed);
+    }
+    queueConversationRoute(conversationRoute);
   }
   middle::InspectorPane &inspectorPane = middleRegion->inspector();
   const std::optional<ui::InspectorProjection> inspectorProjection =
@@ -1750,6 +1760,8 @@ bool ShellWidget::Impl::handleGraphChanged(
       selectedGraphThreadId.clear();
     bindGraphPanes({});
   }
+
+  acknowledgeDetachedTargets();
 
   // The graph retains removed identities until commitPendingPanes has
   // detached every presentation reference and acknowledges that lifetime.

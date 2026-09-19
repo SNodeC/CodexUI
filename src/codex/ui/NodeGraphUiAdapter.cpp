@@ -2157,14 +2157,10 @@ NodeGraphUiAdapter::conversationRoute(const nodegraph::GraphChanged &change,
 
 NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
     const nodegraph::GraphChanged &change, const nodegraph::NodeRef &thread,
-    const nodegraph::NodeGraph::ReadAccess &access,
-    std::uint64_t lastRoutedRevision) const {
+    const nodegraph::NodeGraph::ReadAccess &access) const {
   ConversationRoute route;
   route.graphRevision = access.revision();
   if (!thread)
-    return route;
-  if (lastRoutedRevision != 0 && change.revision != 0 &&
-      change.revision <= lastRoutedRevision)
     return route;
   if (change.rescanRequired) {
     route.affected = true;
@@ -2207,6 +2203,19 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
         return changed.owner == thread &&
                changed.childKind == nodegraph::NodeKind::Turn;
       });
+  const bool turnInsertedIntoThread =
+      threadTurnsChanged &&
+      std::ranges::any_of(change.affected, [&](const auto &node) {
+        return node && node->id().kind == nodegraph::NodeKind::Turn &&
+               read->structureChangedRevision(node) == change.revision &&
+               read->parent(node) == thread;
+      });
+  if (threadTurnsChanged && !turnInsertedIntoThread) {
+    route.affected = true;
+    route.structural = true;
+    route.authorityReplacement = true;
+    return route;
+  }
   const auto belongsToThread = [&](const nodegraph::NodeRef &node) {
     if (!node)
       return false;
@@ -2245,6 +2254,24 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
         route.affected = true;
         route.providerHasMore = graphProviderHasMoreHistory(*read->state(node));
       }
+      if (fieldChanged(*read, node, "hydrationState", change.revision)) {
+        route.affected = true;
+        route.structural = true;
+        route.authorityReplacement = true;
+        route.items.clear();
+        return;
+      }
+      if (read->structureChangedRevision(node) == change.revision) {
+        for (const nodegraph::NodeRef &candidate : change.affected) {
+          if (!candidate ||
+              candidate->id().kind != nodegraph::NodeKind::Turn ||
+              !belongsToThread(candidate))
+            continue;
+          route.affected = true;
+          route.structural = true;
+          addItem(conversationTurnRoot(*read, candidate));
+        }
+      }
       return;
     }
     if (node->id().kind == nodegraph::NodeKind::Thread ||
@@ -2263,13 +2290,6 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
     }
 
     if (!belongsToThread(node)) {
-      if (threadTurnsChanged && node->id().kind == nodegraph::NodeKind::Turn) {
-        route.affected = true;
-        route.structural = true;
-        route.authorityReplacement = true;
-        route.items.clear();
-        return;
-      }
       if (node->id().kind == nodegraph::NodeKind::Item &&
           read->structureChangedRevision(node) == change.revision &&
           !read->parent(node)) {
@@ -2285,7 +2305,7 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
           read->structureChangedRevision(node) == change.revision;
       const bool statusChanged =
           read->statusChangedRevision(node) == change.revision;
-      if (!structureChanged && !statusChanged && !threadTurnsChanged)
+      if (!structureChanged && !statusChanged)
         return;
       route.affected = true;
       route.structural = route.structural || structureChanged || statusChanged;
@@ -2293,12 +2313,9 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
       return;
     }
     route.affected = true;
-    if (read->structureChangedRevision(node) == change.revision) {
+    if (read->structureChangedRevision(node) == change.revision)
       route.structural = true;
-      addItem(read->parent(node));
-    } else {
-      addItem(node);
-    }
+    addItem(node);
   };
 
   for (const nodegraph::NodeRef &node : change.affected)
@@ -2348,46 +2365,13 @@ NodeGraphUiAdapter::conversationDelta(const nodegraph::NodeRef &thread,
       structural ? conversationActiveTurn(*read, thread) : nodegraph::NodeRef{};
 
   std::vector<nodegraph::NodeRef> transactionItems;
-  if (!structural) {
-    transactionItems.assign(items.begin(), items.end());
-  } else {
-    for (const nodegraph::NodeRef &target : items) {
-      if (target && read->live(target) &&
-          target->id().kind == nodegraph::NodeKind::Turn) {
-        transactionItems.push_back(conversationTurnRoot(*read, target));
-        continue;
-      }
+  transactionItems.reserve(items.size());
+  for (const nodegraph::NodeRef &target : items) {
+    if (structural && target && read->live(target) &&
+        target->id().kind == nodegraph::NodeKind::Turn)
+      transactionItems.push_back(conversationTurnRoot(*read, target));
+    else
       transactionItems.push_back(target);
-      if (!target || !read->live(target) ||
-          target->id().kind != nodegraph::NodeKind::Item)
-        continue;
-      const nodegraph::NodeRef turn = read->parent(target);
-      const auto turnState = turn ? read->state(turn) : nullptr;
-      const std::optional<std::size_t> itemIndex = read->childIndex(target);
-      if (!turnState || !itemIndex)
-        continue;
-      const std::string turnId =
-          nodegraph::protocolCanonicalId(*turnState, turn);
-      const auto appendVisible = [&](std::size_t index) {
-        const nodegraph::NodeRef item = read->childAt(turn, index);
-        if (conversationCardKey(*read, item, result.threadId, turnId,
-                                isHiddenMaterializedPrompt(*read, item)))
-          transactionItems.push_back(item);
-      };
-      for (std::size_t previous = *itemIndex; previous > 0; --previous) {
-        const std::size_t before = transactionItems.size();
-        appendVisible(previous - 1);
-        if (transactionItems.size() != before)
-          break;
-      }
-      const std::size_t itemCount = read->childCount(turn);
-      for (std::size_t next = *itemIndex + 1; next < itemCount; ++next) {
-        const std::size_t before = transactionItems.size();
-        appendVisible(next);
-        if (transactionItems.size() != before)
-          break;
-      }
-    }
   }
 
   std::unordered_set<const nodegraph::Node *> seen;
@@ -2510,14 +2494,6 @@ NodeGraphUiAdapter::conversationDeltaSince(
     const auto turnState = read->state(turn);
     if (!turnState)
       continue;
-    const std::string turnId =
-        nodegraph::protocolCanonicalId(*turnState, turn);
-    const auto appendVisible = [&](std::size_t index) {
-      const nodegraph::NodeRef item = read->childAt(turn, index);
-      if (conversationCardKey(*read, item, thread->id().canonical, turnId,
-                              isHiddenMaterializedPrompt(*read, item)))
-        changed.push_back(item);
-    };
     if (read->changedRevision(turn) > afterRevision ||
         read->structureChangedRevision(turn) > afterRevision)
       changed.push_back(conversationTurnRoot(*read, turn));
@@ -2526,21 +2502,8 @@ NodeGraphUiAdapter::conversationDeltaSince(
       const nodegraph::NodeRef item = read->childAt(turn, itemIndex);
       if (item && item->id().kind == nodegraph::NodeKind::Item &&
           (read->changedRevision(item) > afterRevision ||
-           read->structureChangedRevision(item) > afterRevision)) {
-        for (std::size_t previous = itemIndex; previous > 0; --previous) {
-          const std::size_t before = changed.size();
-          appendVisible(previous - 1);
-          if (changed.size() != before)
-            break;
-        }
+           read->structureChangedRevision(item) > afterRevision))
         changed.push_back(item);
-        for (std::size_t next = itemIndex + 1; next < itemCount; ++next) {
-          const std::size_t before = changed.size();
-          appendVisible(next);
-          if (changed.size() != before)
-            break;
-        }
-      }
     }
   }
   if (graphRevision)

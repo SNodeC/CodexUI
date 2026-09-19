@@ -143,9 +143,10 @@ QString accessibleCardText(const VisibleCardData &card) {
 }
 
 bool structurallyCompatible(const CardKey &beforeKey, CardKind beforeKind,
+                            const nodegraph::NodeRef &beforeTarget,
                             const VisibleCardData &after) noexcept {
   return beforeKey == after.key &&
-         (beforeKind == after.kind ||
+         ((beforeKind == after.kind && beforeTarget == after.target) ||
           (beforeKind == CardKind::LocalPrompt &&
            after.kind == CardKind::UserMessage));
 }
@@ -308,7 +309,8 @@ ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
       const Row &replacement = desired[desiredPosition];
       insertionOnly =
           structurallyCompatible(current->value.card.key,
-                                 current->value.card.kind, replacement.card);
+                                 current->value.card.kind,
+                                 current->value.card.target, replacement.card);
       retainedNodes.push_back(current);
       retainedPositions.push_back(desiredPosition);
       ++desiredPosition;
@@ -433,7 +435,8 @@ ConversationItemModel::cardUpdateResult(const VisibleCardData &card) const {
   if (!modelRow)
     return CardUpdateResult::Missing;
   const Row &current = found->second->value;
-  if (current.card.key != card.key || current.card.kind != card.kind)
+  if (current.card.key != card.key || current.card.kind != card.kind ||
+      current.card.target != card.target)
     return CardUpdateResult::Incompatible;
   if (current.card == card)
     return CardUpdateResult::Unchanged;
@@ -780,13 +783,18 @@ ConversationItemModel::planStructuralDelta(
         source >= 0 ? sequence.at(source) : std::nullopt;
     if (current && (!current->target ||
                     !structurallyCompatible(current->key, current->kind,
-                                            card)))
+                                            current->target, card)))
       return reject("incompatible-current");
     const bool materializesLocalPrompt =
         current && current->kind == CardKind::LocalPrompt &&
         card.kind == CardKind::UserMessage;
-    if (current && !materializesLocalPrompt &&
-        current->sectionKey != change.placement.sectionKey)
+    const bool rehomesLocalPrompt =
+        current && current->kind == CardKind::LocalPrompt &&
+        card.kind == CardKind::LocalPrompt && current->target == card.target;
+    if (current && !materializesLocalPrompt && !rehomesLocalPrompt &&
+        (current->turnRoot != change.placement.turnRoot ||
+         (current->turnRoot &&
+          current->sectionKey != change.placement.sectionKey)))
       return reject("section-change");
 
     const auto pending = [&](const std::optional<CardKey> &neighbor) {
@@ -855,9 +863,9 @@ ConversationItemModel::planStructuralDelta(
         validSectionPlacement(replacement.turnRoot, replacement.nested,
                               owner.count, owner.hasRoot, previousInSection,
                               nextInSection);
-    if (!valid && !current)
-      continue;
-    if (!valid && current->sectionKey != replacement.sectionKey)
+    if (!valid)
+      return std::nullopt;
+    if (current && current->turnRoot && source != destination)
       return std::nullopt;
     insertVirtual(destination, std::move(replacement));
     StructuralDeltaPlan::Operation operation;
