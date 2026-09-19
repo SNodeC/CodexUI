@@ -78,7 +78,7 @@ add_library(
     src/codex/ClientRuntime.h
     src/codex/Configuration.cpp
     src/codex/Configuration.h
-    src/codex/CurrentProtocolAdapters.h
+    src/codex/InternalProtocolOperations.h
     src/codex/WorkerMailboxReceiver.cpp
     src/codex/WorkerMailboxReceiver.h
 )
@@ -457,26 +457,26 @@ if(BUILD_TESTING)
     set_tests_properties(codexui-nodegraph-json PROPERTIES TIMEOUT 10)
 
     add_executable(
-        codexui-current-protocol-adapters-test
-        tests/codex/nodegraph/CurrentProtocolAdaptersTest.cpp
-        src/codex/CurrentProtocolAdapters.h
+        codexui-protocol-bindings-test
+        tests/codex/nodegraph/ProtocolBindingsTest.cpp
+        src/codex/InternalProtocolOperations.h
     )
     target_compile_features(
-        codexui-current-protocol-adapters-test PRIVATE cxx_std_20
+        codexui-protocol-bindings-test PRIVATE cxx_std_20
     )
     target_include_directories(
-        codexui-current-protocol-adapters-test PRIVATE src
+        codexui-protocol-bindings-test PRIVATE src
     )
     target_link_libraries(
-        codexui-current-protocol-adapters-test
+        codexui-protocol-bindings-test
         PRIVATE AISuite::OpenAICodex codexui-nodegraph
     )
     add_test(
-        NAME codexui-current-protocol-adapters
-        COMMAND codexui-current-protocol-adapters-test
+        NAME codexui-protocol-bindings
+        COMMAND codexui-protocol-bindings-test
     )
     set_tests_properties(
-        codexui-current-protocol-adapters PROPERTIES TIMEOUT 10
+        codexui-protocol-bindings PROPERTIES TIMEOUT 10
     )
 
     add_executable(

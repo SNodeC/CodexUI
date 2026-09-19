@@ -2561,8 +2561,8 @@ user-owned and are not reset or hidden.
   fixtures and native-platform breadth remain S8 because executing/adding test
   workflows is currently prohibited by user instruction.
 - [ ] **Remaining S8-S9 qualification:** durable Unicode/RTL/IME fixtures, CI
-  Release/Clang/sanitizer/platform breadth, native AT-SPI, and the final
-  AISuite publish/pin transition remain. Multi-case native mains already use
+  Release/Clang/sanitizer/platform breadth, and native AT-SPI remain. The
+  AISuite publish/pin transition is complete. Multi-case native mains already use
   non-short-circuiting accumulation; generated-protocol drift is locally
   repaired. The CI execution matrix is not expanded while the user's current
   no-test-workflow instruction is in force.
@@ -2585,26 +2585,25 @@ The authoritative remaining dependency order is:
    is reconciled, and multi-case mains are non-short-circuiting. The current
    user instruction forbids executing test binaries, so only compile and
    autonomous live offscreen/Xvfb gates run now.
-2. [ ] **AISuite generated protocol release:** pin exact stable+experimental
+2. [x] **AISuite generated protocol release:** pin exact stable+experimental
    generator inputs, regenerate typed bindings, add regenerate-and-diff CI,
    publish an immutable AISuite revision, update CodexUI's pin, replace eight
    adapters with generated operations, and retain only the two intentionally
-   internal typed descriptors. This cannot be completed honestly without the
-   currently prohibited commit/publish step.
+   internal typed descriptors. Completed against immutable AISuite revision
+   `24b1d16ca87e0f0d13fef75a68877cadbb32c03f`.
 
-The AISuite side of item 2 is now prepared locally but is not falsely marked
-released. `tools/regenerate-codex-protocol.sh` pins Codex tag `rust-v0.154.0`
+The AISuite side of item 2 is published and pinned.
+`tools/regenerate-codex-protocol.sh` pins Codex tag `rust-v0.154.0`
 and commit `6b9826e3aa83b1a5947db50f4332cb9c65f1b340`, verifies that tag-to-commit
 mapping, extracts the release's own experimental precomputed schema, and
 regenerates C++/TypeScript/manifest together. A second `--check` run reproduced
 all three artifacts byte-for-byte; the generated native library and TypeScript
-package compile cleanly. AISuite CI now runs the same drift gate. The resulting
+package compile cleanly. AISuite CI runs the same drift gate. The resulting
 bindings expose the expected eight operations and still omit the two upstream
-internal-only operation descriptors. No test executable was run. Publishing an
-immutable AISuite revision, changing `web/AISUITE_REVISION`, and deleting the
-eight CodexUI compatibility descriptors remain blocked by the explicit
-no-commit/no-push/no-install instruction; the existing pin must stay buildable
-until that release exists.
+internal-only operation descriptors. CodexUI now pins the published revision,
+uses generated operations for all eight, and retains only typed local operation
+identity for the two internal `rawResponse*` notifications. The obsolete
+`CurrentProtocolAdapters` name and eight untyped descriptors are deleted.
 
 #### AISuite generated-protocol evidence reconciliation
 
@@ -2631,12 +2630,23 @@ and retain only two typed internal-operation descriptors. A blanket deletion
 would lose valid older-server notification compatibility; retaining ten
 untyped `Value` descriptors would preserve avoidable drift.
 
-This is a cross-repository release dependency, not a reason for a CodexUI-local
-compatibility layer. CodexUI CI and `web/AISUITE_REVISION` require an immutable
-AISuite commit SHA, but committing is explicitly prohibited in this worktree.
-Implementation remains open until the AISuite change can acquire that release
-identity; no app-server source is modified and no fabricated SHA or parallel
-adapter is accepted.
+This was a cross-repository release dependency, not a reason for a CodexUI-local
+compatibility layer. AISuite revision `24b1d16...` supplies the immutable release
+identity and CodexUI's one revision pin now selects it for native and browser
+builds. The transition also reconciles the complete generated operation catalog:
+five newly generated client methods are classified, while three older-server
+methods remain explicit legacy compatibility. No app-server source, fabricated
+SHA, parallel adapter, timer, cache, flag, or protocol state was introduced.
+
+Exact transition verification: AISuite regeneration `--check` reproduced the
+pinned Codex 0.154 experimental artifacts and its frontend package passed 20/20;
+the exact-pinned CodexUI Release tree built completely warning-clean; the native
+protocol-binding gate passed 1/1; and the browser suite passed 287/287. Two broad
+native integration executables retain their pre-existing current-environment
+failures identically in the pre-transition binary and are not misreported as a
+transition regression. Stage accounting is native production **-47 CLOC**,
+native tests **-84 CLOC**, and root CMake physically neutral after target/file
+renaming.
 
 **MR-9A closure (2026-09-17).** The restored invariant is that motion policy and
 native Copy publication each have one authority: every affected surface reads
@@ -2966,11 +2976,10 @@ npm's signed build attestation: tag `rust-v0.154.0`, commit
 exact experimental schema expands generated bindings substantially. The
 earlier rejection of that expansion as a CodexUI-only patch is superseded by
 the later verified generator-drift finding: AISuite must type the complete
-public schema it claims to generate, and CI must reproduce it. The local
-AISuite repair now does so. Until it is published and pinned, CodexUI's
-compatibility boundary still names ten consumed operations. After the immutable
-dependency transition, eight become generated operations and only the two
-upstream internal-only `rawResponse*` descriptors remain local; this is not a
+public schema it claims to generate, and CI must reproduce it. The published
+AISuite repair now does so. CodexUI pins that immutable revision, uses generated
+bindings for eight operations, and retains only the two upstream internal-only
+`rawResponse*` operation identities with generated payload types; this is not a
 second protocol implementation.
 
 The legacy `thread/read` operation itself remains for bounded metadata reads.
@@ -3014,11 +3023,11 @@ The authoritative interruption plan is:
    ceiling independently per turn. Controller/observer ordering, one-page
    continuation and retry, chronological item-page merge, active-turn recovery,
    active-child hydration, and the global item ceiling are browser-session
-   contract cases. CodexUI now pins AISuite `bc448516...`, whose bridge permits
-   both observer page methods; CI reads that one revision file for native and
-   web checkouts. Published generated bindings still require the separately
-   recorded generator transition, while the CodexUI wire path remains runtime-
-   compatible through the existing SDK request boundary.
+   contract cases. CodexUI now pins AISuite `24b1d16...`, whose bridge permits
+   both observer page methods and whose generated bindings cover the public
+   experimental operations; CI reads that one revision file for native and web
+   checkouts. The CodexUI wire path remains runtime-compatible through the
+   existing SDK request boundary.
 
 AISuite's isolated implementation delta is production **+2 CLOC** and tests
 **+15 CLOC**. The two production lines extend the existing observer read

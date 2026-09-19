@@ -3,7 +3,7 @@
 #include "codex/ClientRuntime.h"
 
 #include "codex/Configuration.h"
-#include "codex/CurrentProtocolAdapters.h"
+#include "codex/InternalProtocolOperations.h"
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
 #include "codex/WorkerMailboxReceiver.h"
@@ -1291,7 +1291,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_REGISTER_SERVER_NOTIFICATION)
 #undef CODEXUI_REGISTER_SERVER_NOTIFICATION
 
-  using CurrentTimeRead = current_protocol::server_requests::CurrentTimeRead;
+  using CurrentTimeRead = codex::generated::server_requests::CurrentTimeRead;
   sdk.onServerRequest<CurrentTimeRead>([&pendingServerRequests, &showNotice,
                                         &workerLogic, &sdk](
                                            CurrentTimeRead::Params &request) {
@@ -1330,31 +1330,28 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       showNotice("Current-time server response was rejected");
   });
 
-#define CODEXUI_REGISTER_CURRENT_NOTIFICATION(OperationName)                   \
+#define CODEXUI_REGISTER_INTERNAL_NOTIFICATION(OperationName)                  \
   sdk.onServerNotification<                                                    \
-      current_protocol::server_notifications::OperationName>(                  \
+      internal_protocol::server_notifications::OperationName>(                 \
       [&workerLogic](                                                          \
-          current_protocol::server_notifications::OperationName::Params        \
+          internal_protocol::server_notifications::OperationName::Params       \
               &notification) {                                                 \
         static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{ \
             nodegraph::DecodedMessageKind::ServerNotification,                 \
-            std::string(current_protocol::server_notifications::               \
+            std::string(internal_protocol::server_notifications::              \
                             OperationName::method),                            \
             std::nullopt,                                                      \
             decodedObject(notification.getPayload()),                          \
             {},                                                                \
-            threadActivityAt(current_protocol::server_notifications::          \
+            threadActivityAt(internal_protocol::server_notifications::         \
                                  OperationName::method),                       \
-            {}, {}, {}}));                                                     \
+            {},                                                                \
+            {},                                                                \
+            {}}));                                                             \
       });
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryStarted)
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryCompleted)
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(RawResponseItemCompleted)
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(RawResponseCompleted)
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemStarted)
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemTranscriptDelta)
-  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemCompleted)
-#undef CODEXUI_REGISTER_CURRENT_NOTIFICATION
+  CODEXUI_REGISTER_INTERNAL_NOTIFICATION(RawResponseItemCompleted)
+  CODEXUI_REGISTER_INTERNAL_NOTIFICATION(RawResponseCompleted)
+#undef CODEXUI_REGISTER_INTERNAL_NOTIFICATION
 
   const auto publishTransportEvent = [&channels, &clearTransientState,
                                       &protocolDiagnostics,
@@ -2116,7 +2113,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       if (!page.cursor.empty())
         parameters["cursor"] = page.cursor;
       ++pendingItemPages;
-      dispatchRequest<current_protocol::client_requests::ThreadItemsList>(
+      dispatchRequest<codex::generated::client_requests::ThreadItemsList>(
           sdk, std::move(parameters), workerLogic, page.thread,
           [&, page = std::move(page)](RequestOutcome outcome) mutable {
             --pendingItemPages;
@@ -2227,7 +2224,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                             completeTurnPage](bool resumeAttempted,
                                               bool resumeSucceeded) mutable {
       dispatchRequestHandled<
-          current_protocol::client_requests::ThreadTurnsList>(
+          codex::generated::client_requests::ThreadTurnsList>(
           sdk, turnPageParameters(id), workerLogic, thread,
           [](const nodegraph::ProtocolRequestId &) {},
           [completeTurnPage = std::move(completeTurnPage), resumeAttempted,
@@ -2313,7 +2310,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       return;
     const std::string cursor =
         exactStringFromValue(valueMember(*state, "historyNextCursor"));
-    dispatchRequestHandled<current_protocol::client_requests::ThreadTurnsList>(
+    dispatchRequestHandled<codex::generated::client_requests::ThreadTurnsList>(
         sdk, turnPageParameters(*threadId, cursor), workerLogic, thread,
         [](const nodegraph::ProtocolRequestId &) {},
         [&, thread, id = *threadId](RequestOutcome outcome,

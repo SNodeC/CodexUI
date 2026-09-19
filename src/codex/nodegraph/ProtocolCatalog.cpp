@@ -39,9 +39,13 @@ namespace {
         MessageDisposition::WorkerOperationResult                              \
   }
 
-constexpr std::array<MethodDescriptor, 252> Methods{{
+constexpr std::array<MethodDescriptor, 257> Methods{{
     CODEXUI_CLIENT_REQUEST("initialize"),
     CODEXUI_CLIENT_REQUEST("server/diagnostics"),
+    CODEXUI_CLIENT_REQUEST("userVerification/status"),
+    CODEXUI_CLIENT_REQUEST("userVerification/enroll"),
+    CODEXUI_CLIENT_REQUEST("userVerification/delete"),
+    CODEXUI_CLIENT_REQUEST("userVerification/verify"),
     CODEXUI_CLIENT_REQUEST("thread/start"),
     CODEXUI_CLIENT_REQUEST("thread/resume"),
     CODEXUI_CLIENT_REQUEST("thread/fork"),
@@ -102,6 +106,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_CLIENT_REQUEST("plugin/list"),
     CODEXUI_CLIENT_REQUEST("plugin/search"),
     CODEXUI_CLIENT_REQUEST("plugin/installed"),
+    CODEXUI_CLIENT_REQUEST("plugin/reconcile"),
     CODEXUI_CLIENT_REQUEST("plugin/read"),
     CODEXUI_CLIENT_REQUEST("plugin/skill/read"),
     CODEXUI_CLIENT_REQUEST("plugin/share/save"),
@@ -343,13 +348,13 @@ consteval bool hasUniqueKeys() {
   return true;
 }
 
-static_assert(Methods.size() == 252);
-static_assert(countDirection(ProtocolDirection::ClientRequest) == 157);
+static_assert(Methods.size() == 257);
+static_assert(countDirection(ProtocolDirection::ClientRequest) == 162);
 static_assert(countDirection(ProtocolDirection::ServerRequest) == 11);
 static_assert(countDirection(ProtocolDirection::ServerNotification) == 83);
 static_assert(countDirection(ProtocolDirection::ClientNotification) == 1);
 static_assert(countDisposition(MessageDisposition::WorkerOperationResult) ==
-              158);
+              163);
 static_assert(countDisposition(MessageDisposition::ReverseInteraction) == 11);
 static_assert(countDisposition(MessageDisposition::GraphUpdate) == 75);
 static_assert(countDisposition(MessageDisposition::IntentionallyStateNeutral) ==

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#include "codex/CurrentProtocolAdapters.h"
+#include "codex/InternalProtocolOperations.h"
 #include "codex/nodegraph/ProtocolCatalog.h"
 
 #include <ai/openai/codex/frontend/CodexBridge.h>
@@ -20,11 +20,12 @@
 
 namespace {
 
-namespace adapters = codexui::codex::current_protocol;
-namespace clientRequests = adapters::client_requests;
-namespace requests = adapters::server_requests;
-namespace notifications = adapters::server_notifications;
 namespace generated = ai::openai::codex::generated;
+namespace clientRequests = generated::client_requests;
+namespace requests = generated::server_requests;
+namespace notifications = generated::server_notifications;
+namespace internalNotifications =
+    codexui::codex::internal_protocol::server_notifications;
 namespace nodegraph = codexui::nodegraph;
 
 using Bridge = ai::openai::codex::frontend::CodexBridge;
@@ -54,89 +55,15 @@ constexpr std::array GeneratedServerNotifications{
     AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_CAPTURE_SERVER_NOTIFICATION)};
 #undef CODEXUI_CAPTURE_SERVER_NOTIFICATION
 
-constexpr std::array CompatibilityClientRequests{
-    clientRequests::ThreadItemsList::method,
-    clientRequests::ThreadTurnsList::method,
-};
-constexpr std::array CompatibilityServerRequests{
-    requests::CurrentTimeRead::method,
-};
-constexpr std::array CompatibilityServerNotifications{
-    notifications::ModelProviderAuthRecoveryStarted::method,
-    notifications::ModelProviderAuthRecoveryCompleted::method,
-    notifications::RawResponseItemCompleted::method,
-    notifications::RawResponseCompleted::method,
-    notifications::ThreadRealtimeItemStarted::method,
-    notifications::ThreadRealtimeItemTranscriptDelta::method,
-    notifications::ThreadRealtimeItemCompleted::method,
+constexpr std::array LegacyClientRequests{
+    std::string_view("getAuthStatus"),
+    std::string_view("getConversationSummary"),
+    std::string_view("gitDiffToRemote"),
 };
 
-// The installed generated header is older than the verified app-server schema
-// recorded for this migration.  Keep its client-request delta explicit so the
-// catalog is checked by method name rather than only by a self-reported count.
-constexpr std::array<std::string_view, 62> VerifiedNewerClientRequests{
-    "account/bedrock/discover",
-    "account/bedrock/setup",
-    "collaborationMode/list",
-    "environment/add",
-    "environment/info",
-    "environment/status",
-    "fuzzyFileSearch/sessionStart",
-    "fuzzyFileSearch/sessionStop",
-    "fuzzyFileSearch/sessionUpdate",
-    "getAuthStatus",
-    "getConversationSummary",
-    "gitDiffToRemote",
-    "mcpServer/event/stream/start",
-    "mcpServer/event/stream/stop",
-    "memory/reset",
-    "mock/experimentalMethod",
-    "plugin/search",
-    "process/kill",
-    "process/resizePty",
-    "process/spawn",
-    "process/writeStdin",
-    "project/create",
-    "project/delete",
-    "project/import",
-    "project/list",
-    "project/move",
-    "project/read",
-    "project/update",
-    "remoteControl/client/list",
-    "remoteControl/client/revoke",
-    "remoteControl/disable",
-    "remoteControl/enable",
-    "remoteControl/pairing/start",
-    "remoteControl/pairing/status",
-    "remoteControl/status/read",
-    "server/diagnostics",
-    "thread/backgroundTerminals/clean",
-    "thread/backgroundTerminals/list",
-    "thread/backgroundTerminals/terminate",
-    "thread/decrement_elicitation",
-    "thread/increment_elicitation",
-    "thread/items/list",
-    "thread/memoryMode/set",
-    "thread/queue/add",
-    "thread/queue/delete",
-    "thread/queue/list",
-    "thread/queue/reorder",
-    "thread/queue/start",
-    "thread/queue/update",
-    "thread/realtime/appendAudio",
-    "thread/realtime/appendSpeech",
-    "thread/realtime/appendText",
-    "thread/realtime/listVoices",
-    "thread/realtime/start",
-    "thread/realtime/stop",
-    "thread/revert",
-    "thread/search",
-    "thread/searchOccurrences",
-    "thread/settings/update",
-    "thread/timeline/list",
-    "thread/turns/list",
-    "turn/settings/update",
+constexpr std::array InternalServerNotifications{
+    internalNotifications::RawResponseItemCompleted::method,
+    internalNotifications::RawResponseCompleted::method,
 };
 
 // These assertions deliberately couple this integration test to the installed
@@ -146,10 +73,8 @@ static_assert(GeneratedClientRequests.size() == 159);
 static_assert(GeneratedServerRequests.size() == 11);
 static_assert(GeneratedServerNotifications.size() == 81);
 static_assert(GeneratedClientNotifications.size() == 1);
-static_assert(CompatibilityClientRequests.size() == 2);
-static_assert(CompatibilityServerRequests.size() == 1);
-static_assert(CompatibilityServerNotifications.size() == 7);
-static_assert(VerifiedNewerClientRequests.size() == 62);
+static_assert(LegacyClientRequests.size() == 3);
+static_assert(InternalServerNotifications.size() == 2);
 
 template <typename Operation>
 concept BridgeServerRequest =
@@ -178,33 +103,34 @@ concept BridgeServerNotification =
     };
 
 template <typename Operation>
-concept RequiredValueParams =
+concept RequiredTypedParams =
     Operation::paramsRequired &&
-    std::same_as<typename Operation::Params, GeneratedValue> &&
+    std::derived_from<typename Operation::Params, GeneratedValue> &&
     std::constructible_from<typename Operation::Params, nlohmann::json>;
 
 static_assert(BridgeServerRequest<requests::CurrentTimeRead>);
-static_assert(RequiredValueParams<requests::CurrentTimeRead>);
+static_assert(RequiredTypedParams<requests::CurrentTimeRead>);
 static_assert(
-    std::same_as<requests::CurrentTimeRead::Response, GeneratedValue>);
+    std::derived_from<requests::CurrentTimeRead::Response, GeneratedValue>);
 
 static_assert(BridgeClientRequest<clientRequests::ThreadItemsList>);
-static_assert(RequiredValueParams<clientRequests::ThreadItemsList>);
-static_assert(
-    std::same_as<clientRequests::ThreadItemsList::Response, GeneratedValue>);
+static_assert(RequiredTypedParams<clientRequests::ThreadItemsList>);
+static_assert(std::derived_from<clientRequests::ThreadItemsList::Response,
+                                GeneratedValue>);
 
 static_assert(BridgeClientRequest<clientRequests::ThreadTurnsList>);
-static_assert(RequiredValueParams<clientRequests::ThreadTurnsList>);
-static_assert(
-    std::same_as<clientRequests::ThreadTurnsList::Response, GeneratedValue>);
+static_assert(RequiredTypedParams<clientRequests::ThreadTurnsList>);
+static_assert(std::derived_from<clientRequests::ThreadTurnsList::Response,
+                                GeneratedValue>);
 
 static_assert(
     BridgeServerNotification<notifications::ModelProviderAuthRecoveryStarted>);
 static_assert(BridgeServerNotification<
               notifications::ModelProviderAuthRecoveryCompleted>);
 static_assert(
-    BridgeServerNotification<notifications::RawResponseItemCompleted>);
-static_assert(BridgeServerNotification<notifications::RawResponseCompleted>);
+    BridgeServerNotification<internalNotifications::RawResponseItemCompleted>);
+static_assert(
+    BridgeServerNotification<internalNotifications::RawResponseCompleted>);
 static_assert(
     BridgeServerNotification<notifications::ThreadRealtimeItemStarted>);
 static_assert(
@@ -213,15 +139,16 @@ static_assert(
     BridgeServerNotification<notifications::ThreadRealtimeItemCompleted>);
 
 static_assert(
-    RequiredValueParams<notifications::ModelProviderAuthRecoveryStarted>);
+    RequiredTypedParams<notifications::ModelProviderAuthRecoveryStarted>);
 static_assert(
-    RequiredValueParams<notifications::ModelProviderAuthRecoveryCompleted>);
-static_assert(RequiredValueParams<notifications::RawResponseItemCompleted>);
-static_assert(RequiredValueParams<notifications::RawResponseCompleted>);
-static_assert(RequiredValueParams<notifications::ThreadRealtimeItemStarted>);
+    RequiredTypedParams<notifications::ModelProviderAuthRecoveryCompleted>);
 static_assert(
-    RequiredValueParams<notifications::ThreadRealtimeItemTranscriptDelta>);
-static_assert(RequiredValueParams<notifications::ThreadRealtimeItemCompleted>);
+    RequiredTypedParams<internalNotifications::RawResponseItemCompleted>);
+static_assert(RequiredTypedParams<internalNotifications::RawResponseCompleted>);
+static_assert(RequiredTypedParams<notifications::ThreadRealtimeItemStarted>);
+static_assert(
+    RequiredTypedParams<notifications::ThreadRealtimeItemTranscriptDelta>);
+static_assert(RequiredTypedParams<notifications::ThreadRealtimeItemCompleted>);
 
 bool expect(bool condition, std::string_view message) {
   std::cout << (condition ? "PASS " : "FAIL ") << message << '\n';
@@ -292,26 +219,12 @@ bool testGeneratedSchemaCatalogCoverage() {
                        hasUniqueMethods(GeneratedClientNotifications),
                    "generated ProtocolTypes macros contain unique methods");
   passed &= expect(
-      hasUniqueMethods(CompatibilityClientRequests) &&
-          hasUniqueMethods(CompatibilityServerRequests) &&
-          hasUniqueMethods(CompatibilityServerNotifications) &&
-          hasUniqueMethods(VerifiedNewerClientRequests) &&
-          hasDisjointMethods(GeneratedClientRequests,
-                             VerifiedNewerClientRequests) &&
-          hasDisjointMethods(GeneratedServerRequests,
-                             CompatibilityServerRequests) &&
+      hasUniqueMethods(LegacyClientRequests) &&
+          hasUniqueMethods(InternalServerNotifications) &&
+          hasDisjointMethods(GeneratedClientRequests, LegacyClientRequests) &&
           hasDisjointMethods(GeneratedServerNotifications,
-                             CompatibilityServerNotifications),
-      "compatibility adapters are unique additions to generated ProtocolTypes");
-
-  passed &=
-      expect(std::ranges::all_of(CompatibilityClientRequests,
-                                 [](std::string_view method) {
-                                   return contains(VerifiedNewerClientRequests,
-                                                   method);
-                                 }),
-             "typed client compatibility adapters belong to the verified "
-             "schema delta");
+                             InternalServerNotifications),
+      "legacy and internal methods are unique additions to generated types");
 
   passed &= expect(
       catalogContainsAll(GeneratedClientRequests, ClientRequest,
@@ -323,33 +236,25 @@ bool testGeneratedSchemaCatalogCoverage() {
           catalogContainsAll(GeneratedClientNotifications, ClientNotification,
                              "generated client notification"),
       "catalog classifies every method in generated ProtocolTypes");
-  passed &=
-      expect(catalogContainsAll(VerifiedNewerClientRequests, ClientRequest,
-                                "verified newer client request"),
-             "catalog classifies every newer-schema client request");
-  passed &=
-      expect(catalogContainsAll(CompatibilityClientRequests, ClientRequest,
-                                "compatibility client request") &&
-                 catalogContainsAll(CompatibilityServerRequests, ServerRequest,
-                                    "compatibility server request") &&
-                 catalogContainsAll(CompatibilityServerNotifications,
-                                    ServerNotification,
-                                    "compatibility server notification"),
-             "catalog classifies every explicit CodexUI compatibility adapter");
+  passed &= expect(catalogContainsAll(LegacyClientRequests, ClientRequest,
+                                      "legacy client request") &&
+                       catalogContainsAll(InternalServerNotifications,
+                                          ServerNotification,
+                                          "internal server notification"),
+                   "catalog classifies every explicit compatibility method");
 
-  passed &=
-      expect(catalogDirectionEqualsUnion(ServerRequest, GeneratedServerRequests,
-                                         CompatibilityServerRequests),
-             "11 server requests exactly match generated types plus adapters");
   passed &= expect(
-      catalogDirectionEqualsUnion(ClientRequest, GeneratedClientRequests,
-                                  VerifiedNewerClientRequests),
-      "157 client requests exactly match generated types plus verified delta");
+      catalogDirectionEqualsUnion(ServerRequest, GeneratedServerRequests, {}),
+      "11 server requests exactly match generated types");
+  passed &=
+      expect(catalogDirectionEqualsUnion(ClientRequest, GeneratedClientRequests,
+                                         LegacyClientRequests),
+             "162 client requests exactly match generated plus legacy methods");
   passed &= expect(
       catalogDirectionEqualsUnion(ServerNotification,
                                   GeneratedServerNotifications,
-                                  CompatibilityServerNotifications),
-      "83 server notifications exactly match generated types plus adapters");
+                                  InternalServerNotifications),
+      "83 server notifications exactly match generated plus internal methods");
   passed &=
       expect(catalogDirectionEqualsUnion(ClientNotification,
                                          GeneratedClientNotifications, {}),
@@ -374,8 +279,8 @@ bool testExactMethods() {
       requests::CurrentTimeRead::method,
       notifications::ModelProviderAuthRecoveryStarted::method,
       notifications::ModelProviderAuthRecoveryCompleted::method,
-      notifications::RawResponseItemCompleted::method,
-      notifications::RawResponseCompleted::method,
+      internalNotifications::RawResponseItemCompleted::method,
+      internalNotifications::RawResponseCompleted::method,
       notifications::ThreadRealtimeItemStarted::method,
       notifications::ThreadRealtimeItemTranscriptDelta::method,
       notifications::ThreadRealtimeItemCompleted::method,
@@ -393,7 +298,7 @@ bool testExactMethods() {
       std::string_view("thread/realtime/item/completed"),
   };
   return expect(methods == expected,
-                "adapter methods exactly match the current wire protocol");
+                "generated and internal methods match the wire protocol");
 }
 
 bool testCurrentTimeRequestAndResponse() {
@@ -428,19 +333,20 @@ bool testNotificationPayloads() {
                        notifications::ModelProviderAuthRecoveryCompleted>(
                        {{"provider", "openai"}, {"recovered", true}}),
                    "auth-recovery-completed Params retain their payload");
-  passed &= expect(
-      notificationPayloadRoundTrips<notifications::RawResponseItemCompleted>(
-          {{"threadId", "thread-1"},
-           {"turnId", "turn-1"},
-           {"item", {{"type", "message"}, {"id", "response-item-1"}}}}),
-      "raw-response-item Params retain nested payloads");
   passed &=
-      expect(notificationPayloadRoundTrips<notifications::RawResponseCompleted>(
+      expect(notificationPayloadRoundTrips<
+                 internalNotifications::RawResponseItemCompleted>(
                  {{"threadId", "thread-1"},
                   {"turnId", "turn-1"},
-                  {"responseId", "response-1"},
-                  {"usage", {{"inputTokens", 12}, {"outputTokens", 4}}}}),
-             "raw-response Params retain nested payloads");
+                  {"item", {{"type", "message"}, {"id", "response-item-1"}}}}),
+             "raw-response-item Params retain nested payloads");
+  passed &= expect(notificationPayloadRoundTrips<
+                       internalNotifications::RawResponseCompleted>(
+                       {{"threadId", "thread-1"},
+                        {"turnId", "turn-1"},
+                        {"responseId", "response-1"},
+                        {"usage", {{"inputTokens", 12}, {"outputTokens", 4}}}}),
+                   "raw-response Params retain nested payloads");
   passed &= expect(
       notificationPayloadRoundTrips<notifications::ThreadRealtimeItemStarted>(
           {{"threadId", "thread-rt"}, {"itemId", "item-rt"}}),
@@ -459,7 +365,7 @@ bool testNotificationPayloads() {
   return passed;
 }
 
-bool testCodexBridgeDispatchesCompatibilityOperations() {
+bool testCodexBridgeDispatchesGeneratedAndInternalOperations() {
   nlohmann::json sent;
   Bridge bridge([&sent](const nlohmann::json &message) {
     sent = message;
@@ -484,12 +390,19 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
       });
   CODEXUI_TEST_REGISTER_NOTIFICATION(ModelProviderAuthRecoveryStarted)
   CODEXUI_TEST_REGISTER_NOTIFICATION(ModelProviderAuthRecoveryCompleted)
-  CODEXUI_TEST_REGISTER_NOTIFICATION(RawResponseItemCompleted)
-  CODEXUI_TEST_REGISTER_NOTIFICATION(RawResponseCompleted)
   CODEXUI_TEST_REGISTER_NOTIFICATION(ThreadRealtimeItemStarted)
   CODEXUI_TEST_REGISTER_NOTIFICATION(ThreadRealtimeItemTranscriptDelta)
   CODEXUI_TEST_REGISTER_NOTIFICATION(ThreadRealtimeItemCompleted)
 #undef CODEXUI_TEST_REGISTER_NOTIFICATION
+
+#define CODEXUI_TEST_REGISTER_INTERNAL_NOTIFICATION(OperationName)             \
+  bridge.onServerNotification<internalNotifications::OperationName>(           \
+      [&notificationCount](internalNotifications::OperationName::Params &) {   \
+        ++notificationCount;                                                   \
+      });
+  CODEXUI_TEST_REGISTER_INTERNAL_NOTIFICATION(RawResponseItemCompleted)
+  CODEXUI_TEST_REGISTER_INTERNAL_NOTIFICATION(RawResponseCompleted)
+#undef CODEXUI_TEST_REGISTER_INTERNAL_NOTIFICATION
 
   bool accepted = bridge.receive({{"kind", "bridge.connection"},
                                   {"event", "opened"},
@@ -505,8 +418,8 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
   constexpr std::array notificationMethods{
       notifications::ModelProviderAuthRecoveryStarted::method,
       notifications::ModelProviderAuthRecoveryCompleted::method,
-      notifications::RawResponseItemCompleted::method,
-      notifications::RawResponseCompleted::method,
+      internalNotifications::RawResponseItemCompleted::method,
+      internalNotifications::RawResponseCompleted::method,
       notifications::ThreadRealtimeItemStarted::method,
       notifications::ThreadRealtimeItemTranscriptDelta::method,
       notifications::ThreadRealtimeItemCompleted::method,
@@ -522,7 +435,7 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
   const nlohmann::json response =
       sent.value("payload", nlohmann::json::object());
   return expect(accepted && currentTimeHandled && notificationCount == 7,
-                "CodexBridge dispatches every compatibility operation") &&
+                "CodexBridge dispatches generated and internal operations") &&
          expect(response.value("id", std::string{}) == "clock-bridge" &&
                     response.value("result", nlohmann::json::object())
                             .value("currentTimeAt", std::int64_t{}) ==
@@ -538,6 +451,6 @@ int main() {
   passed &= testExactMethods();
   passed &= testCurrentTimeRequestAndResponse();
   passed &= testNotificationPayloads();
-  passed &= testCodexBridgeDispatchesCompatibilityOperations();
+  passed &= testCodexBridgeDispatchesGeneratedAndInternalOperations();
   return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
