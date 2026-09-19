@@ -549,10 +549,20 @@ public:
             });
   }
 
+  ~RowViewport() override {
+    QObject::disconnect(qApp, nullptr, this, nullptr);
+    releaseAll(false);
+  }
+
   [[nodiscard]] ui::InspectorRowRequest rowRequest() const {
     ui::InspectorRowRequest result;
-    if (rowCount() != 0)
-      result.first = materializationRows().first;
+    if (rowCount() != 0) {
+      const std::size_t lastFullPage =
+          rowCount() > ui::MaximumInspectorRows
+              ? rowCount() - ui::MaximumInspectorRows
+              : 0;
+      result.first = std::min(materializationRows().first, lastFullPage);
+    }
     result.anchorKey = captureAnchor().key;
     QWidget *focused = QApplication::focusWidget();
     for (const Resident &resident : residents_)
@@ -725,14 +735,19 @@ protected:
   }
 
   bool event(QEvent *event) override {
+    const bool geometryEnvironmentChanged =
+        event->type() == QEvent::FontChange ||
+        event->type() == QEvent::StyleChange ||
+        event->type() == QEvent::ApplicationFontChange ||
+        event->type() == QEvent::DevicePixelRatioChange;
+    const std::optional<Anchor> anchor =
+        geometryEnvironmentChanged && indexedWidth_ != -2
+            ? std::optional<Anchor>{captureAnchor()}
+            : std::nullopt;
     const bool result = QAbstractScrollArea::event(event);
-    switch (event->type()) {
-    case QEvent::FontChange:
-    case QEvent::StyleChange:
-    case QEvent::ApplicationFontChange:
-    case QEvent::DevicePixelRatioChange:
+    if (geometryEnvironmentChanged) {
       if (indexedWidth_ == -2)
-        break;
+        return result;
       indexedWidth_ = -2;
       for (const Resident &resident : residents_) {
         for (MarkdownTextView *view :
@@ -743,15 +758,12 @@ protected:
       }
       // Descendant layouts observe a new font, style, or DPR in the next Qt
       // event-loop phase; measure once they share that geometry environment.
-      QTimer::singleShot(0, this, [this] {
+      QTimer::singleShot(0, this, [this, anchor] {
         if (indexedWidth_ != -2)
           return;
         indexedWidth_ = -1;
-        synchronize();
+        synchronize(nullptr, anchor);
       });
-      break;
-    default:
-      break;
     }
     return result;
   }
@@ -995,13 +1007,14 @@ private:
         std::get<PendingRequestDescriptor>(row.value));
   }
 
-  void synchronize(Resident *remeasure = nullptr) {
+  void synchronize(Resident *remeasure = nullptr,
+                   std::optional<Anchor> retainedAnchor = std::nullopt) {
     if (synchronizing_ || !active_ || indexedWidth_ == -2)
       return;
     bool needsPage = false;
     {
       const QScopedValueRollback synchronizing(synchronizing_, true);
-      const Anchor anchor = captureAnchor();
+      const Anchor anchor = retainedAnchor.value_or(captureAnchor());
       if (remeasure) {
         static_cast<void>(measure(*remeasure));
         remeasure->measured = true;
@@ -1038,19 +1051,13 @@ private:
         return true;
       }
       releaseOutside(first, last);
-      bool created = false;
+      bool admissionDeferred = false;
       for (std::size_t row = first; row < last; ++row) {
         const ui::InspectorRow model = *modelRow(pageData_, row);
         Resident *resident = residentForKey(model.key);
         if (!resident) {
           residents_.push_back({model.key, row, create(model), false});
           resident = &residents_.back();
-          created = true;
-          updateScrollRange();
-          restoreAnchor(anchor);
-          layoutResidents();
-          scheduleAdmission();
-          return false;
         } else {
           resident->row = row;
         }
@@ -1059,11 +1066,8 @@ private:
           resident->measured = true;
           if (row + 1 < last &&
               admissionTiming.elapsed() >= AdmissionBudgetMilliseconds) {
-            updateScrollRange();
-            restoreAnchor(anchor);
-            layoutResidents();
-            scheduleAdmission();
-            return false;
+            admissionDeferred = true;
+            break;
           }
         }
       }
@@ -1071,11 +1075,15 @@ private:
         updateScrollRange();
         restoreAnchor(anchor);
       }
-      if ((!created && indexedWidth_ == rowWidth()) ||
+      layoutResidents();
+      if (admissionDeferred) {
+        scheduleAdmission();
+        return false;
+      }
+      if (!heightChanged || indexedWidth_ != rowWidth() ||
           pass + 1 == MaximumSettlementPasses)
         break;
     }
-    layoutResidents();
     return false;
   }
 
