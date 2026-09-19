@@ -1462,6 +1462,14 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   connect(infoStack, &QStackedWidget::currentChanged, this, requestCurrentPage);
 }
 
+InspectorPane::~InspectorPane() {
+  inspectorTabs->blockSignals(true);
+  infoStack->blockSignals(true);
+  delete planRows;
+  delete agentsRows;
+  delete requestRows;
+}
+
 void InspectorPane::setHideAction(std::function<void()> hide) {
   hideAction = std::move(hide);
 }

@@ -42,6 +42,7 @@ public:
   using RequestAction = std::function<void(const nodegraph::NodeRef &)>;
 
   explicit InspectorPane(QWidget *parent = nullptr);
+  ~InspectorPane() override;
   static void prepareMarkdown(ui::InspectorSnapshot &snapshot);
 
   void setHideAction(std::function<void()> hide);
