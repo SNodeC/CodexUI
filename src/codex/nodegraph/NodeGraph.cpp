@@ -1328,14 +1328,22 @@ void NodeGraph::WriteAccess::removeMany(std::span<const NodeRef> nodes) {
                        return removalSet.contains(node.get());
                      }),
       graph_->orderedNodes_.end());
-  std::array<bool, NodeGraph::NodeKindCount> removedKinds{};
-  for (const NodeRef &node : removalOrder)
-    removedKinds[static_cast<std::size_t>(node->id_.kind)] = true;
-  for (std::size_t kind = 0; kind < removedKinds.size(); ++kind) {
-    if (!removedKinds[kind])
+  std::array<std::uint64_t, NodeGraph::NodeKindCount> firstRemovedByKind;
+  firstRemovedByKind.fill(std::numeric_limits<std::uint64_t>::max());
+  for (const NodeRef &node : removalOrder) {
+    std::uint64_t &first =
+        firstRemovedByKind[static_cast<std::size_t>(node->id_.kind)];
+    first = std::min(first, node->insertionOrder_);
+  }
+  for (std::size_t kind = 0; kind < firstRemovedByKind.size(); ++kind) {
+    if (firstRemovedByKind[kind] ==
+        std::numeric_limits<std::uint64_t>::max())
       continue;
     auto &nodes = graph_->orderedNodesByKind_[kind];
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+    const auto firstRemovedOfKind = std::ranges::lower_bound(
+        nodes, firstRemovedByKind[kind], {},
+        [](const NodeRef &node) { return node->insertionOrder_; });
+    nodes.erase(std::remove_if(firstRemovedOfKind, nodes.end(),
                                [&removalSet](const NodeRef &node) {
                                  return removalSet.contains(node.get());
                                }),
