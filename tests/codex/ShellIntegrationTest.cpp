@@ -1070,12 +1070,22 @@ void applicationFontChangeRegeneratesUiGeometry(Configuration &configuration) {
     auto *topBar = shell.findChild<QFrame *>(QStringLiteral("topBar"));
     auto *statusBar =
         shell.findChild<QFrame *>(QStringLiteral("customStatusBar"));
+    auto *statusAttribution =
+        shell.findChild<QLabel *>(QStringLiteral("statusAttribution"));
     auto *conversation =
         shell.findChild<QFrame *>(QStringLiteral("conversation"));
-    require(editor && brandTitle && topBar && statusBar && conversation,
+    require(editor && brandTitle && topBar && statusBar && statusAttribution &&
+                conversation,
             "the shell exposes its font-dependent and statically styled "
             "surfaces");
-    if (editor && brandTitle && topBar && statusBar && conversation) {
+    if (editor && brandTitle && topBar && statusBar && statusAttribution &&
+        conversation) {
+      require(statusAttribution->isVisible() && statusAttribution->width() > 0,
+              "the footer attribution retains visible intrinsic width");
+      require(statusAttribution->text().contains(
+                  QStringLiteral("href=\"https://github.com/volkerchristian\">"
+                                 "Volker Christian</a>")),
+              "the footer links Volker Christian to the author's GitHub account");
       const QImage topPixels = topBar->grab().toImage();
       const QImage statusPixels = statusBar->grab().toImage();
       const QImage conversationPixels = conversation->grab().toImage();

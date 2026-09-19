@@ -761,7 +761,9 @@ void ShellWidget::Impl::buildUi() {
   auto *attribution = new QLabel(
       QStringLiteral(
           "<span style=\"color:%1;font-weight:600\">"
-          "© Volker Christian &amp; Codex</span>  |  "
+          "© <a style=\"color:%1;text-decoration:none;font-weight:600\" "
+          "href=\"https://github.com/volkerchristian\">Volker Christian</a>"
+          " &amp; Codex</span>  |  "
           "<a style=\"color:%1;text-decoration:none;font-weight:600\" "
           "href=\"https://github.com/SNodeC/CodexUI\">CodexUI</a>  •  "
           "<a style=\"color:%1;text-decoration:none;font-weight:600\" "
@@ -777,8 +779,7 @@ void ShellWidget::Impl::buildUi() {
   attribution->setOpenExternalLinks(true);
   attribution->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
                                        Qt::LinksAccessibleByKeyboard);
-  attribution->setMinimumWidth(0);
-  attribution->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  attribution->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   statusLayout->addWidget(attribution);
   statusLayout->addStretch();
   auto *statusCaption = makeStatusLabel(
