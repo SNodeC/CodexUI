@@ -31,6 +31,97 @@ tests; M-5 revisits missing visible rows; NEW-5 did not increase actual shell
 minimum width in the styled probe. D-5 stays withdrawn. Keep existing ownership
 guards, useful diagnostics, incremental update paths and visual behavior.
 
+### Separately authorized C-1 — projection-task lifetime (2026-09-21)
+
+- **Authorization and baseline:** after reviewing Claude's C-1 against clean
+  `7a89045`, the user explicitly requested the reviewed fix, including its
+  quantified **+2 production CLOC**. This is a separately requested correction;
+  the numbered backlog above and the unresolved item-4 gate are unchanged.
+- **Verified invariant violation:** copied `NodeGraphUiAdapter` instances in
+  both shell pool jobs borrow the session's graph. `alive` only invalidates
+  queued UI continuations; it does not extend graph lifetime. `main()` joins
+  the client worker, destroys the window, then destroys the session/graph.
+  Global-pool projection jobs have no join before that graph destruction.
+  Conversation snapshots/deltas and Inspector projection are both affected.
+- **Review corrections:** in Qt 6.10.2, `QCoreApplication` itself joins/deletes
+  the global pool, not only static destruction after `main`; it still runs
+  after graph destruction here. `QThreadPool` destruction already joins its
+  jobs, but an explicit shell-teardown join makes the boundary clear. Waiting
+  does not deliver queued UI callbacks; keep the existing token invalidation
+  first. A single-thread limit is not part of the fix: existing per-category
+  in-flight guards already coalesce requests, and serializing Inspector behind
+  conversation could introduce unnecessary latency.
+- **Replacement and ownership:** add one `QThreadPool projectionPool` member;
+  immediately after `alive=false` in `~Impl`, wait for that pool; replace both
+  global-pool dispatch sites with the member. This removes unowned execution
+  for graph readers without moving projection back to the GUI thread or
+  introducing shared graph ownership. Merely checking the token in the worker
+  would leave a check/use race. Waiting on the global pool would instead tie
+  shell shutdown to unrelated Git/image jobs. No new flag, timer, callback,
+  cache, renderer, protocol state or concurrency limit is introduced.
+- **Documentation:** updated `codex-architecture.md` and
+  `two-thread-shared-node-graph.md` to describe the actual single writer,
+  UI/pool readers, session-before-shell lifetime requirement, queued result
+  delivery and shutdown join. Git/image work remains separate.
+- **Deterministic regression proof:** a standalone executable reuses the
+  existing shell integration fixtures and links the actual production
+  libraries. Test-only linker wrappers around Qt pool dispatch/join pause
+  the two real projection runnables before their adapter work. Cases cover
+  both runnables running, one running with the second queued, and completed
+  work whose UI continuations have not yet been delivered. A controller
+  releases them when teardown reaches its join or incorrectly returns;
+  there is no timing guess about when a large projection happens to run.
+  The one-thread limit in the queued case is confined to this probe.
+- **Before/after result:** the pre-change executable returns from destruction
+  with **0/2 jobs finished** in both outstanding-work cases and fails four
+  lifetime assertions (exit 1). It keeps the graph alive for cleanup rather
+  than deliberately causing a use-after-free. The same probe object linked
+  against the corrected shell returns with **2/2 finished** in all three
+  cases (exit 0). It then destroys the graph and explicitly delivers queued
+  results; both Debug and ASan/UBSan versions pass without a stale UI access.
+  The already-queued-result case also passes before the fix, confirming that
+  the existing callback token was not the defective ownership boundary.
+- **Probe reproducibility:** source/build driver/binaries and logs are under
+  `/tmp/codexui-c1-lifetime.v30ZwE/`. Build with
+  `node /tmp/codexui-c1-lifetime.v30ZwE/build.mjs <build-directory> <binary>`;
+  the driver reuses the target's actual compile/link commands and production
+  libraries. `link-only <existing-probe-object>` allows the same probe object
+  in a before/after comparison. Run as `xvfb-run -a env
+  QT_QPA_PLATFORM=offscreen timeout 15s <binary>` (30 s for sanitizers).
+  `before.log`, `after.log` and `sanitized.log` record all three cases.
+  The wrappers remain outside production and the permanent test suite.
+- **Shutdown latency:** controlled Debug cases took **2.443 / 1.960 / 1.563
+  ms** after the fix; ASan/UBSan **6.026 / 4.916 / 2.405 ms**. These small
+  fixture measurements are not a bound for large histories: teardown waits
+  for remaining finite task work. Tasks must not wait for a blocking UI
+  callback; returning after a timeout would not solve graph ownership.
+- **Build and regression commands:** `cmake --build
+  /tmp/codexui-current-debug.fMMvCu --target codex-ui
+  codexui-shell-integration-test codexui-application-layout-test -j14` passes;
+  shell integration also builds with `-j14` in
+  `/tmp/codexui-current-asan-ubsan.2oIJr4`. Normal integration command:
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -R '^codexui-shell-integration$'
+  --repeat until-fail:3 --output-on-failure -j14`. All three baseline runs
+  pass (**8.39 / 8.33 / 8.40 s**); all three fixed runs pass (**7.96 / 7.95 /
+  8.47 s**). Existing heartbeat, staged presentation, thread switching,
+  paging and frame-work checks remain unchanged. Logs:
+  `/tmp/codexui-c1-{baseline,after}.log`. Suite times do not prove every
+  interaction became faster.
+- **Sanitizer integration:** `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  ctest --test-dir /tmp/codexui-current-asan-ubsan.2oIJr4
+  --output-on-failure -j14 -R '^codexui-shell-integration$'` passes **1/1**,
+  **11.87 s**, with no sanitizer diagnostics or new suppressions. Log:
+  `/tmp/codexui-c1-sanitizers.log`. All Debug/sanitizer Xvfb wrappers exit 0;
+  these are offscreen checks, not native-compositor qualification.
+- **Accounting:** `ShellWidget.cpp` **2,768 → 2,770 production CLOC (+2)**,
+  **2,913 → 2,915 physical lines (+2)**. Permanent test-code delta **0**;
+  existing tests and thresholds are unchanged, with focused instrumentation
+  confined to the standalone probe. Documentation is accounted separately.
+  Final diff review and `git diff --check` pass. C-1 is complete for the
+  reviewed graph-reader lifetime invariant. No commit, push, install,
+  process restart or upstream edit was performed in this stage.
+
 ### Step 1 change gate — NEW-1
 
 - **Invariant:** bounded projected UTF-8 must remain valid for every native

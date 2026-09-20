@@ -6,8 +6,8 @@ keeps only current in-memory state and genuinely local interaction state.
 
 ## Native application
 
-The native application uses one shared `NodeGraph` across exactly two relevant
-app-server/UI threads:
+The native application uses one shared `NodeGraph`, with one protocol writer
+and UI/projection readers:
 
 ```text
 Qt main thread
@@ -16,7 +16,17 @@ Qt main thread
         <-> bounded typed SPSC queues and two Linux eventfds
 existing SNode.C worker thread
   transport, CodexBridge, protocol decode/encode and sole graph writes
+shell-owned projection pool
+  read-only conversation snapshots/deltas and Inspector projection
+  owning value results queued back to the Qt thread
 ```
+
+`FrontendSession` owns the graph and outlives the shell. Shell destruction
+invalidates queued UI continuations, then joins its projection pool before
+the session can destroy the graph. Existing in-flight guards coalesce work
+separately for conversation and Inspector; neither worker accesses widgets.
+Global-pool shutdown at application destruction would be too late for these
+borrowed graph readers. Local Git/image jobs remain separate global-pool work.
 
 There is no internal JSONL, socketpair payload path, presentation model, mirror
 graph, snapshot history, or callback framework. The complete implemented

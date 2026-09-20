@@ -476,6 +476,7 @@ struct ShellWidget::Impl final {
 
   ~Impl() {
     alive->store(false, std::memory_order_release);
+    projectionPool.waitForDone();
     session.setGraphChangedHandler({});
     session.setProtocolDiagnosticHandler({});
     if (!pendingUiDetachments.empty()) {
@@ -566,6 +567,7 @@ struct ShellWidget::Impl final {
   FrontendSession &session;
   ui::NodeGraphUiAdapter uiAdapter;
   std::shared_ptr<std::atomic_bool> alive;
+  QThreadPool projectionPool;
   std::optional<NewThreadDraft> newThreadDraft;
   std::string creationDraftCorrelation;
   std::uint64_t nextCreationDraftSerial = 1;
@@ -1175,7 +1177,7 @@ void ShellWidget::Impl::startConversationSnapshot() {
   const nodegraph::NodeRef requestedThread = boundGraphThread;
   const ui::NodeGraphUiAdapter adapter = uiAdapter;
   const auto token = alive;
-  QThreadPool::globalInstance()->start(
+  projectionPool.start(
       [this, requestedThread, adapter, token, fullSnapshot, afterRevision] {
         std::uint64_t graphRevision = 0;
         auto snapshot =
@@ -1313,7 +1315,7 @@ void ShellWidget::Impl::startInspectorProjection() {
   const ui::InspectorRowRequest request = requestedInspectorRows;
   const ui::NodeGraphUiAdapter adapter = uiAdapter;
   const auto token = alive;
-  QThreadPool::globalInstance()->start(
+  projectionPool.start(
       [this, thread, projection, request, adapter, token, generation] {
         auto snapshot = adapter.inspector(thread, projection, request);
         if (snapshot)

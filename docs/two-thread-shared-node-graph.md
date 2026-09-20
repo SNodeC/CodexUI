@@ -1,4 +1,4 @@
-# Two-thread shared node graph
+# Shared node graph: writer, UI and projection readers
 
 ## Scope and baseline
 
@@ -20,9 +20,10 @@ Without that isolated settings directory, `codexui-git-changes-live` failed its
 persisted-resolution recreation case because the test shared ambient QSettings;
 the isolated run records the product baseline without weakening a test.
 
-## One graph and two threads
+## One graph, one writer and read-only projections
 
-The native application has exactly two relevant execution threads:
+The protocol path retains its Qt main thread and SNode.C writer thread.
+Conversation and Inspector projections additionally run in a shell-owned pool:
 
 ```text
 Qt main thread                         existing SNode.C worker thread
@@ -34,13 +35,32 @@ typed user actions                     protocol updates and correlations
 QSocketNotifier                        native descriptor receiver
         |                                         |
         +-- bounded SPSC + eventfd each way ------+
+
+Shell-owned QThreadPool
+  non-blocking graph reads for conversation snapshots/deltas and Inspector
+  owning projection values and prepared Inspector Markdown
+  queued UI continuation; no QWidget access in pool tasks
 ```
 
 There is one current in-memory `NodeGraph`, shared by those threads. The
 app-server remains authoritative for provider facts. This data path has no
-mirror, snapshot history, journal, presentation model, view-state model,
-projector, serialized internal protocol, or third execution context. The
-pre-existing `GitDiffProvider` may use Qt's global thread pool for local
+mirror, snapshot history, journal or serialized internal protocol. The
+stateless `NodeGraphUiAdapter` projects current graph state without becoming
+another state authority. Existing conversation and Inspector in-flight guards
+coalesce requests independently; no single-thread pool limit forces the two
+surfaces to serialize.
+
+`FrontendSession` owns the graph and must outlive `ShellWidget`. Shell teardown
+first invalidates its shared continuation token, then waits for all of its
+projection tasks, before releasing remaining shell state. Queued continuations
+still check the token: joining tasks does not deliver their UI callbacks.
+The join occurs while the session's graph and `QApplication` remain alive;
+the application-global pool's later shutdown cannot provide that guarantee.
+Tasks must not require a blocking call back to the UI thread. Shutdown waits
+for finite outstanding work; it does not impose a fixed-duration timeout that
+could let graph readers outlive their owner.
+
+The pre-existing `GitDiffProvider` may use Qt's global thread pool for local
 libgit2 work; it neither consumes app-server traffic nor reads or writes the
 node graph and is outside this deliberately narrow data path.
 
@@ -110,11 +130,12 @@ and only then queues a notification. An idempotent update or an explicitly
 state-neutral message is a no-op: it does not advance either graph or node
 revisions and does not queue `GraphChanged`.
 
-Qt uses try-read acquisition only. Failure schedules another Qt event-loop
-pass; Qt never waits for the writer. A successful read either briefly pins a
-node's immutable current storage or extracts only values needed for the visible
-render. The access is released before any QWidget call. No callback executes
-while a graph or queue lock is held.
+UI and projection readers use try-read acquisition only. Failure schedules
+another Qt event-loop pass; readers do not wait for the writer's lock. The UI
+extracts values for visible rendering; pool tasks can traverse the loaded
+conversation to prepare a snapshot or delta. The access is released before
+any QWidget call or queued UI continuation. No callback executes while a graph
+or queue lock is held.
 
 This gives Qt either the state before a decoded message or the complete state
 after it, never an intermediate graph.
