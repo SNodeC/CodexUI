@@ -117,7 +117,11 @@ QString accessibleCardText(const VisibleCardData &card) {
           bool complete =
               appendAccessibleLine(lines, payload.explanation, false);
           for (const PlanStepData &step : payload.steps) {
-            if (!complete || !appendAccessibleLine(lines, step.text, true)) {
+            if (!complete ||
+                !appendAccessibleLine(lines, displayStatus(step.status),
+                                      true) ||
+                !appendAccessibleLine(lines, ": ", false) ||
+                !appendAccessibleLine(lines, step.text, false)) {
               complete = false;
               break;
             }

@@ -195,20 +195,208 @@ private:
 };
 
 #if QT_CONFIG(accessibility)
-namespace {
 
+// Logical rows outlive their QWidget residents. These interfaces retain only
+// identity; content, selection, folding and geometry are read from their
+// owners.
+class ConversationAccessibleItem final : public QAccessibleInterface,
+                                         public QAccessibleActionInterface {
+public:
+  ConversationAccessibleItem(ConversationView *view, std::string key)
+      : owner_(view), key_(std::move(key)) {}
+  ConversationView *view() const {
+    return dynamic_cast<ConversationView *>(owner_.data());
+  }
+  QModelIndex index() const {
+    auto *owner = view();
+    return owner ? owner->model_->indexForStableKey(key_) : QModelIndex{};
+  }
+  bool isValid() const override { return index().isValid(); }
+  QObject *object() const override { return nullptr; }
+  QAccessible::Role role() const override { return QAccessible::ListItem; }
+  QAccessibleInterface *parent() const override {
+    auto *owner = view();
+    return isValid() && owner->stagingOverlay_->isHidden()
+               ? QAccessible::queryAccessibleInterface(owner->viewport())
+               : nullptr;
+  }
+  QString text(QAccessible::Text type) const override {
+    const QModelIndex row = index();
+    return type == QAccessible::Name ? row.data(Qt::DisplayRole).toString()
+           : type == QAccessible::Description
+               ? row.data(Qt::AccessibleTextRole).toString()
+               : QString{};
+  }
+  void setText(QAccessible::Text, const QString &) override {}
+  QRect rect() const override {
+    auto *owner = view();
+    const QRect geometry = owner ? owner->visualRect(index()) : QRect{};
+    return geometry.isEmpty()
+               ? QRect{}
+               : QRect(owner->viewport()->mapToGlobal(geometry.topLeft()),
+                       geometry.size());
+  }
+  QAccessible::State state() const override {
+    QAccessible::State result;
+    auto *owner = view();
+    const QModelIndex row = index();
+    if (!owner || !row.isValid()) {
+      result.invalid = true;
+      return result;
+    }
+    const bool presented =
+        owner->stagingOverlay_->isHidden() && owner->rowPresented(row.row());
+    result.disabled = !owner->isEnabled();
+    result.selectable = result.focusable =
+        presented && owner->isVisible() && !result.disabled;
+    result.selected = owner->selectionModel()->isSelected(row);
+    result.focused =
+        presented && owner->hasFocus() && owner->currentIndex() == row;
+    result.offscreen =
+        !owner->visualRect(row).intersects(owner->viewport()->rect());
+    result.invisible = !presented || !owner->isVisible() || result.offscreen;
+    return result;
+  }
+  QAccessibleInterface *renderer() const {
+    auto *owner = view();
+    auto *card = owner && isValid() ? owner->cardForStableKey(key_) : nullptr;
+    return card && !card->isHidden() &&
+                   card->parentWidget() == owner->viewport() &&
+                   owner->stagingOverlay_->isHidden()
+               ? QAccessible::queryAccessibleInterface(card)
+               : nullptr;
+  }
+  int childCount() const override { return renderer() ? 1 : 0; }
+  QAccessibleInterface *child(int child) const override {
+    return child == 0 ? renderer() : nullptr;
+  }
+  int indexOfChild(const QAccessibleInterface *child) const override {
+    return child && child == renderer() ? 0 : -1;
+  }
+  QAccessibleInterface *childAt(int x, int y) const override {
+    auto *body = renderer();
+    return body && body->rect().contains(x, y) ? body : nullptr;
+  }
+  QAccessibleInterface *focusChild() const override {
+    auto *body = renderer();
+    if (state().focused) {
+      auto *list = parent();
+      return list ? list->focusChild() : nullptr;
+    }
+    return body ? body->focusChild() : nullptr;
+  }
+  void *interface_cast(QAccessible::InterfaceType type) override {
+    return type == QAccessible::ActionInterface
+               ? static_cast<QAccessibleActionInterface *>(this)
+               : nullptr;
+  }
+  QStringList actionNames() const override {
+    return state().focusable ? QStringList{setFocusAction()} : QStringList{};
+  }
+  void doAction(const QString &action) override {
+    if (action != setFocusAction() || !state().focusable)
+      return;
+    QPointer<ConversationView> owner(view());
+    const QPersistentModelIndex row = index();
+    owner->revealRow(row, QAbstractItemView::EnsureVisible, true);
+    if (owner && row.isValid()) {
+      owner->selectionModel()->setCurrentIndex(row,
+                                               QItemSelectionModel::NoUpdate);
+      if (!owner)
+        return;
+      owner->setFocus(Qt::OtherFocusReason);
+    }
+  }
+  QStringList keyBindingsForAction(const QString &) const override {
+    return {};
+  }
+
+private:
+  QPointer<QWidget> owner_;
+  std::string key_;
+};
+
+namespace {
 ConversationView *conversationViewFor(QWidget *widget) {
   for (; widget; widget = widget->parentWidget())
     if (auto *view = dynamic_cast<ConversationView *>(widget))
       return view;
   return nullptr;
 }
+} // namespace
 
 class ConversationAccessible final : public QAccessibleWidget,
                                      public QAccessibleSelectionInterface {
 public:
   ConversationAccessible(QWidget *widget, QAccessible::Role role)
-      : QAccessibleWidget(widget, role) {}
+      : QAccessibleWidget(widget, role) {
+    auto *owner = conversationViewFor(widget);
+    if (role != QAccessible::List || !owner)
+      return;
+    const auto reorder = [this] {
+      QAccessibleEvent event(this, QAccessible::ObjectReorder);
+      QAccessible::updateAccessibility(&event);
+    };
+    QObject::connect(owner->model_, &QAbstractItemModel::modelAboutToBeReset,
+                     &lifetime_, [this] { clearItems(); });
+    QObject::connect(
+        owner->model_, &QAbstractItemModel::rowsAboutToBeRemoved, &lifetime_,
+        [this, owner](const QModelIndex &, int first, int last) {
+          if (items_.empty())
+            return;
+          for (int row = first; row <= last; ++row) {
+            auto found = items_.find(owner->model_->row(row)->stableKey);
+            if (found == items_.end())
+              continue;
+            const QAccessible::Id id = found->second;
+            items_.erase(found);
+            QAccessible::deleteAccessibleInterface(id);
+          }
+        });
+    QObject::connect(owner->model_, &QAbstractItemModel::modelReset, &lifetime_,
+                     reorder);
+    QObject::connect(owner->model_, &QAbstractItemModel::rowsInserted,
+                     &lifetime_, reorder);
+    QObject::connect(owner->model_, &QAbstractItemModel::rowsRemoved,
+                     &lifetime_, reorder);
+    QObject::connect(owner->model_, &QAbstractItemModel::rowsMoved, &lifetime_,
+                     reorder);
+    QObject::connect(
+        owner->model_, &QAbstractItemModel::dataChanged, &lifetime_,
+        [this, owner](const QModelIndex &first, const QModelIndex &last,
+                      const QList<int> &roles) {
+          if (items_.empty() ||
+              (!roles.isEmpty() && !roles.contains(Qt::AccessibleTextRole) &&
+               !roles.contains(ConversationItemModel::PresentedRole)))
+            return;
+          const QPointer<QObject> alive(&lifetime_);
+          const QPersistentModelIndex end = last;
+          for (int row = first.row(); row <= end.row(); ++row) {
+            const auto found = items_.find(owner->model_->row(row)->stableKey);
+            if (found == items_.end())
+              continue;
+            const auto id = found->second;
+            if (roles.isEmpty() || roles.contains(Qt::AccessibleTextRole)) {
+              QAccessibleEvent event(QAccessible::accessibleInterface(id),
+                                     QAccessible::DescriptionChanged);
+              QAccessible::updateAccessibility(&event);
+              if (!alive)
+                return;
+            }
+            if (auto *item = QAccessible::accessibleInterface(id);
+                item && roles.contains(ConversationItemModel::PresentedRole)) {
+              QAccessible::State changed;
+              changed.invisible = changed.offscreen = true;
+              changed.selectable = changed.focusable = true;
+              QAccessibleStateChangeEvent event(item, changed);
+              QAccessible::updateAccessibility(&event);
+            }
+            if (!alive)
+              return;
+          }
+        });
+  }
+  ~ConversationAccessible() override { clearItems(); }
 
   void *interface_cast(QAccessible::InterfaceType type) override {
     return role() == QAccessible::List &&
@@ -216,88 +404,107 @@ public:
                ? static_cast<QAccessibleSelectionInterface *>(this)
                : QAccessibleWidget::interface_cast(type);
   }
-
   int childCount() const override {
-    return projectsChildren() ? physicalChildren().size()
-                              : QAccessibleWidget::childCount();
+    if (role() == QAccessible::List)
+      return chromeChildren().size() + logicalCount();
+    return role() == QAccessible::Pane ? chromeChildren().size()
+                                       : QAccessibleWidget::childCount();
   }
-
   QAccessibleInterface *child(int index) const override {
-    if (!projectsChildren())
+    if (role() != QAccessible::Pane && role() != QAccessible::List)
       return QAccessibleWidget::child(index);
-    QWidget *childWidget = physicalChildren().value(index);
-    return childWidget ? QAccessible::queryAccessibleInterface(childWidget)
-                       : nullptr;
+    const auto chrome = chromeChildren();
+    if (index >= 0 && index < chrome.size())
+      return QAccessible::queryAccessibleInterface(chrome.at(index));
+    auto *owner = conversationViewFor(widget());
+    index -= chrome.size();
+    return owner && index >= 0 && index < logicalCount()
+               ? itemForIndex(owner->model_->index(index))
+               : nullptr;
   }
-
   int indexOfChild(const QAccessibleInterface *child) const override {
-    return projectsChildren()
-               ? physicalChildren().indexOf(
-                     child ? qobject_cast<QWidget *>(child->object()) : nullptr)
-               : QAccessibleWidget::indexOfChild(child);
+    if (role() != QAccessible::Pane && role() != QAccessible::List)
+      return QAccessibleWidget::indexOfChild(child);
+    const auto *item = dynamic_cast<const ConversationAccessibleItem *>(child);
+    if (role() == QAccessible::List && logicalCount() && item &&
+        item->view() == conversationViewFor(widget())) {
+      const auto index = item->index();
+      return index.isValid() ? chromeChildren().size() + index.row() : -1;
+    }
+    return chromeChildren().indexOf(
+        child ? qobject_cast<QWidget *>(child->object()) : nullptr);
   }
-
+  QAccessibleInterface *childAt(int x, int y) const override {
+    if (role() != QAccessible::List)
+      return QAccessibleWidget::childAt(x, y);
+    for (auto *control : chromeChildren()) {
+      auto *accessible = QAccessible::queryAccessibleInterface(control);
+      if (accessible && accessible->rect().contains(x, y))
+        return accessible;
+    }
+    auto *owner = conversationViewFor(widget());
+    return owner && logicalCount()
+               ? itemForIndex(owner->indexAt(
+                     owner->viewport()->mapFromGlobal(QPoint(x, y))))
+               : nullptr;
+  }
+  QAccessibleInterface *parent() const override {
+    if (auto *card = qobject_cast<ConversationCard *>(widget())) {
+      auto *owner = conversationViewFor(card);
+      if (owner && card->parentWidget() == owner->viewport()) {
+        auto *list = dynamic_cast<ConversationAccessible *>(
+            QAccessible::queryAccessibleInterface(owner->viewport()));
+        return list && !card->isHidden() &&
+                       owner->cardForStableKey(stableKey(card->data().key)) ==
+                           card
+                   ? list->itemForIndex(owner->model_->indexForStableKey(
+                         stableKey(card->data().key)))
+                   : nullptr;
+      }
+    }
+    return QAccessibleWidget::parent();
+  }
+  QString text(QAccessible::Text type) const override {
+    return role() == QAccessible::Client && (type == QAccessible::Name ||
+                                             type == QAccessible::Description)
+               ? QString{}
+               : QAccessibleWidget::text(type);
+  }
   QAccessibleInterface *focusChild() const override {
-    ConversationView *owner = conversationViewFor(widget());
+    auto *owner = conversationViewFor(widget());
     if (owner && owner->hasFocus()) {
       if (role() == QAccessible::List)
         return itemForIndex(owner->currentIndex());
       if (role() == QAccessible::Pane) {
-        QAccessibleInterface *list = child(0);
-        QAccessibleInterface *row = list ? list->focusChild() : nullptr;
+        auto *list = child(0);
+        auto *row = list ? list->focusChild() : nullptr;
         return row ? row : list;
       }
     }
     return QAccessibleWidget::focusChild();
   }
-
   QAccessible::State state() const override {
-    QAccessible::State result = QAccessibleWidget::state();
-    if (role() == QAccessible::List) {
-      const auto *history = widget()->findChild<QPushButton *>(
-          QStringLiteral("conversationLoadMore"), Qt::FindDirectChildrenOnly);
-      result.busy = history && history->isVisible() && !history->isEnabled();
-      return result;
-    }
+    auto result = QAccessibleWidget::state();
+    auto *owner = conversationViewFor(widget());
+    if (role() == QAccessible::List && owner)
+      result.busy =
+          owner->loadMore_->isVisible() && !owner->loadMore_->isEnabled();
     if (role() == QAccessible::StatusBar) {
       const auto *overlay =
           dynamic_cast<const ConversationLoadingOverlay *>(widget());
       result.busy = overlay && overlay->isBusy();
-      return result;
     }
-    if (role() != QAccessible::ListItem)
-      return result;
-    ConversationView *owner = conversationViewFor(widget());
-    auto *card = qobject_cast<ConversationCard *>(widget());
-    if (!owner || !card || card->parentWidget() != owner->viewport()) {
-      result.offscreen = result.invisible = true;
-      return result;
-    }
-    const QModelIndex index = owner->conversationModel()->indexForStableKey(
-        stableKey(card->data().key));
-    const bool exposed = index.isValid() && !card->isHidden();
-    const bool interactive = exposed && owner->isVisible() &&
-                             owner->isEnabled() && card->isEnabled();
-    result.focusable = result.selectable = interactive;
-    result.selected = exposed && owner->selectionModel()->isSelected(index);
-    result.focused =
-        exposed && owner->hasFocus() && owner->currentIndex() == index;
-    result.offscreen = !card->geometry().intersects(owner->viewport()->rect());
-    result.invisible = result.invisible || !exposed || result.offscreen;
     return result;
   }
-
   int selectedItemCount() const override { return selectedItems().size(); }
-
   QList<QAccessibleInterface *> selectedItems() const override {
     QList<QAccessibleInterface *> result;
-    if (ConversationView *owner = conversationViewFor(widget()))
-      for (const QModelIndex &index : owner->selectionModel()->selectedRows())
-        if (QAccessibleInterface *item = itemForIndex(index))
+    if (auto *owner = conversationViewFor(widget()); owner && logicalCount())
+      for (const auto &index : owner->selectionModel()->selectedRows())
+        if (auto *item = itemForIndex(index))
           result.push_back(item);
     return result;
   }
-
   bool select(QAccessibleInterface *item) override {
     return setItemSelected(item, true);
   }
@@ -306,28 +513,38 @@ public:
   }
   bool selectAll() override { return false; }
   bool clear() override {
-    ConversationView *owner = conversationViewFor(widget());
+    const QPointer<ConversationView> owner(conversationViewFor(widget()));
     if (!owner || !owner->isVisible() || !owner->isEnabled())
       return false;
     owner->selectionModel()->clearSelection();
-    return !owner->selectionModel()->hasSelection();
+    return owner && !owner->selectionModel()->hasSelection();
+  }
+  QAccessibleInterface *itemForIndex(const QModelIndex &index) const {
+    auto *owner = conversationViewFor(widget());
+    if (!owner || role() != QAccessible::List || !index.isValid() ||
+        index.model() != owner->model_ || !logicalCount())
+      return nullptr;
+    const auto &key = owner->model_->row(index.row())->stableKey;
+    const auto found = items_.find(key);
+    if (found != items_.end())
+      return QAccessible::accessibleInterface(found->second);
+    auto *item = new ConversationAccessibleItem(owner, key);
+    items_.emplace(key, QAccessible::registerAccessibleInterface(item));
+    return item;
   }
 
 private:
-  bool projectsChildren() const {
-    return role() == QAccessible::Pane || role() == QAccessible::List;
+  int logicalCount() const {
+    auto *owner = conversationViewFor(widget());
+    return role() == QAccessible::List && owner &&
+                   (!owner->stagingOverlay_ ||
+                    owner->stagingOverlay_->isHidden())
+               ? owner->model_->rowCount()
+               : 0;
   }
-
-  QModelIndex indexForCard(const ConversationCard *card) const {
-    ConversationView *owner = conversationViewFor(widget());
-    return owner && card ? owner->conversationModel()->indexForStableKey(
-                               stableKey(card->data().key))
-                         : QModelIndex{};
-  }
-
-  QList<QWidget *> physicalChildren() const {
+  QList<QWidget *> chromeChildren() const {
     QList<QWidget *> result;
-    ConversationView *owner = conversationViewFor(widget());
+    auto *owner = conversationViewFor(widget());
     if (!owner)
       return result;
     if (role() == QAccessible::Pane) {
@@ -336,80 +553,50 @@ private:
            {owner->horizontalScrollBar(), owner->verticalScrollBar()})
         if (bar->isVisible())
           result.push_back(bar->parentWidget());
-      if (QWidget *corner = owner->cornerWidget();
-          corner && corner->isVisible())
+      if (auto *corner = owner->cornerWidget(); corner && corner->isVisible())
         result.push_back(corner);
-      return result;
+    } else if (role() == QAccessible::List) {
+      if (owner->stagingOverlay_ && !owner->stagingOverlay_->isHidden())
+        return {owner->stagingOverlay_};
+      if (!owner->loadMore_->isHidden())
+        result.push_back(owner->loadMore_);
+      if (!owner->empty_->isHidden())
+        result.push_back(owner->empty_);
     }
-    if (role() != QAccessible::List || widget() != owner->viewport())
-      return result;
-    QList<ConversationCard *> cards;
-    for (QWidget *childWidget : widget()->findChildren<QWidget *>(
-             QString{}, Qt::FindDirectChildrenOnly)) {
-      if (dynamic_cast<ConversationLoadingOverlay *>(childWidget) &&
-          !childWidget->isHidden())
-        return {childWidget};
-      if (auto *card = qobject_cast<ConversationCard *>(childWidget)) {
-        if (!card->isHidden() && indexForCard(card).isValid())
-          cards.push_back(card);
-      } else if (!childWidget->isHidden() &&
-                 (childWidget->objectName() ==
-                      QStringLiteral("conversationLoadMore") ||
-                  childWidget->objectName() ==
-                      QStringLiteral("conversationEmpty"))) {
-        result.push_back(childWidget);
-      }
-    }
-    std::ranges::sort(
-        cards, std::ranges::less{},
-        [this](ConversationCard *card) { return indexForCard(card).row(); });
-    for (ConversationCard *card : cards)
-      result.push_back(card);
     return result;
   }
-
-  QAccessibleInterface *itemForIndex(const QModelIndex &index) const {
-    if (!index.isValid())
-      return nullptr;
-    for (QWidget *childWidget : physicalChildren())
-      if (auto *card = qobject_cast<ConversationCard *>(childWidget);
-          card && indexForCard(card) == index)
-        return QAccessible::queryAccessibleInterface(card);
-    return nullptr;
+  void clearItems() {
+    auto retired = std::move(items_);
+    items_.clear();
+    for (const auto &[key, id] : retired) {
+      static_cast<void>(key);
+      QAccessible::deleteAccessibleInterface(id);
+    }
   }
-
-  QModelIndex cardIndex(QAccessibleInterface *item) const {
-    auto *card =
-        item ? qobject_cast<ConversationCard *>(item->object()) : nullptr;
-    return role() == QAccessible::List && card && !card->isHidden() &&
-                   card->parentWidget() == widget()
-               ? indexForCard(card)
-               : QModelIndex{};
-  }
-
-  bool setItemSelected(QAccessibleInterface *item, bool selected) {
-    ConversationView *owner = conversationViewFor(widget());
-    const QModelIndex index = cardIndex(item);
-    auto *card =
-        item ? qobject_cast<ConversationCard *>(item->object()) : nullptr;
-    if (!owner || !owner->isVisible() || !owner->isEnabled() || !card ||
-        !card->isEnabled() || !index.isValid())
+  bool setItemSelected(QAccessibleInterface *interface, bool selected) {
+    const QPointer<ConversationView> owner(conversationViewFor(widget()));
+    auto *item = dynamic_cast<ConversationAccessibleItem *>(interface);
+    if (!owner || !logicalCount() || !item || item->view() != owner ||
+        !item->state().selectable)
       return false;
+    const QPersistentModelIndex index = item->index();
     owner->selectionModel()->select(
         index,
         selected
             ? QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows
             : QItemSelectionModel::Deselect | QItemSelectionModel::Rows);
-    return owner->selectionModel()->isSelected(index) == selected;
+    return owner && owner->selectionModel()->isSelected(index) == selected;
   }
+
+  QObject lifetime_;
+  mutable std::unordered_map<std::string, QAccessible::Id> items_;
 };
 
+namespace {
 QAccessibleInterface *conversationAccessibleFactory(const QString &,
                                                     QObject *object) {
   auto *widget = qobject_cast<QWidget *>(object);
-  if (!widget)
-    return nullptr;
-  ConversationView *owner = conversationViewFor(widget);
+  auto *owner = conversationViewFor(widget);
   if (!owner)
     return nullptr;
   if (widget == owner)
@@ -417,12 +604,18 @@ QAccessibleInterface *conversationAccessibleFactory(const QString &,
   if (widget == owner->viewport())
     return new ConversationAccessible(widget, QAccessible::List);
   if (qobject_cast<ConversationCard *>(widget))
-    return new ConversationAccessible(widget, QAccessible::ListItem);
+    return new ConversationAccessible(widget, QAccessible::Client);
   if (dynamic_cast<ConversationLoadingOverlay *>(widget))
     return new ConversationAccessible(widget, QAccessible::StatusBar);
   return nullptr;
 }
 
+QAccessibleInterface *accessibleRow(ConversationView &view,
+                                    const QModelIndex &index) {
+  auto *list = dynamic_cast<ConversationAccessible *>(
+      QAccessible::queryAccessibleInterface(view.viewport()));
+  return list ? list->itemForIndex(index) : nullptr;
+}
 } // namespace
 #endif
 
@@ -3037,6 +3230,11 @@ QRect ConversationView::visualRect(const QModelIndex &index) const {
 }
 
 void ConversationView::scrollTo(const QModelIndex &index, ScrollHint hint) {
+  revealRow(index, hint, false);
+}
+
+void ConversationView::revealRow(const QModelIndex &index, ScrollHint hint,
+                                 bool userInitiated) {
   if (applying_)
     return;
   const QRect geometry = visualRect(index);
@@ -3053,6 +3251,10 @@ void ConversationView::scrollTo(const QModelIndex &index, ScrollHint hint) {
     target += geometry.top();
   else if (geometry.bottom() >= viewport()->height())
     target += geometry.bottom() - viewport()->height() + 1;
+  // Explicit item navigation owns this scroll; height admission must not
+  // restore live-tail following over the row the user requested.
+  if (userInitiated && target != verticalScrollBar()->value())
+    handleUserScrollValue(target);
   setScrollValue(target);
   updateMaterialization();
 }
@@ -3227,12 +3429,7 @@ void ConversationView::selectionChanged(const QItemSelection &selected,
 #if QT_CONFIG(accessibility)
   const auto notify = [this](const QModelIndex &index,
                              QAccessible::Event type) {
-    const auto *row = model_->row(index.row());
-    ConversationCard *card = row ? cardForStableKey(row->stableKey) : nullptr;
-    if (!card || card->isHidden())
-      return;
-    if (QAccessibleInterface *interface =
-            QAccessible::queryAccessibleInterface(card)) {
+    if (QAccessibleInterface *interface = accessibleRow(*this, index)) {
       QAccessibleEvent event(interface, type);
       QAccessible::updateAccessibility(&event);
     }
@@ -3250,11 +3447,8 @@ void ConversationView::currentChanged(const QModelIndex &current,
   updateFocusDecoration(previous);
   updateFocusDecoration(current);
 #if QT_CONFIG(accessibility)
-  const auto *row = model_->row(current.row());
-  ConversationCard *card = row ? cardForStableKey(row->stableKey) : nullptr;
-  if (hasFocus() && card && !card->isHidden()) {
-    if (QAccessibleInterface *interface =
-            QAccessible::queryAccessibleInterface(card)) {
+  if (hasFocus()) {
+    if (QAccessibleInterface *interface = accessibleRow(*this, current)) {
       QAccessibleEvent event(interface, QAccessible::Focus);
       QAccessible::updateAccessibility(&event);
     }

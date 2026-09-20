@@ -5406,9 +5406,9 @@ bool keyboardNavigationAndViewIsolation() {
       initialFirstCard ? initialFirstCard->geometry() : QRect{};
   const QImage unselectedPixels =
       initialFirstCard ? initialFirstCard->grab().toImage() : QImage{};
+  auto *firstList = QAccessible::queryAccessibleInterface(first.viewport());
   QAccessibleInterface *const firstAccessible =
-      initialFirstCard ? QAccessible::queryAccessibleInterface(initialFirstCard)
-                       : nullptr;
+      firstList ? firstList->child(firstIndex.row()) : nullptr;
   const QAccessible::Id firstAccessibleId =
       firstAccessible ? QAccessible::uniqueId(firstAccessible) : 0;
   selectFirstWithMouse();
@@ -6288,7 +6288,7 @@ bool runtimeGeometryEnvironmentKeepsOneInteractiveRenderer() {
   return result;
 }
 
-bool accessibilityUsesTheResidentRendererTree() {
+bool accessibilityUsesLogicalRowsAndRealControls() {
 #if !QT_CONFIG(accessibility)
   return true;
 #else
@@ -6306,11 +6306,9 @@ bool accessibilityUsesTheResidentRendererTree() {
   QAccessibleSelectionInterface *selection =
       list ? list->selectionInterface() : nullptr;
   tests::AccessibilityEventProbe events;
-  const auto shownCardCount = [&view] {
-    return std::ranges::count_if(
-        view.viewport()->findChildren<ConversationCard *>(
-            QString{}, Qt::FindDirectChildrenOnly),
-        [](const ConversationCard *card) { return !card->isHidden(); });
+  const auto renderer = [](QAccessibleInterface *item) {
+    auto *body = item ? item->child(0) : nullptr;
+    return body ? qobject_cast<ConversationCard *>(body->object()) : nullptr;
   };
   QList<QWidget *> expectedPaneChildren{view.viewport()};
   for (QScrollBar *bar : {view.horizontalScrollBar(), view.verticalScrollBar()})
@@ -6333,9 +6331,9 @@ bool accessibilityUsesTheResidentRendererTree() {
           !pane->tableInterface() && list && pane->indexOfChild(list) == 0 &&
           list->role() == QAccessible::List && list->parent() == pane &&
           !list->tableInterface() && selection &&
-          list->childCount() == shownCardCount(),
+          list->childCount() == view.conversationModel()->rowCount(),
       "the Pane preserves its native physical children and exposes one "
-      "shown-renderer List rather than virtual model cells");
+      "logical List independently of widget residency");
 
   const auto residentCards = view.viewport()->findChildren<ConversationCard *>(
       QString{}, Qt::FindDirectChildrenOnly);
@@ -6349,13 +6347,11 @@ bool accessibilityUsesTheResidentRendererTree() {
       hiddenItem ? hiddenItem->state() : QAccessible::State{};
   result &= expect(
       hiddenItem && list && list->indexOfChild(hiddenItem) == -1 &&
-          hiddenState.invisible && hiddenState.offscreen &&
-          !hiddenState.focusable && !hiddenState.selectable &&
-          !selection->select(hiddenItem),
+          hiddenState.invisible && !hiddenState.focusable &&
+          !hiddenState.selectable && !selection->select(hiddenItem),
       "hidden overscan is neither an accessible child nor selectable through "
       "a directly queried interface");
 
-  int previousRow = -1;
   bool foundVisible = false;
   bool foundOffscreen = false;
   bool foundCopy = false;
@@ -6396,40 +6392,36 @@ bool accessibilityUsesTheResidentRendererTree() {
   QAccessibleInterface *otherItem = nullptr;
   for (int child = 0; list && child < list->childCount(); ++child) {
     QAccessibleInterface *item = list->child(child);
-    auto *card =
-        item ? qobject_cast<ConversationCard *>(item->object()) : nullptr;
-    const QModelIndex index = card
-                                  ? view.conversationModel()->indexForStableKey(
-                                        stableKey(card->data().key))
-                                  : QModelIndex{};
+    const QModelIndex index = view.conversationModel()->index(child);
     const QAccessible::State state =
         item ? item->state() : QAccessible::State{};
     const bool offscreen =
-        card && !card->geometry().intersects(view.viewport()->rect());
-    result &= expect(item && card && item->role() == QAccessible::ListItem &&
-                         item->parent() == list &&
-                         list->indexOfChild(item) == child && index.isValid() &&
-                         index.row() > previousRow &&
-                         !item->text(QAccessible::Name).isEmpty() &&
-                         state.selectable && state.offscreen == offscreen &&
-                         state.invisible == (card->isHidden() || offscreen),
-                     "each accessible list item is one ordered resident card");
-    previousRow = index.row();
+        !view.visualRect(index).intersects(view.viewport()->rect());
+    result &= expect(
+        item && !item->object() && item->role() == QAccessible::ListItem &&
+            item->parent() == list && list->indexOfChild(item) == child &&
+            index.isValid() && !item->text(QAccessible::Name).isEmpty() &&
+            state.selectable && state.offscreen == offscreen &&
+            state.invisible == offscreen &&
+            item->text(QAccessible::Description)
+                .contains(
+                    QString::fromStdString("Answer " + std::to_string(child))),
+        "each logical item has model order, text and scalar geometry");
     if (!state.offscreen && !visibleItem)
       visibleItem = item;
-    else if (!otherItem)
+    else if (!state.offscreen && !otherItem)
       otherItem = item;
     foundVisible = foundVisible || !state.offscreen;
     foundOffscreen = foundOffscreen || state.offscreen;
   }
   inspect(inspect, pane, 0);
   result &=
-      expect(foundVisible && !foundOffscreen && foundCopy &&
+      expect(foundVisible && foundOffscreen && foundCopy &&
                  foundScrollBar == expectsScrollBar && !foundVirtualCell &&
                  !foundStagingObject && symmetricTree &&
-                 list->childCount() < view.conversationModel()->rowCount(),
-             "shown items expose real controls and scrollbar semantics without "
-             "hidden overscan, virtual cells, or staging objects");
+                 list->childCount() == view.conversationModel()->rowCount(),
+             "logical rows expose resident controls exactly once, with no "
+             "staging objects or duplicate table cells");
 
   view.setEnabled(false);
   result &= expect(
@@ -6455,16 +6447,12 @@ bool accessibilityUsesTheResidentRendererTree() {
 
   if (!otherItem && list && list->childCount() > 1)
     otherItem = list->child(1);
-  auto *currentCard =
-      visibleItem ? qobject_cast<ConversationCard *>(visibleItem->object())
-                  : nullptr;
+  auto *currentCard = renderer(visibleItem);
   const QModelIndex current = currentCard
                                   ? view.conversationModel()->indexForStableKey(
                                         stableKey(currentCard->data().key))
                                   : QModelIndex{};
-  auto *otherCard =
-      otherItem ? qobject_cast<ConversationCard *>(otherItem->object())
-                : nullptr;
+  auto *otherCard = renderer(otherItem);
   const QModelIndex other =
       otherCard ? view.conversationModel()->indexForStableKey(
                       stableKey(otherCard->data().key))
@@ -6496,19 +6484,18 @@ bool accessibilityUsesTheResidentRendererTree() {
         record.type == QAccessible::SelectionRemove)
       removeOrder = static_cast<int>(event);
   }
-  result &= expect(
-      selectedOther.size() == 1 && deselectedCurrent.size() == 1 &&
-          addOrder >= 0 && removeOrder > addOrder &&
-          selectedOther.front().state.selected &&
-          !deselectedCurrent.front().state.selected,
-      "accessible selection emits one event on each exact resident item");
+  result &=
+      expect(selectedOther.size() == 1 && deselectedCurrent.size() == 1 &&
+                 addOrder >= 0 && removeOrder > addOrder &&
+                 selectedOther.front().state.selected &&
+                 !deselectedCurrent.front().state.selected,
+             "accessible selection emits one event on each exact logical item");
   events.clear();
   view.setCurrentIndex(other);
   settle();
-  result &= expect(
-      events.events(otherId, QAccessible::Focus).size() == 1 &&
-          otherItem && otherItem->state().focused,
-      "logical row focus emits once on the exact resident item");
+  result &= expect(events.events(otherId, QAccessible::Focus).size() == 1 &&
+                       otherItem && otherItem->state().focused,
+                   "logical row focus emits once on the exact logical item");
   events.clear();
   view.setCurrentIndex(other);
   if (selection && otherItem)
@@ -6572,51 +6559,49 @@ bool accessibilityUsesTheResidentRendererTree() {
   const int residentsBeforeNonresidentSelection = view.materializedCardCount();
   const int scrollBeforeNonresidentSelection =
       view.verticalScrollBar()->value();
-  QList<QObject *> accessibleObjectsBeforeNonresidentSelection;
+  QList<QAccessible::Id> accessibleObjectsBeforeNonresidentSelection;
   for (int child = 0; list && child < list->childCount(); ++child)
     accessibleObjectsBeforeNonresidentSelection.push_back(
-        list->child(child)->object());
+        QAccessible::uniqueId(list->child(child)));
   events.clear();
   if (nonresident.isValid())
     view.selectionModel()->select(
         nonresident, QItemSelectionModel::ClearAndSelect |
                          QItemSelectionModel::Rows);
   settle();
-  const bool noFabricatedRowEvent =
-      std::ranges::none_of(events.all(), [](const auto &event) {
-        return event.type == QAccessible::Selection ||
-               event.type == QAccessible::SelectionAdd ||
-               event.type == QAccessible::SelectionRemove ||
-               event.type == QAccessible::SelectionWithin ||
-               event.type == QAccessible::Focus;
-      });
+  auto *nonresidentItem = list->child(nonresident.row());
+  const auto nonresidentId = QAccessible::uniqueId(nonresidentItem);
   result &= expect(
-      nonresident.isValid() &&
-          view.selectionModel()->isSelected(nonresident) && selection &&
-          selection->selectedItemCount() == 0 && noFabricatedRowEvent &&
+      nonresident.isValid() && view.selectionModel()->isSelected(nonresident) &&
+          selection && selection->selectedItemCount() == 1 &&
+          selection->selectedItem(0) == nonresidentItem &&
+          events.events(nonresidentId, QAccessible::SelectionAdd).size() == 1 &&
+          events.events(nonresidentId, QAccessible::Focus).isEmpty() &&
           view.property("conversationCardConstructions").toULongLong() ==
               constructionsBeforeNonresidentSelection &&
-          view.materializedCardCount() ==
-              residentsBeforeNonresidentSelection &&
-          view.verticalScrollBar()->value() == scrollBeforeNonresidentSelection &&
+          view.materializedCardCount() == residentsBeforeNonresidentSelection &&
+          view.verticalScrollBar()->value() ==
+              scrollBeforeNonresidentSelection &&
           view.currentIndex() == current,
-      "a nonresident model selection constructs no renderer and fabricates no "
-      "accessible ListItem event");
+      "offscreen selection exposes its logical item and event without "
+      "constructing a widget, scrolling or moving focus");
+  events.clear();
   view.selectionModel()->clearSelection();
   settle();
-  QList<QObject *> accessibleObjectsAfterNonresidentSelection;
+  QList<QAccessible::Id> accessibleObjectsAfterNonresidentSelection;
   for (int child = 0; list && child < list->childCount(); ++child)
     accessibleObjectsAfterNonresidentSelection.push_back(
-        list->child(child)->object());
+        QAccessible::uniqueId(list->child(child)));
   result &= expect(
-      events.all().isEmpty() &&
+      events.events(nonresidentId, QAccessible::SelectionRemove).size() == 1 &&
           accessibleObjectsAfterNonresidentSelection ==
               accessibleObjectsBeforeNonresidentSelection &&
           view.property("conversationCardConstructions").toULongLong() ==
               constructionsBeforeNonresidentSelection &&
           view.materializedCardCount() == residentsBeforeNonresidentSelection &&
           view.verticalScrollBar()->value() == scrollBeforeNonresidentSelection,
-      "clearing nonresident selection is an accessibility and residency no-op");
+      "clearing offscreen selection emits the exact removal without changing "
+      "residency");
 
   if (copy)
     copy->setFocus(Qt::TabFocusReason);
@@ -6626,12 +6611,12 @@ bool accessibilityUsesTheResidentRendererTree() {
                           ? scrollBar->maximum()
                           : scrollBar->minimum());
   const auto accessibleObjects = [list] {
-    QList<QObject *> objects;
+    QList<QAccessible::Id> objects;
     for (int child = 0; list && child < list->childCount(); ++child)
-      objects.push_back(list->child(child)->object());
+      objects.push_back(QAccessible::uniqueId(list->child(child)));
     return objects;
   };
-  const QList<QObject *> beforeAdmission = accessibleObjects();
+  const QList<QAccessible::Id> beforeAdmission = accessibleObjects();
   const qulonglong constructionsBeforeAdmission =
       view.property("conversationCardConstructions").toULongLong();
   result &=
@@ -6658,25 +6643,26 @@ bool accessibilityUsesTheResidentRendererTree() {
       QAccessible::queryAccessibleInterface(&staged);
   const QAccessible::State stagedState =
       stagedItem ? stagedItem->state() : QAccessible::State{};
-  result &= expect(
-      stagedItem && stagedItem->role() == QAccessible::ListItem &&
-          stagedItem->parent() != list &&
-          list->indexOfChild(stagedItem) == -1 && stagedState.invisible &&
-          stagedState.offscreen && !stagedState.selectable &&
-          !selection->select(stagedItem) && view.currentIndex() == current,
-      "a staged card with a resident key remains outside the "
-      "List and cannot become an accessibility selection");
+  result &= expect(stagedItem && stagedItem->role() == QAccessible::Client &&
+                       stagedItem->parent() != list &&
+                       list->indexOfChild(stagedItem) == -1 &&
+                       stagedState.invisible && !stagedState.selectable &&
+                       !selection->select(stagedItem) &&
+                       view.currentIndex() == current,
+                   "a staged card with a resident key remains outside the "
+                   "List and cannot become an accessibility selection");
 
   ConversationSnapshot history = snapshot;
   history.hasMore = true;
   result &= expect(changed(view.reconcile(std::move(history))),
                    "the accessibility fixture exposes available history");
   settle();
-  result &= expect(list && list->childCount() == shownCardCount() + 1 &&
-                       list->child(0)->role() == QAccessible::Button &&
-                       list->child(0)->parent() == list,
-                   "the visible native history control precedes resident "
-                   "cards in the List");
+  result &= expect(
+      list && list->childCount() == view.conversationModel()->rowCount() + 1 &&
+          list->child(0)->role() == QAccessible::Button &&
+          list->child(0)->parent() == list,
+      "the visible native history control precedes resident "
+      "cards in the List");
   auto *historyButton = view.findChild<QPushButton *>(
       QStringLiteral("conversationLoadMore"));
   QAccessibleInterface *historyAccessible =
@@ -6795,6 +6781,226 @@ bool accessibilityUsesTheResidentRendererTree() {
   settle();
   result &= expect(events.events(overlayId).isEmpty(),
                    "identical loaded state emits no accessibility event");
+  return result;
+#endif
+}
+
+bool accessibilitySurvivesResidencyAndModelChanges() {
+#if !QT_CONFIG(accessibility)
+  return true;
+#else
+  auto owner = std::make_unique<ConversationView>();
+  auto &view = *owner;
+  view.resize(700, 360);
+  view.show();
+  auto snapshot = conversation(2000, 100);
+  bool result =
+      expect(changed(view.reconcile(snapshot)) && waitForResidency(view),
+             "logical accessibility lifecycle fixture settles");
+  auto *list = QAccessible::queryAccessibleInterface(view.viewport());
+  if (!list || list->childCount() != 2000)
+    return expect(false, "all loaded logical rows are accessible");
+  const auto constructions = view.property("conversationCardConstructions");
+  const auto measurements = view.property("conversationHeightIndexUpdateSteps");
+  const int residents = view.materializedCardCount();
+  const int documents = view.findChildren<QTextDocument *>().size();
+  QElapsedTimer traversal;
+  traversal.start();
+  QList<QAccessible::Id> identities;
+  for (int row = 0; row < list->childCount(); ++row) {
+    auto *item = list->child(row);
+    result &=
+        expect(item && item->isValid() && list->indexOfChild(item) == row &&
+                   item->text(QAccessible::Description)
+                       .contains(QString::number(100 + row)),
+               "every logical row enumerates in model order with bounded text");
+    identities.push_back(QAccessible::uniqueId(item));
+  }
+  std::cout << "Accessible 2000-row traversal: "
+            << traversal.nsecsElapsed() / 1000 << " us\n";
+  result &= expect(
+      view.property("conversationCardConstructions") == constructions &&
+          view.property("conversationHeightIndexUpdateSteps") == measurements &&
+          view.materializedCardCount() == residents &&
+          view.findChildren<QTextDocument *>().size() == documents,
+      "full accessibility enumeration constructs and measures no renderers or "
+      "documents");
+  auto *first = list->child(0);
+  const auto firstId = QAccessible::uniqueId(first);
+  const auto selection = view.selectionModel()->selectedRows();
+  first->actionInterface()->doAction(
+      QAccessibleActionInterface::setFocusAction());
+  result &= expect(
+      waitForResidency(view) && !first->state().offscreen &&
+          first->state().focused && list->focusChild() == first &&
+          first->focusChild() == first &&
+          view.selectionModel()->selectedRows() == selection,
+      "explicit accessible focus reveals the row without altering selection");
+  auto *body = first->child(0);
+  QPointer<QObject> originalRenderer(body ? body->object() : nullptr);
+  auto *card =
+      body ? qobject_cast<ConversationCard *>(body->object()) : nullptr;
+  auto *copy =
+      card ? card->findChild<QToolButton *>(QStringLiteral("cardCopyButton"))
+           : nullptr;
+  auto *copyInterface = QAccessible::queryAccessibleInterface(copy);
+  if (copyInterface && copyInterface->actionInterface())
+    copyInterface->actionInterface()->doAction(
+        QAccessibleActionInterface::pressAction());
+  result &= expect(
+      copyInterface &&
+          QApplication::clipboard()->text() == QStringLiteral("Answer 100") &&
+          body->parent() == first && first->indexOfChild(body) == 0,
+      "the logical row exposes the sole real Copy implementation");
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  result &= expect(
+      waitForResidency(view) && originalRenderer.isNull() &&
+          QAccessible::accessibleInterface(firstId) == first &&
+          first->childCount() == 0 && first->state().offscreen &&
+          list->child(0) == first && list->childCount() == 2000,
+      "recycling deletes the renderer but preserves the logical identity");
+  tests::AccessibilityEventProbe events;
+  const auto updated = message(100, "Changed while offscreen");
+  result &= expect(
+      applyPresentation(view, updated).has_value() &&
+          first->text(QAccessible::Description)
+              .contains(QStringLiteral("Changed while offscreen")) &&
+          events.events(firstId, QAccessible::DescriptionChanged).size() == 1 &&
+          first->childCount() == 0,
+      "offscreen updates notify the exact logical row without materializing "
+      "it");
+  events.clear();
+  result &=
+      expect(applyPresentation(view, updated) == PresentationImpact::None &&
+                 events.events(firstId).isEmpty(),
+             "unchanged offscreen content emits no accessibility event");
+  first->actionInterface()->doAction(
+      QAccessibleActionInterface::setFocusAction());
+  result &= expect(waitForResidency(view) && first->childCount() == 1 &&
+                       QAccessible::uniqueId(list->child(0)) == firstId,
+                   "returning to a recycled row preserves its accessible ID");
+
+  auto prefix = conversation(3, 97);
+  snapshot.sections.insert(snapshot.sections.begin(), prefix.sections.begin(),
+                           prefix.sections.end());
+  result &=
+      expect(changed(view.reconcile(snapshot)) && list->child(3) == first,
+             "history insertion preserves existing accessible identities");
+  std::swap(snapshot.sections[3], snapshot.sections[20]);
+  result &= expect(
+      changed(view.reconcile(snapshot)) && list->child(20) == first &&
+          list->indexOfChild(first) == 20,
+      "model moves update position without replacing accessible identity");
+  snapshot.sections.erase(snapshot.sections.begin() + 20);
+  result &= expect(changed(view.reconcile(snapshot)) &&
+                       !QAccessible::accessibleInterface(firstId),
+                   "true removal retires the exact accessible ID");
+
+  auto folded = pinnedTurnPage(0, 4);
+  auto reasoning = message(9999);
+  reasoning.kind = CardKind::Reasoning;
+  reasoning.payload = ReasoningData{"Hidden reasoning"};
+  folded.sections.push_back(
+      {"reasoning-section", reasoning.turnId, {reasoning}, {}});
+  result &=
+      expect(changed(view.reconcile(folded)), "folding fixture reconciles");
+  auto *root = list->child(0);
+  auto *nested = list->child(1);
+  const auto nestedId = QAccessible::uniqueId(nested);
+  root->actionInterface()->doAction(
+      QAccessibleActionInterface::setFocusAction());
+  auto *rootBody = root->child(0);
+  auto *rootCard =
+      rootBody ? qobject_cast<ConversationCard *>(rootBody->object()) : nullptr;
+  auto *disclosure = rootCard ? rootCard->findChild<QToolButton *>(
+                                    QStringLiteral("cardDisclosureButton"))
+                              : nullptr;
+  auto *disclosureInterface = QAccessible::queryAccessibleInterface(disclosure);
+  if (disclosureInterface && disclosureInterface->actionInterface())
+    disclosureInterface->actionInterface()->doAction(
+        QAccessibleActionInterface::pressAction());
+  result &=
+      expect(disclosure && rootCard->isCollapsed() &&
+                 disclosureInterface->state().collapsed &&
+                 nested->state().invisible && !nested->state().selectable &&
+                 nested->actionInterface()->actionNames().isEmpty() &&
+                 !list->selectionInterface()->select(nested) &&
+                 list->childCount() == 6 &&
+                 QAccessible::uniqueId(list->child(1)) == nestedId,
+             "native disclosure owns folding; hidden logical children retain "
+             "identity but cannot act");
+  if (disclosureInterface && disclosureInterface->actionInterface())
+    disclosureInterface->actionInterface()->doAction(
+        QAccessibleActionInterface::pressAction());
+  result &= expect(disclosure && !rootCard->isCollapsed() &&
+                       nested->state().selectable &&
+                       QAccessible::uniqueId(list->child(1)) == nestedId,
+                   "unfolding restores interaction on the same logical row");
+  auto *reasoningItem = list->child(5);
+  const auto reasoningId = QAccessible::uniqueId(reasoningItem);
+  auto options = view.presentationOptions();
+  options.showReasoning = false;
+  events.clear();
+  view.setPresentationOptions(options);
+  result &= expect(
+      reasoningItem->state().invisible && !reasoningItem->state().selectable &&
+          reasoningItem->rect().isEmpty() && list->child(5) == reasoningItem &&
+          events.events(reasoningId, QAccessible::StateChanged).size() == 1,
+      "filtering hides logical rows without removing their identity");
+  options.showReasoning = true;
+  view.setPresentationOptions(options);
+  result &= expect(list->child(5) == reasoningItem &&
+                       reasoningItem->state().selectable &&
+                       QAccessible::uniqueId(reasoningItem) == reasoningId,
+                   "restoring visibility reuses the same accessible row");
+
+  ConversationSnapshot prompt;
+  prompt.threadId = "virtual-thread";
+  VisibleCardData local{LocalPromptKey{999},
+                        CardKind::LocalPrompt,
+                        prompt.threadId,
+                        "turn-prompt",
+                        "local",
+                        LocalPromptData{999, "Continue"}};
+  prompt.sections.push_back(
+      {"prompt-section", "turn-prompt", {local}, local.key});
+  result &=
+      expect(changed(view.reconcile(prompt)), "optimistic fixture reconciles");
+  auto *promptItem = list->child(0);
+  const auto promptId = QAccessible::uniqueId(promptItem);
+  local.kind = CardKind::UserMessage;
+  local.payload = UserMessageData{"Continue"};
+  local.itemId = "authoritative";
+  prompt.sections.front().cards.front() = local;
+  result &= expect(
+      changed(view.reconcile(prompt)) && list->child(0) == promptItem &&
+          QAccessible::uniqueId(promptItem) == promptId,
+      "optimistic acknowledgement preserves the accessible row identity");
+  auto switched = conversation(1);
+  switched.threadId = "another-thread";
+  switched.sections[0].cards[0].threadId = switched.threadId;
+  switched.sections[0].cards[0].key =
+      AuthoritativeItemKey{switched.threadId, "turn-0", "item-0"};
+  result &= expect(
+      changed(view.reconcile(switched)) &&
+          !QAccessible::accessibleInterface(promptId),
+      "thread replacement retires old handles instead of retargeting them");
+  result &=
+      expect(std::ranges::all_of(identities,
+                                 [](QAccessible::Id id) {
+                                   return !QAccessible::accessibleInterface(id);
+                                 }),
+             "all enumerated identities retire with their model rows");
+  const auto finalId = QAccessible::uniqueId(list->child(0));
+  view.selectionModel()->setCurrentIndex({}, QItemSelectionModel::NoUpdate);
+  QObject::connect(view.selectionModel(), &QItemSelectionModel::currentChanged,
+                   &view, [&owner] { owner.reset(); });
+  list->child(0)->actionInterface()->doAction(
+      QAccessibleActionInterface::setFocusAction());
+  result &=
+      expect(!owner && !QAccessible::accessibleInterface(finalId),
+             "teardown during an accessible action retires outstanding IDs "
+             "without using a deleted interface");
   return result;
 #endif
 }
@@ -7117,8 +7323,10 @@ int main(int argc, char **argv) {
       interactiveResizeCoalescesConversationReflow);
   run("runtimeGeometryEnvironmentKeepsOneInteractiveRenderer",
       runtimeGeometryEnvironmentKeepsOneInteractiveRenderer);
-  run("accessibilityUsesTheResidentRendererTree",
-      accessibilityUsesTheResidentRendererTree);
+  run("accessibilityUsesLogicalRowsAndRealControls",
+      accessibilityUsesLogicalRowsAndRealControls);
+  run("accessibilitySurvivesResidencyAndModelChanges",
+      accessibilitySurvivesResidencyAndModelChanges);
   run("collapsedLargeCardsSkipBodyProjection",
       collapsedLargeCardsSkipBodyProjection);
   run("collapsedInteractionDefersEveryHeavyCardBody",

@@ -12,14 +12,14 @@ clean `eb6d56d` on `master`, two commits ahead of `origin/master`.
 |---|---|---|
 | 1 / NEW-1 | UTF-8-safe byte bounding at the generic-activity adapter boundary | Completed; broader performance qualification remains open below |
 | 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Completed and verified; Copy cost and separate DPR-suite limitation recorded below |
-| 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Pending |
+| 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Completed and offscreen-verified within approved growth; native screen-reader qualification remains separate |
 | 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Pending |
 | 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Pending |
 | Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
 | Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
 
-The user explicitly restored this priority order: D-6 is the current task,
-not further performance work. Commit `6056570` contains NEW-1; `eb6d56d`
+The user explicitly restored this priority order: item 3 follows the completed
+D-6 correction, not further performance work. Commit `6056570` contains NEW-1; `eb6d56d`
 contains the previously authorized targeted thread-row deadline correction.
 Other SHELL-1 measurements remain under qualification, not an additional task.
 
@@ -325,6 +325,250 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   callback, QObject property, or upstream change was added. The superseded
   blanket cleanup and ODF HTML reparse are deleted. `git diff --check` passes.
   Changes remain uncommitted; no processes were installed/restarted or pushed.
+
+### Step 3 investigation and proposed addition gate — M-4 / D-4a
+
+- **Checkpoint:** at the user's explicit request, committed D-6 and its
+  verification record as `a14ad23` (`Preserve authored Unicode in Markdown
+  selection Copy`). The worktree was then clean. No push, installation,
+  upstream change or process restart. This investigation changes documentation
+  only; the diagnostic source lives outside the repository.
+- **Invariant:** loaded logical conversation rows and selection must remain
+  accessible independently of renderer residency. A surviving semantic key
+  keeps its accessible identity when scrolled away and back. Existing controls
+  remain the only implementation of their actions and text interaction.
+- **Exact path:** graph projection -> `ConversationItemModel` rows/stable keys
+  -> `ConversationView` residency -> `ConversationAccessible::physicalChildren`.
+  The last step incorrectly makes visible `ConversationCard` children the
+  item authority. `itemForIndex`, selection lookup and row-event dispatch also
+  require resident widgets. `releaseCard` deletes a widget; Qt deletes that
+  widget's cached accessible interface although its model row survives.
+- **Local reproduction, Qt 6.10.2, Xvfb/offscreen:** 200 model rows, 9 resident
+  cards, only **5 accessible rows**; scrolling to the opposite end changes the
+  accessible count to **6**. Selecting an offscreen model row reports one model
+  selection but **zero accessible selections** without moving the viewport.
+  The original row key survives, but its accessible ID is deleted and differs
+  when returning to that row. Enumeration itself constructs no card widgets.
+  One thousand complete enumerate/index-back traversals of this small exposed
+  window took **251,557 us**. This is a diagnostic baseline, not a scrolling
+  benchmark or a claim about native screen-reader behavior.
+- **D-4a reproduction:** changing a structured plan step from Pending to
+  Completed produces the identical model accessible string
+  `Plan\n\nsame step`. `accessibleCardText` appends `step.text` but not
+  `step.status`. Qualification: current graph conversation projection produces
+  legacy-text `PlanData`; structured Inspector steps take a different path and
+  already expose their status description. This demonstrates the structured
+  conversation/model omission, not a new claim that the Inspector tab loses
+  its statuses.
+- **Existing authorities to retain:** model rows, stable-key lookup and exact
+  structural notifications; view-owned folding/visibility, scalar geometry,
+  selection model and navigation; `UiStatus`/`displayStatus`; the real card
+  controls and native Qt text interfaces. No graph lock belongs in this layer.
+- **Rejected deletion-only alternative:** Qt's built-in item accessibility
+  uses model-backed cells, but `QAccessibleTableCell` has zero children and the
+  reusable implementation is a private Qt header. Using it unchanged does not
+  preserve rich card controls; inheriting private Qt internals adds a version
+  dependency. Qt's cache associates a widget interface with that widget's
+  lifetime, so returning one reused interface for replacement widgets is not
+  a valid identity solution either.
+- **Proposed replacement:** enumerate model rows (plus the existing native
+  history/empty/loading chrome), and lazily register logical row interfaces by
+  semantic key. Keep only interface identity/lifetime bookkeeping, not copies
+  of row payloads, geometry, folding or selection state. Offscreen queries read
+  the model and scalar geometry without materializing widgets. Folding and
+  filtering remain explicit hidden/unavailable states, distinct from being
+  outside the viewport. Selection alone does not scroll; an explicit focus/
+  reveal action uses the existing view navigation and residency path.
+- A resident card supplies its existing native control subtree beneath the
+  logical row, with its outer accessible wrapper acting only as a container,
+  not a second ListItem/selection authority. Do not duplicate Copy, disclosure,
+  text selection or link implementations. Preserve parent/child symmetry,
+  native control IDs and exact event targets. Actual row removal/thread
+  replacement retires old identities; no stale handle may resolve to another
+  thread's row. Scroll recycling must not retire logical identities.
+- **Delete in the same stage:** resident-card scanning/sorting for list
+  enumeration, resident-only index/selection lookup and event guards, and
+  assertions requiring absent offscreen rows/selections. Retain checks for
+  real controls, no-op events, disabled interactions, loading/history chrome,
+  text selection and bounded widget residency. Do not weaken those checks.
+- **Addition gate:** deletion cannot supply a stable identity after its widget
+  dies. A narrowly scoped logical-interface registry and lifecycle/event
+  integration are required. Estimated **+150–300 net production CLOC** after
+  deleting the resident-only path; test replacement/extension estimated
+  **+150–300 net test CLOC**. These are estimates requiring approval, not
+  completed accounting. No new renderer, timer, graph-state cache, global
+  focus hook or second geometry/interaction implementation is proposed.
+- **Baseline accounting:** view .cpp/.h **3,451 production CLOC**, item model
+  .cpp/.h **1,743 production CLOC**; virtualization test **6,828 CLOC**, model
+  test **1,174 CLOC** (`cloc --hide-rate --by-file <files>`).
+- **Baseline verification:** build model/virtualization targets using
+  `cmake --build /tmp/codexui-current-debug.fMMvCu --target
+  codexui-conversation-item-model-test codexui-conversation-virtualization-test
+  -j14`; then `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -R
+  '^(codexui-conversation-item-model|codexui-conversation-virtualization)$'
+  -j14 --output-on-failure`: **2/2 pass**, 0.34 / 7.67 seconds, wrapper exit 0.
+  The existing resident-tree case explicitly encodes the faulty contract; its
+  passing result is not evidence against the probe.
+- **Diagnostic:** `/tmp/codexui-item3-a11y.7zKOZH/probe.cpp`, built with
+  `g++ -std=c++20 -g -fPIC -Isrc <probe.cpp> <conversation-ui.a>
+  <conversation-height-index.a> <nodegraph.a> <ui-style.a>
+  $(pkg-config --cflags --libs Qt6Widgets) -o <probe>` against the current
+  Debug libraries, executed with `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  /tmp/codexui-item3-a11y.7zKOZH/probe` (exit 0). Standalone compilation has
+  the previously recorded GCC16/Qt-header SFINAE warning; repository build is
+  clean. An initial probe namespace typo failed compilation; that attempt
+  supplied no runtime evidence and was corrected before the successful run.
+- **Required implementation verification:** logical counts independent of
+  residency; stable IDs through scroll, insertion, moves and optimistic
+  promotion; safe removal/reset/thread switching; folding/visibility states;
+  exact selection/focus events and semantic no-ops; one real control subtree;
+  bounded text/status summaries; history/empty/staging behavior; destruction
+  with outstanding accessible references. Measure queried-interface memory,
+  traversal cost, construction/parse/measurement counts and incoming-update
+  work, and rerun the registered performance gates and relevant DPR checks.
+  Xvfb/offscreen interfaces do not qualify a native screen reader; retain that
+  explicit limitation under the existing qualification item.
+- Qt evidence: [6.10.2 item interfaces and private-header contract](https://github.com/qt/qtbase/blob/v6.10.2/src/widgets/accessible/itemviews_p.h),
+  [widget-interface cache ownership](https://github.com/qt/qtbase/blob/v6.10.2/src/gui/accessible/qaccessiblecache.cpp),
+  [public accessibility interface](https://doc.qt.io/qt-6/qaccessibleinterface.html).
+  At this investigation checkpoint, no item-3 production/test implementation
+  had been applied. Only the existing plan item is being advanced.
+
+### Step 3 implementation gate
+
+- The user approved the estimate and required stopping/reporting before
+  exceeding it: at most **+300 net production CLOC**; estimated test growth
+  is separately tracked against **+300 net test CLOC**.
+- Replace resident-only enumeration with logical interfaces; keep only a lazy
+  stable-key-to-accessible-ID registry, owned by the viewport interface. Native
+  card wrappers become non-semantic containers for the unchanged controls.
+  Scope model signal connections to a member QObject whose destruction closes
+  them; retire exact removed keys and clear the registry on model replacement.
+  No widget/document construction is permitted from accessibility queries.
+- A first lifecycle check exposed that explicit accessible navigation must
+  declare user scroll intent before height admission, or Following restores
+  the bottom. Applying that policy to every programmatic `scrollTo` broke the
+  existing command-detachment test and was rejected. The replacement keeps
+  one reveal calculation with an explicit call-time user-initiated argument:
+  Qt/programmatic callers retain their previous semantics; accessible focus
+  uses the existing user-scroll policy. This is not a retained flag, second
+  scroll controller, timer or geometry correction.
+- The initial optimistic-promotion diagnostic incorrectly used a presentation
+  update for a kind change (then an exact delta without a graph target). Those
+  are correctly rejected by production contracts. Verify promotion using the
+  authoritative reconciliation boundary; do not weaken admission validation.
+- Compilation and intermediate failing checks are development evidence, not
+  completed verification. Final results and accounting follow only after the
+  required checks succeed.
+
+### Step 3 result — logical conversation accessibility
+
+- **Implementation:** replaced resident-widget enumeration/sorting and
+  resident-only selection/event lookup with lazily registered logical rows.
+  Stable keys identify interfaces; the model remains the content/order
+  authority, the view retains scalar geometry and folding, and Qt's selection
+  model retains selection. A resident card is only a native control container
+  under its logical row. No offscreen Copy/disclosure/Markdown implementation
+  was added. Typed plan-step statuses now appear in bounded accessible text.
+- **Lifetime and event review:** exact model removal/reset retires interfaces;
+  recycling does not. A QObject connection context closes model callbacks with
+  the viewport interface. Update notifications visit the changed range and
+  only already-queried identities, not all logical rows. Description and
+  visibility updates, selection/focus events, and no-op suppression are checked.
+  Explicit accessible focus uses the shared reveal path with user intent;
+  programmatic `scrollTo` preserves its prior command-output semantics. Local
+  persistent model indices and QPointers protect action/update callbacks from
+  using deleted identities. Destruction inside a current-index callback is
+  covered under ASan/UBSan.
+- **Correctness:** 2,000 loaded rows enumerate in order with stable IDs,
+  without new card constructions, measurements or QTextDocuments. Real Copy
+  and disclosure actions, parent/child symmetry, hidden staging, disabled
+  interaction, native text focus/selection, history/loading/empty chrome,
+  recycling, insertion, movement, exact removal, filtering, folding, optimistic
+  promotion, thread replacement and owner teardown all pass. The full existing
+  virtualization suite also retains command follow-tail/manual detachment,
+  geometry, anchors, streaming and incremental admission checks. Plan summaries
+  distinguish pending/running/completed and remain bounded on large payloads.
+- **Build:** `cmake --build /tmp/codexui-current-debug.fMMvCu --target
+  codex-ui codexui-conversation-item-model-test
+  codexui-conversation-virtualization-test codexui-conversation-cards-test
+  codexui-conversation-view-benchmark codexui-inspector-graph-test -j14`
+  succeeds with repository warning/error flags, GCC 16 and Qt 6.10.2.
+- **Final targeted CTest command:** `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  ctest --test-dir /tmp/codexui-current-debug.fMMvCu -R
+  '^(codexui-conversation-item-model|codexui-conversation-virtualization|codexui-conversation-cards|codexui-inspector-graph|codexui-conversation-selection-focus-fusion-.*)$'
+  -j14 --output-on-failure`: **8/8 pass**, 11.12 seconds; model 0.33,
+  virtualization 7.86, cards 11.12, Inspector 0.60 seconds. Named cases retain
+  non-short-circuit execution.
+- **Sanitizers:** build the model/virtualization targets with `-j14` in
+  `/tmp/codexui-current-asan-ubsan.2oIJr4`; run `xvfb-run -a env
+  QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-asan-ubsan.2oIJr4 -R
+  '^(codexui-conversation-item-model|codexui-conversation-virtualization)$'
+  -j14 --output-on-failure`: **2/2 pass**, 1.07 / 15.33 seconds. Flags:
+  `-fsanitize=address,undefined -fno-omit-frame-pointer
+  -fno-sanitize-recover=all`; no new suppressions or leak-detection disablement.
+- **Full virtualization DPR checks:** in addition to the DPR-1 CTest run,
+  execute `xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=<dpr>
+  QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
+  /tmp/codexui-current-debug.fMMvCu/codexui-conversation-virtualization-test`
+  for **1.25, 1.5, 2.0**, all pass (including teardown during an action).
+  Logs: `/tmp/codexui-item3-dpr-{1.25,1.5,2}.log`. All Xvfb wrappers exit 0;
+  offscreen plugin `raise()` notices do not represent native compositor proof.
+- **Quantitative gates:** `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest
+  --test-dir /tmp/codexui-current-debug.fMMvCu -R
+  '^codexui-conversation-performance-' -j14 --output-on-failure`: the first
+  complete run passed **12/12**, 119.92 seconds. These registered timing cases
+  deliberately retain `RUN_SERIAL` despite `-j14`, avoiding mutual timing
+  interference. The final repeat after the callback-lifetime review also passes
+  **12/12**, 118.79 seconds, wrapper exit 0.
+- **Comparable standalone performance:** execute
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=1
+  QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
+  /tmp/codexui-current-debug.fMMvCu/codexui-conversation-view-benchmark 1280 1`
+  before/after this stage. Both pass all gates. Before -> after, microseconds:
+  warm-input p95 **570 -> 503**; warm no-residency scrollbar p95
+  **700 -> 556**; streaming input-to-paint p95 **7,665 -> 7,460**;
+  normal-scroll p95 **8,135 -> 7,956**; command-stream p95 **943 -> 760**;
+  following-tail append p95 **5,460 -> 5,480**. Peaks remain **31 cards,
+  479 widgets, 29 documents**. Stream constructions remain zero, document
+  changes remain 48/24, and no-op layout/paint counts remain zero. Sampled peak
+  RSS **69,680 -> 69,592 KiB**. Single-run timings contain noise; these are
+  bounded-regression observations, not universal lag-free guarantees. Final
+  JSON: `/tmp/codexui-item3-benchmark-final.json`.
+- **Accessibility-specific cost:** standalone
+  `/tmp/codexui-item3-a11y.7zKOZH/logical-probe.cpp`, linked to current Debug
+  conversation, height-index, nodegraph and style libraries with Qt6Widgets,
+  run using `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  /tmp/codexui-item3-a11y.7zKOZH/logical-probe`. For 2,000 queried rows,
+  first full traversal **8,219 us**, repeat **5,649 us**; `mallinfo2` allocated
+  heap increase **674,720 bytes**, repeat **400 bytes**. This includes Qt's
+  accessible cache/allocator effects, not an exact per-interface size. One
+  thousand offscreen presentation updates plus summary-reading notifications
+  take **35,369 us**, with exactly 1,000 logical description events and no new
+  widgets/documents/measurements. Cache entries are bounded by queried live
+  model rows and are all retired on replacement (2,000-ID lifecycle check).
+  The old 1,000 traversals of a five-row exposed window are a different workload
+  and are not claimed as a direct speedup comparison. Standalone GCC compilation
+  reports the pre-existing Qt-header SFINAE warning; the repository build is clean.
+- **Accounting against `a14ad23`:** production **+205 CLOC / +203 physical
+  lines** (view .cpp 3,164 -> 3,362; .h 287 -> 290; model .cpp
+  1,566 -> 1,570). Tests **+229 CLOC / +233 physical lines** (virtualization
+  6,828 -> 7,032; model 1,174 -> 1,199). Both remain below the approved
+  +300 ceilings; documentation and `/tmp` diagnostics are separate.
+  Added persistent bookkeeping is the lazy key/ID map plus connection context
+  and each interface's owner/key. No payload cache, renderer, geometry authority,
+  timer, global focus hook, retained navigation flag or dynamic property was
+  added. `git diff --check` passes. No commit, push, installation, upstream
+  modification or running-application restart was performed.
+- **Qualification boundary:** this fixes and verifies the Qt interface contract,
+  not real AT-SPI/screen-reader operation or native compositor behavior. Those
+  remain explicitly open under the already-existing qualification item. Qt's
+  [state contract](https://doc.qt.io/qt-6/qaccessible-state.html) marks clipped
+  items offscreen/invisible; unlike filtered/folded items, presented offscreen
+  rows remain logically selectable and explicitly revealable. No plan task
+  was added and item 4 has not been started.
 
 ### Performance continuation gate — targeted thread-row scheduling
 

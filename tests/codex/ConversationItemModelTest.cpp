@@ -1221,6 +1221,31 @@ bool testAccessibilityProjectionStopsAtItsVisibleBound() {
       planText.size() <= 8210 && planText.endsWith(QStringLiteral("…")) &&
           !planText.contains(QStringLiteral("must-not-be-projected")),
       "plan accessibility traversed beyond its bounded text");
+  plan = *model.card(0);
+  plan.payload = PlanData{"Plan explanation",
+                          {{"first", nodegraph::NodeStatus::Pending},
+                           {"second", nodegraph::NodeStatus::Running},
+                           {"third", nodegraph::NodeStatus::Completed}},
+                          {}};
+  result &=
+      require(model.updateCard(plan) ==
+                      ConversationItemModel::CardUpdateResult::Changed &&
+                  model.index(0).data(Qt::AccessibleTextRole).toString() ==
+                      QStringLiteral("Plan\nPlan explanation\npending: first\n"
+                                     "running: second\ncompleted: third"),
+              "plan summary exposes every typed step status");
+  std::get<PlanData>(plan.payload).steps[0].status =
+      nodegraph::NodeStatus::Completed;
+  result &= require(
+      model.updateCard(plan) ==
+              ConversationItemModel::CardUpdateResult::Changed &&
+          model.index(0)
+              .data(Qt::AccessibleTextRole)
+              .toString()
+              .contains(QStringLiteral("completed: first")) &&
+          model.updateCard(plan) ==
+              ConversationItemModel::CardUpdateResult::Unchanged,
+      "status-only changes reach summaries and repeated status is a no-op");
   return result;
 }
 

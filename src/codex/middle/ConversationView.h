@@ -152,6 +152,11 @@ protected:
   void wheelEvent(QWheelEvent *event) override;
 
 private:
+  friend class ConversationAccessible;
+  friend class ConversationAccessibleItem;
+
+  void revealRow(const QModelIndex &index, ScrollHint hint, bool userInitiated);
+
   struct Anchor {
     std::string stableKey;
     int pixelOffset = 0;
