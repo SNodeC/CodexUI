@@ -5,22 +5,23 @@
 This checkpoint implements the replacement plan accepted after the review of
 `6a71db068b9a593b24c9ae638fbec9016e76376b`. The older entries below remain
 historical evidence, not additional authorization to expand this plan.
-The implementation baseline is a clean `master`, equal to `origin/master`.
+The original implementation baseline was clean `6a71db0`. Step 2 starts from
+clean `eb6d56d` on `master`, two commits ahead of `origin/master`.
 
 | Step | Accepted correction | Status |
 |---|---|---|
 | 1 / NEW-1 | UTF-8-safe byte bounding at the generic-activity adapter boundary | Completed; broader performance qualification remains open below |
-| Current / SHELL-1, performance | Measured GUI-thread work bounds and the existing large-file-card timing failure | Targeted thread-row deadline correction completed and verified; other single-stage overruns and large-card layout remain open |
+| 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Completed and verified; Copy cost and separate DPR-suite limitation recorded below |
 | 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Pending |
 | 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Pending |
 | 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Pending |
 | Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
 | Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
-| Deferred / D-6 | Copy removes generated placeholders only, preserving authored U+200B | User chose non-Markdown priorities next; append-boundary dependency and growth approval remain open; no production edits yet |
 
-The user requested committing the existing work and proceeding in importance
-order with performance first, excluding Markdown work. Commit `6056570`
-contains NEW-1, its regression coverage and the preceding ledger checkpoint.
+The user explicitly restored this priority order: D-6 is the current task,
+not further performance work. Commit `6056570` contains NEW-1; `eb6d56d`
+contains the previously authorized targeted thread-row deadline correction.
+Other SHELL-1 measurements remain under qualification, not an additional task.
 
 Candidate findings remain candidates: no speculative renderer, virtualization,
 treap, lifetime, scheduler or graph rewrite is authorized. In particular H-2
@@ -189,6 +190,141 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   returns 1 under the previously recorded sandbox restriction. The standalone
   probe compile emits a GCC 16/Qt-header SFINAE warning; the repository test
   build is clean. No tracked production/test edits belong to this probe.
+
+### Step 2 approved implementation gate
+
+- The user approved approximately **+60–100 net production CLOC** after
+  deletion, including the demonstrated append-boundary dependency. Subsequent
+  approval allows collision-checked import tags only as source-origin metadata,
+  not a character-removal heuristic or a change to Markdown semantics.
+- Remove blanket U+200B deletion and the separate HTML-to-ODF reparse. Export
+  all formats from one selected fragment cleaned using document provenance.
+  Ordinary and prepared Markdown must preserve authored characters unchanged.
+- Record generated characters and generated portions of rich-text attributes
+  during clipboard preparation. Use the existing Qt parser, not another parser.
+  No retained secondary renderer, timer, cache, or reconciliation mechanism.
+- Correct a source/document tail pair only where the existing last-block
+  assumption is not justified. Preserve the independently reparsable tail path.
+- Baseline at `eb6d56d`: presentation .cpp/.h **883 production CLOC**;
+  cards test **4,623 CLOC**, virtualization test **6,828 CLOC**. Existing cards
+  and virtualization suites passed (11.02 / 7.76 seconds), via
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -R
+  '^(codexui-conversation-cards|codexui-conversation-virtualization)$'
+  -j14 --output-on-failure`. Xvfb wrapper now succeeds as well.
+- Required verification: authored literal/entity characters, partial/full
+  selections, plain/HTML/Markdown/ODF agreement, links and image attributes,
+  prepared and incremental content, unchanged geometry/selection/document
+  identity, all four DPRs, and construction/Copy cost against the baseline.
+  Prototype evidence alone is not completion.
+
+### Step 2 implementation — export owns provenance work
+
+- The first implementation annotated the live document during `setContent`.
+  Measurement rejected that placement: 21,000-unit prompt construction rose
+  from 27.18 to 35.87 ms for plain text, and 27.29 to 53.73 ms for mixed
+  authored U+200B. **That implementation has been removed**, not retained as
+  a compatibility path. Provenance is needed for export, not painting.
+- The accepted implementation does no origin parsing/annotation during
+  construction, materialization, scrolling, resizing, or streaming. Canonical
+  source remains the authority. When exporting a user-message selection,
+  the existing projection with/without generated blanks establishes whether
+  cleanup is needed. Other selections use Qt's unchanged native exporter.
+- If source has neither an authored U+200B nor an entity introducer, every
+  projected U+200B is provably generated. Otherwise, import tags are checked
+  against source, parsed text and format properties, including decoded
+  entities. A collision chooses another checked token. The same Qt Markdown
+  importer runs once in a temporary, layout-disabled document to recover
+  origins; tags are normalized before position mapping to the selection.
+- Only the copied fragment gets two `QTextFormat::UserProperty` annotations:
+  generated characters and clean authored rich-text attribute values. Neither
+  is a QObject dynamic property or retained widget/model state. Remove the
+  identified characters and apply attribute values once, then produce plain
+  text, HTML, Markdown and ODF from that one fragment. No HTML-to-ODF reparse,
+  second renderer, new timer, callback, cache or live-document mutation.
+- The tail correction maps a whole mutable source paragraph to document
+  position zero, not its last Qt block. For non-initial tails containing line
+  breaks or numeric entities, Qt's fragment importer establishes whether the
+  tail really occupies one block. Multi-block tails use the existing full
+  replacement path: entity-created block margins are context-dependent (the
+  probe reproduced equal text but a 6 px height discrepancy after splicing).
+  The ordinary single-line tail remains unchanged; ambiguous tails incur one
+  additional tail-only parse to establish eligibility, not a geometry guess.
+- New checks exercise literal/entity U+200B, forced literal/entity import-tag
+  collisions, full/partial selections, bold text, inline code, links/images,
+  blank lines, prepared Markdown, unchanged live revision/selection, and
+  repeated incremental-vs-fresh updates. ODF expectations are independently
+  cleaned rich fragments; the former assertion that reparsed Copy's own HTML
+  is removed because it prescribed the superseded implementation.
+- Temporary provenance documents scale with prompt size **on Copy** for the
+  ambiguous-source case. This is not a constant-time Copy claim. Long-copy
+  timings and limitations must remain visible with the final results.
+
+### Step 2 verification and accounting
+
+- Built `codex-ui`, `codexui-conversation-cards-test`,
+  `codexui-conversation-virtualization-test`, `codexui-inspector-graph-test`,
+  and `codexui-conversation-view-benchmark` with
+  `cmake --build /tmp/codexui-current-debug.fMMvCu --target <targets> -j14`.
+  Final repository build is clean under its `-Wall -Wextra -Werror` flags.
+- Final command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -R
+  '^(codexui-conversation-cards|codexui-conversation-virtualization|codexui-inspector-graph|codexui-conversation-performance-.*)$'
+  -j14 --output-on-failure`. **15/15 passed**, wrapper exit 0, 131.33 s.
+  Cards: 11.12 s; virtualization: 7.53 s; Inspector: 0.59 s. All 12 registered
+  performance gates passed (320/1,280/10,000 rows, each at four DPRs), including
+  immutable Markdown prefix/selection retention and bounded residency/work.
+  Log: `/tmp/codexui-d6-accepted-verification.log`.
+- Focused public-widget/clipboard checks pass at DPR **1, 1.25, 1.5, 2**:
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=<dpr>
+  QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough CODEXUI_MARKDOWN_SELECTION_TESTS=1
+  /tmp/codexui-current-debug.fMMvCu/codexui-conversation-cards-test`.
+  This filter runs the existing line-break case and the new authored-character
+  case; both also remain in the unfiltered suite. Each wrapper exits 0.
+  Logs: `/tmp/codexui-d6-export-dpr-<dpr>.log`.
+- **Existing CI-2 qualification limitation, not a new remediation item:** the
+  full cards suite passes at DPR 1 but fails its unchanged thumbnail assertion
+  at 1.25/1.5/2. That assertion compares physical `QPixmap` dimensions with
+  logical 280×180 limits although production sets the pixmap DPR. The same
+  failure reproduces at DPR 2 in the untouched September 19 executable
+  `/tmp/codexui-protocol-debug/codexui-conversation-cards-test` (exit 1).
+  Logs: `/tmp/codexui-d6-cards-dpr-<dpr>.log` and
+  `/tmp/codexui-d6-predating-cards-dpr-2.log`. Do not report full-suite
+  four-DPR qualification as passed; no image code or assertion was altered.
+- Copy measurements use actual public `MarkdownTextView::copy()` and request
+  all four MIME formats, including ODF. Median of five runs, source lengths
+  210 / 2,100 / 21,000 UTF-16 units: **before 878 / 7,399 / 73,857 us;
+  final 712 / 6,436 / 72,608 us**. These are local measurements, not a claim
+  of universally faster or lag-free interaction.
+- Partial selections expose the cost explicitly: selecting a normal word in
+  the 21,000-unit mixed-source sample takes **1,224 us** (before 79 us).
+  A selection actually containing the ambiguous authored U+200B takes
+  **21,262 us** (the defective baseline took 116 us and deleted that character).
+  The no-candidate short-circuit avoids full origin import for ordinary words.
+  There is no retained cache hiding this source-sized work on ambiguous Copy.
+- Construction medians (seven runs) for the 21,000-unit plain and literal
+  samples and 27,000-unit entity sample: **before 27,183 / 27,287 / 34,466 us;
+  after relocating origin work to Copy 27,297 / 27,521 / 34,443 us**. These
+  samples have whole-source mutable paragraphs, so the subsequent tail-only
+  eligibility guard does not add a parse. No Copy-origin work remains in
+  construction, scrolling, or ordinary streaming.
+- Standalone diagnostic sources/binaries and CSV/JSON outputs use the
+  `/tmp/codexui-d6-{selection,construction,partial-copy}-*` names. They are
+  built with `g++ -std=c++20` against the production library and Qt6Widgets;
+  the construction/partial baseline compiles the original presentation sources
+  taken from `git show HEAD:src/codex/middle/ConversationPresentation.{h,cpp}`
+  in `/tmp/codexui-d6-baseline`. All executions use Xvfb/offscreen. Standalone
+  probe compilation reports the already-observed GCC16/Qt-header SFINAE
+  warning; the repository build does not. No native compositor, screen reader,
+  older Qt version, or Release qualification is claimed by this step.
+- Final accounting against `eb6d56d`: **production +100 CLOC / +106 physical
+  lines** across presentation .cpp/.h (883 → 983 CLOC); **tests +281 CLOC /
+  +287 physical lines** (4,623 → 4,904 CLOC). Documentation is separate.
+  Added mechanisms are bounded temporary export provenance and conservative
+  parser-backed tail eligibility; no renderer, persistent state, timer, cache,
+  callback, QObject property, or upstream change was added. The superseded
+  blanket cleanup and ODF HTML reparse are deleted. `git diff --check` passes.
+  Changes remain uncommitted; no processes were installed/restarted or pushed.
 
 ### Performance continuation gate — targeted thread-row scheduling
 

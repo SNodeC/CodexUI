@@ -34,6 +34,7 @@
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextDocument>
+#include <QTextDocumentFragment>
 #include <QTextDocumentWriter>
 #include <QTextLayout>
 #include <QThread>
@@ -2063,11 +2064,18 @@ bool testUserMessageLineBreakPresentation() {
   QBuffer expectedOdfBuffer(&expectedOdf);
   const bool expectedOdfOpened = expectedOdfBuffer.open(QIODevice::WriteOnly);
   QTextDocument expectedOdfDocument;
-  expectedOdfDocument.setHtml(selectionMime ? selectionMime->html()
-                                            : QString{});
+  // The fixture knows the sole synthetic glyph's exact position. Build the
+  // expected rich selection without reading Copy's output or origin metadata.
+  QTextCursor expectedSelection(&expectedOdfDocument);
+  expectedSelection.insertFragment(selection.selection());
+  const int emptyRow = expectedOdfDocument.findBlockByNumber(1).position();
+  expectedSelection.setPosition(emptyRow);
+  expectedSelection.setPosition(emptyRow + 1, QTextCursor::KeepAnchor);
+  expectedSelection.removeSelectedText();
   QTextDocumentWriter expectedOdfWriter(&expectedOdfBuffer, "ODF");
   const bool expectedOdfWritten =
-      expectedOdfOpened && expectedOdfWriter.write(&expectedOdfDocument);
+      expectedOdfOpened &&
+      expectedOdfWriter.write(QTextDocumentFragment(&expectedOdfDocument));
   result &= expect(
       selectionMime && selectionMime->text() == source &&
           selectionMime->hasHtml() &&
@@ -2120,6 +2128,279 @@ bool testUserMessageLineBreakPresentation() {
           QStringLiteral(
               "First authored line  \n\u200B  \nThird authored line"),
       "plain prompt projection represents an empty source line explicitly");
+  return result;
+}
+
+bool testMarkdownSelectionPreservesAuthoredCharacters() {
+  bool result = true;
+  const auto copy = [](QTextBrowser &view, int start = 0, int end = -1) {
+    QTextCursor selection(view.document());
+    selection.setPosition(start);
+    selection.setPosition(end < 0 ? view.document()->characterCount() - 1 : end,
+                          QTextCursor::KeepAnchor);
+    view.setTextCursor(selection);
+    view.copy();
+  };
+  for (const QString &source :
+       {QStringLiteral(
+            "**left\u200Bright** [link](https://example.org/a\u200Bb)"),
+        QStringLiteral("left&#8203;right"),
+        QStringLiteral("&#x200b;\n\nend")}) {
+    for (bool prepared : {false, true}) {
+      MarkdownTextView view(prepared ? QString{} : source, 500);
+      if (prepared)
+        view.setPreparedContent(source,
+                                presentation::prepareMarkdownHtml(source));
+      copy(view);
+      const auto *actual = QApplication::clipboard()->mimeData();
+      const QString plain = actual->text(), html = actual->html();
+      const QByteArray markdown = actual->data("text/markdown");
+      const QByteArray odf =
+          actual->data("application/vnd.oasis.opendocument.text");
+      QTextBrowser reference;
+      reference.document()->setDefaultStyleSheet(
+          view.document()->defaultStyleSheet());
+      reference.document()->setDefaultFont(view.document()->defaultFont());
+      if (prepared)
+        reference.setHtml(presentation::prepareMarkdownHtml(source));
+      else
+        reference.setMarkdown(source);
+      copy(reference);
+      const auto *expected = QApplication::clipboard()->mimeData();
+      if (plain != expected->text() ||
+          markdown != expected->data("text/markdown") ||
+          normalizedZipMetadata(odf) !=
+              normalizedZipMetadata(
+                  expected->data("application/vnd.oasis.opendocument.text")))
+        std::cerr << "Native Copy comparison: " << source.toStdString()
+                  << ", prepared=" << prepared
+                  << ", plain=" << (plain == expected->text())
+                  << ", md=" << (markdown == expected->data("text/markdown"))
+                  << ", odf="
+                  << (normalizedZipMetadata(odf) ==
+                      normalizedZipMetadata(expected->data(
+                          "application/vnd.oasis.opendocument.text")))
+                  << '\n';
+      result &= expect(plain == expected->text() &&
+                           markdown == expected->data("text/markdown") &&
+                           html.contains(QChar(0x200B)) &&
+                           normalizedZipMetadata(odf) ==
+                               normalizedZipMetadata(expected->data(
+                                   "application/vnd.oasis.opendocument.text")),
+                       "ordinary/prepared selected Copy retains authored "
+                       "Unicode in every format");
+    }
+  }
+  for (const auto &[source, expected] :
+       std::vector<std::pair<QString, QString>>{
+           {QStringLiteral("left\u200Bright\n\nend"),
+            QStringLiteral("left\u200Bright\n\nend")},
+           {QStringLiteral("left&#8203;right\n\nend"),
+            QStringLiteral("left\u200Bright\n\nend")},
+           {QStringLiteral("left\uE000right\n\nend"),
+            QStringLiteral("left\uE000right\n\nend")},
+           {QStringLiteral("left&#57344;right\n\nend"),
+            QStringLiteral("left\uE000right\n\nend")},
+           {QStringLiteral("left\u200B\uE000\uE001right\n\nend"),
+            QStringLiteral("left\u200B\uE000\uE001right\n\nend")},
+           {QStringLiteral("left&#8203;&#57344;&#57345;right\n\nend"),
+            QStringLiteral("left\u200B\uE000\uE001right\n\nend")},
+           {QStringLiteral("**First\n\nThird**"),
+            QStringLiteral("First\n\nThird")},
+           {QStringLiteral("`First\n\nThird`"),
+            QStringLiteral("First    Third")},
+           // Preserve the existing projection's whitespace-only-line policy.
+           {QStringLiteral("First\n  \nThird"),
+            QStringLiteral("First\n Third")},
+           {QStringLiteral("\n\nThird"), QStringLiteral("\n\nThird")},
+           {QStringLiteral("First\n\n"), QStringLiteral("First\n\n")},
+           {QStringLiteral("a\n\u200B\nb"), QStringLiteral("a\n\u200B\nb")},
+           {QStringLiteral("a [link](https://example.org/a\u200Bb)\n\nend"),
+            QStringLiteral("a link\n\nend")}}) {
+    MarkdownTextView view(source, 500, nullptr, true);
+    const QString liveText = view.document()->toRawText();
+    QTextDocument reference;
+    presentation::MarkdownTailState unused;
+    presentation::replaceMarkdownDocument(
+        reference, presentation::userMessageMarkdown(source), unused);
+    reference.setDefaultFont(view.document()->defaultFont());
+    reference.setDocumentMargin(0);
+    reference.setTextWidth(500);
+    const qreal height = view.document()->size().height();
+    copy(view);
+    const auto *mime = QApplication::clipboard()->mimeData();
+    if (mime->text() != expected)
+      std::cerr << "Copy mismatch for " << source.toStdString() << ": ["
+                << mime->text().toStdString() << "]\n";
+    result &=
+        expect(mime->text() == expected && mime->hasHtml() &&
+                   mime->hasFormat("text/markdown") &&
+                   mime->hasFormat("application/vnd.oasis.opendocument.text"),
+               "prompt selection removes generated content and preserves "
+               "authored content");
+    result &=
+        expect(liveText == view.document()->toRawText() &&
+                   liveText == reference.toRawText() &&
+                   qAbs(height - reference.size().height()) < 1.0,
+               "origin preparation and Copy preserve live text and geometry");
+    if (source.contains(QStringLiteral("https://")))
+      result &= expect(mime->html().contains(QStringLiteral("a\u200Bb")) &&
+                           mime->data("text/markdown")
+                               .contains(QStringLiteral("a\u200Bb").toUtf8()),
+                       "selected link destinations preserve authored Unicode");
+  }
+  MarkdownTextView mixed(QStringLiteral("left\u200Bright\n\nend"), 500, nullptr,
+                         true);
+  copy(mixed, 4, 5);
+  result &=
+      expect(QApplication::clipboard()->text() == QString(QChar(0x200B)),
+             "selecting only an authored zero-width character preserves it");
+  const int blank = mixed.document()->findBlockByNumber(1).position();
+  copy(mixed, blank, blank + 1);
+  result &= expect(
+      QApplication::clipboard()->text().isEmpty(),
+      "selecting only a generated blank placeholder exports no character");
+  for (const auto &[start, end] : std::vector<std::pair<int, int>>{
+           {1, blank}, {4, blank + 2}, {blank, blank + 3}, {blank + 1, blank + 3}}) {
+    QString expected = mixed.document()->toPlainText().mid(start, end - start);
+    if (start <= blank && blank < end)
+      expected.remove(blank - start, 1);
+    const auto before = mixed.document()->revision();
+    copy(mixed, start, end);
+    result &= expect(QApplication::clipboard()->text() == expected &&
+                         mixed.document()->revision() == before &&
+                         mixed.textCursor().selectionStart() == start &&
+                         mixed.textCursor().selectionEnd() == end,
+                     "partial selections map origins without modifying the live document or selection");
+  }
+  for (const QString &source :
+       {QStringLiteral(
+            "**left\u200Bright**\n\nend [link](https://example.org/a\u200Bb)"),
+        QStringLiteral("**left&#8203;right**\n\nend "
+                       "[link](https://example.org/a&#8203;b)")}) {
+    MarkdownTextView view(source, 500, nullptr, true);
+    copy(view);
+    const auto *actual = QApplication::clipboard()->mimeData();
+    const QString plain = actual->text();
+    const QByteArray markdown = actual->data("text/markdown");
+    const QByteArray odf =
+        actual->data("application/vnd.oasis.opendocument.text");
+    QTextDocument html;
+    html.setHtml(actual->html());
+    result &= expect(
+        html.toPlainText() == plain &&
+            html.firstBlock().begin().fragment().charFormat().fontWeight() ==
+                QFont::Bold,
+        "cleaned selection HTML preserves authored Unicode and emphasis");
+    QTextBrowser expected;
+    expected.document()->setDefaultStyleSheet(
+        view.document()->defaultStyleSheet());
+    expected.document()->setDefaultFont(view.document()->defaultFont());
+    expected.setMarkdown(presentation::userMessageMarkdown(source));
+    QTextCursor generated(expected.document());
+    const int position = expected.document()->findBlockByNumber(1).position();
+    generated.setPosition(position);
+    generated.setPosition(position + 1, QTextCursor::KeepAnchor);
+    generated.removeSelectedText();
+    copy(expected);
+    const auto *reference = QApplication::clipboard()->mimeData();
+    result &= expect(plain == reference->text() &&
+                         markdown == reference->data("text/markdown") &&
+                         normalizedZipMetadata(odf) ==
+                             normalizedZipMetadata(reference->data(
+                                 "application/vnd.oasis.opendocument.text")),
+                     "mixed authored/generated selection exports the "
+                     "independently cleaned rich fragment in all formats");
+  }
+  for (const auto &[source, property] : std::vector<std::pair<QString, int>>{
+           {QStringLiteral(
+                "a [link](https://example.org/a \"first\u200B\n\nlast\")"),
+            QTextFormat::TextToolTip},
+           {QStringLiteral("a ![first\u200B\n\nlast](https://example.org/a)"),
+            QTextFormat::ImageAltText}}) {
+    MarkdownTextView view(source, 500, nullptr, true);
+    copy(view);
+    const auto *actual = QApplication::clipboard()->mimeData();
+    const QString html = actual->html();
+    const QByteArray markdown = actual->data("text/markdown");
+    const QByteArray odf =
+        actual->data("application/vnd.oasis.opendocument.text");
+    QTextBrowser expected;
+    expected.document()->setDefaultStyleSheet(
+        view.document()->defaultStyleSheet());
+    expected.setMarkdown(presentation::userMessageMarkdown(source));
+    // This fixture puts an authored glyph immediately after "first"; any
+    // other glyph in this attribute is the single inserted empty-row marker.
+    for (auto block = expected.document()->begin(); block.isValid();
+         block = block.next()) {
+      for (auto it = block.begin(); !it.atEnd(); ++it) {
+        const auto fragment = it.fragment();
+        auto format = fragment.charFormat();
+        QString value = format.stringProperty(property);
+        const int generated = value.indexOf(
+            QChar(0x200B), value.startsWith(QStringLiteral("first")) ? 6 : 0);
+        if (generated < 0)
+          continue;
+        value.remove(generated, 1);
+        format.setProperty(property, value);
+        QTextCursor range(expected.document());
+        range.setPosition(fragment.position());
+        range.setPosition(fragment.position() + fragment.length(),
+                          QTextCursor::KeepAnchor);
+        range.setCharFormat(format);
+      }
+    }
+    copy(expected);
+    const auto *reference = QApplication::clipboard()->mimeData();
+    result &= expect(html == reference->html() &&
+                         markdown == reference->data("text/markdown") &&
+                         normalizedZipMetadata(odf) ==
+                             normalizedZipMetadata(reference->data(
+                                 "application/vnd.oasis.opendocument.text")),
+                     "Copy preserves authored image/link attributes and "
+                     "removes generated attribute content only");
+  }
+  for (const QString &initial : {QStringLiteral("First\n\nThird"),
+                                 QStringLiteral("First\n\nThird\nfourth"),
+                                 QStringLiteral("prefix\n\nmutable  \nline"),
+                                 QStringLiteral("prefix\n\nmutable  \n"),
+                                 QStringLiteral("prefix\n\nleft\u2029right"),
+                                 QStringLiteral("prefix\n\nleft&#8233;right"),
+                                 QStringLiteral("prefix\n\nleft&#x2029;right"),
+                                 QStringLiteral("prefix\n\nleft\r\rright")}) {
+    for (bool preserve : {false, true}) {
+      MarkdownTextView updated(initial, 500, nullptr, preserve);
+      QTextDocument *identity = updated.document();
+      QString source = initial;
+      for (const QString &suffix :
+           {QStringLiteral(" appended"), QStringLiteral("\n\nnew **end**")}) {
+        source += suffix;
+        updated.setContent(source);
+        MarkdownTextView fresh(source, 500, nullptr, preserve);
+        if (updated.document()->toRawText() != fresh.document()->toRawText() ||
+            updated.heightForWidth(500) != fresh.heightForWidth(500))
+          std::cerr << "Incremental mismatch: " << source.toStdString()
+                    << ", preserve=" << preserve << ", text="
+                    << (updated.document()->toRawText() == fresh.document()->toRawText())
+                    << ", heights=" << updated.heightForWidth(500) << '/'
+                    << fresh.heightForWidth(500) << '\n';
+        result &=
+            expect(updated.document() == identity &&
+                       updated.document()->toRawText() ==
+                           fresh.document()->toRawText() &&
+                       updated.heightForWidth(500) == fresh.heightForWidth(500),
+                   "incremental source/document boundaries match a fresh "
+                   "prompt without duplication");
+        copy(updated);
+        const QString updatedCopy = QApplication::clipboard()->text();
+        copy(fresh);
+        result &= expect(updatedCopy == QApplication::clipboard()->text() &&
+                             !updated.setContent(source),
+                         "incremental Copy origins agree with fresh "
+                         "preparation and semantic no-ops");
+      }
+    }
+  }
   return result;
 }
 
@@ -4776,6 +5057,11 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   using namespace codexui::codex::middle;
+  if (qEnvironmentVariableIsSet("CODEXUI_MARKDOWN_SELECTION_TESTS")) {
+    bool focused = testUserMessageLineBreakPresentation();
+    focused &= testMarkdownSelectionPreservesAuthoredCharacters();
+    return focused ? 0 : 1;
+  }
   if (qEnvironmentVariableIsSet("CODEXUI_MUTABLE_CARD_TESTS"))
     return testMutableCardsAndCommandOutput() ? 0 : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_FOLLOW_TESTS"))
@@ -4816,6 +5102,7 @@ int main(int argc, char **argv) {
   result &= testAgentActivityLifecycleLabelRetention();
   result &= testMarkdownLongLinesWrapInsideMaterializedCards();
   result &= testUserMessageLineBreakPresentation();
+  result &= testMarkdownSelectionPreservesAuthoredCharacters();
   result &= testMutableCardsAndCommandOutput();
   result &= testCardFoldingGeometryAndRetention();
   result &= testPresentationOptionsRetainCardsAndInitialFolding();

@@ -146,7 +146,8 @@ void announce(QWidget &widget, const QString &message);
 // User-authored prompt newlines are intentional visual line breaks. Preserve
 // them in the Markdown presentation without changing the canonical source
 // retained for copy or protocol reconciliation.
-[[nodiscard]] QString userMessageMarkdown(QStringView source);
+[[nodiscard]] QString userMessageMarkdown(
+    QStringView source, QStringView blankOrigin = u"\u200B");
 [[nodiscard]] QString planMarkdown(const PlanData &plan);
 [[nodiscard]] QString agentMetadata(const AgentActivityData &activity,
                                     const UiStatus &status);
