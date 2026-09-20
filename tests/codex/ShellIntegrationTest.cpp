@@ -1086,6 +1086,10 @@ void applicationFontChangeRegeneratesUiGeometry(Configuration &configuration) {
                   QStringLiteral("href=\"https://github.com/volkerchristian\">"
                                  "Volker Christian</a>")),
               "the footer links Volker Christian to the author's GitHub account");
+      require(statusAttribution->text().contains(
+                  QStringLiteral("href=\"https://github.com/openai/codex\">"
+                                 "Codex</a>")),
+              "the footer links Codex to its official repository");
       const QImage topPixels = topBar->grab().toImage();
       const QImage statusPixels = statusBar->grab().toImage();
       const QImage conversationPixels = conversation->grab().toImage();
