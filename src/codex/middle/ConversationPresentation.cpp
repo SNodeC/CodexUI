@@ -338,9 +338,6 @@ void MarkdownTextView::refreshPreferredHeight(int documentWidth) const {
 namespace presentation {
 namespace {
 
-constexpr qsizetype MaximumGenericActivityCharacters = 4096;
-constexpr std::size_t MaximumGenericActivityUtf8Bytes =
-    static_cast<std::size_t>(MaximumGenericActivityCharacters) * 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
 constexpr int CopyCheckHoldMilliseconds = 500;
 
@@ -408,8 +405,15 @@ bool simpleMarkdownParagraphs(QStringView source) {
            line.at(indentation) == QLatin1Char(' '))
       ++indentation;
     const QStringView content = line.sliced(indentation);
-    const bool heading = content.startsWith(QLatin1Char('#')) &&
-                         (content.size() == 1 || content.at(1).isSpace());
+    const auto markerSpace = [](QChar character) {
+      return character == QLatin1Char(' ') || character == QLatin1Char('\t');
+    };
+    qsizetype hashes = 0;
+    while (hashes < content.size() && content.at(hashes) == QLatin1Char('#'))
+      ++hashes;
+    const bool heading =
+        hashes > 0 && hashes <= 6 &&
+        (hashes == content.size() || markerSpace(content.at(hashes)));
     const bool quote = content.startsWith(QLatin1Char('>'));
     const bool fence = content.startsWith(QLatin1StringView("```")) ||
                        content.startsWith(QLatin1StringView("~~~"));
@@ -417,18 +421,21 @@ bool simpleMarkdownParagraphs(QStringView source) {
                                (content.at(0) == QLatin1Char('-') ||
                                 content.at(0) == QLatin1Char('*') ||
                                 content.at(0) == QLatin1Char('+')) &&
-                               content.at(1).isSpace();
+                               markerSpace(content.at(1));
     qsizetype digits = 0;
-    while (digits < content.size() && content.at(digits).isDigit())
+    while (digits < content.size() && content.at(digits) >= QLatin1Char('0') &&
+           content.at(digits) <= QLatin1Char('9'))
       ++digits;
-    const bool orderedList = digits > 0 && digits + 1 < content.size() &&
+    const bool orderedList = digits > 0 && digits <= 9 &&
+                             digits + 1 < content.size() &&
                              (content.at(digits) == QLatin1Char('.') ||
                               content.at(digits) == QLatin1Char(')')) &&
-                             content.at(digits + 1).isSpace();
+                             markerSpace(content.at(digits + 1));
     const bool referenceDefinition = content.startsWith(QLatin1Char('['));
     const bool table = content.contains(QLatin1Char('|'));
-    if (indentation >= 4 || heading || quote || fence || unorderedList ||
-        orderedList || referenceDefinition || table)
+    if (indentation >= 4 || line.startsWith(QLatin1Char('\t')) || heading ||
+        quote || fence || unorderedList || orderedList || referenceDefinition ||
+        table)
       return false;
     if (lineEnd == source.size())
       break;
@@ -681,31 +688,7 @@ QString userMessageMarkdown(QStringView source, QStringView blankOrigin) {
   // paragraph with explicit hard breaks and give empty lines an invisible
   // layout glyph. The canonical source remains untouched on the view and is
   // still used for copy and protocol correlation.
-  if (simpleMarkdownParagraphs(source)) {
-    qsizetype lineStart = 0;
-    while (lineStart <= source.size()) {
-      qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
-      const bool hasNewline = lineEnd >= 0;
-      if (!hasNewline)
-        lineEnd = source.size();
-      QStringView line = source.sliced(lineStart, lineEnd - lineStart);
-      if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
-        line.chop(1);
-      rendered += line;
-      if (line.trimmed().isEmpty())
-        rendered += blankOrigin;
-      if (hasNewline) {
-        if (!line.endsWith(QLatin1Char('\\')) &&
-            !line.endsWith(QLatin1StringView("  ")))
-          rendered += QLatin1StringView("  ");
-        rendered += QLatin1Char('\n');
-      }
-      if (!hasNewline)
-        break;
-      lineStart = lineEnd + 1;
-    }
-    return rendered;
-  }
+  const bool simple = simpleMarkdownParagraphs(source);
 
   bool fenced = false;
   QChar fenceMarker;
@@ -743,6 +726,8 @@ QString userMessageMarkdown(QStringView source, QStringView blankOrigin) {
     const bool insideFence = fenced || opensFence;
 
     rendered += line;
+    if (simple && line.trimmed().isEmpty())
+      rendered += blankOrigin;
     if (hasNewline) {
       qsizetype nextEnd = source.indexOf(QLatin1Char('\n'), lineEnd + 1);
       if (nextEnd < 0)
@@ -754,8 +739,9 @@ QString userMessageMarkdown(QStringView source, QStringView blankOrigin) {
       const bool nextBlank = next.trimmed().isEmpty();
       const bool alreadyHardBreak = line.endsWith(QLatin1Char('\\')) ||
                                     line.endsWith(QLatin1StringView("  "));
-      if (!insideFence && !fenceLine && !indentedCode && !currentBlank &&
-          !nextBlank && !alreadyHardBreak)
+      if (!alreadyHardBreak &&
+          (simple || (!insideFence && !fenceLine && !indentedCode &&
+                      !currentBlank && !nextBlank)))
         rendered += QLatin1StringView("  ");
       rendered += QLatin1Char('\n');
     }
@@ -835,20 +821,8 @@ QString fileChangesText(const FileChangesData &changes) {
 }
 
 QString genericActivityTitle(const GenericActivityData &activity) {
-  return activity.type.empty() ? QStringLiteral("Activity")
-                               : UiStyle::humanizeLabel(text(activity.type));
-}
-
-QString boundedGenericActivityDetail(const GenericActivityData &activity) {
-  const std::size_t byteCount =
-      std::min(activity.displayDetail.size(), MaximumGenericActivityUtf8Bytes);
-  QString rendered = QString::fromUtf8(activity.displayDetail.data(),
-                                       static_cast<qsizetype>(byteCount));
-  if (byteCount == activity.displayDetail.size() &&
-      rendered.size() <= MaximumGenericActivityCharacters)
-    return rendered;
-  rendered.truncate(MaximumGenericActivityCharacters);
-  return rendered + QStringLiteral("\n\n[Activity details truncated]");
+  const QString label = UiStyle::humanizeLabel(text(activity.type));
+  return label.isEmpty() ? QStringLiteral("Activity") : label;
 }
 
 void allowPreformattedMarkdownWrapping(QTextDocument &document) {

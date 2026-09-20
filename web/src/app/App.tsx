@@ -347,20 +347,28 @@ function SafeMarkdown({text}: {text: string}) {
 }
 
 export function userMessageMarkdownText(text: string): string {
-    const lines = text.split("\n");
-    const structuralMarkdown = lines.some(rawLine => {
-        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const lines = text.split("\n").map(line => line.endsWith("\r") ? line.slice(0, -1) : line);
+    const structuralMarkdown = lines.some(line => {
         const indentation = line.match(/^ */u)?.[0].length ?? 0;
         const content = line.slice(indentation);
-        return indentation >= 4 || /^(?:#{1,6}(?:\s|$)|>|```|~~~|[-*+]\s|\d+[.)]\s|\[)/u.test(content)
+        return indentation >= 4 || line.startsWith("\t")
+            || /^(?:#{1,6}(?:[ \t]|$)|>|```|~~~|[-*+][ \t]|[0-9]{1,9}[.)][ \t]|\[)/u.test(content)
             || content.includes("|");
     });
-    if (structuralMarkdown) return text;
-    return lines.map((rawLine, index) => {
-        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-        const blankMarker = line.trim() === "" ? "\u200B" : "";
-        if (index === lines.length - 1) return `${line}${blankMarker}`;
-        const hardBreak = line.endsWith("\\") || line.endsWith("  ") ? "" : "  ";
+    let fenceMarker = "", fenceLength = 0;
+    return lines.map((line, index) => {
+        const marker = /^ {0,3}(`{3,}|~{3,})/u.exec(line);
+        const opens = fenceLength === 0 && marker !== null;
+        const closes = fenceLength > 0 && marker?.[1]?.[0] === fenceMarker
+            && marker[1].length >= fenceLength && /^\p{White_Space}*$/u.test(line.slice(marker[0].length));
+        const inside = fenceLength > 0 || opens;
+        const blank = /^\p{White_Space}*$/u.test(line);
+        const blankMarker = !structuralMarkdown && blank ? "\u200B" : "";
+        const hardBreak = index < lines.length - 1 && !line.endsWith("\\") && !line.endsWith("  ")
+            && (!structuralMarkdown || (!inside && !closes && !/^( {4}|\t)/u.test(line)
+                && !blank && !/^\p{White_Space}*$/u.test(lines[index + 1]!))) ? "  " : "";
+        if (opens) { fenceMarker = marker[1]![0]!; fenceLength = marker[1]!.length; }
+        else if (closes) { fenceMarker = ""; fenceLength = 0; }
         return `${line}${blankMarker}${hardBreak}`;
     }).join("\n");
 }
@@ -422,7 +430,7 @@ export function cardCopyContent(card: VisibleCardData): CardCopyContent {
     if (card.kind === "reasoning") return {text: (card.payload as ReasoningData).summary, markdown: true};
     if (card.kind === "commandExecution") {
         const data = card.payload as CommandExecutionData;
-        return {text: joinCopyText([data.command.trimEnd(), data.output.trimEnd()]), markdown: false};
+        return {text: joinCopyText([trimTrailingEmptyLines(data.command), trimTrailingEmptyLines(data.output)]), markdown: false};
     }
     if (card.kind === "agentActivity") {
         const data = card.payload as AgentActivityData;
@@ -517,7 +525,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     } else if (card.kind === "fileChanges") {
         const data = card.payload as FileChangesData; title = "File changes";
         body = <><div className="file-list">{data.changes.map(change => <div key={`${change.path}:${change.kind}`}>
-            <span>{change.path}</span><small>{humanize(change.kind)} {change.additions !== undefined && <b className="plus">+{change.additions}</b>} {change.deletions !== undefined && <b className="minus">−{change.deletions}</b>}</small>
+            <span>{change.path}</span><small>{humanize(change.kind || "changed")} {change.additions !== undefined && <b className="plus">+{change.additions}</b>} {change.deletions !== undefined && <b className="minus">−{change.deletions}</b>}</small>
         </div>)}</div><small className="card-status">{fileChangeMetadata(data)}</small></>;
     } else if (card.kind === "agentActivity") {
         const data = card.payload as AgentActivityData; title = "Agent activity";
@@ -530,7 +538,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     } else if (card.kind === "plan") {
         const data = card.payload as PlanData; title = "Plan"; body = <SafeMarkdown text={planMarkdown(data)} />;
     } else {
-        const data = card.payload as GenericActivityData; title = data.type ? humanize(data.type) : "Activity";
+        const data = card.payload as GenericActivityData; title = humanize(data.type) || "Activity";
         body = <pre className="generic-activity-data">{data.displayDetail}</pre>;
     }
     const copyContent = cardCopyContent(card);

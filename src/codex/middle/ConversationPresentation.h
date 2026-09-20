@@ -153,8 +153,6 @@ void announce(QWidget &widget, const QString &message);
                                     const UiStatus &status);
 [[nodiscard]] QString fileChangesText(const FileChangesData &changes);
 [[nodiscard]] QString genericActivityTitle(const GenericActivityData &activity);
-[[nodiscard]] QString
-boundedGenericActivityDetail(const GenericActivityData &activity);
 
 // A streamed Markdown document has one mutable trailing block while all
 // preceding blocks are already final. These helpers preserve the Qt Markdown

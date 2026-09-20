@@ -81,16 +81,63 @@ export function projectTurnPlan(turn: TurnPresentation, threadStatus: Presentati
     return undefined;
 }
 
+// Shared with graphDisplayDetail: readable, code-point-ordered fields, four
+// nesting levels, and at most 4000 UTF-8 bytes before the truncation notice.
+function genericActivityDetail(item: JsonObject): string {
+    const bytes = new Uint8Array(4000);
+    const encoder = new TextEncoder();
+    let used = 0, truncated = false;
+    const append = (text: string): void => {
+        if (truncated) return;
+        const {read, written} = encoder.encodeInto(text.slice(0, bytes.length - used + 1), bytes.subarray(used));
+        used += written;
+        truncated = read < text.length;
+    };
+    const keyOrder = (left: string, right: string): number => {
+        for (let a = 0, b = 0; a < left.length && b < right.length;) {
+            const x = left.codePointAt(a)!, y = right.codePointAt(b)!;
+            if (x !== y) return x - y;
+            a += x > 0xffff ? 2 : 1; b += y > 0xffff ? 2 : 1;
+        }
+        return left.length - right.length;
+    };
+    const visit = (value: unknown, depth: number): void => {
+        if (truncated) return;
+        if (value === null || typeof value !== "object") { append(value == null ? "none" : String(value)); return; }
+        if (depth >= 4) { append("nested detail omitted"); return; }
+        if (Array.isArray(value)) {
+            if (value.length === 0) append("none");
+            for (const entry of value) {
+                append(`\n${"  ".repeat(depth + 1)}- `); visit(entry, depth + 1);
+                if (truncated) return;
+            }
+            return;
+        }
+        const keys = Object.keys(value).sort(keyOrder);
+        if (keys.length === 0) { append("none"); return; }
+        for (const key of keys) {
+            append(`\n${"  ".repeat(depth + 1)}`);
+            append(`${key}: `);
+            visit((value as Record<string, unknown>)[key], depth + 1);
+            if (truncated) return;
+        }
+    };
+    for (const key of Object.keys(item).sort(keyOrder)) {
+        if (["protocolId", "protocolThreadId", "protocolTurnId", "textRetention"].includes(key)) continue;
+        append(`${key}: `); visit(item[key], 0);
+        if (truncated) break;
+        append("\n");
+    }
+    return new TextDecoder().decode(bytes.subarray(0, used)) + (truncated ? "\n\n[Activity details truncated]" : "");
+}
+
 function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPresentation,
     visualKey: CardKey, threadCwd: string): VisibleCardData {
     const item = presentation.raw;
     const type = stringMember(item, "type");
     let kind: CardKind = "genericActivity";
     let status = statusFromValue(member(item, "status"));
-    const rawDetail = JSON.stringify(item, null, 2) ?? "";
-    const displayDetail = rawDetail.length <= 4096 ? rawDetail
-        : `${rawDetail.slice(0, 4096)}\n\n[Activity details truncated]`;
-    let payload: CardPayload = {type, displayDetail} satisfies GenericActivityData;
+    let payload: CardPayload;
     if (type === "userMessage") {
         status = UnknownStatus;
         kind = "userMessage"; payload = {text: messageText(item), imagePaths: messageImagePaths(item)} satisfies UserMessageData;
@@ -143,7 +190,7 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
     } else if (type === "plan" && messageText(item) !== "") {
         kind = "plan"; payload = {explanation: "", steps: [], legacyText: withTruncationNotice(
             messageText(item), omittedTextBytes(presentation, "text"), "plan text", true)};
-    }
+    } else payload = {type, displayDetail: genericActivityDetail(item)} satisfies GenericActivityData;
     return {key: visualKey, kind, threadId: identity.threadId, turnId: identity.turnId, itemId: identity.itemId,
         payload, status};
 }

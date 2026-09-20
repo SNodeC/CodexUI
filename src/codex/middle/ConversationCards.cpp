@@ -645,7 +645,7 @@ std::optional<QString> selectionSource(const VisibleCardData &card, bool nested,
           if (role == SelectionRole::Title)
             return presentation::genericActivityTitle(payload);
           if (role == SelectionRole::Metadata)
-            return presentation::boundedGenericActivityDetail(payload);
+            return text(payload.displayDetail);
         } else if constexpr (std::is_same_v<Payload, LocalPromptData>) {
           if (role == SelectionRole::Title)
             return QStringLiteral("You");
@@ -850,7 +850,7 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
               joinedCopyText({text(payload.revisedPrompt), text(payload.path)}),
               false};
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
-          return {presentation::boundedGenericActivityDetail(payload), false};
+          return {text(payload.displayDetail), false};
         } else {
           return payload.prompt.empty()
                      ? CardCopyContent{textList(payload.imagePaths)
@@ -2099,7 +2099,7 @@ public:
       markBodyProjectionDeferred();
       return;
     }
-    metadata->setText(presentation::boundedGenericActivityDetail(activity));
+    metadata->setText(text(activity.displayDetail));
     metadata->show();
     markBodyProjectionReady();
   }

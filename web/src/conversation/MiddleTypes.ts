@@ -95,7 +95,7 @@ export function trimTrailingEmptyLines(text: string): string {
         if (end === 0) break;
         let start = end;
         while (start > 0 && text[start - 1] !== "\n" && text[start - 1] !== "\r") --start;
-        if ([...text.slice(start, end)].some(character => !/\s/u.test(character))) break;
+        if (/[^\p{White_Space}\u001c-\u001f]/u.test(text.slice(start, end))) break;
         end = start;
     }
     return text.slice(0, end);

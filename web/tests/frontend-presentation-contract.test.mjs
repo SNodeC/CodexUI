@@ -8,13 +8,59 @@ import {
     isActiveStatus, isTerminalTurnStatus, isWorkingStatus, projectTurnPlan,
     pendingDecisionOptions, pendingResponse, settingDraftFor, settingPresentation,
     settingPromptOptions, statusFromValue, statusToken, statusTone, turnSettingCatalog,
+    humanizeProtocolLabel, projectConversation,
 } from "../dist/index.js";
+import {cardCopyContent, userMessageMarkdownText} from "../dist/app/App.js";
 
 const contract = JSON.parse(readFileSync(
     new URL("../../tests/fixtures/frontend-presentation.json", import.meta.url), "utf8",
 ));
 
-assert.equal(contract.schemaVersion, 5);
+assert.equal(contract.schemaVersion, 6);
+
+for (const entry of contract.labelCases) test(`label contract: ${JSON.stringify(entry.input)}`, () => {
+    assert.equal(humanizeProtocolLabel(entry.input), entry.expected);
+});
+for (const [index, entry] of contract.copyCases.entries()) test(`Copy contract: ${index}`, () => {
+    assert.deepEqual(cardCopyContent({kind: "commandExecution", payload: entry}), {text: entry.expected, markdown: false});
+});
+for (const [index, entry] of contract.markdownCases.entries()) test(`Markdown contract: ${index}`, () => {
+    assert.equal(userMessageMarkdownText(entry.source), entry.expected);
+});
+for (const [index, entry] of contract.genericDetailCases.entries()) test(`generic detail contract: ${index}`, () => {
+    const {model, normalizer} = pipeline();
+    normalizer.serverNotification("thread/started", {thread: {id: "detail"}});
+    normalizer.serverNotification("turn/started", {threadId: "detail", turn: {id: "turn"}});
+    normalizer.serverNotification("item/completed", {threadId: "detail", turnId: "turn", item: fixtureRaw(entry)});
+    const card = projectConversation(model.thread("detail"), [], 80, 0).sections[0].cards[0];
+    const repeat = entry.expectedRepeat;
+    const expected = repeat ? `a: ${repeat.text.repeat(repeat.count)}\n\n[Activity details truncated]` : entry.expected;
+    assert.equal(card.payload.displayDetail, expected);
+    assert.deepEqual(cardCopyContent(card), {text: expected, markdown: false});
+});
+
+test("detail projection skips known-card extras and stops traversing at its output bound", () => {
+    const {model, normalizer} = pipeline();
+    normalizer.serverNotification("thread/started", {thread: {id: "detail"}});
+    normalizer.serverNotification("turn/started", {threadId: "detail", turn: {id: "turn"}});
+    normalizer.serverNotification("item/completed", {threadId: "detail", turnId: "turn",
+        item: {id: "item", type: "agentMessage", text: "answer"}});
+    const thread = model.thread("detail"), raw = thread.turns.get("turn").items.get("item").raw;
+    Object.defineProperty(raw, "extra", {enumerable: true, configurable: true,
+        get() { throw new Error("known cards must not traverse unrelated detail"); }});
+    assert.equal(projectConversation(thread, [], 80, 0).sections[0].cards[0].payload.text, "answer");
+    delete raw.extra;
+    raw.type = "custom";
+    let visits = 0;
+    raw.a = new Proxy(Array(100_000).fill("value"), {get(target, key, receiver) {
+        if (typeof key === "string" && /^[0-9]+$/u.test(key)) ++visits;
+        return Reflect.get(target, key, receiver);
+    }});
+    const detail = projectConversation(thread, [], 80, 0).sections[0].cards[0].payload.displayDetail;
+    assert.ok(visits > 0 && visits < 1000, `bounded array traversal: ${visits}`);
+    assert.ok(Buffer.byteLength(detail) <= 4030);
+    assert.ok(detail.endsWith("[Activity details truncated]"));
+});
 
 const SettingFields = ["model", "effort", "personality", "sandbox", "network", "approval",
     "reviewer", "cwd", "permissionProfile", "serviceTier", "summary", "collaboration"];

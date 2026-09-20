@@ -280,6 +280,40 @@ private:
   bool truncated_ = false;
 };
 
+// Use shortest round-trip numbers, with the browser's decimal/exponent range.
+// Integer Value alternatives retain their exact protocol representation.
+std::string graphDetailNumber(double value) {
+  if (value == 0)
+    return "0";
+  char buffer[64];
+  const auto converted = std::to_chars(std::begin(buffer), std::end(buffer),
+                                       value, std::chars_format::scientific);
+  std::string result(buffer, converted.ptr);
+  const auto exponentAt = result.find('e');
+  if (exponentAt == std::string::npos)
+    return result;
+  int exponent = 0;
+  const char *digits = result.data() + exponentAt + 1;
+  if (*digits == '+')
+    ++digits;
+  std::from_chars(digits, result.data() + result.size(), exponent);
+  result.resize(exponentAt);
+  if (exponent < -6 || exponent >= 21)
+    return result + "e" + (exponent >= 0 ? "+" : "") + std::to_string(exponent);
+  const std::size_t sign = result.front() == '-' ? 1 : 0;
+  const auto point = result.find('.');
+  if (point != std::string::npos)
+    result.erase(point, 1);
+  if (exponent < 0)
+    result.insert(sign, "0." + std::string(-exponent - 1, '0'));
+  else if (const auto position = sign + static_cast<std::size_t>(exponent) + 1;
+           position < result.size())
+    result.insert(position, ".");
+  else
+    result.append(position - result.size(), '0');
+  return result;
+}
+
 void appendGraphDetail(GraphDetailBuilder &builder,
                        const nodegraph::Value &value, int depth) {
   if (builder.truncated())
@@ -301,7 +335,7 @@ void appendGraphDetail(GraphDetailBuilder &builder,
     return;
   }
   if (const auto *number = value.asDouble()) {
-    builder.append(std::to_string(*number));
+    builder.append(graphDetailNumber(*number));
     return;
   }
   if (const auto *text = value.asString()) {
@@ -346,6 +380,10 @@ void appendGraphDetail(GraphDetailBuilder &builder,
 std::string graphDisplayDetail(const nodegraph::NodeState &state) {
   GraphDetailBuilder builder;
   for (const auto &[key, value] : state.fields) {
+    // Graph identity/retention metadata is not part of the activity payload.
+    if (key == "protocolId" || key == "protocolThreadId" ||
+        key == "protocolTurnId" || key == "textRetention")
+      continue;
     builder.append(key);
     builder.append(": ");
     appendGraphDetail(builder, value, 0);

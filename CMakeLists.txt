@@ -524,9 +524,11 @@ if(BUILD_TESTING)
         codexui-conversation-cards-test PRIVATE cxx_std_20
     )
     target_include_directories(codexui-conversation-cards-test PRIVATE src)
+    target_compile_definitions(codexui-conversation-cards-test PRIVATE
+        CODEXUI_PRESENTATION_CONTRACT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/frontend-presentation.json")
     target_link_libraries(
         codexui-conversation-cards-test
-        PRIVATE codexui-conversation-ui
+        PRIVATE codexui-conversation-ui codexui-ui-adapter
     )
     add_test(
         NAME codexui-conversation-cards

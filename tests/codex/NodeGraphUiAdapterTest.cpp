@@ -2622,7 +2622,7 @@ bool frontendPresentationContractIsShared() {
     return false;
   }
 
-  bool passed = require(contract.value("schemaVersion", 0) == 5,
+  bool passed = require(contract.value("schemaVersion", 0) == 6,
                         "shared presentation schema version changed");
   const auto check = [&passed](bool condition, const std::string &message) {
     passed &= require(condition, message.c_str());

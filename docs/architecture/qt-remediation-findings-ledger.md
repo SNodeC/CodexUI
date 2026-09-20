@@ -13,7 +13,7 @@ clean `eb6d56d` on `master`, two commits ahead of `origin/master`.
 | 1 / NEW-1 | UTF-8-safe byte bounding at the generic-activity adapter boundary | Completed; broader performance qualification remains open below |
 | 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Completed and verified; Copy cost and separate DPR-suite limitation recorded below |
 | 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Completed and offscreen-verified within approved growth; native screen-reader qualification remains separate |
-| 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Pending |
+| 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Implemented; correctness checks pass; NOT complete: browser stream-performance gate remains open |
 | 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Pending |
 | Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
 | Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
@@ -569,6 +569,150 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   items offscreen/invisible; unlike filtered/folded items, presented offscreen
   rows remain logically selectable and explicitly revealable. No plan task
   was added and item 4 has not been started.
+
+### Step 4 change gate — shared presentation contract
+
+- Baseline is clean `14e1d19`, the user-authorized item-3 commit. Item 4 alone
+  is authorized; stop before exceeding **+220 production / +300 test CLOC**.
+- Trace: protocol notifications -> native NodeGraph / browser PresentationModel
+  -> conversation adapters -> DTOs -> existing display, Copy and accessibility
+  consumers. Native and browser rendering remain separate; their data meaning
+  is governed by the same differential fixture.
+- Reproduced: browser command Copy drops content-line spaces; labels disagree
+  on empty/separator-only inputs, padded xhigh and Unicode word boundaries;
+  native prompt preparation misses heading levels 2–6; browser discards native
+  prose-line preservation whenever structured Markdown appears. Native generic
+  details use a 4,000-byte readable tree and include graph bookkeeping, whereas
+  browser eagerly serializes every card to JSON and slices 4,096 UTF-16 units.
+  Diagnostics produced an unpaired D83D surrogate and an 8,212-byte browser
+  detail. Existing baseline checks pass (200 browser cases, two native suites),
+  but do not cover these counterexamples.
+- Delete eager/full browser JSON formatting and the native render-side generic
+  bounds after both adapters satisfy the bounded DTO contract. Reuse command
+  trimming; keep label fallback at call sites; consolidate native prompt line
+  traversal while aligning browser fence/prose handling. Preserve D-6 Copy
+  provenance and incremental Markdown preparation.
+- Add only pure bounded formatting/normalization work necessary for the missing
+  browser contract. No renderer, retained state, timer, cache, graph authority,
+  scheduling mechanism or upstream modification is authorized.
+- Baseline production: affected native files 6,439 CLOC, browser files 1,517
+  CLOC. Tests: native adapter/cards 8,058 CLOC; three relevant browser files
+  820 CLOC. Fixture/build/documentation deltas are also reported separately.
+- Required checks: execute both frontends over added fixture groups; exercise
+  actual native Copy and adapter snapshot/delta paths; retain large-output,
+  Markdown selection/preparation/append checks; cover Unicode byte boundaries,
+  ordering/nesting/numbers, whitespace and all heading levels. Use 14-way
+  builds/test execution where suitable, Xvfb/offscreen for Qt, sanitizer and
+  DPR checks, and compare native/browser performance with recorded baselines.
+
+### Step 4 implementation and verification — 2026-09-20–21
+
+- **Implemented at the existing boundaries:** generic details now share sorted
+  readable tree output, four nesting levels, a 4,000-byte UTF-8 body and the
+  existing truncation notice. Graph-only identity/retention fields are excluded.
+  Floating-point values use shortest round-trip decimal formatting with the
+  same exponent range. Native integer alternatives retain exact integer text.
+  The browser visits array values only until its output is full and does not
+  inspect unrelated generic details on known card types.
+- **Deleted:** eager `JSON.stringify` and UTF-16 slicing on every browser card,
+  native `boundedGenericActivityDetail`, its two constants and three consumer
+  calls, and the duplicated native plain-prompt line traversal. No renderer,
+  persistent state, timer, cache, QObject property, worker, bridge or upstream
+  change was introduced. New formatting state is local to one projection.
+- Command Copy reuses trailing-empty-line trimming and preserves content-line
+  spaces. Labels normalize Unicode whitespace before classification, process
+  complete code points, and keep empty values empty; generic-card and empty
+  file-change label fallbacks belong to their callers. Authored Markdown
+  preparation now agrees on all six heading levels, ASCII list markers,
+  indentation, fences, CRLF and prose hard breaks. Existing Markdown renderers
+  and D-6 selection provenance remain authoritative.
+- Shared fixture schema 6 adds **37 cases**: 10 labels, 5 command Copy,
+  16 Markdown, 6 generic details. Both frontends execute it. Native checks
+  include real Copy clicks, actual documents, every incremental source prefix,
+  prepared content, and adapter snapshot/delta agreement. The existing huge
+  generic-card check now supplies 100,000 characters through the real adapter,
+  preserving its visual bound assertion rather than constructing an invalid
+  unbounded DTO. No existing assertion was removed or loosened.
+- Before implementation the new browser fixture had **23 failing cases**;
+  native failures covered Unicode labels, headings/indentation and generic
+  detail/Copy. Logs: `/tmp/codexui-item4-browser-before.log` and
+  `/tmp/codexui-item4-native-before.log`. An intermediate numeric case exposed
+  `1000000000000000128` versus `1000000000000000100`; requesting the shortest
+  scientific significand before applying the common decimal range corrected
+  this without rounding integer DTO values.
+- Debug build: `cmake --build /tmp/codexui-current-debug.fMMvCu --target
+  codex-ui codexui-conversation-cards-test codexui-nodegraph-ui-adapter-test
+  codexui-conversation-virtualization-test codexui-conversation-view-benchmark
+  codexui-conversation-item-model-test codexui-inspector-graph-test
+  codexui-shell-integration-test codexui-application-layout-test -j14`.
+  Production compiles with the existing warning/error flags. Builds succeeded.
+- Native regression command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest
+  --test-dir /tmp/codexui-current-debug.fMMvCu --output-on-failure -j14 -R
+  '^codexui-(conversation-cards|nodegraph-ui-adapter|conversation-virtualization|conversation-item-model|inspector-graph|shell-integration|application-layout|ui-style-source-policy)$'`:
+  **8/8 pass**, 11.24 s. Log: `/tmp/codexui-item4-consumers-tests.log`.
+- Browser: in `web`, `npm run build`, then `node --test --test-concurrency=14
+  tests/*.test.mjs`: **325/325 pass**, no skips, including bounded traversal
+  and absence of generic-payload inspection for known cards. Log:
+  `/tmp/codexui-item4-web-tests.log`.
+- DPR command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  QT_SCALE_FACTOR=<1|1.25|1.5|2> QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
+  CODEXUI_PRESENTATION_CONTRACT_TESTS=1
+  /tmp/codexui-current-debug.fMMvCu/codexui-conversation-cards-test`:
+  **4/4 pass**. This test-only filter runs the new contract plus existing
+  line-break and authored-character selection cases; all remain in the full
+  suite. Logs: `/tmp/codexui-item4-contract-dpr-*.log`. These are offscreen
+  checks, not compositor/screen-reader qualification. The already-recorded
+  high-DPR thumbnail assertion limitation was not changed or counted passed.
+- ASan/UBSan: build adapter/cards targets with `-j14` in
+  `/tmp/codexui-current-asan-ubsan.2oIJr4`. The same Xvfb/CTest command with
+  `-R '^codexui-conversation-cards$'` passes **1/1**, 12.83 s, including all new
+  adapter-through-Copy cases. No suppressions or sanitizer options were added.
+  The broader adapter CTest hit its existing 10 s timeout; direct execution
+  completed but failed its existing, unscaled one-second 40k-row timing bound
+  (**1.239 s**), with no sanitizer diagnostic. Recompiling the adapter source
+  from `git show HEAD:src/codex/ui/NodeGraphUiAdapter.cpp` with identical flags
+  and linking it against the same test object/dependencies reproduces this
+  timing failure (**1.225 s**). Thus this is not a passing sanitizer suite.
+  Baseline artifact: `/tmp/codexui-item4-adapter-baseline.OcIkrj/adapter-test`;
+  logs: `/tmp/codexui-item4-sanitizer-adapter-{direct,baseline}.log`.
+- Native quantitative command: Xvfb/offscreen CTest in the Debug build with
+  `-R '^codexui-conversation-performance-' -j14 --output-on-failure`:
+  **12/12 pass**, 120.44 s; the registered timing cases retain `RUN_SERIAL`.
+  Log: `/tmp/codexui-item4-performance-matrix.log`. Standalone before/after:
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=1
+  QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
+  /tmp/codexui-current-debug.fMMvCu/codexui-conversation-view-benchmark 1280 1`.
+  Both pass. Median microseconds before -> after: warm wheel **462 -> 466**,
+  warm scrollbar **474 -> 474**, Markdown stream **6343 -> 6227**, streaming
+  input-to-paint **5810 -> 5767**. Widget/document peaks remain **479/29**;
+  streaming constructions remain zero. These measurements do not prove
+  universally lag-free interaction.
+- **Unclosed performance gate:** `node tools/profile-presentation.mjs` in
+  `web` intermittently exceeds its unchanged **4 ms** 2,000-delta stream
+  threshold. The initial baseline passed at 3.58 ms. A five-pair comparison
+  using the pre-change projection module and otherwise identical generated
+  modules passed **5/5** (2.91–3.69 ms); the current module passed **2/5**, with
+  failures at **8.16, 6.87, 8.62 ms**. Earlier current runs failed at 7.31 and
+  5.90 ms. Successful current samples project faster, but do not cancel those
+  failures. GC/deoptimization-instrumented runs pass; that is diagnostic
+  observer sensitivity, not proof of the cause or permission to loosen the
+  gate. No warm-up, forced GC, delay, discarded serialization, threshold
+  increase or stream-runtime change has been introduced to hide this result.
+  Logs: `/tmp/codexui-item4-web-{baseline,current}-repeat-{1..5}.{json,stderr}`;
+  comparison snapshot: `/tmp/codexui-item4-web-baseline.rpAGrc`.
+- **Accounting against `14e1d19`: production +69 CLOC / +76 physical lines;
+  test code +195 CLOC / +198 physical lines; shared fixture +45 lines;
+  CMake +2 lines.** Even counting fixture/build growth with tests gives +242,
+  within the approved +220 production / +300 test ceilings. Documentation is
+  separate. `git diff --check` passes. No commit, push, install or process
+  restart was performed.
+- Limits: browser JSON integers beyond its safe integer range were already
+  lossy before projection; native exact integer values are not deliberately
+  rounded here. Sorted object-key enumeration still depends on object width;
+  the output bound is not a constant-time guarantee for arbitrary objects.
+  Other Qt/Unicode versions and native platform accessibility remain under
+  the existing qualification item. **Item 4 is not marked complete while its
+  browser performance check remains open; item 5 has not been started.**
 
 ### Performance continuation gate — targeted thread-row scheduling
 

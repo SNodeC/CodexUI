@@ -610,28 +610,34 @@ QString humanizeLabel(QString value) {
   QString result;
   result.reserve(value.size() + 4);
   bool space = false;
-  for (qsizetype index = 0; index < value.size(); ++index) {
-    QChar character = value[index];
-    if (character.isSpace() || character == QLatin1Char('-') ||
-        character == QLatin1Char('_') || character == QLatin1Char('.') ||
-        character == QLatin1Char('/')) {
+  const auto characters = value.toUcs4();
+  for (qsizetype index = 0; index < characters.size(); ++index) {
+    const char32_t character = characters[index];
+    if (QChar::isSpace(character) || character == U'-' || character == U'_' ||
+        character == U'.' || character == U'/') {
       space = !result.isEmpty();
       continue;
     }
-    const QChar previous = index > 0 ? value[index - 1] : QChar{};
-    const QChar next = index + 1 < value.size() ? value[index + 1] : QChar{};
+    const char32_t previous = index > 0 ? characters[index - 1] : 0;
+    const char32_t next =
+        index + 1 < characters.size() ? characters[index + 1] : 0;
     const bool wordBoundary =
-        character.isUpper() && (previous.isLower() || previous.isDigit() ||
-                                (previous.isUpper() && next.isLower()));
+        QChar::isUpper(character) &&
+        (QChar::isLower(previous) || QChar::isDigit(previous) ||
+         (QChar::isUpper(previous) && QChar::isLower(next)));
     if ((space || wordBoundary) && !result.endsWith(QLatin1Char(' ')))
       result.append(QLatin1Char(' '));
-    if (wordBoundary || (space && character.isUpper() && next.isLower()))
-      character = character.toLower();
-    result.append(character);
+    const QString scalar = QString::fromUcs4(&character, 1);
+    result.append(wordBoundary || (space && QChar::isUpper(character) &&
+                                   QChar::isLower(next))
+                      ? scalar.toLower()
+                      : scalar);
     space = false;
   }
-  if (!result.isEmpty())
-    result[0] = result[0].toUpper();
+  if (!result.isEmpty()) {
+    const int firstLength = result.front().isHighSurrogate() ? 2 : 1;
+    result.replace(0, firstLength, result.left(firstLength).toUpper());
+  }
   return result;
 }
 

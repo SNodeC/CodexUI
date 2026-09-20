@@ -9,26 +9,30 @@ export interface PresentationStatus {
 export const UnknownStatus: PresentationStatus = {semantic: "unknown", unknownText: ""};
 
 function protocolWords(value: string, format: "label" | "status"): string {
+    if (format === "label") value = value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
     if (format === "label" && value.toLowerCase() === "xhigh") return "Extra high";
     const result: string[] = [];
     let pendingSpace = false;
-    const characters = [...(format === "label" ? value.trim() : value)];
+    const characters = [...value];
+    const upper = format === "label" ? /\p{Lu}/u : /[A-Z]/u;
+    const lower = format === "label" ? /\p{Ll}/u : /[a-z]/u;
+    const digit = format === "label" ? /\p{Nd}/u : /[0-9]/u;
     for (let index = 0; index < characters.length; ++index) {
         let character = characters[index]!;
-        const separator = format === "label" ? /\s|[-_./]/u.test(character)
+        const separator = format === "label" ? /\p{White_Space}|[-_./]/u.test(character)
             : /[ \t\n\r\f\v_.\/-]/u.test(character);
         if (separator) { pendingSpace = result.length > 0; continue; }
         const previous = characters[index - 1] ?? "";
         const next = characters[index + 1] ?? "";
-        const boundary = /[A-Z]/u.test(character) && (/[a-z\d]/u.test(previous)
-            || (/[A-Z]/u.test(previous) && /[a-z]/u.test(next)));
+        const boundary = upper.test(character) && (lower.test(previous) || digit.test(previous)
+            || (upper.test(previous) && lower.test(next)));
         if ((pendingSpace || boundary) && result.at(-1) !== " ") result.push(" ");
         if (format === "status" ? /[A-Z]/u.test(character)
-            : boundary || (pendingSpace && /[A-Z]/u.test(character) && /[a-z]/u.test(next)))
+            : boundary || (pendingSpace && upper.test(character) && lower.test(next)))
             character = character.toLowerCase();
         result.push(character); pendingSpace = false;
     }
-    if (result.length === 0) return format === "label" ? "Activity" : "unknown";
+    if (result.length === 0) return format === "label" ? "" : "unknown";
     if (format === "label") result[0] = result[0]!.toUpperCase();
     return result.join("");
 }

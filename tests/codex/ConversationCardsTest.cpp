@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationCards.h"
+#include "codex/NodeGraphJson.h"
 #include "codex/middle/ConversationView.h"
+#include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
@@ -48,6 +50,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -58,6 +61,7 @@
 
 namespace codexui::codex::middle {
 namespace {
+std::optional<VisibleCardData> projectedGenericCard(const nlohmann::json &raw);
 
 class AnimationDurationStyle final : public QProxyStyle {
 public:
@@ -5010,15 +5014,14 @@ bool testGeneratedImagePresentationAndGenericBound() {
       "plain image-view cards use a neutral title and reuse the cached "
       "thumbnail without decoding");
 
-  VisibleCardData generic{
-      AuthoritativeItemKey{"generated", "turn", "unknown"},
-      CardKind::GenericActivity,
-      "generated",
-      "turn",
-      "unknown",
-      GenericActivityData{"contextCompaction",
-                          "type: contextCompaction\nlarge: " +
-                              std::string(100000, 'x')}};
+  const auto projected =
+      projectedGenericCard({{"id", "unknown"},
+                            {"type", "contextCompaction"},
+                            {"large", std::string(100000, 'x')}});
+  if (!expect(projected.has_value(),
+              "large generic detail projects through the adapter"))
+    return false;
+  VisibleCardData generic = *projected;
   ConversationCard genericCard(generic, false);
   genericCard.show();
   spin();
@@ -5050,6 +5053,143 @@ bool testGeneratedImagePresentationAndGenericBound() {
   return result;
 }
 
+std::optional<VisibleCardData> projectedGenericCard(const nlohmann::json &raw) {
+  nodegraph::NodeGraph graph;
+  nodegraph::ProtocolUpdater updater(graph);
+  for (const auto &[method, payload] :
+       std::vector<std::pair<std::string, nlohmann::json>>{
+           {"thread/started", {{"thread", {{"id", "detail"}}}}},
+           {"turn/started",
+            {{"threadId", "detail"}, {"turn", {{"id", "turn"}}}}},
+           {"item/completed",
+            {{"threadId", "detail"}, {"turnId", "turn"}, {"item", raw}}}})
+    static_cast<void>(
+        updater.apply({nodegraph::DecodedMessageKind::ServerNotification,
+                       method, std::nullopt, objectFromJson(payload)}));
+  nodegraph::NodeRef thread;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({nodegraph::NodeKind::Thread, "detail"});
+  }
+  ui::NodeGraphUiAdapter adapter(graph);
+  const auto snapshot = adapter.conversation(thread);
+  if (!snapshot || snapshot->sections.empty() ||
+      snapshot->sections.front().cards.empty())
+    return {};
+  auto card = snapshot->sections.front().cards.front();
+  const std::array targets{card.target};
+  const auto delta = adapter.conversationDelta(thread, targets, false);
+  if (!delta || delta->presentations.size() != 1 ||
+      delta->presentations.front() != card)
+    return {};
+  return card;
+}
+
+bool testSharedPresentationContract() {
+  std::ifstream input(CODEXUI_PRESENTATION_CONTRACT_PATH);
+  const auto contract = nlohmann::json::parse(input, nullptr, false);
+  if (!expect(contract.is_object() && contract.value("schemaVersion", 0) == 6,
+              "shared card presentation fixture is valid"))
+    return false;
+  bool passed = true;
+  std::string context;
+  const auto check = [&context](bool condition, const char *message) {
+    return expect(condition, (context + ": " + message).c_str());
+  };
+  const auto repeatText = [](const nlohmann::json &repeat) {
+    std::string value;
+    for (int index = 0; index < repeat.at("count").get<int>(); ++index)
+      value += repeat.at("text").get<std::string>();
+    return value;
+  };
+  const auto checkCopy = [&passed, &check](const VisibleCardData &data,
+                                           const std::string &expected) {
+    ConversationCard card(data, true);
+    QApplication::clipboard()->clear();
+    auto *copy =
+        card.findChild<QToolButton *>(QStringLiteral("cardCopyButton"));
+    if (copy)
+      copy->click();
+    passed &= check(
+        copy && QApplication::clipboard()->text().toStdString() == expected,
+        "shared contract: real native Copy preserves projected text");
+  };
+  for (const auto &[index, entry] : contract.at("labelCases").items()) {
+    context = "labelCases[" + index + "]";
+    passed &=
+        check(UiStyle::humanizeLabel(QString::fromStdString(entry.at("input")))
+                      .toStdString() == entry.at("expected").get<std::string>(),
+              "shared label normalization contract");
+  }
+  for (const auto &[index, entry] : contract.at("copyCases").items()) {
+    context = "copyCases[" + index + "]";
+    VisibleCardData card{
+        AuthoritativeItemKey{"detail", "turn", "command"},
+        CardKind::CommandExecution,
+        "detail",
+        "turn",
+        "command",
+        CommandExecutionData{entry.at("command"), entry.at("output"), ""}};
+    checkCopy(card, entry.at("expected"));
+  }
+  for (const auto &[index, entry] : contract.at("markdownCases").items()) {
+    context = "markdownCases[" + index + "]";
+    const auto source = QString::fromStdString(entry.at("source"));
+    const auto expected = QString::fromStdString(entry.at("expected"));
+    passed &= check(presentation::userMessageMarkdown(source) == expected,
+                    "shared authored Markdown preparation contract");
+    QTextDocument reference;
+    reference.setMarkdown(
+        expected,
+        QTextDocument::MarkdownFeatures{QTextDocument::MarkdownDialectGitHub} |
+            QTextDocument::MarkdownNoHTML);
+    MarkdownTextView view(source, 480, nullptr, true);
+    passed &=
+        check(view.document()->toRawText() == reference.toRawText(),
+              "shared Markdown contract reaches the actual native document");
+    MarkdownTextView streamed(QString{}, 480, nullptr, true);
+    for (qsizetype end = 1; end <= source.size(); ++end) {
+      if (source.at(end - 1).isHighSurrogate())
+        continue;
+      streamed.setContent(source.left(end));
+      MarkdownTextView fresh(source.left(end), 480, nullptr, true);
+      passed &= check(
+          streamed.document()->toRawText() == fresh.document()->toRawText(),
+          "shared Markdown incremental preparation matches fresh content");
+    }
+    MarkdownTextView prepared(QString{}, 480, nullptr, true);
+    prepared.setPreparedContent(source,
+                                presentation::prepareMarkdownHtml(source));
+    passed &=
+        check(prepared.document()->toRawText() == reference.toRawText(),
+              "prepared user Markdown preserves the authored-line policy");
+  }
+  for (const auto &[index, entry] : contract.at("genericDetailCases").items()) {
+    context = "genericDetailCases[" + index + "]";
+    auto raw = entry.at("raw");
+    for (const auto &repeat : entry.value("repeats", nlohmann::json::array()))
+      raw[repeat.at("path").at(0).get<std::string>()] = repeatText(repeat);
+    const auto card = projectedGenericCard(raw);
+    passed &= check(card.has_value(),
+                    "shared generic snapshot/delta projection contract");
+    if (!card)
+      continue;
+    const std::string expected =
+        entry.contains("expectedRepeat")
+            ? "a: " + repeatText(entry.at("expectedRepeat")) +
+                  "\n\n[Activity details truncated]"
+            : entry.at("expected").get<std::string>();
+    const auto &detail =
+        std::get<GenericActivityData>(card->payload).displayDetail;
+    if (detail != expected)
+      std::cerr << "Generic detail actual: " << detail.substr(0, 300)
+                << "\nexpected: " << expected.substr(0, 300) << '\n';
+    passed &= check(detail == expected && detail.size() <= 4030,
+                    "shared generic readable UTF-8 byte-bound contract");
+    checkCopy(*card, expected);
+  }
+  return passed;
+}
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -5057,6 +5197,12 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   using namespace codexui::codex::middle;
+  if (qEnvironmentVariableIsSet("CODEXUI_PRESENTATION_CONTRACT_TESTS")) {
+    bool focused = testSharedPresentationContract();
+    focused &= testUserMessageLineBreakPresentation();
+    focused &= testMarkdownSelectionPreservesAuthoredCharacters();
+    return focused ? 0 : 1;
+  }
   if (qEnvironmentVariableIsSet("CODEXUI_MARKDOWN_SELECTION_TESTS")) {
     bool focused = testUserMessageLineBreakPresentation();
     focused &= testMarkdownSelectionPreservesAuthoredCharacters();
@@ -5087,7 +5233,8 @@ int main(int argc, char **argv) {
     focused &= testMutableCardsAndCommandOutput();
     return focused ? 0 : 1;
   }
-  bool result = testPerceptuallyUniformPalette();
+  bool result = testSharedPresentationContract();
+  result &= testPerceptuallyUniformPalette();
   result &= testApplicationStyleSheetContract();
   result &= testMessageIdentityPalette();
   result &= testActiveWorkBordersFollowStatus();

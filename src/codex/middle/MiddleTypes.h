@@ -145,6 +145,7 @@ struct PlanData {
 
 struct GenericActivityData {
   std::string type;
+  // Adapter-owned readable tree: 4000 UTF-8 bytes plus truncation notice.
   std::string displayDetail;
 
   bool operator==(const GenericActivityData &) const = default;

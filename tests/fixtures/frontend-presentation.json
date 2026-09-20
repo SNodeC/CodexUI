@@ -1,5 +1,50 @@
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
+  "labelCases": [
+    {"input": "", "expected": ""},
+    {"input": " _./- ", "expected": ""},
+    {"input": "  xhigh  ", "expected": "Extra high"},
+    {"input": "\u0085XHIGH\u0085", "expected": "Extra high"},
+    {"input": "HTTPServer", "expected": "HTTP server"},
+    {"input": "éCamel", "expected": "É camel"},
+    {"input": "ßeta", "expected": "SSeta"},
+    {"input": "aİtem", "expected": "A i̇tem"},
+    {"input": "𐐨Camel", "expected": "𐐀 camel"},
+    {"input": "🚀Launch", "expected": "🚀Launch"}
+  ],
+  "copyCases": [
+    {"command": "printf x  \n\n", "output": "value  \n \t\n", "expected": "printf x  \n\nvalue  "},
+    {"command": "", "output": "\r\n \t\r\n", "expected": ""},
+    {"command": "command\r\n", "output": "a  \r\nb  \r\n", "expected": "command\n\na  \r\nb  "},
+    {"command": "x\n\u0085\n", "output": "y\n\u001c\n", "expected": "x\n\ny"},
+    {"command": "", "output": "x\n\ufeff\n", "expected": "x\n\ufeff"}
+  ],
+  "markdownCases": [
+    {"source": "plain\n\nbody", "expected": "plain  \n\u200b  \nbody"},
+    {"source": "# Heading\n\nbody", "expected": "# Heading\n\nbody"},
+    {"source": "## Heading\n\nbody", "expected": "## Heading\n\nbody"},
+    {"source": "### Heading\n\nbody", "expected": "### Heading\n\nbody"},
+    {"source": "#### Heading\n\nbody", "expected": "#### Heading\n\nbody"},
+    {"source": "##### Heading\n\nbody", "expected": "##### Heading\n\nbody"},
+    {"source": "###### Heading\n\nbody", "expected": "###### Heading\n\nbody"},
+    {"source": "####### text\n\nbody", "expected": "####### text  \n\u200b  \nbody"},
+    {"source": "Before\nAfter\n\n```text\ninside\ncode\n```\n\nDone", "expected": "Before  \nAfter\n\n```text\ninside\ncode\n```\n\nDone"},
+    {"source": "~~~\r\ncode\r\n~~~~\r\none\r\ntwo", "expected": "~~~\ncode\n~~~~\none  \ntwo"},
+    {"source": "\tcode\n\tmore\n\nbody", "expected": "\tcode\n\tmore\n\nbody"},
+    {"source": "١. prose\n\nbody", "expected": "١. prose  \n\u200b  \nbody"},
+    {"source": "1. item\n2. item", "expected": "1. item  \n2. item"},
+    {"source": "[link](https://example.org)\nnext", "expected": "[link](https://example.org)  \nnext"},
+    {"source": "a\u200bb\n\nend", "expected": "a\u200bb  \n\u200b  \nend"},
+    {"source": "a\\\n\u0085\n", "expected": "a\\\n\u0085\u200b  \n\u200b"}
+  ],
+  "genericDetailCases": [
+    {"raw": {"id": "g", "type": "custom", "z": null, "a": {"nested": [true, 1.5, "é"]}}, "expected": "a: \n  nested: \n    - true\n    - 1.5\n    - é\nid: g\nstatus: completed\ntype: custom\nz: none\n"},
+    {"raw": {"id": "g", "type": "custom", "a": [0, -0.0, 1.0, 0.000001, 1e-7, 1e20, 1e21, 1.0000000000000001e18]}, "expected": "a: \n  - 0\n  - 0\n  - 1\n  - 0.000001\n  - 1e-7\n  - 100000000000000000000\n  - 1e+21\n  - 1000000000000000100\nid: g\nstatus: completed\ntype: custom\n"},
+    {"raw": {"id": "g", "type": "custom", "2": "two", "10": "ten", "😀": "emoji", "\ue000": "private"}, "expected": "10: ten\n2: two\nid: g\nstatus: completed\ntype: custom\n\ue000: private\n😀: emoji\n"},
+    {"raw": {"id": "g", "type": "custom", "a": {"b": {"c": {"d": {"e": {"f": 1}}}}}, "empty": []}, "expected": "a: \n  b: \n    c: \n      d: \n        e: nested detail omitted\nempty: none\nid: g\nstatus: completed\ntype: custom\n"},
+    {"raw": {"id": "g", "type": "custom", "a": ""}, "repeats": [{"path": ["a"], "text": "é", "count": 5000}], "expectedRepeat": {"text": "é", "count": 1998}},
+    {"raw": {"id": "g", "type": "custom", "a": ""}, "repeats": [{"path": ["a"], "text": "😀", "count": 5000}], "expectedRepeat": {"text": "😀", "count": 999}}
+  ],
   "statusCases": [
     {
       "id": "pending-aliases",

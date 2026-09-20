@@ -40,6 +40,11 @@ test("card copy payloads preserve Markdown and structured source", () => {
     assert.deepEqual(cardCopyContent(files), {
         text: "src/card.cpp  ·  Update  +2 −1", markdown: false,
     });
+    files.payload.changes = [{path: "file", kind: ""}];
+    assert.equal(cardCopyContent(files).text, "file  ·  Changed");
+    assert.match(renderToStaticMarkup(createElement(Card, {
+        card: files, active: false, collapsed: false, onToggle() {},
+    })), /<small>Changed /u);
 });
 
 test("Copy precedes folding and remains available on collapsed cards", () => {
