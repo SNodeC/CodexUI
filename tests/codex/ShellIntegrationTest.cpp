@@ -3,6 +3,7 @@
 #include <core/SNodeC.h>
 #include <utils/Config.h>
 
+#include "AccessibilityEventProbe.h"
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
 #include "codex/PendingRequestDialog.h"
@@ -1732,6 +1733,100 @@ void conversationPresentationBurstIsFrameBounded(Configuration &configuration) {
           conversation->property("conversationCardConstructions")
                   .toULongLong() == constructionsBefore,
       "stream coalescing leaves unrelated panes and QWidget population alone");
+}
+
+void threadPresentationBurstYieldsBetweenRows(Configuration &configuration) {
+#if QT_CONFIG(accessibility)
+  FrontendSession session(configuration);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, FrontendSessionTestPeer::channels(session));
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  constexpr int RowCount = 8;
+  for (int index = 0; index < RowCount; ++index)
+    applyThread(worker, "yield-thread-" + std::to_string(index),
+                "Original " + std::to_string(index));
+  auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] {
+            return threadItem(list, "yield-thread-7") != nullptr;
+          }),
+          "the targeted thread burst has resident tree items");
+  if (!list || !threadItem(list, "yield-thread-7"))
+    return;
+  spin(80);
+  std::vector<QTreeWidgetItem *> identities;
+  std::vector<NodeRef> targets;
+  {
+    auto read = graph.tryRead();
+    for (int index = 0; read && index < RowCount; ++index) {
+      const std::string id = "yield-thread-" + std::to_string(index);
+      identities.push_back(threadItem(list, id));
+      targets.push_back(read->find({NodeKind::Thread, id}));
+    }
+  }
+  require(targets.size() == RowCount &&
+              std::ranges::all_of(targets, [](const auto &target) { return !!target; }),
+          "every targeted thread row has an exact live graph identity");
+  if (targets.size() != RowCount ||
+      !std::ranges::all_of(targets, [](const auto &target) { return !!target; }))
+    return;
+  for (auto *item : identities)
+    static_cast<void>(threadAccessible(list, item));
+
+  std::unordered_set<QAccessible::Id> presented;
+  std::size_t rowsBeforeYield = 0;
+  bool yielded = false;
+  tests::AccessibilityEventProbe events(
+      [&](const tests::AccessibilityEventRecord &event) {
+        if (event.type != QAccessible::NameChanged ||
+            !event.name.startsWith(QStringLiteral("Updated ")) ||
+            !presented.insert(event.target).second)
+          return;
+        if (presented.size() == 1)
+          QTimer::singleShot(0, &shell, [&] {
+            rowsBeforeYield = presented.size();
+            yielded = true;
+          });
+        // A single row consumes the 8 ms deadline. The scheduler must yield
+        // before starting another row, regardless of machine speed.
+        QThread::msleep(10);
+      });
+  for (int index = 0; index < RowCount; ++index) {
+    GraphChange change;
+    {
+      auto write = graph.write();
+      write.setField(targets[index], "name", Value("Updated " + std::to_string(index)));
+      change = write.finish();
+    }
+    FrontendSessionTestPeer::deliverGraphChanged(
+        session, GraphChanged{change.revision, std::move(change.affected),
+                              std::move(change.removed), false,
+                              std::move(change.childListsChanged), 0});
+  }
+  require(spinUntil([&] { return yielded && presented.size() == RowCount; }),
+          "deferred targeted thread rows eventually all reach the UI");
+  if (rowsBeforeYield != 1)
+    std::cerr << "Targeted thread rows before event-loop yield: "
+              << rowsBeforeYield << '\n';
+  require(rowsBeforeYield == 1,
+          "targeted thread updates yield after one over-budget row");
+  for (int index = 0; index < RowCount; ++index) {
+    auto *item = threadItem(list, "yield-thread-" + std::to_string(index));
+    require(item && item == identities[index] &&
+                threadAccessibleText(list, item, QAccessible::Name) ==
+                    QStringLiteral("Updated %1").arg(index),
+            "budgeted thread updates retain row identities and latest titles");
+  }
+  spin(40);
+  const auto idleCommits = shell.property("paneCommitInvocations").toULongLong();
+  spin(40);
+  require(shell.property("paneCommitInvocations").toULongLong() == idleCommits,
+          "an emptied thread-row queue schedules no idle commits");
+#else
+  static_cast<void>(configuration);
+#endif
 }
 
 void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
@@ -5337,6 +5432,7 @@ int main(int argc, char **argv) {
   typedActionsAreExactOnceAndBounded(*configuration);
   qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
   conversationPresentationBurstIsFrameBounded(*configuration);
+  threadPresentationBurstYieldsBetweenRows(*configuration);
   graphBackedShellPreservesDraftsAndPrompts(*configuration);
   initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
   completedLiveAgentAppearsWithoutThreadReselection(*configuration);

@@ -584,7 +584,7 @@ struct ShellWidget::Impl final {
   bool graphBindingScheduled = false;
   bool paneCommitScheduled = false;
   bool pendingThreadPane = false;
-  std::vector<nodegraph::NodeRef> pendingThreadRows;
+  std::deque<nodegraph::NodeRef> pendingThreadRows;
   bool pendingConversation = false;
   bool pendingConversationAuthorityReplacement = false;
   bool conversationProjectionInFlight = false;
@@ -1478,19 +1478,15 @@ void ShellWidget::Impl::commitPendingPanes() {
   middleRegion->inspector().flushProtocolPresentation();
   if (hasFrameBudget() && !pendingThreadPane &&
       !pendingThreadRows.empty()) {
-    std::vector<nodegraph::NodeRef> rows = std::move(pendingThreadRows);
-    pendingThreadRows.clear();
-    bool structuralFallback = false;
-    for (const nodegraph::NodeRef &thread : rows) {
-      const auto row = uiAdapter.threadRow(thread);
+    while (!pendingThreadRows.empty() && hasFrameBudget()) {
+      const auto row = uiAdapter.threadRow(pendingThreadRows.front());
       if (!row || !middleRegion->threads().applyRowPresentation(*row)) {
-        structuralFallback = true;
+        pendingThreadPane = true;
         break;
       }
+      pendingThreadRows.pop_front();
     }
-    if (structuralFallback) {
-      pendingThreadPane = true;
-    } else {
+    if (!pendingThreadPane) {
       ++threadPaneRoutes;
       owner->setProperty("threadPaneRoutes",
                          static_cast<qulonglong>(threadPaneRoutes));

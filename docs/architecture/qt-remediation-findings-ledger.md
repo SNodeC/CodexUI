@@ -10,12 +10,17 @@ The implementation baseline is a clean `master`, equal to `origin/master`.
 | Step | Accepted correction | Status |
 |---|---|---|
 | 1 / NEW-1 | UTF-8-safe byte bounding at the generic-activity adapter boundary | Completed; broader performance qualification remains open below |
-| 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Awaiting scope approval for the reproduced append-boundary dependency below; origin-aware design and growth estimate remain provisional; no production edits yet |
+| Current / SHELL-1, performance | Measured GUI-thread work bounds and the existing large-file-card timing failure | Targeted thread-row deadline correction completed and verified; other single-stage overruns and large-card layout remain open |
 | 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Pending |
 | 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Pending |
 | 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Pending |
 | Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
 | Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
+| Deferred / D-6 | Copy removes generated placeholders only, preserving authored U+200B | User chose non-Markdown priorities next; append-boundary dependency and growth approval remain open; no production edits yet |
+
+The user requested committing the existing work and proceeding in importance
+order with performance first, excluding Markdown work. Commit `6056570`
+contains NEW-1, its regression coverage and the preceding ledger checkpoint.
 
 Candidate findings remain candidates: no speculative renderer, virtualization,
 treap, lifetime, scheduler or graph rewrite is authorized. In particular H-2
@@ -184,6 +189,121 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   returns 1 under the previously recorded sandbox restriction. The standalone
   probe compile emits a GCC 16/Qt-header SFINAE warning; the repository test
   build is clean. No tracked production/test edits belong to this probe.
+
+### Performance continuation gate — targeted thread-row scheduling
+
+- **Invariant:** a completed UI work unit must not start the next pending unit
+  after the existing presentation deadline; unfinished work remains in the
+  existing queue and eventually reaches its latest graph state. One unit can
+  still overrun; this change does not claim a preemptive hard wall-clock cap.
+- **Path:** worker graph changes → `FrontendSession` graph handler →
+  `threadPaneRoute` → `pendingThreadRows` → `commitPendingPanes` →
+  `NodeGraphUiAdapter::threadRow` → `ThreadPane::applyRowPresentation`.
+  Structural fallback and retirement acknowledgements remain unchanged.
+- **Cause:** the targeted-row stage checks `hasFrameBudget()` only at entry,
+  moves the complete queue into a local vector, then drains every row without
+  checking elapsed time. The eight-stage scheduler finding already includes
+  this work; this is not a new backlog item or a full scheduler rewrite.
+- **Reduction:** process the existing pending queue while the existing
+  deadline permits; pop completed rows only. Use the already-established deque
+  container (as for pending conversation items) to retain FIFO order without
+  repeated vector-prefix shifts or starving older rows. Delete the local vector and
+  separate fallback flag. Reuse `pendingThreadPane` and the existing
+  rescheduling tail. No new timer, cache, flag, callback, renderer, sort policy
+  or visual change. Actual production reduction: four lines.
+- **Lifetime:** pending targets retain their graph identities until processed
+  or cleared by the existing successful full snapshot/provider reset. Existing
+  `uiRetainsTarget` already covers that queue. Failed row projection still
+  requests the existing full snapshot; no extra retry mechanism.
+- **Verification:** extend shell integration at the graph-to-tree boundary.
+  Inject a 10 ms cost into each distinct row's accessible-name notification and
+  observe a queued callback: the next row must wait for another event-loop
+  turn. Verify all eight latest titles, stable tree-item identities, and an
+  idle scheduler after completion. Existing retirement, thread-switching,
+  streaming, focus/accessibility and graph-contention cases must still run.
+- **Accounting baseline:** `ShellWidget.cpp` 2,772 production CLOC; test growth
+  reported after verification. Test-only delay and observation remain outside
+  production. All builds use `-j14`; CTest is invoked with `-j14` through
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen`.
+
+### Targeted thread-row scheduling result
+
+- Removed the moved batch and fallback flag. The existing queue is now a
+  deque, like the conversation-item queue, and is consumed from the front
+  only while the existing 8 ms deadline permits. Successfully presented rows
+  are removed; unfinished rows remain queued. Structural fallback still
+  replaces the whole projection and clears the queue after success.
+- Regression proof: the unchanged production implementation processes all
+  **eight** deliberately expensive row updates before the queued event-loop
+  callback can run (`/tmp/codexui-thread-deadline-before.log`). The corrected
+  implementation yields after **one**, completes every row, retains native
+  item identity and the latest accessible title, and stops scheduling once
+  empty. This is controlled work-budget evidence, not a claim about real
+  input-to-paint latency or an 8 ms cap on an individual row.
+- The first test draft incorrectly listened for `dataChanged`; this custom
+  tree updates its authoritative row fields and accessibility directly. That
+  draft was corrected before production changes. The final test observes
+  accessible-name events using the existing test-only event probe, extended
+  with an optional observer. No production instrumentation was added.
+- Build passed without diagnostics:
+  `cmake --build /tmp/codexui-current-debug.fMMvCu --target codex-ui
+  codexui-shell-integration-test codexui-nodegraph-thread-pane-ui-test
+  codexui-inspector-graph-test codexui-conversation-virtualization-test -j14`.
+- Shell integration passed three consecutive complete runs: **9.76, 9.18,
+  9.23 s**. Command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest
+  --test-dir /tmp/codexui-current-debug.fMMvCu -R
+  '^codexui-shell-integration$' -j14 --repeat until-fail:3
+  --output-on-failure`. Existing retirement, graph contention, selection,
+  streaming and provider-reset cases still execute; no failures are hidden.
+- Shared-helper consumers: **17/17 passed**, including all four thread-panel
+  DPRs, Inspector graph and four geometry DPRs, and eight Fusion/Breeze
+  conversation selection/focus variants. None skipped. Command: the same
+  Xvfb/CTest prefix with `-R '^codexui-(nodegraph-thread-pane-ui.*|inspector-
+  (graph|geometry-.*)|conversation-selection-focus-.*)$' -j14
+  --output-on-failure` (join the wrapped regular expression without spaces).
+- Full virtualization suite after rebuilding with the test-helper change:
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -R
+  '^codexui-conversation-virtualization$' -j14 --output-on-failure`.
+  All cases ran; its only failure remains the previously recorded
+  `collapsedLargeCardsSkipBodyProjection` timing gate, now **152,064 us**,
+  one rebuild and 5,000 blocks. No new correctness failure was reported.
+- Accounting against `6056570`: production `ShellWidget.cpp` **2,772 →
+  2,768 CLOC (-4)** / **2,917 → 2,913 physical lines (-4)**. Test
+  `ShellIntegrationTest.cpp` **5,081 → 5,173 CLOC (+92)**; test helper
+  **87 → 93 CLOC (+6)**. Total tests **+98 CLOC / +102 physical lines**.
+  Documentation is separate. `git diff --check` passes. No new production
+  timer, callback, cache, flag, dynamic property or authority; no visual change.
+
+### Performance baseline still open — no completion claim
+
+- Before the scheduler correction, the registered 12-case conversation
+  performance matrix ran with `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  ctest --test-dir /tmp/codexui-current-debug.fMMvCu -R
+  '^codexui-conversation-performance-' -j14 --output-on-failure`.
+  CTest's existing `RUN_SERIAL` setting isolated performance cases despite
+  `-j14`. Debug/GCC 16/Qt 6.10.2; raw baseline preserved at
+  `/tmp/codexui-performance-baseline-6056570.log`.
+- **3/12 passed:** all DPR-1 cases (320, 1,280 and 10,000 rows). **9/12
+  failed:** all higher-DPR cases exceed the 10 ms Markdown-stream median
+  gate, at **10.817–13.842 ms**. Mutable-tail locality and retained
+  card/document checks remain true; the gate message alone must not be
+  interpreted as evidence of failed incremental parsing. At 10,000 rows,
+  DPR 1.5/2 also exceed the 5 ms structural-commit median gate:
+  **5.063/5.493 ms**; structural correctness remains true.
+- The independent 5,000-file expansion gate also failed before this change:
+  **145,460 us > 100,000 us**, with the expected one body rebuild and 5,000
+  document blocks. An isolated Qt reproduction attributes most measurement
+  work to full-document layout/shaping (Callgrind artifact:
+  `/tmp/codexui-file-layout.callgrind`). Simply using document height,
+  batching edits or changing initial width did not meet the gate. A separate
+  worker-document handoff experiment still spent roughly 90–96 ms attaching
+  on the GUI thread and produced timer-affinity warnings; it was rejected.
+  None of these experimental alternatives entered production.
+- The scheduler change does not touch these conversation paths or their
+  thresholds. These are still performance-qualification failures, not fixed
+  by this step. Markdown changes remain deferred as requested. Offscreen
+  checks do not establish compositor or assistive-technology qualification.
 
 ## Historical remediation record
 

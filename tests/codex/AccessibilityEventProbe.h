@@ -8,6 +8,7 @@
 #include <QList>
 #include <QPointer>
 
+#include <functional>
 #include <utility>
 
 namespace codexui::tests {
@@ -27,8 +28,10 @@ struct AccessibilityEventRecord final {
 
 class AccessibilityEventProbe final {
 public:
-  AccessibilityEventProbe()
-      : previous_(QAccessible::installUpdateHandler(dispatch)) {
+  explicit AccessibilityEventProbe(
+      std::function<void(const AccessibilityEventRecord &)> observer = {})
+      : previous_(QAccessible::installUpdateHandler(dispatch)),
+        observer_(std::move(observer)) {
     // Do not force QAccessible active here. Before Qt 6.10 setActive() only
     // notified activation observers and did not portably activate the platform
     // backend. This probe is the deterministic seam for explicit app events;
@@ -97,11 +100,14 @@ private:
       record.changedStates =
           static_cast<QAccessibleStateChangeEvent *>(event)->changedStates();
     events_.push_back(std::move(record));
+    if (observer_)
+      observer_(events_.back());
   }
 
   inline static AccessibilityEventProbe *active_ = nullptr;
   QAccessible::UpdateHandler previous_ = nullptr;
   QList<AccessibilityEventRecord> events_;
+  std::function<void(const AccessibilityEventRecord &)> observer_;
 };
 
 #endif
