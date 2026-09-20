@@ -3,7 +3,6 @@
 #include "codex/middle/ConversationHeightIndex.h"
 
 #include <algorithm>
-#include <vector>
 
 namespace codexui::codex::middle {
 namespace {
@@ -91,30 +90,26 @@ bool ConversationHeightIndex::setHeight(std::size_t row,
   if (row >= size())
     return false;
   nextHeight = validHeight(nextHeight);
-  std::vector<Node *> path;
-  Node *current = root_.get();
+  const qint64 delta = static_cast<qint64>(nextHeight) - height(row);
   lastUpdateSteps_ = 0;
-  while (current) {
-    path.push_back(current);
+  if (delta == 0)
+    return false;
+  for (Node *current = root_.get(); current;) {
     ++lastUpdateSteps_;
+    current->total += delta;
     const std::size_t leftCount = nodeCount(current->left);
+    if (row == leftCount) {
+      current->height = nextHeight;
+      return true;
+    }
     if (row < leftCount) {
       current = current->left.get();
-      continue;
+    } else {
+      row -= leftCount + 1;
+      current = current->right.get();
     }
-    if (row == leftCount)
-      break;
-    row -= leftCount + 1;
-    current = current->right.get();
   }
-  if (!current || current->height == nextHeight) {
-    lastUpdateSteps_ = 0;
-    return false;
-  }
-  current->height = nextHeight;
-  for (auto position = path.rbegin(); position != path.rend(); ++position)
-    updateNode(*position);
-  return true;
+  return false;
 }
 
 qint64 ConversationHeightIndex::top(std::size_t row) const noexcept {

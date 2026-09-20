@@ -2415,7 +2415,7 @@ void ConversationView::rebuildHeightIndex() {
               static_cast<qulonglong>(heights_.rebuildCount()));
 }
 
-int ConversationView::leadingChromeHeight() const noexcept {
+int ConversationView::leadingChromeHeight() const {
   if (!model_)
     return 0;
   if (model_->hasMore())
@@ -2425,7 +2425,7 @@ int ConversationView::leadingChromeHeight() const noexcept {
   return 0;
 }
 
-qint64 ConversationView::naturalContentHeight() const noexcept {
+qint64 ConversationView::naturalContentHeight() const {
   return static_cast<qint64>(leadingChromeHeight()) + heights_.totalHeight();
 }
 

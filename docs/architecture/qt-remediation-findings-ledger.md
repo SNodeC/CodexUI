@@ -14,7 +14,7 @@ clean `eb6d56d` on `master`, two commits ahead of `origin/master`.
 | 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Completed and verified; Copy cost and separate DPR-suite limitation recorded below |
 | 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Completed and offscreen-verified within approved growth; native screen-reader qualification remains separate |
 | 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Implemented; correctness checks pass; NOT complete: browser stream-performance gate remains open |
-| 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Pending |
+| 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Completed; allocation-failure proof, consumer/DPR/performance gates and ASan/UBSan pass |
 | Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
 | Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
 
@@ -712,7 +712,141 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   the output bound is not a constant-time guarantee for arbitrary objects.
   Other Qt/Unicode versions and native platform accessibility remain under
   the existing qualification item. **Item 4 is not marked complete while its
-  browser performance check remains open; item 5 has not been started.**
+  browser performance check remains open; item 5 had not started at that checkpoint.**
+
+### Step 5 change gate — allocation-free scalar height updates (L-1)
+
+- **Scope and baseline:** user approved the reviewed item-5 proposal after
+  committing item 4 as `71e2eb1`. This stage starts from that clean commit;
+  the separate item-4 browser performance gate is not closed or expanded here.
+- **Invariant and consumers:** changing a scalar height in the existing index
+  needs no allocation or structural mutation. Both conversation measurement,
+  folding and reflow and Inspector resident measurement use `setHeight()`;
+  their ranges, anchors and row placement consume the same totals/prefixes.
+  No presentation, measurement, residency, interaction or accessibility policy
+  is changed.
+- **Reproduced cause:** `57a4523` introduced a growing `vector<Node *>` while
+  retaining `noexcept`. Even an unchanged height fills that vector before
+  comparing values. At 10,000 rows, the first-row call allocates four times
+  (120 cumulative bytes); middle/last-row calls allocate five times (248
+  bytes), whether changed or unchanged. Rejecting allocations immediately
+  before either valid call invokes the probe's terminate handler (exit 86).
+  Invalid-row calls allocate nothing and retain the previous diagnostic count.
+  These are fault-injection results, not an observed live low-memory crash.
+- **Replacement:** use existing allocation-free `height(row)` to compute a
+  `qint64` difference, return early for zero, then add the difference along
+  the existing order-statistic path. Delete the ancestor vector, reverse
+  traversal, scalar-update count recomputation and unused vector include.
+  Keep `updateNode()` for structural operations. No parent pointer, helper,
+  cache, timer, fixed-depth buffer, new authority or recursion is introduced.
+  Expected-logarithmic update complexity and the diagnostic meaning remain;
+  auxiliary storage becomes constant. Tree structure cannot change between
+  the two synchronous, callback-free traversals.
+- **Exception specifications:** retain now-allocation-free `setHeight()`'s
+  `noexcept`; remove it only from `leadingChromeHeight()` and its caller
+  `naturalContentHeight()` (declarations and definitions), because their
+  `QLabel::sizeHint()` call does not offer that guarantee. No general Qt
+  memory-exhaustion recovery is claimed.
+- **Accounting baseline:** touched production 3,893 CLOC / 4,205 physical
+  lines; item-model tests 1,199 CLOC / 1,275 physical lines. Estimated
+  production reduction, focused test-only growth; no production addition.
+- **Baseline checks:** existing Debug targets built with `-j14` (no work);
+  Xvfb/offscreen CTest selection for the six consumer suites plus 12
+  conversation and four Inspector performance cases passes **22/22**,
+  134.58 s. Registered timing cases retain `RUN_SERIAL`; no limits changed.
+  Log: `/tmp/codexui-item5-before.log`.
+- **Required verification:** exact scalar/prefix/lookup results against a
+  reference vector, unchanged/invalid diagnostics, negative clamping, zero
+  extents, large sums, and updates after insertion/move/removal. Reject heap
+  allocations in a standalone probe without injecting allocator hooks into
+  production or the Qt test process. Rerun both consumers, focused DPR
+  checks, quantitative gates and sanitizers; compare the same before/after
+  microbenchmark. Offscreen checks do not qualify native compositors or AT.
+
+### Step 5 implementation and verification
+
+- Implemented the reviewed two-traversal scalar update, deleting its only
+  allocation. Removed the two unsupported view-wrapper exception promises.
+  Structural tree operations, node layout, counters, no-op semantics and all
+  widget/measurement policies remain unchanged. No compatibility path remains.
+- Added one model-suite case with **847** valid scalar updates, empty/invalid
+  updates, a reference vector checked after every mutation, integer limits,
+  zero extents, sums beyond `INT_MAX`, exact boundary lookup and diagnostic
+  checks, both before and after insertion/movement/removal. It joins the
+  existing non-short-circuit runner; no existing checks or thresholds changed.
+- **Allocation proof:** the standalone probe uses the actual index source,
+  with allocation interception confined to the probe executable. The fixed
+  first/middle/last-row changed and unchanged calls allocate zero bytes;
+  changed, unchanged and invalid calls return normally when all allocations
+  are rejected. A further **60,000** changed/unchanged/clamped/limit updates
+  after structural edits succeed with allocations forbidden (exit 0,
+  `allocations=0`, final total 70,000); the old valid calls terminated (86).
+  Probe source/binaries: `/tmp/codexui-item5-review.lAhtKI/allocations.cpp`,
+  `allocations` (pre-change) and `allocations-after`.
+- Probe build: `g++ -std=c++20 -O2 -Wall -Wextra -Werror -Isrc
+  /tmp/codexui-item5-review.lAhtKI/allocations.cpp
+  src/codex/middle/ConversationHeightIndex.cpp
+  $(pkg-config --cflags --libs Qt6Core) -o
+  /tmp/codexui-item5-review.lAhtKI/allocations-after`.
+  Execute with `xvfb-run -a env QT_QPA_PLATFORM=offscreen <binary>`; arguments
+  `change`, `noop`, `invalid`, `sweep` select allocation-rejection checks.
+  No argument measures five 100,000-call batches.
+- **Scalar performance:** three alternating before/after pairs with the same
+  optimized flags and allocation instrumentation: changed median ns/call
+  **68/69/68 → 22/19/18**, unchanged **55/55/53 → 7/6/6**. Each old middle-row
+  batch allocated 500,000 times / 24.8 MB cumulatively; all new batches zero.
+  Diagnostic counts match (first row 8, middle/last 11, no-op 0, invalid
+  preserves the preceding count). Log:
+  `/tmp/codexui-item5-scalar-comparison.log`. These are scalar microbenchmarks,
+  not end-to-end UI latency or a promise of universally lag-free interaction.
+- **Builds:** `cmake --build /tmp/codexui-current-debug.fMMvCu --target
+  codex-ui codexui-conversation-item-model-test
+  codexui-conversation-virtualization-test codexui-conversation-cards-test
+  codexui-inspector-graph-test codexui-conversation-view-benchmark
+  codexui-application-layout-test codexui-shell-integration-test -j14` passes
+  with the existing warning/error policy. Sanitizer build in
+  `/tmp/codexui-current-asan-ubsan.2oIJr4` of model, virtualization and Inspector
+  targets with `-j14` also passes.
+- **ASan/UBSan:** `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-asan-ubsan.2oIJr4 --output-on-failure -j14 -R
+  '^codexui-(conversation-item-model|conversation-virtualization|inspector-graph)$'`:
+  **3/3 pass**, 1.24 / 15.79 / 1.10 s, wrapper exit 0. No new suppressions,
+  leak-detection changes or sanitizer diagnostics. Log:
+  `/tmp/codexui-item5-sanitizers.log`.
+- **Matched native baseline/after command:** `xvfb-run -a env
+  QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -V -j14 -R
+  '^codexui-(conversation-item-model|conversation-virtualization|conversation-cards|inspector-graph|application-layout|shell-integration|conversation-performance-.*|inspector-performance-.*)$'`:
+  **22/22 pass before and after**, 134.58 → 135.21 s, wrapper exit 0.
+  Logs: `/tmp/codexui-item5-{before,after}.log`. This covers six consumer
+  suites, conversation rows 320/1,280/10,000 at DPR 1/1.25/1.5/2 and Inspector
+  10,000 rows at the same DPRs. Timing cases stay serial; the other cases use
+  `-j14`. No case was skipped or threshold weakened.
+- **UI performance interpretation:** all quantitative gates pass. Conversation
+  peaks remain 479 widgets / 29 documents / 31 resident cards in all 12
+  comparisons; streaming constructions remain zero; height-index update
+  counts match at each size. Timings are not uniformly lower: at 1,280
+  rows/DPR 1, median warm wheel is 470 → 463 us and streaming input-to-paint
+  5,771 → 5,687 us; at 10,000 rows/DPR 2 those are 760 → 833 us and
+  6,565 → 6,994 us. The scalar measurement proves its own improvement, not
+  that every end-to-end sample improves. Inspector renderer retention,
+  zero update-time row/document construction and its bounded-work gates also
+  pass. Full raw measurements remain in the logs above.
+- **Focused DPR verification:** `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  ctest --test-dir /tmp/codexui-current-debug.fMMvCu --output-on-failure -j14
+  -R '^codexui-(command-output-geometry-.*|conversation-selection-focus-.*|inspector-geometry-.*)$'`:
+  **20/20 pass**, 0.75 s, wrapper exit 0, including Fusion and Breeze (no
+  style skips), DPR 1/1.25/1.5/2. Log: `/tmp/codexui-item5-dpr.log`.
+- **Final accounting:** touched production **3,893 → 3,888 CLOC (-5)**,
+  **4,205 → 4,200 physical lines (-5)**; tests **1,199 → 1,288 CLOC (+89)**,
+  **1,275 → 1,365 physical lines (+90)**. Documentation is separate. Final
+  diff review finds no new flag, timer, cache, callback, property, ownership
+  path or duplicated authority; `git diff --check` passes. No commit, push,
+  install, process restart or upstream modification performed for item 5.
+- Item 5 is complete for its stated scalar and exception-specification
+  invariants. The item-4 browser performance gate remains open; native
+  compositor/screen-reader qualification remains separate. No plan-tab update
+  tool is exposed in this session; this existing ledger records completion.
 
 ### Performance continuation gate — targeted thread-row scheduling
 

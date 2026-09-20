@@ -261,8 +261,8 @@ private:
   enum class ReflowCause { ResizeFrame, ResizeExact, Environment };
   void reflowAfterResize(ReflowCause cause);
   void scheduleInteractiveResizeReflow();
-  [[nodiscard]] int leadingChromeHeight() const noexcept;
-  [[nodiscard]] qint64 naturalContentHeight() const noexcept;
+  [[nodiscard]] int leadingChromeHeight() const;
+  [[nodiscard]] qint64 naturalContentHeight() const;
 
   void updateMaterialization(bool admitOverscan = false);
   [[nodiscard]] std::pair<int, int>

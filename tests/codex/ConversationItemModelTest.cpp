@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -1179,6 +1180,94 @@ bool testTailAppendKeepsEveryLoadedIdentityIndex() {
   return result;
 }
 
+bool testHeightIndexScalarUpdatesPreserveGeometry() {
+  ConversationHeightIndex index;
+  static_assert(noexcept(index.setHeight(0, 1)));
+  bool result = require(!index.setHeight(0, 1) && index.empty() &&
+                            index.totalHeight() == 0 &&
+                            index.lastUpdateSteps() == 0,
+                        "scalar update of an empty height index changed it");
+  std::vector<int> heights(65);
+  for (std::size_t row = 0; row < heights.size(); ++row)
+    heights[row] = row % 5 == 0 ? 0 : 7 + static_cast<int>(row);
+  index.assign(heights);
+  const auto rebuilds = index.rebuildCount();
+  const auto verify = [&] {
+    bool exact = true;
+    qint64 top = 0;
+    for (std::size_t row = 0; row < heights.size(); ++row) {
+      const qint64 bottom = top + heights[row];
+      exact &= require(index.height(row) == heights[row] &&
+                           index.top(row) == top && index.bottom(row) == bottom,
+                       "scalar update changed a row height or prefix incorrectly");
+      if (heights[row] > 0)
+        exact &= require(index.rowAt(top) == row &&
+                             index.rowAt(bottom - 1) == row,
+                         "scalar update broke extent-boundary lookup");
+      top = bottom;
+    }
+    exact &= require(index.size() == heights.size() &&
+                         index.totalHeight() == top &&
+                         index.top(index.size()) == top &&
+                         index.rebuildCount() == rebuilds,
+                     "scalar update changed row count, total or rebuild count");
+    if (top == 0)
+      exact &= require(index.rowAt(0) == 0,
+                       "all-folded height index has no valid zero position");
+    return exact;
+  };
+  const auto update = [&](std::size_t row, int requested) {
+    const int expected = std::max(0, requested);
+    const bool changed = heights[row] != expected;
+    const auto lookupSteps = index.lastLookupSteps();
+    bool exact = require(index.setHeight(row, requested) == changed,
+                         "scalar height update returned the wrong change flag");
+    exact &= require(index.lastLookupSteps() == lookupSteps &&
+                         (changed ? index.lastUpdateSteps() > 0 &&
+                                        index.lastUpdateSteps() <= 64
+                                  : index.lastUpdateSteps() == 0),
+                     "scalar update changed lookup/update diagnostic meaning");
+    heights[row] = expected;
+    exact &= verify();
+    if (!exact)
+      std::cerr << "height update row=" << row << " requested=" << requested
+                << '\n';
+    result &= exact;
+  };
+  result &= verify();
+  for (int phase = 0; phase < 2; ++phase) {
+    for (std::size_t sample = 0; sample < heights.size(); ++sample) {
+      const std::size_t row = (sample * 37) % heights.size();
+      for (int requested : {0, std::numeric_limits<int>::min(),
+                            std::numeric_limits<int>::max(),
+                            std::numeric_limits<int>::max(), 7, 7})
+        update(row, requested);
+    }
+    if (phase == 0) {
+      const std::vector<int> inserted{std::numeric_limits<int>::max(), 0, 41};
+      index.insert(3, inserted);
+      heights.insert(heights.begin() + 3, inserted.begin(), inserted.end());
+      result &= verify();
+      index.move(2, 4, 10);
+      std::rotate(heights.begin() + 2, heights.begin() + 6, heights.begin() + 14);
+      result &= verify();
+      index.remove(5, 3);
+      heights.erase(heights.begin() + 5, heights.begin() + 8);
+      result &= verify();
+    }
+  }
+  for (std::size_t row = 0; row < heights.size(); ++row)
+    update(row, 0);
+  update(heights.size() - 1, std::numeric_limits<int>::max());
+  update(0, std::numeric_limits<int>::max());
+  const auto steps = index.lastUpdateSteps();
+  for (std::size_t row : {index.size(), std::numeric_limits<std::size_t>::max()})
+    result &= require(!index.setHeight(row, 1) && index.lastUpdateSteps() == steps,
+                      "invalid scalar update changed the index or its diagnostics");
+  result &= verify();
+  return result;
+}
+
 bool testAccessibilityProjectionStopsAtItsVisibleBound() {
   ConversationItemModel model;
   VisibleCardData files;
@@ -1268,6 +1357,7 @@ int main(int argc, char **argv) {
   result &= testExistingRowsCannotChangeStructuralRootIdentity();
   result &= testTailAppendKeepsEveryLoadedIdentityIndex();
   result &= testHeightIndexIsBoundedAndExact();
+  result &= testHeightIndexScalarUpdatesPreserveGeometry();
   result &= testAccessibilityProjectionStopsAtItsVisibleBound();
   if (result)
     std::cout << "Conversation item model tests passed\n";
