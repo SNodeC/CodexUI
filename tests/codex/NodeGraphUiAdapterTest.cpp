@@ -62,6 +62,76 @@ NodeState itemState(std::string id, std::string type, std::string text) {
   return state;
 }
 
+bool genericActivityDetailPreservesUtf8Boundaries() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef item;
+  {
+    auto write = graph.write();
+    thread = write.upsert({NodeKind::Thread, "detail-thread"});
+    const NodeRef turn = write.upsert({NodeKind::Turn, "detail-turn"});
+    item = write.upsert({NodeKind::Item, "detail-item"});
+    write.setParent(thread, turn);
+    write.setParent(turn, item);
+    static_cast<void>(write.finish());
+  }
+  NodeGraphUiAdapter adapter(graph);
+  const auto check = [&](const std::string &label, const std::string &value,
+                         const std::string &expected) {
+    {
+      auto write = graph.write();
+      write.setField(item, "a", value);
+      static_cast<void>(write.finish());
+    }
+    const auto snapshot = adapter.conversation(thread);
+    const std::array<NodeRef, 1> changed{item};
+    const auto delta = adapter.conversationDelta(thread, changed, false);
+    if (!require(snapshot && snapshot->sections.size() == 1 &&
+                     snapshot->sections.front().cards.size() == 1 && delta &&
+                     delta->presentations.size() == 1,
+                 (label + ": generic detail projection unavailable").c_str()))
+      return false;
+    bool passed = true;
+    for (int projection = 0; projection < 2; ++projection) {
+      const auto &card = projection == 0
+                             ? snapshot->sections.front().cards.front()
+                             : delta->presentations.front();
+      const auto *detail =
+          std::get_if<middle::GenericActivityData>(&card.payload);
+      passed &= require(detail && detail->displayDetail == expected,
+                        (label + (projection == 0 ? " / snapshot" : " / delta") +
+                         ": generic detail differs at its UTF-8 byte bound")
+                            .c_str());
+    }
+    return passed;
+  };
+  bool passed = check("empty", "", "a: \n");
+  passed &= check("short Unicode", "plain ¢ € 😀", "a: plain ¢ € 😀\n");
+  for (const std::string codepoint : {"A", "¢", "€", "😀"}) {
+    const std::string label = std::to_string(codepoint.size()) + "-byte character";
+    const std::string exact(3996 - codepoint.size(), 'x');
+    passed &= check(label + " / exact fit including newline", exact + codepoint,
+                    "a: " + exact + codepoint + "\n");
+    passed &= check(label + " / exact value followed by overflowing newline",
+                    exact + "x" + codepoint,
+                    "a: " + exact + "x" + codepoint +
+                        "\n\n[Activity details truncated]");
+    for (std::size_t remaining = 0; remaining <= codepoint.size() + 1;
+         ++remaining) {
+      const std::string prefix(3997 - remaining, 'x');
+      const std::string retained =
+          remaining < codepoint.size()
+              ? prefix
+              : prefix + codepoint +
+                    std::string(remaining - codepoint.size(), 'z');
+      passed &= check(label + " / " + std::to_string(remaining) + " bytes left",
+                      prefix + codepoint + "zzzzzzzz",
+                      "a: " + retained + "\n\n[Activity details truncated]");
+    }
+  }
+  return passed;
+}
+
 bool projectsCanonicalTurnStructureAndRoot() {
   nodegraph::NodeGraph graph;
   NodeRef thread;
@@ -3192,6 +3262,7 @@ bool frontendPresentationContractIsShared() {
 int main() {
   using namespace codexui::codex::ui;
   bool passed = true;
+  passed &= genericActivityDetailPreservesUtf8Boundaries();
   passed &= projectsCanonicalTurnStructureAndRoot();
   passed &= projectsEveryLoadedItemInCanonicalOrder();
   passed &= completeHistoryRetainsCanonicalItemOrder();

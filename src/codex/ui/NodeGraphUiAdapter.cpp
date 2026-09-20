@@ -246,21 +246,20 @@ std::pair<int, int> graphDiffCounts(std::string_view diff) {
   return {additions, deletions};
 }
 
-constexpr std::size_t MaximumGraphActivityDetailCharacters = 4000;
+constexpr std::size_t MaximumGraphActivityDetailBytes = 4000;
 
 class GraphDetailBuilder final {
 public:
   void append(std::string_view text) {
     if (text.empty() || truncated_)
       return;
-    const std::size_t remaining =
-        MaximumGraphActivityDetailCharacters - value_.size();
-    if (text.size() <= remaining) {
-      value_.append(text);
-      return;
-    }
-    value_.append(text.substr(0, remaining));
-    truncated_ = true;
+    std::size_t count =
+        std::min(text.size(), MaximumGraphActivityDetailBytes - value_.size());
+    truncated_ = count < text.size();
+    while (count > 0 && count < text.size() &&
+           (static_cast<unsigned char>(text[count]) & 0xc0U) == 0x80U)
+      --count;
+    value_.append(text.substr(0, count));
   }
 
   void indent(int depth) {

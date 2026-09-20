@@ -1,5 +1,192 @@
 # Qt architecture remediation findings ledger
 
+## Current verified repair plan — 2026-09-20
+
+This checkpoint implements the replacement plan accepted after the review of
+`6a71db068b9a593b24c9ae638fbec9016e76376b`. The older entries below remain
+historical evidence, not additional authorization to expand this plan.
+The implementation baseline is a clean `master`, equal to `origin/master`.
+
+| Step | Accepted correction | Status |
+|---|---|---|
+| 1 / NEW-1 | UTF-8-safe byte bounding at the generic-activity adapter boundary | Completed; broader performance qualification remains open below |
+| 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Awaiting scope approval for the reproduced append-boundary dependency below; origin-aware design and growth estimate remain provisional; no production edits yet |
+| 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Pending |
+| 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Pending |
+| 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Pending |
+| Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
+| Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
+
+Candidate findings remain candidates: no speculative renderer, virtualization,
+treap, lifetime, scheduler or graph rewrite is authorized. In particular H-2
+has no reproduced section-range mismatch (800 comparisons passed); the broad
+D-9/T-4 atomicity allegation is contradicted by prevalidation and passing
+tests; M-5 revisits missing visible rows; NEW-5 did not increase actual shell
+minimum width in the styled probe. D-5 stays withdrawn. Keep existing ownership
+guards, useful diagnostics, incremental update paths and visual behavior.
+
+### Step 1 change gate — NEW-1
+
+- **Invariant:** bounded projected UTF-8 must remain valid for every native
+  consumer; enforce it once at the graph-to-presentation boundary.
+- **Path:** protocol strings in `NodeState::fields` → `graphDisplayDetail` /
+  `GraphDetailBuilder` → `GenericActivityData::displayDetail`, through both
+  snapshot and delta projections → visual detail, Copy and accessible text.
+- **Replacement:** remove unchecked prefix slicing in the existing builder;
+  retain the 4,000-byte body bound and existing truncation notice, cutting at a
+  complete UTF-8 boundary. Rename the limit to bytes. No new helper, retained
+  state, renderer, timer, cache or downstream correction.
+- **Other policies:** protocol stream-tail retention keeps a suffix rather
+  than this prefix; it is not a duplicate detail serializer. Native/browser
+  serialization alignment and downstream bound consolidation stay in step 4.
+- **Accounting baseline:** adapter production 2,531 CLOC / 2,681 physical
+  lines; adapter test 3,084 CLOC / 3,223 physical lines. Expected production
+  reduction; one public-boundary test exercises snapshots and deltas.
+- **Before-change verification:** existing adapter suite passed three times
+  (3.77 / 3.55 / 3.60 seconds). New regression cases fail on the unchanged
+  production implementation at all six partial 2/3/4-byte boundaries, in both
+  snapshot and delta projections (12 failures); later existing cases execute.
+- **Commands:** build with `cmake --build /tmp/codexui-current-debug.fMMvCu
+  --target codexui-nodegraph-ui-adapter-test -j14`; execute through
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu -R '^codexui-nodegraph-ui-adapter$' -j14
+  --output-on-failure`, with `--repeat until-fail:3` for the baseline.
+- **Environment:** the offscreen child executes, but the Xvfb wrapper returns
+  1 in this sandbox. This is not native-display qualification. The adapter
+  correctness test itself does not construct widgets or require a display.
+
+### Step 1 result
+
+- Replaced the existing builder's prefix slice and renamed its byte limit.
+  For valid UTF-8, the boundary check inspects at most three preceding bytes;
+  it does not decode or scan the whole payload. Existing state and the
+  truncation notice are unchanged. No new production helper or mechanism.
+- The new regression case checks 20 inputs through both snapshot and delta
+  projection (40 exact-output checks): empty/short text, ASCII and 2/3/4-byte
+  characters before, across and after the byte boundary. All pass after the
+  change; all 12 partial-codepoint outputs failed before it.
+- Adapter repeat: 3.59 / 3.49 / 3.49 seconds after, versus
+  3.77 / 3.55 / 3.60 seconds before. This is a whole-suite timing comparison,
+  not a claim that the one-byte-boundary correction sped up the UI.
+- Built `codex-ui`, adapter, cards and virtualization targets with `-j14`.
+  CTest selection `^(codexui-nodegraph-ui-adapter|codexui-conversation-cards|
+  codexui-conversation-virtualization)$` executes all three: adapter passes
+  (3.95 s), cards passes (11.70 s), virtualization fails its unrelated
+  `collapsedLargeCardsSkipBodyProjection` timing gate (140,891 us > 100,000 us;
+  one rebuild and 5,000 blocks remain correct). A separate repeat fails at
+  148,510 us. The virtualization executable was not relinked by this change
+  (mtime 12:19:02); it does not contain the adapter fix. No test threshold or
+  unrelated production code was changed. Keep this observed timing failure
+  in the existing performance-qualification work, not as proof of regression
+  from NEW-1 or as an additional authorized refactor.
+- Final touched-file accounting: production 2,530 CLOC / 2,680 physical lines
+  (**-1 / -1**); tests 3,142 CLOC / 3,282 physical lines (**+58 / +59**).
+  Documentation is accounted separately. `git diff --check` passes.
+- Step 1 is complete for its adapter invariant. Native-display qualification,
+  the unrelated performance failure, and the different browser serialization
+  contract are not claimed fixed by this stage.
+
+### Step 1 review follow-up
+
+- Added exact-capacity cases for ASCII and 2/3/4-byte characters: the complete
+  formatted line fits without a truncation notice, or the value fills the
+  capacity and the following formatter newline triggers truncation. Failures
+  now identify the character width, boundary case and snapshot/delta path.
+- The regression case now exercises 28 inputs / 56 exact-output checks. The
+  same adapter build and CTest commands above pass (3.89 s, child result
+  `100% tests passed`). The Xvfb wrapper still returns 1; no native-display
+  coverage is claimed. No production code changed in this follow-up.
+- Current total delta against the clean baseline: production **-1 CLOC / -1
+  physical line**; tests **+70 CLOC / +71 physical lines** (the review follow-up
+  adds 12 test lines). `git diff --check` passes.
+
+### Step 2 investigation and addition gate — D-6
+
+- **Invariant:** presentation-only content must never leak into Copy, while
+  authored Unicode, Markdown semantics, selection and blank-line geometry are
+  preserved. The canonical source and the existing Markdown document remain
+  the authorities; no additional renderer or interaction implementation.
+- **Cause:** `userMessageMarkdown` inserts U+200B for empty prose rows and
+  `MarkdownTextView::createMimeDataFromSelection` deletes every U+200B from
+  exported formats, without distinguishing authorship. Plain and prepared
+  Markdown views also inherit that deletion although they inserted no marker.
+  Whole-card Copy already reads canonical source and is not the faulty path.
+- **Rejected reductions, measured with Qt 6.10.2 offscreen:** backslash hard
+  breaks preserve internal blank rows but leave a visible final backslash in
+  trailing-empty-row cases. U+2028 produces one text block and changes the
+  sample's height from 71 to 59; U+2029 keeps three blocks but changes code-span
+  newline and escaping behavior. Empty-link markup gives three empty/ordinary
+  blocks with no accessible/hittable anchors in prose, but becomes literal
+  `[]()` inside code spans. These are counterexamples, not accepted fixes.
+- **Other rejected direction:** parsing each prose paragraph independently to
+  insert empty Qt blocks would multiply parser invocations with paragraph
+  count. It is not accepted as an unmeasured replacement of the single parse.
+- **Clipboard control:** a plain `QTextBrowser` preserves an authored U+200B
+  in both plain-text and Markdown selection MIME. Thus the reproduced
+  selection loss is not excused as an upstream Qt clipboard limitation.
+- **Proposed next approach (unchanged in intent):** provenance-aware document
+  preparation and selection export, replacing character-value-only cleanup
+  and per-format reparsing. Keep one document, unchanged visible formatting,
+  the existing incremental-update boundary and bounded work. Exact origin
+  mapping must be demonstrated before accepting an implementation; none is
+  claimed implemented by this investigation.
+- **Addition gate:** the reductions tested do not satisfy all invariants.
+  Estimate approximately **+40–80 net production CLOC** for origin-aware
+  handling after deleting superseded cleanup. Request explicit approval
+  before implementing that addition; the estimate is not completed accounting
+  or authorization to exceed it. No production/test files changed for step 2.
+- **Probe artifacts:** `/tmp/codexui-blank-lines-probe.cpp` and
+  `/tmp/codexui-empty-block-probe.cpp`, built with
+  `c++ -std=c++20 <source> -o <binary> $(pkg-config --cflags --libs Qt6Widgets)`
+  and invoked through `xvfb-run -a env QT_QPA_PLATFORM=offscreen <binary>`.
+  Xvfb startup remains unavailable in the sandbox; offscreen children run.
+
+### Step 2 continuation — rejected replacement and newly proved dependency
+
+- A `/tmp`-only probe now measures the previously unmeasured paragraph-import
+  alternative. Importing each nonblank prose run and inserting real empty Qt
+  blocks preserves ordinary internal blank rows, but changes leading-empty
+  geometry (71 → 59 px), inline-code-adjacent geometry (68 → 65 px), and
+  cross-line emphasis/code/backslash behavior. It is **not accepted**.
+- Ten runs of the 1,000-repeat sample take 152,300 us with the existing
+  import versus 430,881 us with paragraph imports; repeat 155,037 versus
+  400,863 us. Parser calls increase from 10 to 20,000. Both use disabled
+  document layout while importing. These are local construction measurements,
+  not whole-UI frame-time claims; no production replacement was applied.
+- The same probe, linked against the unchanged production conversation
+  library, reproduces an **incremental-update boundary defect** through actual
+  `MarkdownTextView::setContent`: start with `First\n\nThird`, then append
+  ` appended`. The updated document contains five blocks
+  (`First`, blank marker, `First`, blank marker, `Third appended`); a fresh
+  view of the identical canonical source contains three. This is a controlled
+  widget reproduction, not a claim of observing the user's live session or
+  tracing a specific incoming protocol message.
+- **Exact cause:** `markdownTailState` pairs Markdown source offset 0 with
+  `document.lastBlock().position()` (8 in this sample). One normalized
+  Markdown paragraph spans three Qt blocks. `appendMarkdownDocument` removes
+  only the last Qt block, then inserts the entire source paragraph. The two
+  coordinates therefore do not describe the same replacement boundary.
+- **Proposed correction:** make the existing tail pair describe the same
+  source/document range, preserving prefix identity and using the existing
+  full-replacement path when an independent tail cannot be established.
+  Verify incremental-versus-fresh content, formatting, geometry, selection
+  and parse/layout work before accepting it; no new timer, reconciliation
+  state or unconditional full-reparse workaround is proposed.
+- This dependency was not a separately accepted implementation task. Per the
+  user's instruction to ask before increasing the work, **request scope
+  approval before fixing it**. D-6 remains incomplete; no safe origin mapping
+  or final production-growth estimate is claimed. This entry records evidence,
+  not authorization to expand the plan.
+- Artifact: `/tmp/codexui-prose-blocks-probe.cpp`, linked to the current
+  `libcodexui-conversation-ui.a`, height-index, nodegraph and UiStyle libraries;
+  run as `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  /tmp/codexui-prose-blocks-probe`. Offscreen child completes; Xvfb wrapper
+  returns 1 under the previously recorded sandbox restriction. The standalone
+  probe compile emits a GCC 16/Qt-header SFINAE warning; the repository test
+  build is clean. No tracked production/test edits belong to this probe.
+
+## Historical remediation record
+
 Date: 2026-09-12  
 Repository: `/home/voc/projects/drafts/CodexUI/codexui`  
 Branch/HEAD: `master` at `629660e8882bddc7473ee5f1aab90c755ee6edd4`  
