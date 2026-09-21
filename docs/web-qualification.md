@@ -94,6 +94,36 @@ Hydration was exactly two layout/style passes in every sample; streaming was
 exactly one; idle and the semantic settings no-op were exactly zero. These are
 local regression gates, not portable hardware performance claims.
 
+### Paginated-protocol requalification — 2026-09-21
+
+The browser fixture now follows metadata-only `thread/resume`,
+`thread/turns/list` and `thread/items/list`; it rejects legacy `thread/read`.
+Its 80 turns × 125 items retain the original 10,000-item / 80-visible-card
+initial-render workload, without measuring an additional history expansion.
+Idle is observed for 33.3 ms from the host, without running test animation
+callbacks inside the browser. All existing limits above remain unchanged.
+An injected idle workload fails at 7.97 ms, as intended.
+
+With the local AISuite inbound-frame bound correction, ten serial fresh
+production-browser processes passed every gate. Ingest was 6.3–7.1 ms;
+hydration wall/task maxima were 114.2 / 118.63 ms; streaming settlement/task
+maxima were 37.3 / 33.03 ms. Idle remained at most 0.14 ms with no layout/style
+work. Three immediately preceding runs with the original SDK ingested in
+8.6–10.1 ms. Separate instrumentation confirmed 2,000 input frames delivered
+with 2,000 -> 0 temporary frame-size encoding buffers. Byte limits and
+malformed-message handling did not change.
+
+The Node gate passed 50/50 fresh-process runs, with maxima of 29.826 / 20.306 /
+3.525 / 6.738 ms for hydration / projection / streaming / presentation churn.
+SDK tests passed 44/44 and browser tests passed 330/330 with concurrency 14.
+Timing runs were serial and separate from builds/tests; all execution checks
+used `xvfb-run -a env QT_QPA_PLATFORM=offscreen`. The production artifact was
+rebuilt and its relocatability verified. Intermediate failures, source/LOC
+accounting, exact commands and qualification limitations are retained in the
+[remediation ledger](architecture/qt-remediation-findings-ledger.md).
+This is local-worktree evidence, not a claim of universally lag-free operation;
+the AISuite source change must accompany CodexUI in subsequent releases.
+
 ## Browser representation and resilience
 
 - WebSocket and WSS are the only exposed transports.

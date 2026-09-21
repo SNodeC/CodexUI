@@ -13,7 +13,7 @@ clean `eb6d56d` on `master`, two commits ahead of `origin/master`.
 | 1 / NEW-1 | UTF-8-safe byte bounding at the generic-activity adapter boundary | Completed; broader performance qualification remains open below |
 | 2 / D-6 | Copy removes generated placeholders only, preserving authored U+200B | Completed and verified; Copy cost and separate DPR-suite limitation recorded below |
 | 3 / M-4, D-4a | Model-backed accessible conversation identities and plan statuses | Completed and offscreen-verified within approved growth; native screen-reader qualification remains separate |
-| 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T-3 | Shared native/browser detail, Copy, label and Markdown contracts | Implemented; correctness checks pass; NOT complete: browser stream-performance gate remains open |
+| 4 / NEW-2, D-4b, D-3, WEB-1, T-1–T–3 | Shared native/browser detail, Copy, label and Markdown contracts | Completed and locally verified, including the separately authorized AISuite receive-bound correction; broader qualification remains separate |
 | 5 / L-1 | Allocation-free scalar height updates and justified exception specifications | Completed; allocation-failure proof, consumer/DPR/performance gates and ASan/UBSan pass |
 | Cleanup | NEW-6–NEW-8, L-4–L-6, L-8: bounded test/documentation/code cleanup | Pending |
 | Qualification | CI-1–CI-4, T-5/NEW-5, SHELL-1: coverage and measured performance | Pending; native-platform checks remain environment-constrained |
@@ -804,6 +804,304 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   Other Qt/Unicode versions and native platform accessibility remain under
   the existing qualification item. **Item 4 is not marked complete while its
   browser performance check remains open; item 5 had not started at that checkpoint.**
+
+### Step 4 performance follow-up — approved change gate (2026-09-21)
+
+- **Scope:** the user approved the reviewed metadata-copy correction and
+  stricter existing benchmark verification, without workarounds. Baseline:
+  clean `263fb3b`, `master`, synchronized with `origin/master`. This continues
+  item 4; it adds no plan task and does not reopen completed presentation fixes.
+- **Invariant and trace:** presentation frames enter `PresentationModel`;
+  `upsertThread` owns metadata and dispatches history to `upsertTurn` /
+  `upsertItem`, which independently own item data. Select metadata before its
+  deep copy, rather than deep-copying the complete history and deleting that
+  copy immediately. Preserve both replace/merge paths, settings handling,
+  input isolation, item order and subsequent streaming. Paginated turn
+  loading already enters `upsertTurn` directly and is not rewritten.
+- **Evidence:** review instrumentation found 20,000 item copies for 10,000
+  retained items, versus 10,000 after the proposed change. Slow benchmark
+  stream intervals overlapped major GC; the stage name does not identify
+  where garbage originated. The generic-detail serializer is not reached by
+  this benchmark's three known card kinds. Removing discarded serialization
+  must not be reversed merely to change collection timing.
+- **Deletion:** replace `clone(raw); delete threadFields.turns` with shallow
+  metadata selection followed by the existing deep clone. No retained state,
+  flag, timer, cache, renderer, worker or alternate protocol path is added.
+  Per-delta wrapper and projection-allocation experiments did not establish
+  reliable gate improvements and are excluded from this implementation.
+- **Verification:** preserve the complete four-phase benchmark workload and
+  the existing 47/45/4/20 ms limits; compare unrounded values, report all
+  exceeded limits and assert real streamed content/item counts. Check input
+  isolation through public model boundaries. Run the complete browser suite
+  with concurrency 14, repeated timing runs serially, and the existing real
+  browser qualification through Xvfb/offscreen. Record all failures; do not
+  use forced GC, delays, discarded samples or changed thresholds. Qualify the
+  shared native contract separately without changing native production.
+- **Accounting gate:** production change is two lines replaced by two lines,
+  expected net **0 CLOC**. Test/benchmark changes are accounted separately.
+  No production growth or broader optimization is authorized. Item 4 remains
+  open until its required verification succeeds.
+
+#### Implemented correction and verification result
+
+- `upsertThread` now selects metadata before cloning it. The existing
+  `upsertItem` remains the owner of item copies; neither input frames nor
+  nested metadata are aliased. No pagination, projection, renderer or delta
+  processing policy changed. The benchmark now reports every phase before
+  asserting all failures, compares unrounded times, and verifies actual
+  item/card counts and the final appended text. Workload and limits are
+  unchanged; there is no warm-up, forced GC or discarded sample.
+- Both `npm run build` and `npm run build:app` in `web` pass. Browser command:
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen node --test --test-concurrency=14
+  tests/*.test.mjs`: **327/327 pass**, no skips, including new replace/merge
+  input-isolation cases. The same cases also passed before the production
+  edit: they protect ownership, not an implementation-specific clone count.
+- Native build: `cmake --build /tmp/codexui-current-debug.fMMvCu --target
+  codexui-conversation-cards-test codexui-nodegraph-ui-adapter-test -j14`.
+  Native command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir
+  /tmp/codexui-current-debug.fMMvCu --output-on-failure -j14 -R
+  '^codexui-(conversation-cards|nodegraph-ui-adapter)$'`: **2/2 pass**,
+  11.35 seconds. Native production is unchanged.
+- Diagnostic command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen node
+  /tmp/codexui-step4-review.SnCC1C/clone-proof.mjs
+  /home/voc/projects/drafts/CodexUI/codexui/web`. Item copies fall from
+  **20,000 to 10,000** for 10,000 retained items; discarded history copies
+  fall from **10,000 to zero**. Nested metadata/input isolation and subsequent
+  streaming checks pass. This diagnostic is separate from timing runs.
+- Matched timing command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen node
+  /tmp/codexui-step4-fix.mqeMY4/repeat.mjs
+  /home/voc/projects/drafts/CodexUI/codexui/web/tools/profile-presentation.mjs
+  30`. Thirty serial processes per version, with the strengthened benchmark
+  in both versions and no concurrent build/test workload. Before: **11/30
+  pass**; after: **29/30 pass**. Median milliseconds before -> after:
+  hydration **33.817 -> 26.560**, projection **18.332 -> 18.791**, streaming
+  **6.476 -> 2.794**, presentation-lifetime churn **5.198 -> 6.257**. Thus
+  hydration and streaming improve; this is not an all-phase speedup claim.
+  The remaining failure is iteration 25: streaming **4.047178 ms > 4 ms**.
+  Both repetition commands exit 1; the remaining violation is not waived.
+- Existing real-browser command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen
+  node tools/qualify-browser.mjs`. Before the production edit, Chrome starts
+  successfully but the mock times out waiting for `thread/read`. The client
+  now uses `thread/resume` with `excludeTurns: true`, followed by paginated
+  history. This is stale qualification setup, not an Xvfb startup failure or
+  proof of a product loading defect. Updating this additional test-only
+  mock was requested separately; it has not been changed without approval.
+- Logs and timing samples: `/tmp/codexui-step4-fix.mqeMY4/`, especially
+  `strict-baseline-profile.jsonl`, `after-profile.jsonl`, `after-tests.log`,
+  `native-contract.log`, `native-build.log` and `baseline-browser.log`.
+- **Accounting against `263fb3b`: production 0 net CLOC / 0 net physical
+  lines; regression tests +22 CLOC / +23 physical lines; benchmark +6 CLOC /
+  +6 physical lines.** Documentation is separate. Diff review found no new
+  retained state, timer, callback, cache, compatibility path or authority.
+  `git diff --check` passes. No commit, push, install or application restart.
+- **Item 4 remains open:** the repeated Node performance gate still has one
+  failure, and real-browser qualification cannot reach its streaming checks
+  until the stale mock is aligned. These results do not prove lag-free UI
+  interaction or native compositor/screen-reader behavior.
+
+#### Approved browser-qualification mock alignment (2026-09-21)
+
+- The user explicitly authorized updating the existing mock. No further
+  production changes were made; the prior metadata-copy change is preserved.
+  Replaced the held full-history `thread/read` response with metadata-only
+  `thread/resume`, bounded descending turn summaries, and per-turn item pages.
+  The mock rejects legacy reads and checks thread identity, limit 80,
+  descending order and summary-mode parameters. It no longer supplies an
+  invalid generic `{data: []}` response for metadata resume.
+- Preserve the 100-turn / 10,000-item fixture and 2,000 streaming deltas.
+  Two turn pages (80 + 20) and 200 item pages (80 + 20 per turn) are served.
+  Item replies are held until the real Load earlier activity control requests
+  page two; otherwise the control first reveals thousands of already-local
+  items rather than requesting older turns. This is mock response ordering,
+  not a production delay or compatibility path. One click increases the
+  application's exact display limit from 80 to **160**; the assertion follows
+  that existing public behavior. Detached-scroll references remain tied to
+  the same tail-relative cards. No timing/layout limit was increased.
+- Added mock-only pending-response storage, fixture ownership and delivery
+  counters. The former held-read path is deleted. Performance failures now
+  accumulate until all dependent interaction checks have run and all phase
+  measurements have been printed; they still make the executable exit 1.
+  Browser evaluation errors include their actual exception description.
+- Commands: `node --check web/tools/qualify-browser.mjs`; in `web`,
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen node --test --test-concurrency=14
+  tests/*.test.mjs` (**327/327 pass**, no skips), and
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen node tools/qualify-browser.mjs`.
+  Xvfb and headless Chromium start successfully; the old API timeout is gone.
+- Three serial before/after pairs use the identical updated mock against
+  the saved pre-copy-fix `baseline-app-dist` and current `app-dist`. Every
+  run reaches the final performance assertion: all preceding behavioral
+  checks pass, including responsive drawers, focus/control/card/text identity,
+  10,000-item delivery, exact 160-card display, follow-tail, detached anchor,
+  semantic no-op and submitted settings. Stream ingest/settled/task timing
+  passes in all six runs. Current stream task time: **38.82–40.87 ms < 48 ms**.
+- **All six full qualifications still fail** the unchanged hydration gates.
+  Current wall/task times: **173.3–174.0 / 159.66–160.62 ms**, limits **141 /
+  154 ms**; baseline **158.8–173.9 / 158.19–163.95 ms**. Both versions record
+  **5 layout/style passes**, exceeding the existing bound of 2. One run per
+  version also records idle **1.06 ms > 1 ms**, with zero layouts/styles.
+  These failures reproduce without the metadata-copy correction. The mock
+  now exercises multi-page loading plus an explicit history expansion, so
+  its hydration result is not directly comparable to the former one-response,
+  80-card workload. This is evidence requiring assessment within item 4,
+  not authorization to relax its gates or rewrite production speculatively.
+- Artifacts: `/tmp/codexui-step4-mock.AJUy53/`. `baseline-{1,2,3}.log` uses
+  `qualify-baseline.mjs`, an otherwise identical harness with only its static
+  artifact directory changed; `current-{1,2,3}.log` uses the repository tool.
+  `browser-tests.log` records the 327 cases. Each paired qualification exits
+  1; both versions' earlier failures remain recorded.
+- **This follow-up: production 0 CLOC / 0 physical lines; qualification tool
+  +38 CLOC / +40 physical lines** (612 -> 650 CLOC). Documentation is separate.
+  `git diff --check` passes. No production timers, state or callbacks added;
+  no install, commit, push or restart of the user's application. **Item 4 is
+  still open**, including the prior standalone Node 4 ms gate violation.
+
+#### Step 4 closure investigation and scalar-append reduction (2026-09-21)
+
+- The user authorized continuing until item 4 can genuinely close. Baseline
+  remains `263fb3b` plus the five previously recorded, preserved worktree
+  changes. No new plan item, upstream change or commit is introduced.
+- Repeated the unchanged Node gate: **29/30 pass**, one stream sample
+  **6.978179 ms > 4 ms**. The scalar append path still built
+  `{...scope, delta: text}` only to look up the original identity and then
+  extract that text. `findItem` reads only thread/turn/item IDs. The file-change
+  output path also constructed a one-field wrapper solely to unpack it.
+  Both consumers now pass the already-normalized string to `appendText` and
+  borrow the original scope for lookup. UTF-8 retention accounting, empty /
+  non-string handling, indexed reasoning, ownership and agent propagation
+  are unchanged. This deletes two lines and two temporary-object sites;
+  no flag, cache, timer, worker or competing identity authority is added.
+- A scratch prototype combining this reduction with the already implemented
+  metadata correction passed **50/50** fresh Node processes. Unlike the older
+  append-only prototype, it does not retain the discarded history clone.
+  Implemented it in TypeScript, then reran the actual repository benchmark:
+  **50/50 pass**, no discarded runs, forced GC or warm-up. Streaming median
+  **2.835 -> 2.702 ms**, maximum **6.978 -> 3.486 ms**; all four unchanged
+  limits pass. Hydration/projection/churn maxima: **39.780 / 22.701 / 10.913
+  ms**, below **47 / 45 / 20 ms**.
+- Commands: in `web`, `npm run build`, `npm run build:app`, and
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen node --test --test-concurrency=14
+  tests/*.test.mjs`: **329/329 pass**. Two additional model cases exercise
+  frozen incoming scopes/data, empty and non-string deltas, multibyte text,
+  retained byte counts and stable item/raw identity for both append consumers.
+  Serial timing command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen node
+  /tmp/codexui-step4-fix.mqeMY4/repeat.mjs
+  /home/voc/projects/drafts/CodexUI/codexui/web/tools/profile-presentation.mjs
+  50`. This correction is **−2 production CLOC / −2 physical lines** and
+  **+22 test CLOC / +23 physical lines**, relative to the previous checkpoint.
+- **Browser test-contract correction proposed, not yet applied:** the mock
+  alignment above incorrectly combined initial hydration with explicit
+  history expansion, changing the original measured 80-card scenario to 160.
+  A scratch fixture of **80 turns × 125 items** preserves 10,000 items,
+  resumes metadata-only, hydrates 160 bounded item pages and restores the
+  exact original 80-card display and two-layout initial-reveal invariant.
+  It does not raise any threshold. Existing session tests separately exercise
+  multiple turn pages. User approval of this fixture reshape is pending.
+- The first restored-scenario browser trial passes. Five subsequent paired
+  trials pass all hydration/interaction assertions; one current run misses
+  idle at **1.01 ms**, versus three baseline idle misses of **1.04–1.17 ms**.
+  The idle phase itself runs test JavaScript across two animation frames.
+  An isolated idle CPU profile samples no application JavaScript; this does
+  not prove zero CPU use, but identifies a measurement-overhead concern.
+- Scratch verification replaces that active idle driver with a **measured**
+  two-frame-duration host-side observation (33.3 ms), not a warm-up or a
+  delay before measurement. The unchanged 1 ms / zero layout / zero style
+  gates still apply. **5/5 complete browser trials pass**: hydration wall
+  **119–129 ms**, task **123.94–133.92 ms**, exactly two layouts/style passes;
+  idle **0.14–0.29 ms**, zero script/layout/style; streaming task
+  **34.97–38.26 ms**. A positive-control run injecting 2 ms of browser CPU
+  work every 8 ms fails the idle gate at **8.25 ms**, as required. The
+  observation therefore still catches real work rather than suppressing it.
+- Artifacts: `/tmp/codexui-step4-close.dsCeFN/` includes `node-before.jsonl`,
+  `node-after.jsonl`, `web-after-scalar.log`, the browser CPU profiles,
+  `initial-{baseline,current}-{1..5}.log`, `passive-idle-{1..5}.log` and
+  `passive-idle-positive.log`. The initial unlinked scratch Node run could not
+  resolve the existing frontend package; it is recorded in `append-trial.jsonl`
+  and is not counted as a timing result. The linked prototype is separate.
+- **Status at that checkpoint:** scalar append correction implemented and verified;
+  browser fixture/idle-measurement corrections remain scratch-only pending
+  the requested fixture approval. Item 4 is not yet marked complete. No
+  production renderer/scheduler changes are justified by these measurements.
+
+#### Step 4 closure — approved mock correction and AISuite receive bound (2026-09-21)
+
+- **Authorization:** the user approved the 80-turn × 125-item browser fixture
+  and host-observed 33.3 ms idle interval. Both are now applied, preserving
+  10,000 hydrated items, 80 visible cards and every existing timing/layout
+  limit. Hydration uses metadata-only resume, one turn-summary page and 160
+  item pages; it no longer waits for obsolete `thread/read`. No history
+  expansion is included in the initial-render measurement. An injected idle
+  workload still fails the unchanged 1 ms gate (**7.97 ms**), confirming that
+  host observation does not conceal browser work.
+- **Intermediate failures retained:** the first repository rerun failed
+  streaming ingest in 2/5 browser runs (**21.3 / 21.9 ms**, limit 20 ms).
+  Profiling identified redundant deep clones in diagnostic history. The
+  private normalizer emits fresh frames from independently parsed messages;
+  model mutation owns separate copies, and response consumers only read the
+  input. History now retains those frames directly while preserving request
+  redaction and the 500-frame bound. New coverage verifies both result and
+  notification history remain unchanged during subsequent streaming.
+  This improved five paired ingest measurements from **14.7–19.8 ms** to
+  **8.7–12.4 ms**, but ten production runs still included one **22.2 ms**
+  failure. Passing diagnostic traces were not substituted for that failure.
+- **AISuite scope and invariant:** after the user explicitly approved the
+  proposed source-level change, the clean AISuite checkout was
+  `d84dc7d0e98b950441ae1dc9739aa3fd6361142c`, branch
+  `feature/agent-provider-anthropic`. Only its browser transport and boundary
+  tests changed. Incoming strings require at most three UTF-8 bytes per
+  UTF-16 code unit (four per surrogate pair). The receive predicate now
+  avoids encoding when that upper bound already fits; otherwise the original
+  exact byte check still runs before JSON parsing. The maximum, rejection
+  code/reason, malformed-input handling, outbound accounting and backpressure
+  are unchanged. No bridge daemon or app-server code changed.
+- **Deterministic resource proof:** the same 2,000 delta frames are delivered
+  before and after, with **2,000 -> 0** frame-size encoding allocations.
+  Six character classes × four limits exercise ASCII, two-/three-byte text,
+  surrogate pairs and lone surrogates below, at and above the byte boundary,
+  plus the conservative upper bound. All 24 cases pass both before and after.
+  The earlier scratch check compared 1,376,326 boundary decisions. This proves
+  the removed work and equivalent decisions; it does not retrospectively
+  establish the exact cause of the isolated 22.2 ms outlier.
+- **Commands and final results:** in AISuite's `packages/codex-frontend`,
+  `npm run build`, `./node_modules/.bin/tsc -p tsconfig.type-tests.json`, and
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen node --test --test-concurrency=14
+  tests/*.test.mjs`: build/type checks pass, **44/44 SDK tests pass**. In
+  CodexUI's `web`, `npm run build`, the same Node test command, and
+  `npm run build:app` pass; **330/330 browser tests pass**. Xvfb/offscreen
+  `node tools/verify-artifact.mjs` passes. All relevant cases ran without
+  short-circuiting; builds/tests did not overlap timing runs.
+- **Production-browser gate:** ten serial fresh-process runs of
+  `xvfb-run -a env QT_QPA_PLATFORM=offscreen node web/tools/qualify-browser.mjs`
+  pass **10/10**. Ingest: **6.3–7.1 ms**, versus **8.6–10.1 ms** in three
+  immediately preceding runs with the original SDK. Hydration wall/task
+  maxima **114.2 / 118.63 ms** (limits 141 / 154); stream settlement/task
+  maxima **37.3 / 33.03 ms** (47 / 48); idle maximum **0.14 ms** (1), with
+  no idle layout/style passes. Semantic no-op, card/control/focus identity,
+  follow-tail, detached anchor, responsive layout and settings checks pass.
+- **Node gate:** 50 serial fresh-process runs of the existing
+  `web/tools/profile-presentation.mjs` pass **50/50**. Maximum hydration,
+  projection, stream and churn costs: **29.826 / 20.306 / 3.525 / 6.738 ms**,
+  below unchanged **47 / 45 / 4 / 20 ms** limits. No forced GC, warm-up,
+  discarded samples or production delay was used. Native production is
+  unchanged by this follow-up; its latest adapter/cards checks passed 2/2
+  and focused DPR contract checks passed at 1 / 1.25 / 1.5 / 2.
+- **Accounting:** CodexUI follow-up against `263fb3b`: production **−2 CLOC /
+  0 physical lines**, tests/tools **+102 CLOC / +106 physical lines**. Including
+  the original item-4 implementation gives **+67 production / +297 test CLOC**;
+  fixture/build/documentation remain separately reported. The separately
+  authorized AISuite change is **+1 production CLOC / +2 physical lines** and
+  **+20 test CLOC / +21 physical lines**. It replaces unconditional temporary
+  encoding with a proven bound; no state, helper, cache, timer, renderer or
+  alternate transport was added. Both repository diff checks pass.
+- **Evidence and completion boundary:** final logs and allocation probe are
+  `/tmp/aisuite-frame-bound.K9KZ5y/`; earlier failed runs and profiles remain
+  `/tmp/codexui-step4-final.PgVRVS/`. Item 4 is complete against the two local
+  worktrees. Both changes still require user-authorized commits/release before
+  other checkouts inherit them. Real compositor/screen-reader qualification,
+  broader CI coverage and the previously reproduced baseline sanitizer timing
+  limitation remain in the existing qualification item, not counted as passes.
+  These measurements do not establish universally lag-free interaction. No
+  commit, push, install, upstream app-server change or application restart was
+  performed; no plan-tab update tool is available in this session.
 
 ### Step 5 change gate — allocation-free scalar height updates (L-1)
 

@@ -1113,6 +1113,33 @@ test("prompt admission requires provider readiness and controller authority", as
     session.dispose();
 });
 
+test("bounded protocol history stays independent of mutable presentation state", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "history-ownership");
+    session.selectThread("history");
+    await completeControllerHydration(socket, {id: "history", turns: [
+        {id: "turn", items: [{id: "item", type: "agentMessage", text: "original"}]},
+    ]});
+    socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
+        threadId: "history", turnId: "turn", item: {id: "item", type: "agentMessage", text: "original"},
+    }}));
+    const diagnosticFrames = [...session.getSnapshot().protocolFrames];
+    const originalFrames = structuredClone(diagnosticFrames);
+    for (let index = 0; index < 510; ++index) socket.receive(appserver({jsonrpc: "2.0",
+        method: "item/agentMessage/delta", params: {
+            threadId: "history", turnId: "turn", itemId: "item", delta: "x",
+        }}));
+    assert.equal(session.model.thread("history").turns.get("turn").items.get("item").raw.text,
+        `original${"x".repeat(510)}`);
+    assert.deepEqual(diagnosticFrames, originalFrames, "later streaming cannot rewrite result or notification history");
+    const retained = session.getSnapshot().protocolFrames;
+    assert.equal(retained.length, 500);
+    assert.ok(retained.every(frame => frame.type === "conversation.item.append" && frame.data.text === "x"));
+    assert.equal(retained.at(-1).sequence - retained[0].sequence, 499);
+    session.dispose();
+});
+
 test("pending request responses require current controller authority and resolve once", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

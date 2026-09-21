@@ -110,6 +110,29 @@ test("presentation pipeline state and replacement invariants", () => {
     assert.equal(model.activeTurnId("thread-1"), undefined);
 });
 
+for (const authority of ["replace", "merge"]) test(`thread ${authority} owns metadata and history independently`, () => {
+    const model = new PresentationModel();
+    const raw = {id: "owned", model: "gpt-current", futureMetadata: {nested: ["metadata"]},
+        turns: [{id: "turn", items: [{id: "item", type: "agentMessage", text: "original"}]}]};
+    const original = structuredClone(raw);
+    model.applyEvent(result(1, 1, "thread.read", "seed", true, {thread: {id: "owned"}}, "merge"));
+    assert.equal(model.applyEvent(result(2, 1, "thread.read", "read", true, {thread: raw}, authority)), "accepted");
+    assert.deepEqual(raw, original, "metadata extraction must not mutate the incoming frame");
+    const thread = model.thread("owned");
+    const item = thread.turns.get("turn").items.get("item");
+    assert.equal(Object.hasOwn(thread.raw, "turns"), false);
+    assert.deepEqual(thread.turnOrder, ["turn"]);
+    assert.equal(thread.raw.model, "gpt-current");
+    raw.futureMetadata.nested[0] = "changed externally";
+    raw.turns[0].items[0].text = "changed externally";
+    assert.equal(thread.raw.futureMetadata.nested[0], "metadata");
+    assert.equal(item.raw.text, "original");
+    model.applyEvent(event(3, 1, "conversation.item.append", {field: "text", text: " appended"}, "merge",
+        {threadId: "owned", turnId: "turn", itemId: "item"}));
+    assert.equal(item.raw.text, "original appended");
+    assert.equal(raw.turns[0].items[0].text, "changed externally");
+});
+
 test("delayed thread reads preserve newer effective settings", () => {
     const {model, normalizer} = pipeline();
     normalizer.serverNotification("thread/started", {thread: {
@@ -459,6 +482,29 @@ test("settings acknowledgements reconcile retained drafts within one thread inca
     draft = settingDraftFor(drafts, identity, thread.raw, catalog, thread.settingStamps);
     assert.equal(draft.values.approval, "never");
     assert.equal(draft.touched.has("approval"), false);
+});
+
+for (const [type, field, eventType, textKey] of [
+    ["agentMessage", "text", "conversation.item.append", "text"],
+    ["fileChange", "output", "conversation.file-change.output-appended", "delta"],
+]) test(`${type} scalar deltas preserve identity and normalize input once`, () => {
+    const model = new PresentationModel();
+    const scope = Object.freeze({threadId: "thread", turnId: "turn", itemId: "item", delta: "not content"});
+    model.applyEvent(event(1, 1, "conversation.item.upsert", {item: {
+        id: "item", type, [field]: "before",
+    }}, "merge", scope));
+    const item = model.thread("thread").turns.get("turn").items.get("item");
+    const raw = item.raw;
+    let sequence = 2;
+    for (const text of ["", null, 23, "🧭é"]) {
+        const data = Object.freeze({field, [textKey]: text});
+        assert.equal(model.applyEvent(event(sequence++, 1, eventType, data, "merge", scope)), "accepted");
+        assert.equal(model.thread("thread").turns.get("turn").items.get("item"), item);
+        assert.equal(item.raw, raw);
+        assert.equal(raw[field], `before${typeof text === "string" ? text : ""}`);
+    }
+    assert.equal(item.textRetention.get(field).retainedBytes, new TextEncoder().encode("before🧭é").length);
+    assert.equal(scope.delta, "not content");
 });
 
 test("stream text retains bounded tails and explicit discarded-byte metadata", () => {

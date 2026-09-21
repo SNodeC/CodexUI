@@ -33,13 +33,15 @@ function isThreadHydrationAction(action: string): boolean {
 }
 
 function retainedProtocolFrame(frame: JsonObject): unknown {
-    if (stringMember(frame, "type") !== "pending-request.upsert") return structuredClone(frame);
+    // The private normalizer emits fresh frames from independently parsed messages.
+    // Only the model mutates protocol data, and it owns copies; history can retain the input.
+    if (stringMember(frame, "type") !== "pending-request.upsert") return frame;
     const data = isObject(frame.data) ? frame.data : {};
-    return structuredClone({...frame, data: {
+    return {...frame, data: {
         requestId: member(data, "requestId"),
         category: stringMember(data, "category"),
         request: "[redacted; inspect the typed Requests view]",
-    }});
+    }};
 }
 
 const actionMethods = {

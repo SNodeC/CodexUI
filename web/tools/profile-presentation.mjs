@@ -39,21 +39,27 @@ for (let index = 0; index < 10_000; ++index)
 for (let index = 0; index < 10_000; ++index)
     presentationState.retire(`presentation-${index}`);
 const presentationChurnMilliseconds = performance.now() - started;
-assert.equal(presentationState.retainedPresentationCount(), 0);
 session.dispose();
 
+const streamedText = thread?.turns.get("turn-99")?.items.get("item-99-99")?.raw.text;
 const measurements = {
-    authoritativeItems: 10_000,
+    authoritativeItems: [...(thread?.turns.values() ?? [])].reduce((count, turn) => count + turn.items.size, 0),
     visibleCards: projection.sections.reduce((count, section) => count + section.cards.length, 0),
-    streamedDeltas: 2_000,
+    streamedDeltas: typeof streamedText === "string" ? streamedText.length - "Answer 99".length : 0,
     presentationLifetimes: 10_000,
-    hydrateMilliseconds: Number(hydrateMilliseconds.toFixed(2)),
-    projectMilliseconds: Number(projectMilliseconds.toFixed(2)),
-    streamMilliseconds: Number(streamMilliseconds.toFixed(2)),
-    presentationChurnMilliseconds: Number(presentationChurnMilliseconds.toFixed(2)),
+    hydrateMilliseconds,
+    projectMilliseconds,
+    streamMilliseconds,
+    presentationChurnMilliseconds,
 };
 const limits = {hydrateMilliseconds: 47, projectMilliseconds: 45, streamMilliseconds: 4,
     presentationChurnMilliseconds: 20};
-for (const [name, limit] of Object.entries(limits))
-    assert(measurements[name] <= limit, `${name} ${measurements[name]} ms exceeds ${limit} ms`);
 process.stdout.write(`${JSON.stringify({...measurements, limits}, null, 2)}\n`);
+const failures = Object.entries(limits)
+    .filter(([name, limit]) => !(measurements[name] <= limit))
+    .map(([name, limit]) => `${name} ${measurements[name]} ms exceeds ${limit} ms`);
+if (measurements.authoritativeItems !== 10_000) failures.push("Hydration did not retain 10,000 items");
+if (measurements.visibleCards !== 10_000) failures.push("Projection did not present 10,000 cards");
+if (streamedText !== `Answer 99${"x".repeat(2_000)}`) failures.push("Streaming did not append all 2,000 deltas");
+if (presentationState.retainedPresentationCount() !== 0) failures.push("Retired presentation state was retained");
+assert.deepEqual(failures, [], "Presentation profile failed");

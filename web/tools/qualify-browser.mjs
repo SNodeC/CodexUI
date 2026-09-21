@@ -98,7 +98,8 @@ class DevTools {
 
     async evaluate(expression) {
         const result = await this.call("Runtime.evaluate", {expression, awaitPromise: true, returnByValue: true});
-        if (result.exceptionDetails) throw new Error(result.exceptionDetails.text ?? "Browser evaluation failed");
+        if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description
+            ?? result.exceptionDetails.text ?? "Browser evaluation failed");
         return result.result.value;
     }
 
@@ -157,6 +158,10 @@ const applicationPerformanceLimits = Object.freeze({
     streamSettledMilliseconds: 47,
     streamTaskMilliseconds: 48,
 });
+const performanceFailures = [];
+function checkPerformance(condition, message) {
+    if (!condition) performanceFailures.push(message);
+}
 
 const applicationProfileSetup = `(async()=>{
     const delay=milliseconds=>new Promise(complete=>setTimeout(complete,milliseconds));
@@ -165,10 +170,14 @@ const applicationProfileSetup = `(async()=>{
     class ProfileWebSocket{
         constructor(){this.protocol="codex";this.readyState=0;this.bufferedAmount=0;this.binaryType="arraybuffer";
             this.onopen=null;this.onmessage=null;this.onerror=null;this.onclose=null;this.sent=[];
-            this.pendingCatalogs=[];
+            this.pendingCatalogs=[];this.turnPages=0;this.itemPages=0;this.deliveredItems=0;
             globalThis.codexuiProfileSocket=this;queueMicrotask(()=>{this.readyState=1;this.onopen?.();});}
         send(data){const message=JSON.parse(data);this.sent.push(message);const payload=message.kind==="appserver"?message.payload:null;
-            if(!payload?.method||payload.method==="thread/read")return;
+            if(!payload?.method||payload.method==="thread/resume")return;
+            if(payload.method==="thread/read")throw new Error("Profile hydration must use pagination");
+            if(payload.method==="thread/turns/list"||payload.method==="thread/items/list"){
+                this.historyPage(payload);
+                return;}
             const result=payload.method==="thread/list"?{data:[{id:"profile",status:{type:"idle"}}],nextCursor:null}
                 :payload.method==="model/list"?{data:[
                     {id:"gpt-a",model:"gpt-a",displayName:"GPT A",description:"Primary model",isDefault:true,
@@ -181,6 +190,19 @@ const applicationProfileSetup = `(async()=>{
             if(payload.method==="model/list"||payload.method==="permissionProfile/list"){
                 this.pendingCatalogs.push({id:payload.id,result});return;}
             queueMicrotask(()=>this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:payload.id,result}}));}
+        historyPage(payload){
+            const params=payload.params;const turns=payload.method==="thread/turns/list";
+            if(params.threadId!=="profile"||params.limit!==80||params.sortDirection!=="desc"
+                ||(turns&&params.itemsView!=="summary"))throw new Error("Unexpected history page parameters");
+            const source=turns?this.turns:this.turns.find(turn=>turn.id===params.turnId)?.items;
+            if(!source)throw new Error("Unknown history turn");
+            const offset=Number(params.cursor??0);const page=source.toReversed().slice(offset,offset+params.limit);
+            const data=turns?page.map(({items,...summary})=>({...summary,items:[]}))
+                :page.map(item=>({turnId:params.turnId,item}));
+            const nextCursor=offset+page.length<source.length?String(offset+page.length):null;
+            if(turns)++this.turnPages;else{++this.itemPages;this.deliveredItems+=data.length;}
+            queueMicrotask(()=>this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:payload.id,
+                result:{data,nextCursor}}}));}
         releaseCatalogs(){for(const pending of this.pendingCatalogs)
             this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:pending.id,result:pending.result}});
             this.pendingCatalogs=[];}
@@ -199,9 +221,9 @@ const applicationProfileSetup = `(async()=>{
     reasoning?.click();
     await new Promise(complete=>requestAnimationFrame(()=>complete()));
     document.querySelector(".thread-row").click();
-    await waitFor(()=>socket.sent.some(message=>message.kind==="appserver"&&message.payload.method==="thread/read"),
-        "profile thread read");
-    const read=socket.sent.findLast(message=>message.kind==="appserver"&&message.payload.method==="thread/read");
+    await waitFor(()=>socket.sent.some(message=>message.kind==="appserver"&&message.payload.method==="thread/resume"),
+        "profile metadata resume");
+    const resume=socket.sent.findLast(message=>message.kind==="appserver"&&message.payload.method==="thread/resume");
     await waitFor(()=>socket.pendingCatalogs.length===2,"deferred settings catalogs");
     const settingsToggle=document.querySelector(".settings-toggle");settingsToggle.click();
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
@@ -215,9 +237,9 @@ const applicationProfileSetup = `(async()=>{
     const catalogUpdated=modelSelect===selectFor("Model")&&profileSelect===selectFor("Permission profile");
     settingsToggle.click();
     await new Promise(complete=>requestAnimationFrame(()=>complete()));
-    globalThis.codexuiApplicationProfile={socket,read};
-    return {readRequests:socket.sent.filter(message=>message.kind==="appserver"&&message.payload.method==="thread/read").length,
-        catalogUpdated};
+    globalThis.codexuiApplicationProfile={socket,resume};
+    return {resumeRequests:socket.sent.filter(message=>message.kind==="appserver"&&message.payload.method==="thread/resume").length,
+        resumeParams:resume.payload.params,catalogUpdated};
 })()`;
 
 const exactInteractionLifetimeCheck = `(async()=>{
@@ -266,16 +288,22 @@ const exactInteractionLifetimeCheck = `(async()=>{
 
 const applicationProfileHydrate = `(async()=>{
     const profile=globalThis.codexuiApplicationProfile;
-    const turns=Array.from({length:100},(_,turn)=>({id:"turn-"+turn,status:turn===99?"inProgress":"completed",
-        items:Array.from({length:100},(_,item)=>({id:"item-"+turn+"-"+item,
-            type:item%3===0?"agentMessage":item%3===1?"reasoning":"commandExecution",
-            text:item%3===0?"Answer "+item:undefined,summary:item%3===1?["Thinking"]:undefined,
-            command:item%3===2?"true":undefined,status:"completed"}))}));
+    // One bounded turn page retains the original 10,000-item / 80-card initial-render workload.
+    const turns=Array.from({length:80},(_,turn)=>({id:"turn-"+turn,status:turn===79?"inProgress":"completed",
+        items:Array.from({length:125},(_,item)=>({id:"item-"+turn+"-"+item,
+            type:(item+2)%3===0?"agentMessage":(item+2)%3===1?"reasoning":"commandExecution",
+            text:(item+2)%3===0?"Answer "+item:undefined,summary:(item+2)%3===1?["Thinking"]:undefined,
+            command:(item+2)%3===2?"true":undefined,status:"completed"}))}));
+    profile.socket.turns=turns;
     const started=performance.now();
-    profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:profile.read.payload.id,result:{thread:{
-        id:"profile",model:"gpt-a",approvalPolicy:"future-policy",status:{type:"active"},turns}}}});
+    profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:profile.resume.payload.id,result:{thread:{
+        id:"profile",model:"gpt-a",approvalPolicy:"future-policy",status:{type:"active"}}}}});
+    for(let attempt=0;profile.socket.deliveredItems!==10000;++attempt){
+        if(attempt===400)throw new Error("Timed out waiting for paginated items");
+        await new Promise(complete=>setTimeout(complete,5));}
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
-    return {wallMilliseconds:performance.now()-started,authoritativeItems:10000,
+    return {wallMilliseconds:performance.now()-started,authoritativeItems:profile.socket.deliveredItems,
+        turnPages:profile.socket.turnPages,itemPages:profile.socket.itemPages,
         visibleCards:document.querySelectorAll(".conversation-card").length,
         hasHistoryBoundary:Boolean(document.querySelector(".load-more"))};
 })()`;
@@ -324,17 +352,12 @@ const applicationProfileNoOp = `(async()=>{
         ...profile.mutations};
 })()`;
 
-const applicationProfileIdle = `(async()=>{
-    await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
-    return {};
-})()`;
-
 const applicationProfileStream = `(async()=>{
     const profile=globalThis.codexuiApplicationProfile;profile.mutations.settingsStructuralMutations=0;
     profile.mutations.conversationStructuralMutations=0;profile.mutations.targetTextMutations=0;
     const beforeText=profile.targetText.data;const started=performance.now();
     for(let index=0;index<2000;++index)profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",
-        method:"item/agentMessage/delta",params:{threadId:"profile",turnId:"turn-99",itemId:"item-99-99",delta:"x"}}});
+        method:"item/agentMessage/delta",params:{threadId:"profile",turnId:"turn-79",itemId:"item-79-124",delta:"x"}}});
     const ingestMilliseconds=performance.now()-started;
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const cards=[...document.querySelectorAll(".conversation-card")];const controls=[...profile.grid.querySelectorAll("select,input")];
@@ -352,7 +375,7 @@ const applicationProfileStream = `(async()=>{
 
 const applicationProfileDetachedStream = `(async()=>{
     const profile=globalThis.codexuiApplicationProfile;const scroll=profile.scroll;
-    const anchor=profile.cards[50];const source=profile.cards[22];
+    const anchor=profile.cards.at(-30);const source=profile.cards.at(-58);
     const contentTop=anchor.getBoundingClientRect().top-scroll.getBoundingClientRect().top+scroll.scrollTop;
     scroll.scrollTop=contentTop-32;scroll.dispatchEvent(new Event("scroll"));
     await new Promise(complete=>requestAnimationFrame(()=>complete()));
@@ -360,9 +383,9 @@ const applicationProfileDetachedStream = `(async()=>{
     const beforeGap=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight;
     const sourceText=source.querySelector(".safe-markdown p")?.firstChild;const beforeLength=sourceText?.data.length||0;
     profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"item/agentMessage/delta",params:{
-        threadId:"profile",turnId:"turn-99",itemId:"item-99-42",delta:" detached".repeat(300)}}});
+        threadId:"profile",turnId:"turn-79",itemId:"item-79-67",delta:" detached".repeat(300)}}});
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
-    return {anchorStable:anchor===profile.cards[50],anchorTopDelta:Math.abs(
+    return {anchorStable:anchor===profile.cards.at(-30),anchorTopDelta:Math.abs(
         anchor.getBoundingClientRect().top-scroll.getBoundingClientRect().top-beforeTop),
         detachedBefore:beforeGap,detachedAfter:scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight,
         sourceGrowth:(sourceText?.data.length||0)-beforeLength};
@@ -414,7 +437,7 @@ const applicationSettingsDomContract = `(async()=>{
     const changedText=document.querySelector(".settings-toggle")?.textContent||"";
 
     profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"turn/completed",params:{
-        threadId:"profile",turn:{id:"turn-99",status:"completed"}}}});
+        threadId:"profile",turn:{id:"turn-79",status:"completed"}}}});
     await frame();
     const editor=document.querySelector(".composer textarea");
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(editor,"settings DOM contract");
@@ -530,7 +553,8 @@ try {
         "desktop application profile layout");
     await devTools.call("Performance.enable");
     const setup = await devTools.evaluate(applicationProfileSetup);
-    assert.equal(setup.readRequests, 1, "the application profile hydrates through one authoritative read");
+    assert.equal(setup.resumeRequests, 1, "the application profile starts with one metadata-only resume");
+    assert.deepEqual(setup.resumeParams, {threadId: "profile", excludeTurns: true});
     assert.equal(setup.catalogUpdated, true,
         "an unchanged settings draft reprojects refreshed model and permission catalogs");
     const exactInteraction = await devTools.evaluate(exactInteractionLifetimeCheck);
@@ -546,18 +570,20 @@ try {
     const hydratePerformance = performanceDelta(beforeHydrate, afterHydrate);
     assert.deepEqual({items: hydrateResult.authoritativeItems, cards: hydrateResult.visibleCards,
         history: hydrateResult.hasHistoryBoundary}, {items: 10_000, cards: 80, history: true});
-    assert(hydrateResult.wallMilliseconds <= applicationPerformanceLimits.hydrateWallMilliseconds
+    assert.deepEqual({turns: hydrateResult.turnPages, items: hydrateResult.itemPages}, {turns: 1, items: 160});
+    checkPerformance(hydrateResult.wallMilliseconds <= applicationPerformanceLimits.hydrateWallMilliseconds
         && hydratePerformance.taskMilliseconds <= applicationPerformanceLimits.hydrateTaskMilliseconds,
         `10k App hydration exceeded its gate: ${hydrateResult.wallMilliseconds}/${hydratePerformance.taskMilliseconds} ms`);
-    assert(hydratePerformance.layouts <= 2 && hydratePerformance.styleRecalculations <= 2,
+    checkPerformance(hydratePerformance.layouts <= 2 && hydratePerformance.styleRecalculations <= 2,
         `10k App hydration caused ${hydratePerformance.layouts} layouts and ${hydratePerformance.styleRecalculations} style passes`);
 
     const prepareResult = await devTools.evaluate(applicationProfilePrepare);
     assert.equal(prepareResult.settingsControls, 12);
     const beforeIdle = await performanceSnapshot(devTools);
-    await devTools.evaluate(applicationProfileIdle);
+    // This is the measured idle interval, not a warm-up: do not drive browser work to observe inactivity.
+    await wait(1000 / 30);
     const idlePerformance = performanceDelta(beforeIdle, await performanceSnapshot(devTools));
-    assert(idlePerformance.taskMilliseconds <= applicationPerformanceLimits.idleTaskMilliseconds
+    checkPerformance(idlePerformance.taskMilliseconds <= applicationPerformanceLimits.idleTaskMilliseconds
         && idlePerformance.layouts === 0 && idlePerformance.styleRecalculations === 0,
     `idle App exceeded its zero-work gate: ${idlePerformance.taskMilliseconds} ms, ${idlePerformance.layouts}/${idlePerformance.styleRecalculations} passes`);
     const beforeNoOp = await performanceSnapshot(devTools);
@@ -571,9 +597,9 @@ try {
     "a semantic settings no-op changed focus, scroll, or displayed activity");
     assert.equal(noOpResult.settingsStructuralMutations, 0);
     assert.equal(noOpResult.conversationStructuralMutations, 0);
-    assert.equal(noOpPerformance.layouts, 0, "a semantic settings no-op caused layout");
-    assert.equal(noOpPerformance.styleRecalculations, 0, "a semantic settings no-op caused style recalculation");
-    assert(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
+    checkPerformance(noOpPerformance.layouts === 0, "a semantic settings no-op caused layout");
+    checkPerformance(noOpPerformance.styleRecalculations === 0, "a semantic settings no-op caused style recalculation");
+    checkPerformance(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
         `semantic settings no-op exceeded its task gate: ${noOpPerformance.taskMilliseconds} ms`);
 
     const beforeStream = await performanceSnapshot(devTools);
@@ -592,11 +618,11 @@ try {
     assert.equal(streamResult.conversationStructuralMutations, 0);
     assert(streamResult.targetTextMutations <= 1,
         `2,000 coalesced deltas caused ${streamResult.targetTextMutations} text mutations`);
-    assert(streamResult.ingestMilliseconds <= applicationPerformanceLimits.streamIngestMilliseconds
+    checkPerformance(streamResult.ingestMilliseconds <= applicationPerformanceLimits.streamIngestMilliseconds
         && streamResult.settledMilliseconds <= applicationPerformanceLimits.streamSettledMilliseconds
         && streamPerformance.taskMilliseconds <= applicationPerformanceLimits.streamTaskMilliseconds,
     `2k App stream exceeded its gate: ${streamResult.ingestMilliseconds}/${streamResult.settledMilliseconds}/${streamPerformance.taskMilliseconds} ms`);
-    assert(streamPerformance.layouts <= 2 && streamPerformance.styleRecalculations <= 2,
+    checkPerformance(streamPerformance.layouts <= 2 && streamPerformance.styleRecalculations <= 2,
         `2k App stream caused ${streamPerformance.layouts} layouts and ${streamPerformance.styleRecalculations} style passes`);
 
     const detachedResult = await devTools.evaluate(applicationProfileDetachedStream);
@@ -638,6 +664,7 @@ try {
             stream: {...streamResult, ...streamPerformance},
             detachedStream: detachedResult,
             nodes: afterStream.Nodes, jsHeapBytes: afterStream.JSHeapUsedSize}}, null, 2));
+    assert.deepEqual(performanceFailures, [], "Browser performance qualification failed");
 } catch (error) {
     if (chromeErrors) process.stderr.write(chromeErrors);
     throw error;

@@ -265,8 +265,7 @@ function boundRetainedItemText(item: ItemPresentation): void {
     }
 }
 
-function appendText(item: ItemPresentation, field: string, params: unknown): boolean {
-    const delta = stringMember(params, "delta");
+function appendText(item: ItemPresentation, field: string, delta: string): boolean {
     if (delta === "") return false;
     const existing = typeof item.raw[field] === "string" ? item.raw[field] : "";
     const existingBytes = item.textRetention?.get(field)?.retainedBytes ?? textEncoder.encode(existing).length;
@@ -645,7 +644,7 @@ export class PresentationModel {
         }
         if (type === "conversation.file-change.output-appended") {
             const item = this.findItem(scope);
-            if (item) appendText(item, "output", {delta: stringMember(data, "delta")});
+            if (item) appendText(item, "output", stringMember(data, "delta"));
             return;
         }
         if (type === "conversation.file-change.patch-replaced") {
@@ -670,13 +669,12 @@ export class PresentationModel {
             return;
         }
         if (type !== "conversation.item.append") return;
-        const identity = {...scope, delta: stringMember(data, "text")};
-        const item = this.findItem(identity);
+        const item = this.findItem(scope);
         if (!item) return;
         const field = stringMember(data, "field");
         const changed = field === "summary" ? appendIndexedText(item, "summary", data, "summaryIndex")
             : field === "content" ? appendIndexedText(item, "content", data, "contentIndex")
-                : field !== "" && appendText(item, field, identity);
+                : field !== "" && appendText(item, field, stringMember(data, "text"));
         if (!changed) return;
         if (stringMember(item.raw, "type") === "agentMessage")
             this.updateOwningAgentResult(threadId, stringMember(item.raw, "text"));
@@ -764,8 +762,8 @@ export class PresentationModel {
             for (const [turnId, turn] of result.turns)
                 if (isTerminalTurnStatus(turn.status)) terminalTurnStatuses.set(turnId, turn.status);
         }
-        const threadFields = clone(raw);
-        delete threadFields.turns;
+        const {turns: _turns, ...metadata} = raw;
+        const threadFields = clone(metadata);
         const incomingSettings = threadSettings(threadFields, true);
         result.raw = replaceTurns ? {...threadSettings(result.raw), ...threadFields}
             : mergePreservingCompleteness(result.raw, threadFields) as JsonObject;
