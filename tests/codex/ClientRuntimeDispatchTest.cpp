@@ -114,14 +114,26 @@ public:
         continue;
       if (ready <= 0)
         continue;
-      client_ =
+      const int incoming =
           ::accept4(listener_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
-      if (client_ >= 0)
+      if (incoming >= 0) {
+        if (client_ >= 0)
+          static_cast<void>(::close(client_));
+        client_ = incoming;
+        buffered_.clear();
+        nextSequence_ = 4;
         return true;
+      }
       if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
         return false;
     }
     return false;
+  }
+
+  bool peerClosed() const {
+    char byte;
+    return client_ >= 0 &&
+           ::recv(client_, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
   }
 
   bool send(nlohmann::json message, std::chrono::milliseconds timeout = 2s) {
@@ -2533,6 +2545,31 @@ void unknownInboundIsRetainedWithoutCorruptingKnownState(
   runtime.drainNotifications();
 }
 
+void explicitReconnectsControlTheLatestFlow(UnixBridge &bridge,
+                                            RunningRuntime &runtime) {
+  for (const auto kind :
+       {RuntimeActionKind::Reconnect, RuntimeActionKind::Reconnect,
+        RuntimeActionKind::Disconnect}) {
+    RuntimeAction action;
+    action.kind = kind;
+    expect(sendAction(runtime.channels(), std::move(action)),
+           "connection lifecycle action reaches the worker");
+    expect(waitUntil([&] { return bridge.peerClosed(); }),
+           "terminating the current flow closes the current connection");
+    if (kind == RuntimeActionKind::Disconnect) {
+      expect(!bridge.acceptClient(100ms),
+             "manual disconnect does not start another flow");
+      RuntimeAction connect;
+      connect.kind = RuntimeActionKind::Connect;
+      expect(sendAction(runtime.channels(), std::move(connect)),
+             "explicit connect is admitted after flow termination");
+    }
+    expect(bridge.acceptClient(),
+           "each explicit reconnect or connect starts a fresh working flow");
+    runtime.drainNotifications();
+  }
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -2580,6 +2617,7 @@ int main(int argc, char **argv) {
         bridge, runtime);
     codexui::codex::workerRevalidatesCurrentAuthorityAndRetainsResponses(
         bridge, runtime);
+    codexui::codex::explicitReconnectsControlTheLatestFlow(bridge, runtime);
   }
   runtime.channels().failNextQtToWorkerWakeForTest();
   const auto shutdownStarted = std::chrono::steady_clock::now();
@@ -2588,6 +2626,8 @@ int main(int argc, char **argv) {
       std::chrono::steady_clock::now() - shutdownStarted <
           std::chrono::seconds(2),
       "an unwoken ShutdownRequest is consumed without hanging worker join");
+  codexui::codex::expect(bridge.peerClosed(),
+                       "shutdown closes the most recently connected flow");
 
   if (codexui::codex::failures != 0) {
     std::cerr << codexui::codex::failures

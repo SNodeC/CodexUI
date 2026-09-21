@@ -20,6 +20,7 @@
 #include <core/EventReceiver.h>
 #include <core/SNodeC.h>
 #include <core/socket/State.h>
+#include <core/socket/stream/ClientFlowController.h>
 #include <core/timer/Timer.h>
 #include <net/in/stream/legacy/SocketClient.h>
 #include <net/in6/stream/legacy/SocketClient.h>
@@ -1460,8 +1461,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 #endif
 
   std::function<void()> connectSelected;
-  std::function<void()> terminateSelected;
-  std::function<bool()> selectedFlowTerminated;
+  std::shared_ptr<core::socket::stream::ClientFlowController> selectedFlow;
   std::function<void()> disableSelected;
   std::string selectedTransport;
   std::string selectedTransportLabel;
@@ -1469,7 +1469,6 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   bool shutdownRequested = false;
   bool eventLoopRunning = false;
   std::function<void()> continueTransition;
-  std::function<bool()> terminatingFlowTerminated;
   std::function<void()> pendingSelection;
   std::chrono::steady_clock::time_point transitionDeadline;
 
@@ -1479,28 +1478,26 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       disableSelected();
     configuredClient.getConfig()->Instance::setDisabled(false);
     auto *const clientHandle = &configuredClient;
-    auto *const flow = configuredClient.getFlowController();
     auto *const config = configuredClient.getConfig();
     selectedTransport = std::move(transport);
     selectedTransportLabel = std::move(label);
     const std::string connectionLabel = selectedTransportLabel;
-    connectSelected = [&, clientHandle, flow, connectionLabel] {
+    connectSelected = [&, clientHandle, connectionLabel] {
       publishTransportEvent("retrying", "Connecting using " + connectionLabel);
-      clientHandle->connect([&, flow, connectionLabel](
-                                const auto &, core::socket::State state) {
-        if (state == core::socket::State::OK ||
-            state == core::socket::State::DISABLED)
-          return;
-        const std::string failure =
-            "failed to connect using " + connectionLabel + ": " + state.what();
-        core::EventReceiver::atNextTick([&, flow, failure] {
-          if (eventLoopRunning && !shutdownRequested && flow->isTerminated())
-            publishTransportEvent("failure", failure);
-        });
-      });
+      selectedFlow = clientHandle->connect(
+          [&, connectionLabel](const auto &, core::socket::State state) {
+            if (state == core::socket::State::OK ||
+                state == core::socket::State::DISABLED)
+              return;
+            const std::string failure = "failed to connect using " +
+                                        connectionLabel + ": " + state.what();
+            core::EventReceiver::atNextTick([&, flow = selectedFlow, failure] {
+              if (eventLoopRunning && !shutdownRequested && flow &&
+                  flow == selectedFlow && flow->isTerminated())
+                publishTransportEvent("failure", failure);
+            });
+          });
     };
-    terminateSelected = [flow] { static_cast<void>(flow->terminateFlow()); };
-    selectedFlowTerminated = [flow] { return flow->isTerminated(); };
     disableSelected = [config] { config->Instance::setDisabled(true); };
   };
 
@@ -1572,7 +1569,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   continueTransition = [&] {
     if (shutdownRequested || !transitionPending)
       return;
-    if ((terminatingFlowTerminated && !terminatingFlowTerminated()) ||
+    if ((selectedFlow && !selectedFlow->isTerminated()) ||
         connection.attached()) {
       if (std::chrono::steady_clock::now() >= transitionDeadline) {
         publishTransportEvent("failure", "connection transition timed out");
@@ -1584,7 +1581,6 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       return;
     }
     transitionPending = false;
-    terminatingFlowTerminated = {};
     if (pendingSelection) {
       std::function<void()> selection = std::move(pendingSelection);
       pendingSelection = {};
@@ -1602,10 +1598,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       return;
     desiredConnected = connectAfterwards;
     pendingSelection = std::move(selection);
-    terminatingFlowTerminated = selectedFlowTerminated;
-    if (!terminateSelected ||
-        ((!terminatingFlowTerminated || terminatingFlowTerminated()) &&
-         !connection.attached())) {
+    if (!selectedFlow ||
+        (selectedFlow->isTerminated() && !connection.attached())) {
       if (pendingSelection) {
         std::function<void()> selected = std::move(pendingSelection);
         pendingSelection = {};
@@ -1622,7 +1616,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     expectedDisconnectReason =
         connection.attached() ? std::move(disconnectReason) : std::string{};
     connection.disconnect("CodexUI connection transition");
-    terminateSelected();
+    static_cast<void>(selectedFlow->terminateFlow());
     static_cast<void>(core::timer::Timer::singleshotTimer(
         continueTransition, utils::Timeval({0, 10000})));
   };
@@ -1635,7 +1629,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     desiredConnected = true;
     if (transitionPending || connection.attached())
       return;
-    if (!selectedFlowTerminated || selectedFlowTerminated()) {
+    if (!selectedFlow || selectedFlow->isTerminated()) {
       if (connectSelected)
         connectSelected();
     }
@@ -1652,8 +1646,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     transitionPending = false;
     desiredConnected = false;
     connection.shutdown();
-    if (terminateSelected)
-      terminateSelected();
+    if (selectedFlow)
+      static_cast<void>(selectedFlow->terminateFlow());
     if (eventLoopRunning)
       core::SNodeC::stop();
   };
@@ -2965,8 +2959,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 #if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
   webSocketBinding->shutdown();
 #endif
-  if (terminateSelected)
-    terminateSelected();
+  if (selectedFlow)
+    static_cast<void>(selectedFlow->terminateFlow());
   connection.shutdown();
   static_cast<void>(workerLogic.sendWorkerStopped(
       result == 0 ? "SNode.C worker stopped" : "SNode.C worker failed"));
