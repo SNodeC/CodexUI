@@ -39,15 +39,11 @@ jobs:
           ref: master
           path: _deps/snodec
 
-      - name: Read paired AISuite revision
-        id: aisuite_revision
-        run: echo "revision=$(cat web/AISUITE_REVISION)" >> "$GITHUB_OUTPUT"
-
-      - name: Check out paired AISuite Codex
+      - name: Check out AISuite master
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: ${{ steps.aisuite_revision.outputs.revision }}
+          ref: master
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -97,7 +93,7 @@ jobs:
           cmake --build _build/snodec --target all
           cmake --install _build/snodec
 
-      - name: Build, test, and install paired AISuite Codex
+      - name: Build, test, and install AISuite Codex
         run: |
           cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -156,16 +152,11 @@ jobs:
                 github.event.pull_request.head.sha || github.sha }}
           path: CodexUI/codexui
 
-      - name: Read pinned AISuite revision
-        id: aisuite_revision
-        working-directory: CodexUI/codexui
-        run: echo "revision=$(cat web/AISUITE_REVISION)" >> "$GITHUB_OUTPUT"
-
-      - name: Check out pinned AISuite frontend SDK
+      - name: Check out AISuite master frontend SDK
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: ${{ steps.aisuite_revision.outputs.revision }}
+          ref: master
           path: AISuite-extraction/AISuite-final
 
       - name: Set up Node.js
@@ -176,12 +167,6 @@ jobs:
           cache-dependency-path: |
             AISuite-extraction/AISuite-final/packages/codex-frontend/package-lock.json
             CodexUI/codexui/web/package-lock.json
-
-      - name: Verify the paired SDK revision
-        working-directory: CodexUI/codexui
-        run: |
-          test "$(git -C ../../AISuite-extraction/AISuite-final rev-parse HEAD)" = \
-            "$(cat web/AISUITE_REVISION)"
 
       - name: Test the frontend SDK
         working-directory: AISuite-extraction/AISuite-final/packages/codex-frontend

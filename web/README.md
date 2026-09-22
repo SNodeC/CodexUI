@@ -3,13 +3,12 @@
 CodexWebUI is the static browser application for CodexUI 1.0. It connects
 directly to an AISuite `codex-bridge` WebSocket endpoint with the `codex`
 subprotocol. It contains no web server, bridge router, controller authority,
-or persistent Codex state. Its reproducible build and browser qualification
+or persistent Codex state. Its build and browser qualification
 require Node.js 22 or newer.
 
-## Reproducible source layout
+## Source layout
 
-The application consumes the exact AISuite source revision in
-[`AISUITE_REVISION`](AISUITE_REVISION). Check out the repositories as:
+The application consumes AISuite's `master` branch. Check out the repositories as:
 
 ```text
 workspace/
@@ -17,10 +16,9 @@ workspace/
 └── CodexUI/codexui/
 ```
 
-Verify the pin and build both sides:
+Build both sides:
 
 ```sh
-test "$(git -C ../../../AISuite-extraction/AISuite-final rev-parse HEAD)" = "$(cat AISUITE_REVISION)"
 npm ci --prefix ../../../AISuite-extraction/AISuite-final/packages/codex-frontend
 npm test --prefix ../../../AISuite-extraction/AISuite-final/packages/codex-frontend
 npm ci
@@ -66,7 +64,7 @@ replacement.
   headless-Chromium responsive, focus, drawer, and target-size qualification.
 - `npm run verify:artifact` proves that the output is non-empty and relocatable
   below an arbitrary static base path.
-- The repository CI checks the pinned SDK independently, runs the web suite,
+- The repository CI checks the SDK from AISuite `master` independently, runs the web suite,
   records the performance profile, installs the artifact through CMake, and
   uploads the verified staged tree as `codexui-web`.
 

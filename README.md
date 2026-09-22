@@ -60,8 +60,7 @@ with the installed CodexUI application.
 
 ## Browser build
 
-Node.js 22 or newer and the exact AISuite revision recorded in
-[`web/AISUITE_REVISION`](web/AISUITE_REVISION) are required. The source
+Node.js 22 or newer and AISuite's `master` branch are required. The source
 dependency expects the release/CI checkout layout shown below.
 
 ```text

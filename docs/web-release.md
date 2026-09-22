@@ -6,18 +6,19 @@
 | --- | --- | --- |
 | CodexUI native application | 1.0.0 | installed `codex-ui`, desktop entry, and icon |
 | CodexWebUI | 1.0.0 | relocatable `web/app-dist/` static artifact |
-| AISuite frontend SDK | 1.0.0 at `bc4485161ed43428e23e9edf027be6410adc6b5d` | publishable `@snodec/codex-frontend` package |
+| AISuite frontend SDK | 1.0.0 from AISuite `master` | publishable `@snodec/codex-frontend` package |
 
-The SDK revision is machine-readable in `web/AISUITE_REVISION` and is checked
-by CI before either SDK or application tests run. The source layout and build
-commands are documented in `web/README.md`.
+CI checks out AISuite `master` for both native and web jobs, and SNode.C `master`
+for the native build. Checkout logs record the resolved commits; dependency
+commits are not pinned. The source layout and build commands are documented
+in `web/README.md`.
 
 ## Qualification and release gate
 
 A release candidate is eligible only when one CI revision proves all of the
 following:
 
-- the pinned SDK installs from its lockfile and passes protocol generation,
+- the SDK from AISuite `master` installs from its lockfile and passes protocol generation,
   routing/lifecycle, and WebSocket transport tests;
 - the browser application installs from its lockfile and passes the complete
   registered web test suite, including the shared frontend-presentation corpus;
@@ -27,8 +28,7 @@ following:
   installed through the standalone CMake packaging project;
 - CI asserts the staged `share/codexui/web/index.html` and generated assets
   before uploading that installed tree, without source or development files;
-- the complete registered native CTest suite passes against the same AISuite
-  revision;
+- the complete registered native CTest suite passes against AISuite `master`;
 - `git diff --check` passes and the recorded performance profile shows no
   material regression from `web-qualification.md`.
 
