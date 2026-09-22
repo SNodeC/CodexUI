@@ -652,7 +652,7 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
 
   auto *previewHeader = new QHBoxLayout;
   previewHeader->setContentsMargins(10, 0, 10, 0);
-  selectedFile = label(QStringLiteral("Select a changed file"), "title");
+  selectedFile = UiStyle::makeLabel(QStringLiteral("Select a changed file"), "title");
   previewHeader->addWidget(selectedFile, 1);
   copyButton = new QPushButton(QStringLiteral("Copy"));
   copyButton->setProperty("kind", "subtle");
