@@ -41,8 +41,12 @@ function userMessageText(item: unknown): string {
     return parts.join("\n");
 }
 export function indexAuthoritativeItems(threadId: string, thread?: ThreadPresentation): AuthoritativeItemIndex {
+    let positions: Map<string, number> | undefined;
     const result: AuthoritativeItemIndex = {
-        threadId, ordered: [], positions: new Map(), userMessagesByClientId: new Map(), userMessagesByText: [],
+        threadId, ordered: [], userMessagesByClientId: new Map(), userMessagesByText: [],
+        get positions() {
+            return positions ??= new Map(result.ordered.map((item, position) => [authoritativeKey(item.key), position]));
+        },
         turnRoots: new Map(),
     };
     if (!thread) return result;
@@ -55,7 +59,6 @@ export function indexAuthoritativeItems(threadId: string, thread?: ThreadPresent
             const position = result.ordered.length;
             const key: AuthoritativeItemKey = {kind: "item", threadId, turnId, itemId};
             result.ordered.push({key, presentation});
-            result.positions.set(authoritativeKey(key), position);
             if (stringMember(presentation.raw, "type") === "userMessage") {
                 if (!result.turnRoots.has(turnId)) result.turnRoots.set(turnId, position);
                 const clientId = stringMember(presentation.raw, "clientId");

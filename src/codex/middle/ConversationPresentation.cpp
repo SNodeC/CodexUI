@@ -186,7 +186,8 @@ MarkdownTextView::MarkdownTextView(const QString &markdown, int initialWidth,
   setLineWrapMode(QTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  // Keep the width hint: Ignored makes parent layouts probe height at width 0.
+  QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   policy.setHeightForWidth(true);
   setSizePolicy(policy);
   setMinimumSize(0, 0);
@@ -269,9 +270,7 @@ int MarkdownTextView::heightForWidth(int width) const {
 }
 
 QSize MarkdownTextView::sizeHint() const {
-  QSize result = QTextBrowser::sizeHint();
-  result.setHeight(heightForWidth(std::max(1, width())));
-  return result;
+  return {width(), heightForWidth(std::max(1, width()))};
 }
 
 QSize MarkdownTextView::minimumSizeHint() const { return {0, 0}; }

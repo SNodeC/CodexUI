@@ -7072,6 +7072,7 @@ bool collapsedLargeCardsSkipBodyProjection() {
   expansionTimer.start();
   richCard->setCollapsed(false);
   const qint64 expansionMicros = expansionTimer.nsecsElapsed() / 1000;
+  std::clog << "file expansion us=" << expansionMicros << '\n';
   const bool boundedExpansion =
       fileList && fileList->document()->blockCount() == 5'000 &&
       richCard->property("fileChangesBodyRebuilds").toULongLong() == 1 &&

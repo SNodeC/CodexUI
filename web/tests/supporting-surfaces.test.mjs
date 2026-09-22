@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {lastActivityText} from "../dist/app/App.js";
 
 import {
     fixedSettingChoices, pendingRequestDetails, settingDraftFor, settingPresentation, turnSettingCatalog,
 } from "../dist/index.js";
+
+test("activity formatting preserves local time, dates and invalid-date behavior", () => {
+    const now = new Date(2026, 8, 22, 12, 0, 0);
+    for (const date of [new Date(2026, 8, 22, 1, 2, 3), new Date(2026, 8, 21, 23, 59, 59)]) {
+        const time = date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+        assert.equal(lastActivityText(date.getTime() / 1000, now),
+            `Last activity: ${date.getDate() === now.getDate() ? time : `${date.toLocaleDateString()} ${time}`}`);
+    }
+    const invalid = new Date(Number.NaN);
+    assert.equal(lastActivityText(Number.NaN, now),
+        `Last activity: ${invalid.toLocaleDateString()} ${invalid.toLocaleTimeString()}`);
+});
 
 test("built-in permission profiles have user-facing labels", () => {
     const catalog = turnSettingCatalog({models: [], permissionProfiles: {data: [

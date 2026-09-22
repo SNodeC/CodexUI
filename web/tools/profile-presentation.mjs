@@ -25,12 +25,16 @@ started = performance.now();
 const projection = session.conversation(10_000);
 const projectMilliseconds = performance.now() - started;
 
+const streamCpuStart = process.cpuUsage();
+const streamResourceStart = process.resourceUsage();
 started = performance.now();
 for (let sequence = 2; sequence < 2_002; ++sequence) model.applyEvent(event(
     sequence, 1, "conversation.item.append", {field: "text", text: "x"}, "merge",
     {threadId: "profile", turnId: "turn-99", itemId: "item-99-99"},
 ));
 const streamMilliseconds = performance.now() - started;
+const streamCpu = process.cpuUsage(streamCpuStart);
+const streamResourceEnd = process.resourceUsage();
 
 const presentationState = new ConversationViewportState();
 started = performance.now();
@@ -51,6 +55,8 @@ const measurements = {
     hydrateMilliseconds,
     projectMilliseconds,
     streamMilliseconds,
+    streamCpuMilliseconds: (streamCpu.user + streamCpu.system) / 1000,
+    streamInvoluntarySwitches: streamResourceEnd.involuntaryContextSwitches - streamResourceStart.involuntaryContextSwitches,
     presentationChurnMilliseconds,
 };
 const limits = {hydrateMilliseconds: 47, projectMilliseconds: 45, streamMilliseconds: 4,

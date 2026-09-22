@@ -791,13 +791,11 @@ private:
     }
     document()->setTextWidth(width);
     preferredWidth_ = width;
-    qreal laidOutHeight = 0;
+    const qreal laidOutHeight = document()->size().height();
     allBlocksUnwrapped_ = true;
     widestUnwrappedLine_ = 0;
-    QAbstractTextDocumentLayout *documentLayout = document()->documentLayout();
     for (QTextBlock block = document()->begin(); block.isValid();
          block = block.next()) {
-      laidOutHeight += documentLayout->blockBoundingRect(block).height();
       QTextLayout *blockLayout = block.layout();
       if (!blockLayout || blockLayout->lineCount() != 1) {
         allBlocksUnwrapped_ = false;

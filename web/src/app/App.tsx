@@ -123,12 +123,15 @@ function storedConversationPresentation(): ConversationPresentationOptions {
     };
 }
 
+const activityTimeFormat = new Intl.DateTimeFormat([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+const activityDateFormat = new Intl.DateTimeFormat();
 function threadTimestampText(timestamp: number, now = new Date()): string {
     const activity = new Date(timestamp * 1000);
+    if (Number.isNaN(activity.getTime())) return `${activity.toLocaleDateString()} ${activity.toLocaleTimeString()}`;
     const sameDate = activity.getFullYear() === now.getFullYear()
         && activity.getMonth() === now.getMonth() && activity.getDate() === now.getDate();
-    const time = activity.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    return sameDate ? time : `${activity.toLocaleDateString()} ${time}`;
+    const time = activityTimeFormat.format(activity);
+    return sameDate ? time : `${activityDateFormat.format(activity)} ${time}`;
 }
 
 export function lastActivityText(timestamp: number, now = new Date()): string {
