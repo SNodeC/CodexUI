@@ -186,13 +186,32 @@ jobs:
         with:
           node-version: 24
 
-      - name: Test and qualify CodexWebUI
+      - name: Test CodexWebUI on the qualification runtime
         working-directory: CodexUI/codexui
         run: |
           npm ci --prefix web
-          npm run release --prefix web
+          npm test --prefix web
+
+      - name: Profile the presentation model
+        if: ${{ !cancelled() }}
+        working-directory: CodexUI/codexui
+        run: npm run profile --prefix web
+
+      - name: Build and verify the production browser artifact
+        id: web-artifact
+        if: ${{ !cancelled() }}
+        working-directory: CodexUI/codexui
+        run: |
+          npm run build:app --prefix web
+          npm run verify:artifact --prefix web
+
+      - name: Qualify the production browser application
+        if: ${{ !cancelled() && steps.web-artifact.outcome == 'success' }}
+        working-directory: CodexUI/codexui
+        run: npm run qualify:browser --prefix web
 
       - name: Stage and verify the CodexWebUI install
+        if: ${{ !cancelled() && steps.web-artifact.outcome == 'success' }}
         working-directory: CodexUI/codexui
         run: |
           cmake -S web -B _build/web-package \
