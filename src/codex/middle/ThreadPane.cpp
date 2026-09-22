@@ -1080,6 +1080,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 #endif
           });
   connect(tree->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+    if (tree->signalsBlocked())
+      return;
     updateAnimationTimer();
     requestMoreNearListEnd();
   });
@@ -1171,7 +1173,6 @@ void ThreadPane::retireOptimisticThread() {
   ThreadTreeItem *retired = std::exchange(draftItem, nullptr);
   rows.erase(retired->presentationKey);
   QSignalBlocker blocked(tree);
-  QSignalBlocker scrollBlocked(tree->verticalScrollBar());
   tree->deleteItem(retired);
 }
 
@@ -1205,14 +1206,12 @@ void ThreadPane::sortRootItems() {
   const int anchorY =
       anchorIndex.isValid() ? tree->visualRect(anchorIndex).top() : 0;
   QSignalBlocker blocked(tree);
-  QSignalBlocker scrollBlocked(tree->verticalScrollBar());
   tree->invisibleRootItem()->sortChildren(0, Qt::AscendingOrder);
   if (tree->isVisible()) {
     tree->doItemsLayout();
     tree->restoreViewportY(anchorItem, anchorY);
   }
   blocked.unblock();
-  scrollBlocked.unblock();
   updateAnimationTimer();
   if (tree->isVisible())
     requestMoreNearListEnd();
@@ -1242,7 +1241,6 @@ bool ThreadPane::repositionRootItem(ThreadTreeItem *item) {
   const int anchorY =
       anchorIndex.isValid() ? tree->visualRect(anchorIndex).top() : 0;
   QSignalBlocker blocked(tree);
-  QSignalBlocker scrollBlocked(tree->verticalScrollBar());
   tree->takeTopLevelItem(current);
   int position = 0;
   while (position < tree->topLevelItemCount()) {
@@ -1257,7 +1255,6 @@ bool ThreadPane::repositionRootItem(ThreadTreeItem *item) {
     tree->restoreViewportY(anchorItem, anchorY);
   }
   blocked.unblock();
-  scrollBlocked.unblock();
   updateAnimationTimer();
   if (tree->isVisible())
     requestMoreNearListEnd();
@@ -1401,7 +1398,6 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   });
 
   QSignalBlocker blocked(tree);
-  QSignalBlocker scrollBlocked(tree->verticalScrollBar());
   const bool retainDraft =
       draftItem &&
       !findPresentation(snapshot.roots, draftItem->presentationKey);
@@ -1464,7 +1460,6 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       tree->restoreViewportY(retainedAnchor->second, anchorY);
   }
   blocked.unblock();
-  scrollBlocked.unblock();
 #if QT_CONFIG(accessibility)
   const auto retainedByKey = [this](const std::string &key) {
     const auto found = rows.find(key);
