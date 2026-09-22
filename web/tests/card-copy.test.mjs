@@ -109,8 +109,8 @@ test("nested user messages expose the steering identity", () => {
     assert.doesNotMatch(markup, /[·•]\s*steering/u);
 });
 
-test("normal and steering You cards retain authored prompt line breaks", () => {
-    const source = "First authored line\n\nThird authored line";
+test("normal and steering You cards distinguish line and paragraph breaks", () => {
+    const source = "First authored line\nsecond line\n\nThird paragraph";
     const user = itemCard("userMessage", "multiline", {
         text: source, imagePaths: [],
     });
@@ -119,10 +119,11 @@ test("normal and steering You cards retain authored prompt line breaks", () => {
             card: user, active: nestedCard, collapsed: false, nestedCard,
             onToggle() {},
         }));
-        assert.match(markup, /First authored line[\s\S]*<br\/>[\s\S]*\u200B[\s\S]*<br\/>[\s\S]*Third authored line/u);
+        assert.match(markup, /<p>First authored line<br\/>\nsecond line<\/p>\n<p>Third paragraph<\/p>/u);
+        assert.doesNotMatch(markup, /\u200B/u);
     }
     assert.deepEqual(cardCopyContent(user), {text: source, markdown: true});
-    assert.equal(userMessageMarkdownText(source), "First authored line  \n\u200B  \nThird authored line");
+    assert.equal(userMessageMarkdownText(source), "First authored line  \nsecond line\n\nThird paragraph");
 });
 
 test("local prompt sweep is rendered only after delayed feedback activates", () => {

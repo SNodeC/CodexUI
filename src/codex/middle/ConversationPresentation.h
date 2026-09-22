@@ -16,7 +16,6 @@
 class QFocusEvent;
 class QEvent;
 class QLabel;
-class QMimeData;
 class QPaintEvent;
 class QTextDocument;
 class QTimer;
@@ -57,9 +56,6 @@ public:
   [[nodiscard]] int heightForWidth(int width) const override;
   [[nodiscard]] QSize sizeHint() const override;
   [[nodiscard]] QSize minimumSizeHint() const override;
-
-protected:
-  [[nodiscard]] QMimeData *createMimeDataFromSelection() const override;
 
 private:
   void configureDocument();
@@ -143,11 +139,11 @@ void setAccessibleDescriptionIfChanged(QWidget &widget, QString description);
 // Announce a completed semantic action through the strongest API provided by
 // the supported Qt version. The widget remains the sole accessible object.
 void announce(QWidget &widget, const QString &message);
-// User-authored prompt newlines are intentional visual line breaks. Preserve
-// them in the Markdown presentation without changing the canonical source
-// retained for copy or protocol reconciliation.
+// Single newlines are line breaks; blank lines separate paragraphs. Native
+// prose uses Qt's in-paragraph separator instead of its Markdown hard breaks.
+// Canonical source retained for Copy and protocol reconciliation is unchanged.
 [[nodiscard]] QString userMessageMarkdown(
-    QStringView source, QStringView blankOrigin = u"\u200B");
+    QStringView source, bool nativeLineBreaks = false);
 [[nodiscard]] QString planMarkdown(const PlanData &plan);
 [[nodiscard]] QString agentMetadata(const AgentActivityData &activity,
                                     const UiStatus &status);

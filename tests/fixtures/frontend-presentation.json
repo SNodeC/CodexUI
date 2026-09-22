@@ -20,22 +20,26 @@
     {"command": "", "output": "x\n\ufeff\n", "expected": "x\n\ufeff"}
   ],
   "markdownCases": [
-    {"source": "plain\n\nbody", "expected": "plain  \n\u200b  \nbody"},
+    {"source": "plain\n\nbody", "expected": "plain\n\nbody", "paragraphs": [["plain"], ["body"]]},
+    {"source": "first\nsecond\n\nparagraph", "expected": "first  \nsecond\n\nparagraph", "paragraphs": [["first", "second"], ["paragraph"]]},
+    {"source": "first\r\nsecond\r\n\r\nparagraph", "expected": "first  \nsecond\n\nparagraph", "paragraphs": [["first", "second"], ["paragraph"]]},
+    {"source": "first\n\n\nparagraph", "expected": "first\n\n\nparagraph", "paragraphs": [["first"], ["paragraph"]]},
+    {"source": "first\n  \nparagraph", "expected": "first\n  \nparagraph", "paragraphs": [["first"], ["paragraph"]]},
     {"source": "# Heading\n\nbody", "expected": "# Heading\n\nbody"},
     {"source": "## Heading\n\nbody", "expected": "## Heading\n\nbody"},
     {"source": "### Heading\n\nbody", "expected": "### Heading\n\nbody"},
     {"source": "#### Heading\n\nbody", "expected": "#### Heading\n\nbody"},
     {"source": "##### Heading\n\nbody", "expected": "##### Heading\n\nbody"},
     {"source": "###### Heading\n\nbody", "expected": "###### Heading\n\nbody"},
-    {"source": "####### text\n\nbody", "expected": "####### text  \n\u200b  \nbody"},
+    {"source": "####### text\n\nbody", "expected": "####### text\n\nbody"},
     {"source": "Before\nAfter\n\n```text\ninside\ncode\n```\n\nDone", "expected": "Before  \nAfter\n\n```text\ninside\ncode\n```\n\nDone"},
     {"source": "~~~\r\ncode\r\n~~~~\r\none\r\ntwo", "expected": "~~~\ncode\n~~~~\none  \ntwo"},
     {"source": "\tcode\n\tmore\n\nbody", "expected": "\tcode\n\tmore\n\nbody"},
-    {"source": "١. prose\n\nbody", "expected": "١. prose  \n\u200b  \nbody"},
+    {"source": "١. prose\n\nbody", "expected": "١. prose\n\nbody"},
     {"source": "1. item\n2. item", "expected": "1. item  \n2. item"},
     {"source": "[link](https://example.org)\nnext", "expected": "[link](https://example.org)  \nnext"},
-    {"source": "a\u200bb\n\nend", "expected": "a\u200bb  \n\u200b  \nend"},
-    {"source": "a\\\n\u0085\n", "expected": "a\\\n\u0085\u200b  \n\u200b"}
+    {"source": "a\u200bb\n\nend", "expected": "a\u200bb\n\nend"},
+    {"source": "a\\\n\u0085\n", "expected": "a\\\n\u0085\n"}
   ],
   "genericDetailCases": [
     {"raw": {"id": "g", "type": "custom", "z": null, "a": {"nested": [true, 1.5, "é"]}}, "expected": "a: \n  nested: \n    - true\n    - 1.5\n    - é\nid: g\nstatus: completed\ntype: custom\nz: none\n"},

@@ -119,7 +119,7 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.card-phase\.status\.active\s*\{[^}]*color:\s*#285fca/u);
     assert.match(css, /\.card-phase\.status\.success\s*\{[^}]*color:\s*#176b45/u);
     assert.match(css, /\.conversation-card > header \.card-phase\s*\{[^}]*margin-right:\s*0/u);
-    assert.match(css, /\.conversation-card\.userMessage \.safe-markdown\s*\{[^}]*white-space:\s*pre-wrap/u);
+    assert.doesNotMatch(css, /\.conversation-card\.userMessage \.safe-markdown\s*\{[^}]*white-space:\s*pre-wrap/u);
     assert.match(css, /\.card-copy-button \.copy-glyph, \.card-copy-button \.check-glyph\s*\{[^}]*transition:\s*opacity 160ms ease, transform 160ms ease/u);
     assert.match(css, /\.card-copy-button\.copied \.copy-glyph\s*\{[^}]*opacity:\s*0[^}]*transform:\s*scale\(\.72\)/u);
     assert.match(css, /\.card-copy-button\.copied \.check-glyph\s*\{[^}]*opacity:\s*1[^}]*transform:\s*scale\(1\)/u);

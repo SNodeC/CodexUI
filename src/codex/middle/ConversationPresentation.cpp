@@ -8,7 +8,6 @@
 #include <QApplication>
 #include <QAccessible>
 #include <QAccessibleWidget>
-#include <QBuffer>
 #include <QClipboard>
 #include <QEvent>
 #include <QFocusEvent>
@@ -22,11 +21,9 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
-#include <QTextDocumentWriter>
 #include <QTextOption>
 #include <QTimer>
 #include <QToolTip>
-#include <QUuid>
 #include <QVariantAnimation>
 
 #include <algorithm>
@@ -38,86 +35,8 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int MarkdownBottomPaintGuard = 4;
-constexpr int GeneratedBlank = QTextFormat::UserProperty;
-constexpr int AuthoredAttributes = QTextFormat::UserProperty + 1;
 constexpr QTextDocument::MarkdownFeatures MarkdownFeatures{
     QTextDocument::MarkdownDialectGitHub, QTextDocument::MarkdownNoHTML};
-
-void recordBlankOrigins(QTextDocument &selection, const QTextDocument &document,
-                        const QString &source, int selectionStart) {
-  QString origin(QChar(0x200B));
-  const auto contents = [](const QTextDocument &value) {
-    QString text = value.toRawText();
-    for (const QTextFormat &format : value.allFormats())
-      for (const QVariant &property : format.properties())
-        text += property.toString() + property.toStringList().join(QString{});
-    return text;
-  };
-  if (!contents(selection).contains(origin))
-    return;
-  QTextDocument tagged;
-  QTextDocument *projection = &selection;
-  // Without a literal or an entity, source cannot contribute U+200B. Otherwise
-  // carry an explicit, collision-checked origin through the same Qt importer.
-  if (source.contains(origin) || source.contains(QLatin1Char('&'))) {
-    const QString corpus = source + contents(document);
-    origin = QStringLiteral("\uE000\uE001");
-    while (corpus.contains(origin)) {
-      origin = QChar(0xE000) + QUuid::createUuid().toString(QUuid::Id128) +
-               QChar(0xE001);
-    }
-    tagged.setLayoutEnabled(false);
-    tagged.setMarkdown(presentation::userMessageMarkdown(source, origin),
-                       MarkdownFeatures);
-    projection = &tagged;
-  }
-  QTextCursor found(projection);
-  while (!(found = projection->find(origin, found,
-                                    QTextDocument::FindCaseSensitively))
-              .isNull()) {
-    QTextCharFormat format = found.charFormat();
-    format.setProperty(GeneratedBlank, true);
-    if (projection == &selection)
-      found.setCharFormat(format);
-    else
-      found.insertText(QStringLiteral("\u200B"), format);
-  }
-  // Transfer origins only into the selected fragment, never the live document.
-  // Attribute origins include image alt text/link titles.
-  for (QTextBlock block = projection->begin(); block.isValid();
-       block = block.next()) {
-    for (auto it = block.begin(); !it.atEnd(); ++it) {
-      const QTextFragment fragment = it.fragment();
-      const QTextCharFormat format = fragment.charFormat();
-      QTextCharFormat metadata;
-      if (projection != &selection && format.boolProperty(GeneratedBlank))
-        metadata.setProperty(GeneratedBlank, true);
-      QTextCharFormat attributes;
-      const auto properties = format.properties();
-      for (auto property = properties.cbegin(); property != properties.cend();
-           ++property) {
-        QString value = property.value().toString();
-        if (value.contains(origin))
-          attributes.setProperty(property.key(), value.remove(origin));
-      }
-      if (!attributes.isEmpty())
-        metadata.setProperty(AuthoredAttributes, QVariant::fromValue(attributes));
-      if (metadata.isEmpty())
-        continue;
-      const int offset = projection == &selection ? 0 : selectionStart;
-      const int start = std::max(0, fragment.position() - offset);
-      const int end =
-          std::min(selection.characterCount() - 1,
-                   fragment.position() + fragment.length() - offset);
-      if (start >= end)
-        continue;
-      QTextCursor target(&selection);
-      target.setPosition(start);
-      target.setPosition(end, QTextCursor::KeepAnchor);
-      target.mergeCharFormat(metadata);
-    }
-  }
-}
 
 #if QT_CONFIG(accessibility)
 class DisclosureAccessible final : public QAccessibleWidget {
@@ -216,7 +135,7 @@ bool MarkdownTextView::setContent(const QString &markdown) {
     preparedLayoutDisabled_ = false;
   }
   const QString rendered = preserveSoftLineBreaks_
-                               ? presentation::userMessageMarkdown(markdown)
+                               ? presentation::userMessageMarkdown(markdown, true)
                                : markdown;
   if (!presentation::appendMarkdownDocument(
           *document(), QStringView(renderedMarkdown_), QStringView(rendered),
@@ -274,51 +193,6 @@ QSize MarkdownTextView::sizeHint() const {
 }
 
 QSize MarkdownTextView::minimumSizeHint() const { return {0, 0}; }
-
-QMimeData *MarkdownTextView::createMimeDataFromSelection() const {
-  if (!preserveSoftLineBreaks_ ||
-      presentation::userMessageMarkdown(markdown_, {}) == renderedMarkdown_)
-    return QTextBrowser::createMimeDataFromSelection();
-  QTextDocument cleaned;
-  cleaned.setLayoutEnabled(false);
-  QTextCursor selection(&cleaned);
-  selection.insertFragment(QTextDocumentFragment(textCursor()));
-  recordBlankOrigins(cleaned, *document(), markdown_,
-                     textCursor().selectionStart());
-  struct SelectionSpan {
-    int position;
-    int length;
-    QTextCharFormat format;
-  };
-  std::vector<SelectionSpan> fragments;
-  for (QTextBlock block = cleaned.begin(); block.isValid();
-       block = block.next())
-    for (auto it = block.begin(); !it.atEnd(); ++it) {
-      const auto fragment = it.fragment();
-      fragments.push_back(
-          {fragment.position(), fragment.length(), fragment.charFormat()});
-    }
-  for (auto it = fragments.crbegin(); it != fragments.crend(); ++it) {
-    selection.setPosition(it->position);
-    selection.setPosition(it->position + it->length, QTextCursor::KeepAnchor);
-    if (it->format.boolProperty(GeneratedBlank)) {
-      selection.removeSelectedText();
-    } else if (it->format.hasProperty(AuthoredAttributes)) {
-      selection.mergeCharFormat(
-          it->format.property(AuthoredAttributes).value<QTextCharFormat>());
-    }
-  }
-  const QTextDocumentFragment fragment(&cleaned);
-  auto *mime = new QMimeData;
-  mime->setText(fragment.toPlainText());
-  mime->setHtml(fragment.toHtml());
-  mime->setData("text/markdown", fragment.toMarkdown().toUtf8());
-  QByteArray odf;
-  QBuffer output(&odf);
-  if (QTextDocumentWriter(&output, "ODF").write(fragment))
-    mime->setData("application/vnd.oasis.opendocument.text", odf);
-  return mime;
-}
 
 void MarkdownTextView::refreshPreferredHeight(int documentWidth) const {
   if (preparedLayoutDisabled_) {
@@ -677,17 +551,13 @@ void announce(QWidget &widget, const QString &message) {
 #endif
 }
 
-QString userMessageMarkdown(QStringView source, QStringView blankOrigin) {
+QString userMessageMarkdown(QStringView source, bool nativeLineBreaks) {
   QString rendered;
   rendered.reserve(source.size() + source.count(QLatin1Char('\n')) * 3);
 
-  // Markdown treats an empty source line as a paragraph separator and Qt's
-  // Markdown layout consequently paints the two adjacent paragraphs without
-  // the authored empty row. For ordinary prose, keep every editor line in one
-  // paragraph with explicit hard breaks and give empty lines an invisible
-  // layout glyph. The canonical source remains untouched on the view and is
-  // still used for copy and protocol correlation.
-  const bool simple = simpleMarkdownParagraphs(source);
+  // Qt imports Markdown hard breaks as paragraphs. In ordinary prompt prose,
+  // use its in-paragraph separator instead; blank lines remain paragraph breaks.
+  const bool nativeProse = nativeLineBreaks && simpleMarkdownParagraphs(source);
 
   bool fenced = false;
   QChar fenceMarker;
@@ -725,8 +595,6 @@ QString userMessageMarkdown(QStringView source, QStringView blankOrigin) {
     const bool insideFence = fenced || opensFence;
 
     rendered += line;
-    if (simple && line.trimmed().isEmpty())
-      rendered += blankOrigin;
     if (hasNewline) {
       qsizetype nextEnd = source.indexOf(QLatin1Char('\n'), lineEnd + 1);
       if (nextEnd < 0)
@@ -738,11 +606,16 @@ QString userMessageMarkdown(QStringView source, QStringView blankOrigin) {
       const bool nextBlank = next.trimmed().isEmpty();
       const bool alreadyHardBreak = line.endsWith(QLatin1Char('\\')) ||
                                     line.endsWith(QLatin1StringView("  "));
-      if (!alreadyHardBreak &&
-          (simple || (!insideFence && !fenceLine && !indentedCode &&
-                      !currentBlank && !nextBlank)))
-        rendered += QLatin1StringView("  ");
-      rendered += QLatin1Char('\n');
+      if (nativeProse && !currentBlank && !nextBlank) {
+        if (alreadyHardBreak)
+          rendered.chop(line.endsWith(QLatin1Char('\\')) ? 1 : 2);
+        rendered += QChar::LineSeparator;
+      } else {
+        if (!alreadyHardBreak && !insideFence && !fenceLine && !indentedCode &&
+            !currentBlank && !nextBlank)
+          rendered += QLatin1StringView("  ");
+        rendered += QLatin1Char('\n');
+      }
     }
 
     if (opensFence) {

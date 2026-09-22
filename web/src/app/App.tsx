@@ -351,13 +351,6 @@ const SafeMarkdown = memo(function SafeMarkdown({text}: {text: string}) {
 
 export function userMessageMarkdownText(text: string): string {
     const lines = text.split("\n").map(line => line.endsWith("\r") ? line.slice(0, -1) : line);
-    const structuralMarkdown = lines.some(line => {
-        const indentation = line.match(/^ */u)?.[0].length ?? 0;
-        const content = line.slice(indentation);
-        return indentation >= 4 || line.startsWith("\t")
-            || /^(?:#{1,6}(?:[ \t]|$)|>|```|~~~|[-*+][ \t]|[0-9]{1,9}[.)][ \t]|\[)/u.test(content)
-            || content.includes("|");
-    });
     let fenceMarker = "", fenceLength = 0;
     return lines.map((line, index) => {
         const marker = /^ {0,3}(`{3,}|~{3,})/u.exec(line);
@@ -366,13 +359,12 @@ export function userMessageMarkdownText(text: string): string {
             && marker[1].length >= fenceLength && /^\p{White_Space}*$/u.test(line.slice(marker[0].length));
         const inside = fenceLength > 0 || opens;
         const blank = /^\p{White_Space}*$/u.test(line);
-        const blankMarker = !structuralMarkdown && blank ? "\u200B" : "";
         const hardBreak = index < lines.length - 1 && !line.endsWith("\\") && !line.endsWith("  ")
-            && (!structuralMarkdown || (!inside && !closes && !/^( {4}|\t)/u.test(line)
-                && !blank && !/^\p{White_Space}*$/u.test(lines[index + 1]!))) ? "  " : "";
+            && !inside && !closes && !/^( {4}|\t)/u.test(line)
+            && !blank && !/^\p{White_Space}*$/u.test(lines[index + 1]!) ? "  " : "";
         if (opens) { fenceMarker = marker[1]![0]!; fenceLength = marker[1]!.length; }
         else if (closes) { fenceMarker = ""; fenceLength = 0; }
-        return `${line}${blankMarker}${hardBreak}`;
+        return `${line}${hardBreak}`;
     }).join("\n");
 }
 

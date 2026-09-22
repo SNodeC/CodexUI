@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {performance} from "node:perf_hooks";
 import test from "node:test";
+import {createElement} from "react";
+import {renderToStaticMarkup} from "react-dom/server";
 
 import {
     PresentationModel, ProtocolNormalizer, changeSettingDraft, displayStatus, effectivePlanStepStatus, event,
@@ -10,7 +12,7 @@ import {
     settingPromptOptions, statusFromValue, statusToken, statusTone, turnSettingCatalog,
     humanizeProtocolLabel, projectConversation,
 } from "../dist/index.js";
-import {cardCopyContent, userMessageMarkdownText} from "../dist/app/App.js";
+import {Card, cardCopyContent, userMessageMarkdownText} from "../dist/app/App.js";
 
 const contract = JSON.parse(readFileSync(
     new URL("../../tests/fixtures/frontend-presentation.json", import.meta.url), "utf8",
@@ -26,6 +28,16 @@ for (const [index, entry] of contract.copyCases.entries()) test(`Copy contract: 
 });
 for (const [index, entry] of contract.markdownCases.entries()) test(`Markdown contract: ${index}`, () => {
     assert.equal(userMessageMarkdownText(entry.source), entry.expected);
+    if (entry.paragraphs) {
+        const card = {key: {kind: "item", threadId: "t", turnId: "r", itemId: "i"},
+            kind: "userMessage", threadId: "t", turnId: "r", itemId: "i",
+            payload: {text: entry.source, imagePaths: []}, status: statusFromValue("")};
+        const markup = renderToStaticMarkup(createElement(Card, {
+            card, active: false, collapsed: false, onToggle() {},
+        }));
+        assert.deepEqual([...markup.matchAll(/<p>(.*?)<\/p>/gsu)]
+            .map(match => match[1].split(/<br\/>\n?/u)), entry.paragraphs);
+    }
 });
 for (const [index, entry] of contract.genericDetailCases.entries()) test(`generic detail contract: ${index}`, () => {
     const {model, normalizer} = pipeline();
