@@ -565,9 +565,18 @@ try {
         levelBefore: "2", levelAfter: "1", menuFocused: true, menuClosed: true, focusReturned: true,
     });
 
+    if (process.env.CODEXUI_BROWSER_CPU_PROFILE) {
+        await devTools.call("Profiler.enable");
+        await devTools.call("Profiler.setSamplingInterval", {interval: 100});
+        await devTools.call("Profiler.start");
+    }
     const beforeHydrate = await performanceSnapshot(devTools);
     const hydrateResult = await devTools.evaluate(applicationProfileHydrate);
     const afterHydrate = await performanceSnapshot(devTools);
+    if (process.env.CODEXUI_BROWSER_CPU_PROFILE) {
+        const {profile} = await devTools.call("Profiler.stop");
+        await writeFile(`${process.env.CODEXUI_BROWSER_CPU_PROFILE}.hydrate`, JSON.stringify(profile));
+    }
     const hydratePerformance = performanceDelta(beforeHydrate, afterHydrate);
     assert.deepEqual({items: hydrateResult.authoritativeItems, cards: hydrateResult.visibleCards,
         history: hydrateResult.hasHistoryBoundary}, {items: 10_000, cards: 80, history: true});

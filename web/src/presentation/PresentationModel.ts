@@ -107,11 +107,13 @@ export type PresentationApplyResult = "accepted" | "settings-unchanged" | "reque
     | "provider-reset" | "rejected";
 
 function clone<T>(value: T): T {
+    if (value === undefined || value === null || typeof value === "string"
+        || typeof value === "number" || typeof value === "boolean") return value;
     return structuredClone(value);
 }
 
 function objectMember(value: unknown, name: string): JsonObject {
-    const result = member(value, name, {});
+    const result = member(value, name);
     return isObject(result) ? result : {};
 }
 
@@ -268,7 +270,8 @@ function boundRetainedItemText(item: ItemPresentation): void {
 function appendText(item: ItemPresentation, field: string, delta: string): boolean {
     if (delta === "") return false;
     const existing = typeof item.raw[field] === "string" ? item.raw[field] : "";
-    const existingBytes = item.textRetention?.get(field)?.retainedBytes ?? textEncoder.encode(existing).length;
+    const retained = item.textRetention?.get(field);
+    const existingBytes = retained?.retainedBytes ?? textEncoder.encode(existing).length;
     const deltaBytes = utf8ByteLength(delta);
     if (deltaBytes > MaximumRetainedStreamBytes) {
         const tail = utf8Tail(delta, RetainedStreamTailBytes);
@@ -280,7 +283,7 @@ function appendText(item: ItemPresentation, field: string, delta: string): boole
     const combined = existing + delta;
     const combinedBytes = existingBytes + deltaBytes;
     if (combinedBytes > MaximumRetainedStreamBytes) item.raw[field] = boundScalarText(item, field, combined);
-    else { item.raw[field] = combined; setRetainedTextBytes(item, field, combinedBytes); }
+    else { item.raw[field] = combined; (retained ?? retention(item, field)).retainedBytes = combinedBytes; }
     return true;
 }
 
@@ -494,8 +497,8 @@ export class PresentationModel {
             return;
         }
         if (event.kind !== "event") return "rejected";
-        const type = stringMember(event, "type");
-        const authority = stringMember(event, "authority");
+        const type = event.type;
+        const authority = event.authority;
         if (type === "connection.lifecycle") {
             this.connectionState.generation = generation;
             const lifecycle = stringMember(data, "state");
@@ -724,24 +727,25 @@ export class PresentationModel {
     private mergeItemPage(threadId: string, listedEntries: unknown, direction: string, cursor: string): void {
         const thread = this.threads.get(threadId);
         if (!thread || !Array.isArray(listedEntries)) return;
-        const pages = new Map<string, string[]>();
+        const pages = new Map<string, Set<string>>();
         for (const entry of listedEntries) {
             if (!isObject(entry)) continue;
             const turnId = stringMember(entry, "turnId");
             const item = member(entry, "item");
             if (turnId === "" || !isObject(item)) continue;
-            const turn = this.upsertTurn(thread, {id: turnId}, false);
+            const turn = thread.turns.get(turnId) ?? this.upsertTurn(thread, {id: turnId}, false);
             const merged = this.upsertItem(thread, turn, item);
             if (merged.id === "") continue;
-            const page = pages.get(turnId) ?? [];
-            if (!page.includes(merged.id)) page.push(merged.id);
+            const page = pages.get(turnId) ?? new Set<string>();
+            page.add(merged.id);
             pages.set(turnId, page);
         }
-        for (const [turnId, page] of pages) {
+        for (const [turnId, items] of pages) {
             const turn = thread.turns.get(turnId);
             if (!turn) continue;
+            const page = [...items];
             if (direction === "desc") page.reverse();
-            const retained = turn.itemOrder.filter(id => !page.includes(id));
+            const retained = turn.itemOrder.filter(id => !items.has(id));
             turn.itemOrder = direction === "desc" && cursor !== ""
                 ? [...page, ...retained] : [...retained, ...page];
         }

@@ -81,11 +81,8 @@ export function event(
     authority: Authority = "none",
     scope: JsonObject = {},
 ): PresentationFrame {
-    const frame = baseFrame("event");
-    frame.sequence = sequence;
-    frame.generation = generation;
-    frame.type = type;
-    frame.data = data;
+    const frame: PresentationFrame = {protocol: PresentationProtocolName, version: PresentationProtocolVersion,
+        kind: "event", sequence, generation, type, data};
     addAuthorityAndScope(frame, authority, scope);
     return frame;
 }
@@ -117,10 +114,8 @@ export function isPresentationFrame(value: unknown): value is PresentationFrame 
     ) {
         return false;
     }
-    const stringField = (name: string): boolean =>
-        typeof value[name] === "string" && value[name] !== "";
     if (value.kind === "command") {
-        return stringField("action") && isObject(value.data);
+        return stringMember(value, "action") !== "" && isObject(value.data);
     }
     if (value.kind !== "event" && value.kind !== "result") return false;
     if (
@@ -135,11 +130,11 @@ export function isPresentationFrame(value: unknown): value is PresentationFrame 
         return false;
     }
     if (value.kind === "event") {
-        return stringField("type") && isObject(value.data);
+        return stringMember(value, "type") !== "" && isObject(value.data);
     }
     if (
-        !stringField("action")
-        || !stringField("correlationId")
+        stringMember(value, "action") === ""
+        || stringMember(value, "correlationId") === ""
         || typeof value.ok !== "boolean"
     ) {
         return false;
