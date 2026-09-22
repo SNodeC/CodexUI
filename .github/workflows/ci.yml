@@ -14,6 +14,8 @@ concurrency:
 
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 8
+  # Accepted elapsed-time overruns are reported; correctness/work-count gates remain mandatory.
+  CODEXUI_TIMING_POLICY: report
 
 jobs:
   gcc-15-debug:
@@ -123,7 +125,7 @@ jobs:
       - name: Test CodexUI
         run: |
           LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/aisuite/lib:$GITHUB_WORKSPACE/_stage/snodec/lib" \
-            ctest --test-dir build --output-on-failure
+            ctest --test-dir build --output-on-failure --verbose
 
       - name: Check changed lines
         shell: bash
@@ -181,10 +183,22 @@ jobs:
           npm ci --prefix web
           npm test --prefix web
 
-      - name: Select the recorded performance-baseline runtime
+      - name: Select the qualified performance runtime
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.20.0
+
+      - name: Select the qualified browser runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip \
+            --output "$RUNNER_TEMP/codexui-chrome.zip"
+          echo "0704631fb3e4f741092e08f55272f90abc3e307f991f05f332924364415b02e0  $RUNNER_TEMP/codexui-chrome.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/codexui-chrome.zip" -d "$RUNNER_TEMP/codexui-browser"
+          echo "CHROME_BIN=$RUNNER_TEMP/codexui-browser/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/codexui-browser/chrome-linux64/chrome" --version
 
       - name: Test CodexWebUI on the qualification runtime
         working-directory: CodexUI/codexui

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "../TimingPolicy.h"
 #include "codex/nodegraph/ProtocolCatalog.h"
 
 #include <algorithm>
@@ -595,7 +596,7 @@ void longStreamingDeltasStayBoundedInStateAndCost() {
           graph.publishedRevision() == initialRevision + WarmupDeltas +
                                            FirstMeasuredDeltas +
                                            SecondMeasuredDeltas &&
-          secondElapsed <= allowance,
+          codexui::testing::timingLimit(secondElapsed <= allowance),
       "long streaming publishes once per input with bounded retained text and "
       "approximately linear steady-state cost");
   std::cout
@@ -4644,9 +4645,11 @@ void largeThreadDeletionIsNearLinear() {
 
   const auto [smallValid, smallElapsed] = measure(1500);
   const auto [largeValid, largeElapsed] = measure(3000);
-  require(smallValid && largeValid &&
-              largeElapsed <= smallElapsed * 3 + std::chrono::milliseconds(25),
-          "large canonical thread deletion scales approximately linearly");
+  require(
+      smallValid && largeValid &&
+          codexui::testing::timingLimit(
+              largeElapsed <= smallElapsed * 3 + std::chrono::milliseconds(25)),
+      "large canonical thread deletion scales approximately linearly");
   std::cout
       << "thread-delete ns (1500 / 3000 items): "
       << std::chrono::duration_cast<std::chrono::nanoseconds>(smallElapsed)
@@ -4740,10 +4743,12 @@ void smallHistoryPagesIgnoreUnrelatedGraphCardinality() {
 
   const auto [smallValid, smallElapsed] = measure(1000);
   const auto [largeValid, largeElapsed] = measure(10000);
-  require(smallValid && largeValid &&
-              largeElapsed <= smallElapsed * 4 + std::chrono::milliseconds(10),
-          "small history-page work is independent of unrelated graph Item "
-          "cardinality");
+  require(
+      smallValid && largeValid &&
+          codexui::testing::timingLimit(
+              largeElapsed <= smallElapsed * 4 + std::chrono::milliseconds(10)),
+      "small history-page work is independent of unrelated graph Item "
+      "cardinality");
   std::cout
       << "small-history-page ns (1000 / 10000 unrelated): "
       << std::chrono::duration_cast<std::chrono::nanoseconds>(smallElapsed)

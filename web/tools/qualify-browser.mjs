@@ -6,6 +6,7 @@ import {createServer} from "node:http";
 import {tmpdir} from "node:os";
 import {dirname, extname, join, resolve, sep} from "node:path";
 import {fileURLToPath} from "node:url";
+import {timingLimit} from "./timing-policy.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const artifactDirectory = resolve(toolDirectory, "../app-dist");
@@ -161,6 +162,9 @@ const applicationPerformanceLimits = Object.freeze({
 const performanceFailures = [];
 function checkPerformance(condition, message) {
     if (!condition) performanceFailures.push(message);
+}
+function checkTiming(condition, message) {
+    checkPerformance(timingLimit(condition, message), message);
 }
 
 const applicationProfileSetup = `(async()=>{
@@ -581,7 +585,7 @@ try {
     assert.deepEqual({items: hydrateResult.authoritativeItems, cards: hydrateResult.visibleCards,
         history: hydrateResult.hasHistoryBoundary}, {items: 10_000, cards: 80, history: true});
     assert.deepEqual({turns: hydrateResult.turnPages, items: hydrateResult.itemPages}, {turns: 1, items: 160});
-    checkPerformance(hydrateResult.wallMilliseconds <= applicationPerformanceLimits.hydrateWallMilliseconds
+    checkTiming(hydrateResult.wallMilliseconds <= applicationPerformanceLimits.hydrateWallMilliseconds
         && hydratePerformance.taskMilliseconds <= applicationPerformanceLimits.hydrateTaskMilliseconds,
         `10k App hydration exceeded its gate: ${hydrateResult.wallMilliseconds}/${hydratePerformance.taskMilliseconds} ms`);
     checkPerformance(hydratePerformance.layouts <= 2 && hydratePerformance.styleRecalculations <= 2,
@@ -593,9 +597,10 @@ try {
     // This is the measured idle interval, not a warm-up: do not drive browser work to observe inactivity.
     await wait(1000 / 30);
     const idlePerformance = performanceDelta(beforeIdle, await performanceSnapshot(devTools));
-    checkPerformance(idlePerformance.taskMilliseconds <= applicationPerformanceLimits.idleTaskMilliseconds
-        && idlePerformance.layouts === 0 && idlePerformance.styleRecalculations === 0,
-    `idle App exceeded its zero-work gate: ${idlePerformance.taskMilliseconds} ms, ${idlePerformance.layouts}/${idlePerformance.styleRecalculations} passes`);
+    checkTiming(idlePerformance.taskMilliseconds <= applicationPerformanceLimits.idleTaskMilliseconds,
+        `idle App exceeded its task gate: ${idlePerformance.taskMilliseconds} ms`);
+    checkPerformance(idlePerformance.layouts === 0 && idlePerformance.styleRecalculations === 0,
+        `idle App exceeded its zero-work gate: ${idlePerformance.layouts}/${idlePerformance.styleRecalculations} passes`);
     const beforeNoOp = await performanceSnapshot(devTools);
     const noOpResult = await devTools.evaluate(applicationProfileNoOp);
     const afterNoOp = await performanceSnapshot(devTools);
@@ -609,7 +614,7 @@ try {
     assert.equal(noOpResult.conversationStructuralMutations, 0);
     checkPerformance(noOpPerformance.layouts === 0, "a semantic settings no-op caused layout");
     checkPerformance(noOpPerformance.styleRecalculations === 0, "a semantic settings no-op caused style recalculation");
-    checkPerformance(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
+    checkTiming(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
         `semantic settings no-op exceeded its task gate: ${noOpPerformance.taskMilliseconds} ms`);
 
     if (process.env.CODEXUI_BROWSER_CPU_PROFILE) {
@@ -637,7 +642,7 @@ try {
     assert.equal(streamResult.conversationStructuralMutations, 0);
     assert(streamResult.targetTextMutations <= 1,
         `2,000 coalesced deltas caused ${streamResult.targetTextMutations} text mutations`);
-    checkPerformance(streamResult.ingestMilliseconds <= applicationPerformanceLimits.streamIngestMilliseconds
+    checkTiming(streamResult.ingestMilliseconds <= applicationPerformanceLimits.streamIngestMilliseconds
         && streamResult.settledMilliseconds <= applicationPerformanceLimits.streamSettledMilliseconds
         && streamPerformance.taskMilliseconds <= applicationPerformanceLimits.streamTaskMilliseconds,
     `2k App stream exceeded its gate: ${streamResult.ingestMilliseconds}/${streamResult.settledMilliseconds}/${streamPerformance.taskMilliseconds} ms`);

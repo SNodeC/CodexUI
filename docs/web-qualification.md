@@ -8,6 +8,23 @@ they neither execute Qt nor claim pixel identity with it.
 
 ## Verification gates
 
+### Accepted timing policy — 2026-09-22
+
+The owner accepted the outstanding elapsed-time overruns as non-blocking.
+CI sets `CODEXUI_TIMING_POLICY=report`: native elapsed-time assertions (including
+graph scaling comparisons), the browser model profile and production-browser
+qualification still measure the same workloads against the same limits, but
+report timing overruns as warnings. Without this setting they remain strict.
+Native CI uses verbose CTest output so accepted overruns and measurements remain
+visible even when a test passes. This is an explicit acceptance of timing risk,
+not evidence that an overrun was fixed or that interaction is universally lag-free.
+
+Correctness, completion timeouts, residency/memory bounds, work counts,
+layout/style counts, identity, focus, anchors and artifact checks still fail CI.
+Functional predicates remain mandatory even when combined with timing
+comparisons. No blanket `continue-on-error` is applied to a suite containing
+correctness checks.
+
 - Generated protocol names, operation maps, and source-schema digest match the
   checked-in C++ protocol.
 - The shared frontend-presentation corpus is executed by both C++ and
@@ -94,10 +111,22 @@ Hydration was exactly two layout/style passes in every sample; streaming was
 exactly one; idle and the semantic settings no-op were exactly zero. These are
 local regression gates, not portable hardware performance claims.
 
-CI runs functional checks on Node 22 and runs release qualification on Node 24,
-the runtime used to establish these limits. The profile prints its Node version
-and browser qualification prints the actual Chromium version. Timing limits are
-unchanged; runner timing still needs to be distinguished from semantic failures.
+CI runs functional checks on Node 22 and runs qualification on Node 24.20.0
+and Chrome for Testing 152.0.7977.82. Those exact versions are held stable for
+comparisons; they do not pin SNode.C or AISuite, which both follow `master`.
+The profile prints its Node version and browser qualification prints the actual
+Chromium version. Timing limits are unchanged; runner timing still needs to be
+distinguished from semantic failures.
+
+On 2026-09-22 the hosted runner moved from Node 24.20.0 / Chrome 152.0.7977.82
+to Node 24.21.0 / Chrome 153.0.8010.52 between two successive commits.
+The latter run timed out starting Chrome; its diagnostic browser run also
+reported five hydration style passes rather than two. This does not establish
+a browser regression, but makes an uncontrolled runtime unsuitable for isolating
+application changes. The fixed versions above passed local production-browser
+qualification and precede that runner change. Runtime updates require explicit
+requalification, not a change to performance limits. The original 2026-09-14
+numbers above remain historical measurements, not measurements of these versions.
 
 ### Paginated-protocol requalification — 2026-09-21
 

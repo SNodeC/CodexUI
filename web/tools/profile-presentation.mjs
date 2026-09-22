@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {performance} from "node:perf_hooks";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
 import {ConversationViewportState, event, result} from "../dist/index.js";
+import {timingLimit} from "./timing-policy.mjs";
 
 const turns = Array.from({length: 100}, (_, turn) => ({
     id: `turn-${turn}`, status: turn === 99 ? "inProgress" : "completed",
@@ -63,7 +64,8 @@ const limits = {hydrateMilliseconds: 47, projectMilliseconds: 45, streamMillisec
     presentationChurnMilliseconds: 20};
 process.stdout.write(`${JSON.stringify({...measurements, limits}, null, 2)}\n`);
 const failures = Object.entries(limits)
-    .filter(([name, limit]) => !(measurements[name] <= limit))
+    .filter(([name, limit]) => !timingLimit(measurements[name] <= limit,
+        `${name} ${measurements[name]} ms exceeds ${limit} ms`))
     .map(([name, limit]) => `${name} ${measurements[name]} ms exceeds ${limit} ms`);
 if (measurements.authoritativeItems !== 10_000) failures.push("Hydration did not retain 10,000 items");
 if (measurements.visibleCards !== 10_000) failures.push("Projection did not present 10,000 cards");

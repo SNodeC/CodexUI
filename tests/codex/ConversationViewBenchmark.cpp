@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "TimingPolicy.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/nodegraph/NodeGraph.h"
@@ -1963,10 +1964,14 @@ int main(int argc, char **argv) {
   const qint64 sparseVisibilityLimit = timingScale * 250000;
   const auto timingWithin = [timingScale](const SampleStats &stats,
                                           qint64 median, qint64 p95,
-                                          qint64 maximum) {
-    return stats.median <= timingScale * median &&
-           stats.p95 <= timingScale * p95 &&
-           stats.maximum <= timingScale * maximum;
+                                          qint64 maximum,
+                                          std::source_location where =
+                                              std::source_location::current()) {
+    return codexui::testing::timingLimit(stats.median <= timingScale * median &&
+                                             stats.p95 <= timingScale * p95 &&
+                                             stats.maximum <=
+                                                 timingScale * maximum,
+                                         where);
   };
   constexpr quint16 EveryCardKind = (1U << 10U) - 1U;
   const bool requiredMetricsPresent =
@@ -2011,7 +2016,7 @@ int main(int argc, char **argv) {
           QStringLiteral("actual DPR %1 matches requested DPR %2")
               .arg(actualDpr)
               .arg(expectedDpr));
-  require(initialMilliseconds <= initialLimit,
+  require(codexui::testing::timingLimit(initialMilliseconds <= initialLimit),
           QStringLiteral("initial presentation <= %1 ms").arg(initialLimit));
   require(firstFrame.viewportRowsRendered &&
               firstFrame.cards == firstFrame.visibleCards &&
@@ -2141,8 +2146,9 @@ int main(int argc, char **argv) {
           QStringLiteral("progressive native wheel input renders the viewport "
                          "immediately with zero synchronous hidden-card "
                          "construction and bounded asynchronous admission"));
-  require(warmedWheelStats.p95 <= timingScale * 2000 &&
-              warmedWheelStats.maximum <= timingScale * 5000,
+  require(codexui::testing::timingLimit(
+              warmedWheelStats.p95 <= timingScale * 2000 &&
+              warmedWheelStats.maximum <= timingScale * 5000),
           QStringLiteral("progressive viewport-wheel synchronous handler "
                          "p95/max stay within 2/5 ms"));
   require(
@@ -2171,7 +2177,7 @@ int main(int argc, char **argv) {
                          "70/85/120 ms"));
   require(noOpStable,
           QStringLiteral("semantic no-op preserves pixels, objects, and work"));
-  require(noOpMicroseconds <= noOpLimit,
+  require(codexui::testing::timingLimit(noOpMicroseconds <= noOpLimit),
           QStringLiteral("unchanged reconciliation <= %1 us").arg(noOpLimit));
   require(streamAccepted && streamingConstructions == 0 && streamTailLocal &&
               streamTailLocalityChecks == StreamSamples &&
@@ -2191,7 +2197,7 @@ int main(int argc, char **argv) {
                          "within the work budget"));
   require(appendCorrect && appendConstructions == 0 &&
               appendLayoutRequests <= 64 && appendPaints <= 64 &&
-              appendMicroseconds <= appendLimit,
+              codexui::testing::timingLimit(appendMicroseconds <= appendLimit),
           QStringLiteral("paused tail append is rebuild-free and bounded"));
   require(
       followingAppendsCorrect && followingAppendMaximumConstructions <= 4 &&
@@ -2199,17 +2205,21 @@ int main(int argc, char **argv) {
           followingAppendMaximumPaints <= 128 &&
           timingWithin(followingAppendStats, 15000, 30000, 50000),
       QStringLiteral("following tail appends stay smooth and fully visible"));
-  require(resizeCorrect && resizeEntryMicroseconds <= timingScale * 100000 &&
+  require(resizeCorrect &&
+              codexui::testing::timingLimit(resizeEntryMicroseconds <=
+                                            timingScale * 100000) &&
               timingWithin(resizeFrameStats, 35000, 50000, 75000) &&
-              exactResizeMicroseconds <= timingScale * 100000 &&
+              codexui::testing::timingLimit(exactResizeMicroseconds <=
+                                            timingScale * 100000) &&
               resizeMaximumLayoutRequests <= 512 && resizeMaximumPaints <= 256,
           QStringLiteral("interactive resize entry, steady frames, and exact "
                          "settlement stay within budget"));
   require(count < 10'000 ||
               (sparseSmall.correct && sparseLarge.correct &&
-               sparseLarge.microseconds <= sparseVisibilityLimit &&
-               sparseLarge.microseconds <=
-                   sparseSmall.microseconds * 12 + timingScale * 20000),
+               codexui::testing::timingLimit(
+                   sparseLarge.microseconds <= sparseVisibilityLimit &&
+                   sparseLarge.microseconds <=
+                       sparseSmall.microseconds * 12 + timingScale * 20000)),
           QStringLiteral("zero-height rows do not scale viewport traversal"));
   require(count < 10'000 ||
               (structuralPlanCorrect &&

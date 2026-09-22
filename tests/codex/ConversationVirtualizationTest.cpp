@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "AccessibilityEventProbe.h"
+#include "TimingPolicy.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/ui/UiStyle.h"
-#include "AccessibilityEventProbe.h"
 
 #include <QAccessible>
 #include <QAbstractTextDocumentLayout>
@@ -6036,7 +6037,7 @@ bool streamingMarkdownKeepsOneDocument() {
           accessibilityEvents.events(cardAccessibleId).isEmpty(),
       "identical streamed Markdown emits no accessibility event");
 #endif
-  result &= expect(updateMicros < 500000,
+  result &= expect(codexui::testing::timingLimit(updateMicros < 500000),
                    "incremental visible Markdown update stays below 500 ms");
   return result;
 }
@@ -7088,13 +7089,15 @@ bool collapsedLargeCardsSkipBodyProjection() {
     std::clog << "file document layout size=" << size.width() << 'x'
               << size.height() << '\n';
   if (fileList)
-    std::clog << "file document font=" << fileList->font().toString().toStdString()
-              << " resolved=" << QFontInfo(fileList->font()).family().toStdString()
+    std::clog << "file document font="
+              << fileList->font().toString().toStdString() << " resolved="
+              << QFontInfo(fileList->font()).family().toStdString()
               << " Qt=" << qVersion() << '\n';
   const bool boundedExpansion =
       fileList && fileList->document()->blockCount() == 5'000 &&
       richCard->property("fileChangesBodyRebuilds").toULongLong() == 1 &&
-      expansionMicros < InstrumentedTimingScale * 100'000;
+      codexui::testing::timingLimit(expansionMicros <
+                                    InstrumentedTimingScale * 100'000);
   if (!boundedExpansion)
     std::cerr << "large file-change expansion us=" << expansionMicros
               << " rebuilds="

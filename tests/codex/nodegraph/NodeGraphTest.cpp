@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/nodegraph/NodeGraph.h"
+#include "../TimingPolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -1288,7 +1289,8 @@ bool testBatchRemovalIsAtomicAndApproximatelyLinear() {
   const auto [largeValid, largeElapsed] = measure(6000);
   const auto allowance = smallElapsed * 3 + std::chrono::milliseconds(20);
   bool passed = expect(
-      smallValid && largeValid && largeElapsed <= allowance,
+      smallValid && largeValid &&
+          codexui::testing::timingLimit(largeElapsed <= allowance),
       "batch removal preserves order, relations, lifetime, and near-linear "
       "scaling");
   std::cout
@@ -1394,10 +1396,11 @@ bool testBatchRemovalIsAtomicAndApproximatelyLinear() {
   const auto [longPrefixValid, longPrefixElapsed] = measureTailRemoval(40'000);
   const auto localityAllowance =
       shortPrefixElapsed * 4 + std::chrono::milliseconds(5);
-  passed &= expect(shortPrefixValid && longPrefixValid &&
-                       longPrefixElapsed <= localityAllowance,
-                   "single-tail removal is independent of unchanged ordered "
-                   "child and relation prefixes");
+  passed &= expect(
+      shortPrefixValid && longPrefixValid &&
+          codexui::testing::timingLimit(longPrefixElapsed <= localityAllowance),
+      "single-tail removal is independent of unchanged ordered "
+      "child and relation prefixes");
   std::cout << "tail-removal ns (2000 / 40000 unchanged neighbors): "
             << std::chrono::duration_cast<std::chrono::nanoseconds>(
                    shortPrefixElapsed)
@@ -1486,7 +1489,8 @@ bool testInspectorAgentTailAppendIsIncremental() {
           index->agentChangedRevision == appendRevision &&
           !index->agents.front().contributors.empty() &&
           index->agents.front().contributors.back() == appended &&
-          appendElapsed < std::chrono::milliseconds(50),
+          codexui::testing::timingLimit(appendElapsed <
+                                        std::chrono::milliseconds(50)),
       "Agent tail append updates one selector without rebuilding its 10,000 "
       "contribution history");
   read.reset();
@@ -1501,12 +1505,14 @@ bool testInspectorAgentTailAppendIsIncremental() {
   const auto elapsed = std::chrono::steady_clock::now() - started;
   read = graph.tryRead();
   index = read ? read->inspectorIndex(owner) : nullptr;
-  passed &= expect(
-      index && index->agents.size() == 1 &&
-          candidateSource(index->agents.front(), 4) == previousContribution &&
-          index->agentChangedRevision == fallbackRevision &&
-          elapsed < std::chrono::milliseconds(50),
-      "clearing the latest Agent field exposes its predecessor with bounded indexed work");
+  passed &= expect(index && index->agents.size() == 1 &&
+                       candidateSource(index->agents.front(), 4) ==
+                           previousContribution &&
+                       index->agentChangedRevision == fallbackRevision &&
+                       codexui::testing::timingLimit(
+                           elapsed < std::chrono::milliseconds(50)),
+                   "clearing the latest Agent field exposes its predecessor "
+                   "with bounded indexed work");
   read.reset();
 
   const auto toolStarted = std::chrono::steady_clock::now();
@@ -1519,9 +1525,10 @@ bool testInspectorAgentTailAppendIsIncremental() {
   read = graph.tryRead();
   index = read ? read->inspectorIndex(owner) : nullptr;
   passed &= expect(
-      index && candidateSource(index->agents.front(), 1) ==
-                   previousContribution &&
-          toolElapsed < std::chrono::milliseconds(50),
+      index &&
+          candidateSource(index->agents.front(), 1) == previousContribution &&
+          codexui::testing::timingLimit(toolElapsed <
+                                        std::chrono::milliseconds(50)),
       "subAgent display-tool updates do not rebuild 10,000 contributors");
   read.reset();
 
@@ -1546,7 +1553,8 @@ bool testInspectorAgentTailAppendIsIncremental() {
     static_cast<void>(write.finish());
   }
   const auto kindElapsed = std::chrono::steady_clock::now() - kindStarted;
-  passed &= expect(kindElapsed < std::chrono::milliseconds(50),
+  passed &= expect(codexui::testing::timingLimit(kindElapsed <
+                                                 std::chrono::milliseconds(50)),
                    "collaboration lifecycle updates do not rebuild 10,000 "
                    "contributors");
   return passed;
@@ -1585,7 +1593,8 @@ bool testInspectorIndexWorkIsBoundedByChangedDependencies() {
   const auto [longStatusValid, longStatus] = measureTurnStatus(40'000);
   bool passed = expect(
       shortStatusValid && longStatusValid &&
-          longStatus <= shortStatus * 5 + std::chrono::milliseconds(20),
+          codexui::testing::timingLimit(
+              longStatus <= shortStatus * 5 + std::chrono::milliseconds(20)),
       "Turn status updates do not scan unrelated Item history");
 
   const auto measureLegacyPlan = [](std::size_t laterTurns) {
@@ -1625,10 +1634,11 @@ bool testInspectorIndexWorkIsBoundedByChangedDependencies() {
   };
   const auto [shortPlanValid, shortPlan] = measureLegacyPlan(2'000);
   const auto [longPlanValid, longPlan] = measureLegacyPlan(40'000);
-  passed &= expect(
-      shortPlanValid && longPlanValid &&
-          longPlan <= shortPlan * 5 + std::chrono::milliseconds(20),
-      "a selected legacy Plan update does not scan later Turn history");
+  passed &=
+      expect(shortPlanValid && longPlanValid &&
+                 codexui::testing::timingLimit(
+                     longPlan <= shortPlan * 5 + std::chrono::milliseconds(20)),
+             "a selected legacy Plan update does not scan later Turn history");
 
   const auto measureAgentRemoval = [](std::size_t count) {
     NodeGraph graph;
@@ -1673,7 +1683,9 @@ bool testInspectorIndexWorkIsBoundedByChangedDependencies() {
   const auto [largeRemovalValid, largeRemoval] = measureAgentRemoval(3'000);
   passed &= expect(
       smallRemovalValid && largeRemovalValid &&
-          largeRemoval <= smallRemoval * 20 + std::chrono::milliseconds(50),
+          codexui::testing::timingLimit(largeRemoval <=
+                                        smallRemoval * 20 +
+                                            std::chrono::milliseconds(50)),
       "batched Agent removals across Turns avoid a quadratic ambiguity pass");
   const auto measureUnrelatedWrites = [](std::size_t count,
                                          bool createThreads) {
@@ -1718,8 +1730,9 @@ bool testInspectorIndexWorkIsBoundedByChangedDependencies() {
       measureUnrelatedWrites(40'000, true);
   passed &= expect(
       fewPlainValid && manyPlainValid && fewThreadsValid && manyThreadsValid &&
-          manyPlain <= fewPlain * 5 + std::chrono::milliseconds(20) &&
-          manyThreads <= fewThreads * 5 + std::chrono::milliseconds(20),
+          codexui::testing::timingLimit(
+              manyPlain <= fewPlain * 5 + std::chrono::milliseconds(20) &&
+              manyThreads <= fewThreads * 5 + std::chrono::milliseconds(20)),
       "ordinary finishes do not scan all nodes or all Thread indexes");
 
   const auto measurePayloadPresence = [](std::size_t bytes) {
@@ -1762,7 +1775,8 @@ bool testInspectorIndexWorkIsBoundedByChangedDependencies() {
       measurePayloadPresence(2 * 1024 * 1024);
   passed &= expect(
       smallPayloadValid && largePayloadValid &&
-          largePayload <= smallPayload * 6 + std::chrono::milliseconds(20),
+          codexui::testing::timingLimit(
+              largePayload <= smallPayload * 6 + std::chrono::milliseconds(20)),
       "status maintenance tests large Agent payload presence without copies");
 
   const auto measureExactChildFanout = [](std::size_t unrelatedThreads,
@@ -1896,12 +1910,14 @@ bool testInspectorIndexWorkIsBoundedByChangedDependencies() {
       measureExactChildFanout(0, 1'000);
   passed &= expect(
       shortFanoutLocalityValid && longFanoutLocalityValid &&
-          longFanoutLocality <=
-              shortFanoutLocality * 5 + std::chrono::milliseconds(20),
+          codexui::testing::timingLimit(longFanoutLocality <=
+                                        shortFanoutLocality * 5 +
+                                            std::chrono::milliseconds(20)),
       "exact child fanout work is independent of unrelated Thread indexes");
   passed &= expect(
       smallFanoutValid && largeFanoutValid &&
-          largeFanout <= smallFanout * 15 + std::chrono::milliseconds(20),
+          codexui::testing::timingLimit(
+              largeFanout <= smallFanout * 15 + std::chrono::milliseconds(20)),
       "exact child status and result fanout scale with actual parent count");
   std::cout << "inspector indexed ns (status 2k/40k, plan 2k/40k, removal 300/3k): "
             << std::chrono::duration_cast<std::chrono::nanoseconds>(shortStatus)

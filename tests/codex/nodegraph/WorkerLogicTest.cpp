@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/nodegraph/WorkerLogic.h"
+#include "../TimingPolicy.h"
 
 #include <algorithm>
 #include <chrono>
@@ -639,10 +640,12 @@ void hydrationCompletionWorkIsIndependentOfRetainedItems() {
 
   const auto [smallValid, smallElapsed] = measure(2000);
   const auto [largeValid, largeElapsed] = measure(40000);
-  require(smallValid && largeValid &&
-              largeElapsed <= smallElapsed * 4 + std::chrono::milliseconds(10),
-          "hydration completion admission is independent of retained Item "
-          "cardinality");
+  require(
+      smallValid && largeValid &&
+          codexui::testing::timingLimit(
+              largeElapsed <= smallElapsed * 4 + std::chrono::milliseconds(10)),
+      "hydration completion admission is independent of retained Item "
+      "cardinality");
   std::cout
       << "hydration-completion ns (2000 / 40000 retained items): "
       << std::chrono::duration_cast<std::chrono::nanoseconds>(smallElapsed)

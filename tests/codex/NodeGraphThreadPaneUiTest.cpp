@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "AccessibilityEventProbe.h"
+#include "TimingPolicy.h"
 #include "codex/ForkNaming.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
-#include "AccessibilityEventProbe.h"
 
 #include <QAbstractItemView>
 #include <QAccessible>
@@ -1905,11 +1906,13 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
     gate(noOpStable && noOpPaints == 0,
          QStringLiteral(
              "semantic no-op changed model, pixels, focus, or anchor"));
-    gate(noOpMicros <= 100000 * scaleAllowance,
+    gate(codexui::testing::timingLimit(noOpMicros <= 100000 * scaleAllowance),
          QStringLiteral("10k semantic no-op exceeded the work budget"));
-    gate(adapterMicros <= 500000 * scaleAllowance,
-         QStringLiteral("thread projection exceeded the quantitative budget"));
-    gate(populationMicros <= 2000000 * scaleAllowance,
+    gate(
+        codexui::testing::timingLimit(adapterMicros <= 500000 * scaleAllowance),
+        QStringLiteral("thread projection exceeded the quantitative budget"));
+    gate(codexui::testing::timingLimit(populationMicros <=
+                                       2000000 * scaleAllowance),
          QStringLiteral("thread population exceeded the quantitative budget"));
     gate(!offscreenTimerActive && offscreenAnimationPaints == 0,
          QStringLiteral("offscreen animation retained timer or paint work"));

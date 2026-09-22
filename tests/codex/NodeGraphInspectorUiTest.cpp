@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "AccessibilityEventProbe.h"
+#include "TimingPolicy.h"
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/nodegraph/NodeGraph.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
-#include "AccessibilityEventProbe.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QAbstractScrollArea>
@@ -2735,23 +2736,28 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
   constexpr qint64 MaximumScrollMicros = 750'000;
   constexpr qint64 MaximumProjectionResponseMicros = 200'000;
   constexpr qint64 MaximumProjectionBatchMicros = 1'000'000;
-  result &= expect(planMicros <= MaximumInitialMicros &&
-                       agentMicros <= MaximumSwitchMicros &&
-                       requestMicros <= MaximumSwitchMicros &&
-                       planScrollMicros <= MaximumScrollMicros &&
-                       agentScrollMicros <= MaximumScrollMicros &&
-                       requestScrollMicros <= MaximumScrollMicros,
-                   "Inspector residency work stays within quantitative time gates");
+  result &= expect(
+      codexui::testing::timingLimit(planMicros <= MaximumInitialMicros &&
+                                    agentMicros <= MaximumSwitchMicros &&
+                                    requestMicros <= MaximumSwitchMicros &&
+                                    planScrollMicros <= MaximumScrollMicros &&
+                                    agentScrollMicros <= MaximumScrollMicros &&
+                                    requestScrollMicros <= MaximumScrollMicros),
+      "Inspector residency work stays within quantitative time gates");
   result &= expect(
       data.valid && directPagesExact && pendingPagesExact &&
           data.maximumRowsReturned <= ui::MaximumInspectorRows &&
           data.maximumValuesReturned <= ui::MaximumInspectorRows + 1 &&
-          data.maximumResponseMicros <= MaximumProjectionResponseMicros &&
-          std::ranges::all_of(directBatchMicros, [](qint64 micros) {
-            return micros <= MaximumProjectionBatchMicros;
-          }) &&
-          pendingBatchMicros <= MaximumProjectionBatchMicros,
-      "real graph-backed Inspector page projections are exact and quantitatively bounded");
+          codexui::testing::timingLimit(
+              data.maximumResponseMicros <= MaximumProjectionResponseMicros &&
+              std::ranges::all_of(directBatchMicros,
+                                  [](qint64 micros) {
+                                    return micros <=
+                                           MaximumProjectionBatchMicros;
+                                  }) &&
+              pendingBatchMicros <= MaximumProjectionBatchMicros),
+      "real graph-backed Inspector page projections are exact and "
+      "quantitatively bounded");
   result &= expect(
       uiResponseCount >= 6 && uiResponseCount <= 24 &&
           maximumPageDemands <= 4 &&

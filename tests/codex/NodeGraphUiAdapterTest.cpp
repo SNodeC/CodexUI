@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ui/NodeGraphUiAdapter.h"
+#include "TimingPolicy.h"
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
 #include "codex/TurnSettingsPolicy.h"
@@ -405,10 +406,13 @@ bool completeHistoryProjectionScalesLinearly() {
   std::cout << "complete conversation projection us (10k/40k): "
             << medians[0].count() << " / " << medians[1].count() << '\n';
   return result &&
-         require(medians[1] <= std::chrono::seconds(1),
+         require(codexui::testing::timingLimit(medians[1] <=
+                                               std::chrono::seconds(1)),
                  "40k complete projection exceeded its absolute bound") &&
-         require(medians[1] <= medians[0] * 8 + std::chrono::milliseconds(10),
-                 "complete projection scaled beyond its linear allowance");
+         require(
+             codexui::testing::timingLimit(
+                 medians[1] <= medians[0] * 8 + std::chrono::milliseconds(10)),
+             "complete projection scaled beyond its linear allowance");
 }
 
 bool projectsCanonicalAgentActivityLifecycle() {
@@ -1876,13 +1880,15 @@ bool pendingRequestProjectionWorkIsQuantitativelyBounded() {
             << '\n';
   return require(
       small.valid && large.valid &&
-          large.projection <=
-              small.projection * 8 + std::chrono::milliseconds(30) &&
-          large.paging <= small.paging * 6 + std::chrono::milliseconds(30) &&
-          large.unrelated <=
-              small.unrelated * 5 + std::chrono::milliseconds(10) &&
-          large.hierarchy <=
-              small.hierarchy * 8 + std::chrono::milliseconds(30),
+          codexui::testing::timingLimit(
+              large.projection <=
+                  small.projection * 8 + std::chrono::milliseconds(30) &&
+              large.paging <=
+                  small.paging * 6 + std::chrono::milliseconds(30) &&
+              large.unrelated <=
+                  small.unrelated * 5 + std::chrono::milliseconds(10) &&
+              large.hierarchy <=
+                  small.hierarchy * 8 + std::chrono::milliseconds(30)),
       "pending Request projection and dependency work exceeded its bounds");
 }
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "TimingPolicy.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
@@ -295,11 +296,11 @@ bool turnSettingsCatalogProjectionScalesLinearly() {
   std::cout << "Settings catalog projection: "
             << small.nanoseconds / 1'000'000.0 << " ms/2048, "
             << large.nanoseconds / 1'000'000.0 << " ms/8192\n";
-  return expect(small.modelChoices == 2'049 && small.profileChoices == 2'049 &&
-                    large.modelChoices == 8'193 &&
-                    large.profileChoices == 8'193 &&
-                    large.nanoseconds <= linearAllowance,
-                "settings catalog projection remains quantitatively linear");
+  return expect(
+      small.modelChoices == 2'049 && small.profileChoices == 2'049 &&
+          large.modelChoices == 8'193 && large.profileChoices == 8'193 &&
+          codexui::testing::timingLimit(large.nanoseconds <= linearAllowance),
+      "settings catalog projection remains quantitatively linear");
 }
 
 ui::ThreadListRow
@@ -897,11 +898,12 @@ bool nestedWheelGestureHasOneRoutingOwner(bool measurePerformance) {
     std::cerr << "Middle-region wheel route: direct p95=" << directP95
               << " us, routed p95/max=" << routedP95 << '/' << routedMaximum
               << " us\n";
-    result &=
-        expect(performanceMovement && routedP95 <= 2000 &&
-                   routedMaximum <= 5000 && routedP95 <= directP95 * 4 + 500,
-               "the registered central wheel route stays within its "
-               "2/5 ms budget and bounded against native dispatch");
+    result &= expect(performanceMovement &&
+                         codexui::testing::timingLimit(
+                             routedP95 <= 2000 && routedMaximum <= 5000 &&
+                             routedP95 <= directP95 * 4 + 500),
+                     "the registered central wheel route stays within its "
+                     "2/5 ms budget and bounded against native dispatch");
   }
   result &= expect(router.maximumDepth == 2 && !router.overflow,
                    "native redispatch re-enters the application filter once "
