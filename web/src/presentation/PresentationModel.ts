@@ -880,10 +880,9 @@ export class PresentationModel {
             resetIncomingTextBounds(result, raw);
             mergePreservingCompleteness(result.raw, raw);
         }
-        const incomingStatus = statusFromValue(member(raw, "status"));
-        if (lifecycle === "completed" && isEmptyStatus(incomingStatus)) result.raw.status = "completed";
-        else if (lifecycle === "started" && isEmptyStatus(incomingStatus))
-            result.raw.status = "running";
+        if ((lifecycle === "completed" || lifecycle === "started")
+            && isEmptyStatus(statusFromValue(member(raw, "status"))))
+            result.raw.status = lifecycle === "completed" ? "completed" : "running";
         boundRetainedItemText(result);
         const type = stringMember(result.raw, "type");
         if (["subAgentActivity", "collabAgentToolCall"].includes(type))
