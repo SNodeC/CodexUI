@@ -6,10 +6,12 @@
 #include "AccessibilityEventProbe.h"
 
 #include <QAccessible>
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
 #include <QElapsedTimer>
+#include <QFontInfo>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -7068,11 +7070,27 @@ bool collapsedLargeCardsSkipBodyProjection() {
       bodySkipped,
       "collapsed large cards paint only their header without converting or "
       "laying out their body");
+  std::vector<QSizeF> fileLayoutSizes;
+  fileLayoutSizes.reserve(8);
+  QMetaObject::Connection layoutConnection;
+  if (fileList)
+    layoutConnection = QObject::connect(
+        fileList->document()->documentLayout(),
+        &QAbstractTextDocumentLayout::documentSizeChanged, &view,
+        [&fileLayoutSizes](const QSizeF &size) { fileLayoutSizes.push_back(size); });
   QElapsedTimer expansionTimer;
   expansionTimer.start();
   richCard->setCollapsed(false);
   const qint64 expansionMicros = expansionTimer.nsecsElapsed() / 1000;
+  QObject::disconnect(layoutConnection);
   std::clog << "file expansion us=" << expansionMicros << '\n';
+  for (const QSizeF &size : fileLayoutSizes)
+    std::clog << "file document layout size=" << size.width() << 'x'
+              << size.height() << '\n';
+  if (fileList)
+    std::clog << "file document font=" << fileList->font().toString().toStdString()
+              << " resolved=" << QFontInfo(fileList->font()).family().toStdString()
+              << " Qt=" << qVersion() << '\n';
   const bool boundedExpansion =
       fileList && fileList->document()->blockCount() == 5'000 &&
       richCard->property("fileChangesBodyRebuilds").toULongLong() == 1 &&

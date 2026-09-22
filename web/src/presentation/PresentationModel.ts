@@ -633,7 +633,7 @@ export class PresentationModel {
             return;
         }
         if (type === "conversation.reasoning.part-added") {
-            const item = this.findItem(scope);
+            const item = this.findItem(thread, scope);
             const index = isObject(data) ? data.summaryIndex : undefined;
             if (item && typeof index === "number" && Number.isInteger(index) && index >= 0
                 && index < MaximumIndexedTextParts) {
@@ -646,12 +646,12 @@ export class PresentationModel {
             return;
         }
         if (type === "conversation.file-change.output-appended") {
-            const item = this.findItem(scope);
+            const item = this.findItem(thread, scope);
             if (item) appendText(item, "output", stringMember(data, "delta"));
             return;
         }
         if (type === "conversation.file-change.patch-replaced") {
-            const item = this.findItem(scope);
+            const item = this.findItem(thread, scope);
             if (item) {
                 const changes = clone(member(data, "changes", []));
                 if (!jsonEqual(item.raw.changes, changes)) {
@@ -661,7 +661,7 @@ export class PresentationModel {
             return;
         }
         if (type === "conversation.mcp.progress") {
-            const item = this.findItem(scope);
+            const item = this.findItem(thread, scope);
             if (item) {
                 const progress: unknown[] = Array.isArray(item.raw.progress) ? item.raw.progress : [];
                 item.raw.progress = progress;
@@ -672,7 +672,7 @@ export class PresentationModel {
             return;
         }
         if (type !== "conversation.item.append") return;
-        const item = this.findItem(scope);
+        const item = this.findItem(thread, scope);
         if (!item) return;
         const field = stringMember(data, "field");
         const changed = field === "summary" ? appendIndexedText(item, "summary", data, "summaryIndex")
@@ -1115,12 +1115,8 @@ export class PresentationModel {
         this.permissionProfiles = undefined;
     }
 
-    private findTurn(threadId: string, turnId: string): TurnPresentation | undefined {
-        return this.threads.get(threadId)?.turns.get(turnId);
-    }
-
-    private findItem(params: unknown): ItemPresentation | undefined {
-        return this.findTurn(stringMember(params, "threadId"), stringMember(params, "turnId"))
+    private findItem(thread: ThreadPresentation, params: unknown): ItemPresentation | undefined {
+        return thread.turns.get(stringMember(params, "turnId"))
             ?.items.get(stringMember(params, "itemId"));
     }
 }
