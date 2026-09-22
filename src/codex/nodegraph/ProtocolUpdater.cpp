@@ -488,7 +488,25 @@ NodeRef ensureItem(NodeGraph::WriteAccess &write, const NodeRef &turn,
       next.fields.emplace("protocolThreadId", Value(threadId));
     item = write.upsert(std::move(id), std::move(next));
   }
-  write.setParent(turn, item);
+  if (write.parent(item) != turn) {
+    NodeRef before;
+    // Unconsumed steering stays after server history, including after request
+    // acceptance. Only the correlated user item establishes its final slot.
+    for (const NodeRef &prompt :
+         write.related(thread, RelationKind::PendingPrompt)) {
+      if (write.parent(prompt) != turn || !isLocalPrompt(write, prompt))
+        continue;
+      const auto state = write.state(prompt);
+      const std::string dispatch =
+          scalarTextFromValue(valueMember(*state, "dispatchState"));
+      if (!boolFromValue(valueMember(*state, "startsTurn")) &&
+          dispatch != "failed" && dispatch != "uncertain") {
+        before = prompt;
+        break;
+      }
+    }
+    write.setParent(turn, item, before);
+  }
   return item;
 }
 

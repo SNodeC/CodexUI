@@ -787,9 +787,8 @@ bool NodeGraph::WriteAccess::markInspectorAppend(Node *thread, Node *turn,
   return true;
 }
 
-void NodeGraph::WriteAccess::noteInspectorChildChange(Node *parent,
-                                                       Node *child,
-                                                       bool appended) {
+void NodeGraph::WriteAccess::noteInspectorChildChange(
+    Node *parent, Node *child, std::optional<std::size_t> insertion) {
   if (!parent || !child)
     return;
   if (parent->id_.kind == NodeKind::Turn &&
@@ -797,8 +796,11 @@ void NodeGraph::WriteAccess::noteInspectorChildChange(Node *parent,
     Node *thread = inspectorThread(parent);
     std::uint8_t sections = inspectorItemSections(child) |
                             inspectorIndexedSections(thread, child);
-    if (appended && child->changedRevision_ == 0 &&
-        markInspectorAppend(thread, parent, parent->children_.size()))
+    if (insertion && child->changedRevision_ == 0 &&
+        std::ranges::none_of(
+            std::span(parent->children_).subspan(*insertion),
+            [this](Node *node) { return inspectorItemSections(node) & 2U; }) &&
+        markInspectorAppend(thread, parent, *insertion))
       sections &= static_cast<std::uint8_t>(~2U);
     markInspectorRebuild(thread, sections);
   } else if (parent->id_.kind == NodeKind::Thread &&
@@ -815,7 +817,7 @@ void NodeGraph::WriteAccess::noteInspectorChildrenReplacement(
     return;
   for (const NodeRef &child : next)
     if (child && child->parent_ && child->parent_ != parent)
-      noteInspectorChildChange(child->parent_, child.get(), false);
+      noteInspectorChildChange(child->parent_, child.get());
 
   bool appended = previous.size() <= next.size();
   for (std::size_t index = 0; appended && index < previous.size(); ++index)
@@ -861,7 +863,8 @@ void NodeGraph::WriteAccess::noteInspectorRelationChange(
 }
 
 void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
-                                       const NodeRef &child) {
+                                       const NodeRef &child,
+                                       const NodeRef &before) {
   requireLive(parent);
   requireLive(child);
   if (parent == child)
@@ -872,10 +875,19 @@ void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
   }
   if (child->parent_ == parent.get())
     return;
+  if (before) {
+    requireLive(before);
+    if (before->parent_ != parent.get())
+      throw std::invalid_argument(
+          "insertion sibling must belong to the parent");
+  }
   parent->children_.reserve(parent->children_.size() + 1);
   NodeRef previousParent = pin(child->parent_);
-  noteInspectorChildChange(previousParent.get(), child.get(), false);
-  noteInspectorChildChange(parent.get(), child.get(), true);
+  const std::size_t position =
+      before ? before->parentIndex_.load(std::memory_order_relaxed)
+             : parent->children_.size();
+  noteInspectorChildChange(previousParent.get(), child.get());
+  noteInspectorChildChange(parent.get(), child.get(), position);
   const std::array changed{parent, child, previousParent};
   const std::array childrenChanged{
       ChildListChange{parent, child->id().kind},
@@ -889,9 +901,10 @@ void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
           index, std::memory_order_relaxed);
   }
   child->parent_ = parent.get();
-  child->parentIndex_.store(parent->children_.size(),
-                            std::memory_order_relaxed);
-  parent->children_.emplace_back(child.get());
+  parent->children_.insert(parent->children_.begin() + position, child.get());
+  for (std::size_t index = position; index < parent->children_.size(); ++index)
+    parent->children_[index]->parentIndex_.store(index,
+                                                 std::memory_order_relaxed);
 }
 
 void NodeGraph::WriteAccess::clearParent(const NodeRef &child) {
@@ -899,7 +912,7 @@ void NodeGraph::WriteAccess::clearParent(const NodeRef &child) {
   if (!child->parent_)
     return;
   NodeRef parent = pin(child->parent_);
-  noteInspectorChildChange(parent.get(), child.get(), false);
+  noteInspectorChildChange(parent.get(), child.get());
   const std::array changed{parent, child};
   const std::array childrenChanged{ChildListChange{parent, child->id().kind}};
   prepareChanges(changed, changed, childrenChanged);
@@ -1171,7 +1184,7 @@ void NodeGraph::WriteAccess::removeMany(std::span<const NodeRef> nodes) {
   }
 
   for (const NodeRef &node : removalOrder) {
-    noteInspectorChildChange(node->parent_, node.get(), false);
+    noteInspectorChildChange(node->parent_, node.get());
     for (const auto &[source, kind] : node->incomingRelations_)
       noteInspectorRelationChange(source, kind);
   }

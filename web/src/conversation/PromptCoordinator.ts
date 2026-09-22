@@ -7,14 +7,14 @@ export interface PromptSubmission {
     id: number; admissionOrdinal: number; threadId: string; clientUserMessageId: string; prompt: string;
     attachments: AttachmentDraft[]; turnOptions: Record<string, unknown>; state: PromptState;
     admittedAtMilliseconds: number; error: string; admissionAnchor?: AuthoritativeItemKey;
-    admissionAtStart: boolean; startsTurn: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
+    startsTurn: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
     sortActivityAt?: number;
 }
 export interface PromptDispatch {
     id: number; threadId: string; clientUserMessageId: string; prompt: string; attachments: AttachmentDraft[];
     turnOptions: Record<string, unknown>; expectedTurnId?: string;
 }
-export interface PromptVisualAlias {key: LocalPromptKey; admissionAnchor?: AuthoritativeItemKey; admissionOrdinal: number}
+export interface PromptVisualAlias {key: LocalPromptKey}
 interface RetainedPromptVisualAlias extends PromptVisualAlias {materializedItem: AuthoritativeItemKey}
 export interface AuthoritativeItem {key: AuthoritativeItemKey; presentation: ItemPresentation; promptAlias?: PromptVisualAlias}
 export interface UserMessageByText {turnId: string; text: string; position: number}
@@ -87,8 +87,7 @@ export function promptWithFileLinks(prompt: string, attachments: readonly Attach
 }
 
 export function localCardVisible(submission: PromptSubmission): boolean {
-    return submission.state === "queued" || submission.state === "inFlight" || submission.state === "failed"
-        || submission.materializedItem === undefined;
+    return submission.materializedItem === undefined;
 }
 function cloneKey(key: AuthoritativeItemKey): AuthoritativeItemKey { return {...key}; }
 
@@ -105,7 +104,7 @@ export class PromptCoordinator {
             id: this.nextSubmissionId++, admissionOrdinal: this.nextAdmissionOrdinal++, threadId,
             clientUserMessageId: `codexui-${now}-${this.nextSubmissionId - 1}`, prompt, attachments: structuredClone(attachments),
             turnOptions: structuredClone(turnOptions), state: "queued", admittedAtMilliseconds: now, error: "",
-            admissionAtStart: false, startsTurn: activeTurnId === undefined,
+            startsTurn: activeTurnId === undefined,
         };
         if (activeTurnId === undefined && sortActivityAt !== undefined) submission.sortActivityAt = sortActivityAt;
         if (activeTurnId !== undefined) submission.expectedTurnId = activeTurnId;
@@ -125,7 +124,6 @@ export class PromptCoordinator {
         if (!list || list.some(value => value.state === "inFlight")) return undefined;
         const next = list.find(value => value.state === "queued");
         if (!next) return undefined;
-        next.admissionAtStart = next.admissionAnchor === undefined;
         next.state = "inFlight";
         next.startsTurn = activeTurnId === undefined;
         if (activeTurnId === undefined) delete next.expectedTurnId;
@@ -177,7 +175,6 @@ export class PromptCoordinator {
             const destination = this.visualAliasesByThread.get(to) ?? new Map();
             for (const alias of aliases.values()) {
                 alias.materializedItem.threadId = to;
-                if (alias.admissionAnchor) alias.admissionAnchor.threadId = to;
                 destination.set(authoritativeKey(alias.materializedItem), alias);
             }
             this.visualAliasesByThread.set(to, destination);
@@ -197,7 +194,7 @@ export class PromptCoordinator {
         for (const submission of submissions) {
             if (submission.materializedItem) continue;
             if (!submission.admissionAnchor && submission.state === "queued" && index.ordered.length > 0) {
-                submission.admissionAnchor = cloneKey(index.ordered.at(-1)!.key); submission.admissionAtStart = false;
+                submission.admissionAnchor = cloneKey(index.ordered.at(-1)!.key);
             }
             const exact = index.userMessagesByClientId.get(submission.clientUserMessageId);
             if (exact === undefined || claimed[exact]) continue;
@@ -221,9 +218,8 @@ export class PromptCoordinator {
         for (const submission of submissions) {
             if (submission.state !== "accepted" || !submission.materializedItem) continue;
             aliases.set(authoritativeKey(submission.materializedItem), {
-                key: {kind: "prompt", submissionId: submission.id}, admissionOrdinal: submission.admissionOrdinal,
+                key: {kind: "prompt", submissionId: submission.id},
                 materializedItem: cloneKey(submission.materializedItem),
-                ...(submission.admissionAnchor ? {admissionAnchor: cloneKey(submission.admissionAnchor)} : {}),
             });
         }
         this.visualAliasesByThread.set(threadId, aliases);

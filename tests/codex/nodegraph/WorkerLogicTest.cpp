@@ -1089,7 +1089,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
                                         "(file:///tmp/report%20%23%3F.txt)") &&
             dispatch && dispatch->asString() &&
             *dispatch->asString() == "dispatching" &&
-            boolFieldEquals(state, "showPendingAnimation", false) &&
+            !field(state, "showPendingAnimation") &&
             read->related(runtime, RelationKind::PendingPrompt) ==
                 std::vector<NodeRef>{firstPrompt} &&
             read->related(thread, RelationKind::PendingPrompt) ==
@@ -1178,8 +1178,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
             read->state(firstPrompt)->status == NodeStatus::Running &&
             stringFieldEquals(read->state(firstPrompt), "dispatchState",
                               "awaitingMaterialization") &&
-            boolFieldEquals(read->state(firstPrompt), "showPendingAnimation",
-                            false),
+            !field(read->state(firstPrompt), "showPendingAnimation"),
         "matching authoritative clientId directly relates the user item "
         "to its active local visual identity and transfers canonical "
         "turn-root ownership without overriding the retained UI deadline");

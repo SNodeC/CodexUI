@@ -376,7 +376,6 @@ VisibleCardData cardForAppearanceAudit(const std::string &threadId,
     payload = LocalPromptData{9000U + static_cast<std::uint64_t>(index),
                               "Local prompt appearance audit",
                               PromptState::InFlight,
-                              0,
                               {},
                               {}};
     break;
@@ -1503,7 +1502,6 @@ bool testPausedExpandedCommandStaysPainted() {
       LocalPromptData{12'345,
                       "A newly admitted turn",
                       PromptState::InFlight,
-                      true,
                       {},
                       {},
                       QDateTime::currentMSecsSinceEpoch(),
@@ -1689,7 +1687,7 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
       liveSnapshot.threadId,
       "live-turn",
       {},
-      LocalPromptData{1, "Live prompt", PromptState::InFlight, 0, {}, {}}};
+      LocalPromptData{1, "Live prompt", PromptState::InFlight, {}, {}}};
   liveSnapshot.sections.push_back(
       {"live-turn-section", "live-turn", {localPrompt}, localPrompt.key});
   result &= expect(changed(optimisticView.reconcile(liveSnapshot)),
@@ -1772,16 +1770,14 @@ bool testPromptAdmissionFollowOwnership() {
   spin();
 
   bool result = true;
-  VisibleCardData pending{LocalPromptKey{1001},
-                          CardKind::LocalPrompt,
-                          "prompt-follow",
-                          {},
-                          {},
-                          LocalPromptData{1001,
-                                          "a newly admitted pending prompt",
-                                          PromptState::InFlight,
-                                          0,
-                                          {}}};
+  VisibleCardData pending{
+      LocalPromptKey{1001},
+      CardKind::LocalPrompt,
+      "prompt-follow",
+      {},
+      {},
+      LocalPromptData{
+          1001, "a newly admitted pending prompt", PromptState::InFlight, {}}};
   snapshot.sections.back().cards.push_back(pending);
   applyConversation(view, snapshot);
   ConversationCard *pendingCard = nullptr;
@@ -1885,7 +1881,6 @@ bool testCardCopyControls() {
         LocalPromptData{99,
                         "Pending `prompt`",
                         PromptState::InFlight,
-                        0,
                         {},
                         {"/tmp/pending.png"}}},
        QStringLiteral("Pending `prompt`"),
@@ -2301,7 +2296,6 @@ bool testMutableCardsAndCommandOutput() {
                        "pending\n\nAttached files:\n"
                        "- [report.pdf](file:///tmp/report.pdf)",
                        PromptState::InFlight,
-                       0,
                        {}}},
   };
   section.rootCardKey = section.cards.front().key;
@@ -2927,7 +2921,6 @@ bool testCardFoldingGeometryAndRetention() {
       LocalPromptData{4343,
                       "A steering prompt",
                       PromptState::InFlight,
-                      false,
                       {},
                       {},
                       QDateTime::currentMSecsSinceEpoch() - 1500,
@@ -3103,7 +3096,7 @@ bool testCardFoldingGeometryAndRetention() {
       {},
       {},
       LocalPromptData{
-          4242, "A temporary prompt", PromptState::InFlight, 0, {}, {}}};
+          4242, "A temporary prompt", PromptState::InFlight, {}, {}}};
   VisibleCardData promptActivity = agentCard(promptThread, "turn", 77);
   ConversationGraphSpec promptSnapshot{
       promptThread,
@@ -4154,8 +4147,7 @@ bool testPendingPromptAnimation() {
       "prompt-thread",
       {},
       {},
-      LocalPromptData{
-          901, "pending prompt", PromptState::InFlight, false, {}, {}}};
+      LocalPromptData{901, "pending prompt", PromptState::InFlight, {}, {}}};
   ConversationCard card(pending, false);
   card.setStyle(&normalMotion);
   card.invalidateGeometryEnvironment();
@@ -4207,8 +4199,9 @@ bool testPendingPromptAnimation() {
                    "the correlated request acknowledgement is applied");
   const QImage accepted = card.grab().toImage();
   spin(100);
-  result &= expect(accepted == card.grab().toImage(),
-                   "request acknowledgement immediately stops feedback");
+  result &=
+      expect(accepted != card.grab().toImage(),
+             "acceptance keeps feedback pending until entry into history");
 
   VisibleCardData materialized{LocalPromptKey{901},
                                CardKind::UserMessage,
@@ -4230,8 +4223,7 @@ bool testPendingPromptAnimation() {
       "prompt-thread",
       "turn",
       {},
-      LocalPromptData{
-          902, "steering prompt", PromptState::InFlight, false, {}, {}}};
+      LocalPromptData{902, "steering prompt", PromptState::InFlight, {}, {}}};
   ConversationCard steeringCard(steering, false);
   steeringCard.setStyle(&normalMotion);
   steeringCard.invalidateGeometryEnvironment();
@@ -4265,14 +4257,14 @@ bool testPendingPromptAnimation() {
                    "the steering request acknowledgement is applied");
   auto *steeringTimer =
       steeringCard.findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"));
-  result &= expect(steeringTimer && !steeringTimer->isActive(),
-                   "steering acknowledgement synchronously stops its timer");
+  result &= expect(steeringTimer && steeringTimer->isActive(),
+                   "steering acceptance preserves its pending timer");
   spin(40);
   const QImage acceptedSteering = steeringCard.grab().toImage();
   spin(100);
   result &=
-      expect(acceptedSteering == steeringCard.grab().toImage(),
-             "steering acknowledgement immediately stops its feedback sweep");
+      expect(acceptedSteering != steeringCard.grab().toImage(),
+             "steering keeps its sweep until the authoritative item arrives");
   VisibleCardData materializedSteering{
       LocalPromptKey{902}, CardKind::UserMessage,
       "prompt-thread",     "turn",
@@ -4307,7 +4299,6 @@ bool testReducedMotionUsesTheQtStyleAuthority() {
       LocalPromptData{903,
                       "static pending prompt",
                       PromptState::InFlight,
-                      true,
                       {},
                       {},
                       QDateTime::currentMSecsSinceEpoch() - 1500,
@@ -4364,7 +4355,6 @@ bool testReducedMotionUsesTheQtStyleAuthority() {
       LocalPromptData{904,
                       "nested steering prompt",
                       PromptState::InFlight,
-                      true,
                       {},
                       {},
                       QDateTime::currentMSecsSinceEpoch() - 1500,

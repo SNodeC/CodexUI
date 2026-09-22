@@ -105,7 +105,7 @@ test("prompt queue isolation and callback-only acknowledgement", () => {
     assert.equal(findCard(compacted, localKey).kind, "userMessage");
 });
 
-test("first response order remains at the local prompt admission boundary", () => {
+test("turn prompt adopts server order as soon as its authoritative item arrives", () => {
     const thread = baseThread("thread-reasoning-first");
     thread.turnOrder = [];
     thread.turns.clear();
@@ -125,14 +125,16 @@ test("first response order remains at the local prompt admission boundary", () =
         type: "userMessage", clientId: dispatch.clientUserMessageId, content: [{type: "text", text: "new prompt"}],
     });
     prompts.reconcile(thread.id, thread);
-    assert.deepEqual(keys(projectConversation(thread, prompts.submissions(thread.id), 80, 602)), [promptKey, reasoningKey]);
+    assert.deepEqual(keys(projectConversation(thread, prompts.submissions(thread.id), 80, 602)), [reasoningKey, promptKey]);
+    assert.equal(findCard(projectConversation(thread, prompts.submissions(thread.id), 80, 602),
+        {kind: "prompt", submissionId: promptId}).kind, "userMessage", "notification wins before the request response");
     assert.equal(prompts.acknowledge(thread.id, promptId, "turn-new"), true);
     const promotedIndex = prompts.reconcile(thread.id, thread);
-    assert.deepEqual(keys(projectConversation(promotedIndex, prompts.submissions(thread.id), 80, 700, thread)), [promptKey, reasoningKey]);
+    assert.deepEqual(keys(projectConversation(promotedIndex, prompts.submissions(thread.id), 80, 700, thread)), [reasoningKey, promptKey]);
     const index = indexAuthoritativeItems(thread.id, thread);
     prompts.reconcile(thread.id, index);
     const blue = projectConversation(index, prompts.submissions(thread.id), 80, 1200, thread);
-    assert.deepEqual(keys(blue), [promptKey, reasoningKey]);
+    assert.deepEqual(keys(blue), [reasoningKey, promptKey]);
     assert.equal(findCard(blue, {kind: "prompt", submissionId: promptId}).kind, "userMessage");
 });
 
@@ -170,6 +172,40 @@ test("a local steering prompt remains nested under the authoritative turn root",
     assert.equal(snapshot.sections[0].cards.at(-1).kind, "localPrompt");
     assert.equal(snapshot.sections[0].cards.at(-1).payload.submissionId, steeringId);
     assert.notEqual(stableKey(snapshot.sections[0].cards.at(-1).key), stableKey(snapshot.sections[0].rootCardKey));
+});
+
+test("accepted steering stays pending at the turn tail until its exact user item, in either response order", () => {
+    for (const responseFirst of [true, false]) {
+        const thread = baseThread(`steering-${responseFirst}`);
+        const prompts = new PromptCoordinator();
+        const first = prompts.admit(thread.id, "same", [], {}, thread, "turn-1", 100);
+        const dispatch = prompts.beginNext(thread.id, "turn-1");
+        const second = prompts.admit(thread.id, "same", [], {}, thread, "turn-1", 101);
+        const snapshot = now => projectConversation(prompts.reconcile(thread.id, thread), prompts.submissions(thread.id), 80, now, thread);
+        const firstKey = {kind: "prompt", submissionId: first};
+        const secondKey = {kind: "prompt", submissionId: second};
+        const cardOrder = () => snapshot(1200).sections[0].cards.map(card => card.itemId || `pending:${card.payload.submissionId}`);
+        append(thread, "turn-1", "intervening", {type: "agentMessage", text: "Still working"});
+        assert.deepEqual(cardOrder(), ["user-old", "answer-old", "intervening", `pending:${first}`, `pending:${second}`]);
+        if (responseFirst) {
+            prompts.acknowledge(thread.id, first, "turn-1");
+            assert.equal(findCard(snapshot(1099), firstKey).payload.showPendingAnimation, false);
+            assert.equal(findCard(snapshot(1100), firstKey).payload.showPendingAnimation, true, "acceptance preserves the original deadline");
+        }
+        append(thread, "turn-1", "steering", {type: "userMessage", clientId: dispatch.clientUserMessageId, text: "same"});
+        assert.equal(findCard(snapshot(1200), firstKey).kind, "userMessage", "history entry ends pending even before acceptance");
+        assert.deepEqual(cardOrder(), ["user-old", "answer-old", "intervening", "steering", `pending:${second}`]);
+        if (!responseFirst) prompts.acknowledge(thread.id, first, "turn-1");
+        prompts.beginNext(thread.id, "turn-1");
+        append(thread, "turn-1", "later", {type: "reasoning", summary: ["Later"]});
+        assert.deepEqual(cardOrder(), ["user-old", "answer-old", "intervening", "steering", "later", `pending:${second}`]);
+        prompts.fail(thread.id, second, "Rejected");
+        assert.equal(findCard(snapshot(1500), secondKey).payload.showPendingAnimation, false);
+        assert.equal(findCard(snapshot(1500), secondKey).payload.error, "Rejected");
+        assert.deepEqual(keys(projectConversation(prompts.decorate(thread.id, indexAuthoritativeItems(thread.id, thread)), [], 80, 1600, thread)),
+            snapshot(1600).sections[0].cards.filter(card => card.kind !== "localPrompt").map(card => stableKey(card.key)),
+            "retained aliases do not change authoritative ordering");
+    }
 });
 
 test("retained long completed turn pins its complete-history root and keeps steering nested", () => {

@@ -155,12 +155,14 @@ struct LocalPromptData {
   std::uint64_t submissionId = 0;
   std::string prompt;
   PromptState state = PromptState::Queued;
-  bool showPendingAnimation = false;
   std::string error;
   std::vector<std::string> imagePaths;
   std::optional<std::int64_t> admittedAtMs;
   bool requiresExplicitRecovery = false;
 
+  bool awaitingConversation() const noexcept {
+    return state != PromptState::Failed;
+  }
   bool operator==(const LocalPromptData &) const = default;
 };
 

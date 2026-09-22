@@ -57,7 +57,7 @@ struct ThreadListRow {
   std::optional<std::int64_t> lastActivityAt;
   std::optional<std::int64_t> pendingPromptAdmittedAtMs;
   std::size_t pending = 0;
-  bool awaitingPromptAcknowledgement = false;
+  bool awaitingPromptConversation = false;
   bool archived = false;
   std::vector<ThreadListRow> children;
 

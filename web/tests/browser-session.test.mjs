@@ -505,7 +505,15 @@ test("browser session uses canonical action routing and preserves prompt-respons
         "newly admitted prompts begin without motion");
     assert.equal(session.conversation().sections[0].cards[0].payload.prompt, authoredPrompt,
         "the optimistic card retains all authored blank lines");
+    respond(socket, start, {turn: {id: "turn-1", status: "inProgress"}});
+    await waitForPublish();
+    let delayedPublish = false;
+    const unsubscribe = session.subscribe(() => {
+        delayedPublish ||= session.conversation().sections[0]?.cards[0]?.payload.showPendingAnimation === true;
+    });
     await new Promise(resolve => setTimeout(resolve, 1050));
+    unsubscribe();
+    assert.equal(delayedPublish, true, "fast acceptance does not cancel the delayed UI publication");
     assert.equal(session.conversation().sections[0].cards[0].payload.showPendingAnimation, true,
         "the session republishes delayed feedback after one second");
 
@@ -521,18 +529,17 @@ test("browser session uses canonical action routing and preserves prompt-respons
             content: [{type: "text", text: authoredPrompt}],
         },
     }}));
-    respond(socket, start, {turn: {id: "turn-1", status: "inProgress"}});
     await waitForPublish();
 
     const visible = cardKeys(session.conversation()).map(stableKey);
     assert.equal(visible.length, 2);
-    assert.match(visible[0], /^prompt:/u);
-    assert.equal(visible[1], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
+    assert.match(visible[1], /^prompt:/u);
+    assert.equal(visible[0], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
     assert.equal(session.model.connection().connected, true);
     assert.equal(session.model.connection().providerState, "ready");
-    assert.equal(session.conversation().sections[0].cards[0].kind, "userMessage",
+    assert.equal(session.conversation().sections[0].cards[1].kind, "userMessage",
         "correlated acknowledgement materializes without a post-ack timer");
-    assert.equal(session.conversation().sections[0].cards[0].payload.text, authoredPrompt,
+    assert.equal(session.conversation().sections[0].cards[1].payload.text, authoredPrompt,
         "the acknowledged card retains all authored blank lines");
     session.dispose();
 });

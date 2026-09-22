@@ -11,7 +11,7 @@ import {isObject, member, stringMember} from "../presentation/PresentationProtoc
 import {PresentationModel} from "../presentation/PresentationModel.js";
 import type {PendingRequestPresentation} from "../presentation/PresentationModel.js";
 import {ProtocolNormalizer} from "../presentation/ProtocolNormalizer.js";
-import {PromptCoordinator, indexAuthoritativeItems, promptWithFileLinks} from "../conversation/PromptCoordinator.js";
+import {PromptCoordinator, indexAuthoritativeItems, localCardVisible, promptWithFileLinks} from "../conversation/PromptCoordinator.js";
 import type {AttachmentDraft, PromptDispatch} from "../conversation/PromptCoordinator.js";
 import {DefaultAuthoritativeItemLimit, projectConversation} from "../conversation/ConversationProjection.js";
 import {PendingAnimationDelayMilliseconds} from "../conversation/MiddleTypes.js";
@@ -338,7 +338,7 @@ export class BrowserFrontendSession {
     threadPromptAnimating(threadId: string): boolean {
         const now = Date.now();
         return this.prompts.submissions(threadId).some(submission =>
-            (submission.state === "queued" || submission.state === "inFlight")
+            localCardVisible(submission) && submission.state !== "failed"
             && now - submission.admittedAtMilliseconds >= PendingAnimationDelayMilliseconds);
     }
     threadRecentAt(threadId: string): number | undefined {
@@ -1011,9 +1011,9 @@ export class BrowserFrontendSession {
                 this.prompts.acknowledge(dispatch.threadId, dispatch.id, turnId);
             } else {
                 this.prompts.fail(dispatch.threadId, dispatch.id, this.errorMessage(response));
+                this.cancelPendingAnimation(dispatch.id);
                 this.setNotice(this.errorMessage(response));
             }
-            this.cancelPendingAnimation(dispatch.id);
             this.publish();
             queueMicrotask(() => this.dispatchNextPrompt(dispatch.threadId));
         });
@@ -1033,7 +1033,9 @@ export class BrowserFrontendSession {
             const itemId = stringMember(scope, "itemId");
             if (stringMember(thread.turns.get(turnId)?.items.get(itemId)?.raw, "type") !== "userMessage") return;
         }
+        const submissions = this.prompts.submissions(threadId);
         this.prompts.reconcile(threadId, thread);
+        for (const submission of submissions) if (!localCardVisible(submission)) this.cancelPendingAnimation(submission.id);
     }
     private errorMessage(response: {error?: unknown}): string {
         return stringMember(response.error, "message") || "Codex operation failed";

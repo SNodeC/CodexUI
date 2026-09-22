@@ -348,7 +348,8 @@ QString itemDescription(const ThreadTreeItem &item) {
   if (item.draft)
     details.push_back(QStringLiteral("Draft thread"));
   if (item.awaitingPrompt)
-    details.push_back(QStringLiteral("Awaiting prompt acknowledgement"));
+    details.push_back(
+        QStringLiteral("Waiting for prompt to enter conversation"));
   if (const auto *parent =
           item.parent() ? static_cast<const ThreadTreeItem *>(item.parent())
                         : nullptr)
@@ -1125,7 +1126,7 @@ bool ThreadPane::applyItemPresentation(
   assign(item->pending, row.pending);
   assign(item->archived, row.archived);
   assign(item->draft, draft);
-  assign(item->awaitingPrompt, row.awaitingPromptAcknowledgement);
+  assign(item->awaitingPrompt, row.awaitingPromptConversation);
   assign(item->animationEpoch,
          static_cast<qint64>(draft
                                  ? draftStartedAt.value_or(0)

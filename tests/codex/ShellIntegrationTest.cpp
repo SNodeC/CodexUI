@@ -1957,8 +1957,25 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
           "the selected thread card shares the Turn/You pending animation");
   static_cast<void>(worker.completePrompt(localPrompt, true, {}, "shell-turn"));
   spin(60);
-  require(!pendingAnimation->isActive() && !threadAnimation->isActive(),
-          "the same prompt acknowledgement stops both card animations");
+  require(pendingAnimation->isActive() && threadAnimation->isActive(),
+          "request acceptance preserves both pending animations");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/started",
+       std::nullopt,
+       {{"threadId", "shell-thread"},
+        {"turnId", "shell-turn"},
+        {"item", Value::Object{{"id", "shell-user"},
+                               {"type", "userMessage"},
+                               {"text", exact.toStdString()},
+                               {"clientId",
+                                transition.command->clientUserMessageId}}}}}));
+  require(spinUntil([&] {
+            return card->data().kind == middle::CardKind::UserMessage &&
+                   !pendingAnimation->isActive() &&
+                   !threadAnimation->isActive();
+          }),
+          "authoritative history entry stops both animations on the same card");
 }
 
 void initialHydrationRetainsAllLoadedRowsWithBoundedResidency(
@@ -3698,15 +3715,34 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
                                  : nullptr;
                 return threadItem(list, "created-thread") == stableDraft &&
                        acceptedCard && acceptedAnimation &&
-                       !acceptedAnimation->isActive() &&
-                       !threadAnimation->isActive() &&
+                       acceptedAnimation->isActive() &&
+                       threadAnimation->isActive() &&
                        threadAccessibleText(list, stableDraft,
                                             QAccessible::Name) == chosenName;
               },
               3000),
           "the exact prompt result updates the canonical row without "
-          "replacing its widget item or chosen name, and stops pending "
+          "replacing its widget item or chosen name, and preserves pending "
           "feedback");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/started",
+       std::nullopt,
+       {{"threadId", "created-thread"},
+        {"turnId", "created-turn"},
+        {"item", Value::Object{{"id", "created-user"},
+                               {"type", "userMessage"},
+                               {"text", promptText.toStdString()},
+                               {"clientId",
+                                transition.command->clientUserMessageId}}}}}));
+  require(
+      spinUntil([&] {
+        return acceptedCard && acceptedAnimation &&
+               acceptedCard->data().kind == middle::CardKind::UserMessage &&
+               !acceptedAnimation->isActive() && !threadAnimation->isActive() &&
+               threadItem(list, "created-thread") == stableDraft;
+      }),
+      "authoritative first prompt stops feedback while retaining both widgets");
 }
 
 void emptyOptimisticDraftIsAbandonedOnThreadSelection(
@@ -4052,34 +4088,34 @@ void optimisticCreationDoesNotOverrideLaterNavigation(
   const NodeRef localPrompt = transition.command->localPrompt;
   static_cast<void>(
       worker.attachCreatedThread(*transition.command, "background-created"));
-  require(
-      spinUntil(
-          [&] {
-            return list->currentItem() ==
-                       threadItem(list, "navigation-thread") &&
-                   threadItem(list, "background-created") == draft &&
-                   threadAccessibleText(list, draft, QAccessible::Description)
-                       .contains(
-                           QStringLiteral("Awaiting prompt acknowledgement"));
-          },
-          3000),
-      "canonical creation completion preserves both row identity and "
-      "later navigation");
+  require(spinUntil(
+              [&] {
+                return list->currentItem() ==
+                           threadItem(list, "navigation-thread") &&
+                       threadItem(list, "background-created") == draft &&
+                       threadAccessibleText(list, draft,
+                                            QAccessible::Description)
+                           .contains(QStringLiteral(
+                               "Waiting for prompt to enter conversation"));
+              },
+              3000),
+          "canonical creation completion preserves both row identity and "
+          "later navigation");
   static_cast<void>(
       worker.completePrompt(localPrompt, true, {}, "background-turn"));
-  require(
-      spinUntil(
-          [&] {
-            return list->currentItem() ==
-                       threadItem(list, "navigation-thread") &&
-                   threadItem(list, "background-created") == draft &&
-                   !threadAccessibleText(list, draft, QAccessible::Description)
-                        .contains(
-                            QStringLiteral("Awaiting prompt acknowledgement"));
-          },
-          3000),
-      "prompt acknowledgement confirms the background row without a "
-      "selection override");
+  require(spinUntil(
+              [&] {
+                return list->currentItem() ==
+                           threadItem(list, "navigation-thread") &&
+                       threadItem(list, "background-created") == draft &&
+                       threadAccessibleText(list, draft,
+                                            QAccessible::Description)
+                           .contains(QStringLiteral(
+                               "Waiting for prompt to enter conversation"));
+              },
+              3000),
+          "prompt acceptance retains background pending feedback without a "
+          "selection override");
   require(selectThread(list, "background-created") && approval &&
               approval->currentData() == QStringLiteral("untrusted"),
           "selecting the completed background thread restores its exact "

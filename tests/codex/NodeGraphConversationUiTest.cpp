@@ -3,6 +3,7 @@
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 
 #include <QApplication>
@@ -584,6 +585,7 @@ bool controllerAndObserverExactDeltasConverge() {
     write.setField(activity, "protocolTurnId", "exact-provider-order-turn");
     write.setParent(thread, turn);
     write.setParent(turn, root);
+    write.setParent(turn, activity);
     write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
     NodeRef localPrompt;
     if (controller) {
@@ -603,7 +605,6 @@ bool controllerAndObserverExactDeltasConverge() {
       write.relate(thread, nodegraph::RelationKind::PendingPrompt,
                    localPrompt);
     }
-    write.setParent(turn, activity);
     static_cast<void>(write.finish());
     return PreparedGraph{thread, localPrompt};
   };
@@ -732,7 +733,6 @@ bool steeringMorphAdoptsProviderOrderWithoutReplacingItsWidget() {
     local.fields.emplace("dispatchState", "inFlight");
     local.fields.emplace("admittedAtMs",
                          QDateTime::currentMSecsSinceEpoch() - 1500);
-    local.fields.emplace("showPendingAnimation", false);
     local.fields.emplace("startsTurn", false);
     steering =
         write.upsert({NodeKind::Item, "local-steering"}, std::move(local));
@@ -783,7 +783,6 @@ bool steeringMorphAdoptsProviderOrderWithoutReplacingItsWidget() {
   {
     auto write = graph.write();
     write.setField(steering, "dispatchState", "awaitingMaterialization");
-    write.setField(steering, "showPendingAnimation", false);
     static_cast<void>(write.finish());
   }
   const auto acknowledgedPrompt =
@@ -794,11 +793,11 @@ bool steeringMorphAdoptsProviderOrderWithoutReplacingItsWidget() {
   QApplication::processEvents();
   QTimer *animation =
       stable->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"));
-  if (!require(animation && !animation->isActive() &&
+  if (!require(animation && animation->isActive() &&
                    stable->data().kind == middle::CardKind::LocalPrompt &&
                    acknowledgements == 0,
-               "successful steering acknowledgement immediately stopped "
-               "pending animation without retiring its stable card"))
+               "successful steering acceptance must keep pending animation "
+               "until its authoritative item arrives"))
     return false;
 
   NodeRef authoritative;
@@ -858,6 +857,192 @@ bool steeringMorphAdoptsProviderOrderWithoutReplacingItsWidget() {
           promotedTop > view.visualRect(retiredProgressIndex).top() &&
           acknowledgements == 1,
       "steering retirement recreated or moved its promoted provider row");
+}
+
+bool pendingSteeringFollowsIncomingItemsUntilHistoryEntry() {
+  using namespace nodegraph;
+  bool result = true;
+  for (const bool responseFirst : {false, true}) {
+    NodeGraph graph;
+    ThreadChannels channels;
+    WorkerLogic worker(graph, channels);
+    ui::NodeGraphUiAdapter adapter(graph);
+    middle::ConversationView view;
+    view.resize(760, 900);
+    view.show();
+    const auto notify = [&](std::string method, Value::Object payload) {
+      static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                      std::move(method),
+                                      {},
+                                      std::move(payload)}));
+    };
+    const auto item = [&](std::string id, std::string type,
+                          std::string client = {}) {
+      Value::Object data{{"id", id},
+                         {"type", type},
+                         {"text", client.empty() ? id : "same steer"}};
+      if (!client.empty())
+        data.emplace("clientId", client);
+      notify("item/started", {{"threadId", "steering-live"},
+                              {"turnId", "turn"},
+                              {"item", std::move(data)}});
+    };
+    notify("thread/started",
+           {{"thread", Value::Object{{"id", "steering-live"}}}});
+    notify("turn/started",
+           {{"threadId", "steering-live"},
+            {"turn", Value::Object{{"id", "turn"}, {"status", "inProgress"}}}});
+    item("opening", "userMessage");
+    NodeRef thread;
+    {
+      auto read = graph.tryRead();
+      thread = read->find({NodeKind::Thread, "steering-live"});
+    }
+    static_cast<void>(channels.drainWorkerToQtWake());
+    WorkerToQtMessage message;
+    while (channels.tryReceiveForQt(message)) {
+    }
+    static_cast<void>(view.reconcile(*adapter.conversation(thread)));
+    view.setPromptMaterializedAction([&](NodeRef prompt) {
+      return messageAdmitted(worker.promptMaterialized(prompt));
+    });
+    const auto flush = [&] {
+      static_cast<void>(channels.drainWorkerToQtWake());
+      std::vector<NodeRef> changedItems;
+      bool structural = false;
+      while (channels.tryReceiveForQt(message)) {
+        if (const auto *event = std::get_if<GraphChanged>(&message)) {
+          const auto route = adapter.conversationRoute(*event, thread);
+          if (!route.affected)
+            continue;
+          structural |= route.structural;
+          for (const NodeRef &item : route.items)
+            if (std::ranges::find(changedItems, item) == changedItems.end())
+              changedItems.push_back(item);
+        }
+      }
+      if (!changedItems.empty()) {
+        auto delta =
+            adapter.conversationDelta(thread, changedItems, structural);
+        result &= require(
+            delta && view.applyConversationDelta(std::move(*delta)).has_value(),
+            "pending-tail protocol traffic must apply incrementally without "
+            "a snapshot fallback");
+      }
+      QApplication::processEvents();
+    };
+    const auto submit = [&] {
+      NodeAction action{thread, NodeActionKind::SubmitPrompt};
+      action.promptText = "same steer";
+      return worker.admitPrompt(std::move(action), {},
+                                QDateTime::currentMSecsSinceEpoch() - 1500);
+    };
+    auto first = submit();
+    if (!first.command)
+      return false;
+    static_cast<void>(submit());
+    flush();
+    const auto card = [&](int id) -> middle::ConversationCard * {
+      for (auto *widget : view.findChildren<middle::ConversationCard *>())
+        if (middle::stableKey(widget->data().key) ==
+            "prompt:" + std::to_string(id))
+          return widget;
+      return nullptr;
+    };
+    auto *firstCard = card(1);
+    auto *secondCard = card(2);
+    if (!require(firstCard && secondCard,
+                 "both queued steering cards are resident"))
+      return false;
+    const auto order = [&] {
+      std::vector<std::string> actual;
+      for (int i = 0; i < view.conversationModel()->rowCount(); ++i) {
+        const auto &data = view.conversationModel()->row(i)->card;
+        actual.push_back(data.itemId.empty() ? middle::stableKey(data.key)
+                                             : data.itemId);
+      }
+      return actual;
+    };
+    item("intervening", "agentMessage");
+    flush();
+    result &=
+        require(order() == std::vector<std::string>{"opening", "intervening",
+                                                    "prompt:1", "prompt:2"},
+                "incoming history precedes all unconsumed steering in "
+                "submission order");
+    {
+      auto read = graph.tryRead();
+      const auto *index = read->inspectorIndex(thread);
+      result &= require(index && index->latestAgentMessage() &&
+                            scalarTextFromValue(valueMember(
+                                *read->state(index->latestAgentMessage()),
+                                "text")) == "intervening",
+                        "insertion before pending prompts updates the "
+                        "Inspector's latest message index");
+    }
+    PromptTransition next;
+    if (responseFirst) {
+      next =
+          worker.completePrompt(first.command->localPrompt, true, {}, "turn");
+      flush();
+      auto *timer = firstCard->findChild<QTimer *>(
+          QStringLiteral("pendingAnimationTimer"));
+      result &= require(timer && timer->isActive(),
+                        "request acceptance keeps pending steering animated");
+    }
+    const int beforePromotion = firstCard->y();
+    item("steering-1", "userMessage", first.command->clientUserMessageId);
+    flush();
+    result &= require(
+        card(1) == firstCard && firstCard->y() == beforePromotion &&
+            firstCard->data().kind == middle::CardKind::UserMessage &&
+            !firstCard
+                 ->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"))
+                 ->isActive(),
+        "authoritative entry ends animation without replacing or relocating "
+        "the steering widget");
+    if (!responseFirst) {
+      next =
+          worker.completePrompt(first.command->localPrompt, true, {}, "turn");
+      flush();
+    }
+    if (!next.command)
+      return false;
+    item("later", "agentMessage");
+    flush();
+    result &= require(
+        order() == std::vector<std::string>{"opening", "intervening",
+                                            "steering-1", "later", "prompt:2"},
+        "later items overtake only the still-pending steering");
+    item("steering-2", "userMessage", next.command->clientUserMessageId);
+    flush();
+    static_cast<void>(
+        worker.completePrompt(next.command->localPrompt, true, {}, "turn"));
+    flush();
+    const auto settled = order();
+    static_cast<void>(view.reconcile(*adapter.conversation(thread)));
+    result &= require(order() == settled && card(1) == firstCard &&
+                          card(2) == secondCard,
+                      "retirement and full snapshot retain authoritative order "
+                      "and both widget identities");
+    auto failed = submit();
+    if (!failed.command)
+      return false;
+    flush();
+    static_cast<void>(
+        worker.failPrompt(failed.command->localPrompt, "Rejected"));
+    flush();
+    auto *failedCard = card(3);
+    result &= require(
+        failedCard &&
+            !failedCard
+                 ->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"))
+                 ->isActive() &&
+            std::get<middle::LocalPromptData>(failedCard->data().payload)
+                .requiresExplicitRecovery,
+        "rejection stops pending feedback and preserves explicit recovery");
+  }
+  return result;
 }
 
 bool activeTurnDeltaKeepsModelAuthorityAndWidgets() {
@@ -1162,6 +1347,8 @@ int main(int argc, char **argv) {
       controllerAndObserverExactDeltasConverge);
   run("steeringMorphAdoptsProviderOrderWithoutReplacingItsWidget",
       steeringMorphAdoptsProviderOrderWithoutReplacingItsWidget);
+  run("pendingSteeringFollowsIncomingItemsUntilHistoryEntry",
+      pendingSteeringFollowsIncomingItemsUntilHistoryEntry);
   run("activeTurnDeltaKeepsModelAuthorityAndWidgets",
       activeTurnDeltaKeepsModelAuthorityAndWidgets);
   run("coalescedCanonicalFrontMatchesFullProjection",

@@ -7147,7 +7147,7 @@ bool collapsedInteractionDefersEveryHeavyCardBody() {
        "deferred",
        "turn",
        {},
-       LocalPromptData{912, large, PromptState::InFlight, 0, {}, {}}}};
+       LocalPromptData{912, large, PromptState::InFlight, {}, {}}}};
 
   auto appendMarker = [&marker](VisibleCardData &card) {
     std::visit(

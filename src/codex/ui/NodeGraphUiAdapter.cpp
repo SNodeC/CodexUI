@@ -71,7 +71,7 @@ bool fieldChanged(const nodegraph::NodeGraph::ReadAccess &read,
 UiStatus agentUiStatus(const nodegraph::NodeState &state);
 
 struct PendingPromptPresentation {
-  bool awaitingAcknowledgement = false;
+  bool awaitingConversation = false;
   std::optional<std::int64_t> admittedAtMs;
   nodegraph::NodeRef provisionalTurn;
 };
@@ -91,10 +91,13 @@ pendingPromptPresentation(nodegraph::NodeGraph::ReadAccess &read,
     const std::string dispatch =
         scalarTextFromValue(valueMember(*state, "dispatchState"));
     const bool awaiting = dispatch == "queued" || dispatch == "dispatching" ||
-                          dispatch == "inFlight";
-    if (!awaiting)
+                          dispatch == "inFlight" ||
+                          dispatch == "awaitingMaterialization";
+    if (!awaiting ||
+        read.hasIncomingRelation(
+            prompt, nodegraph::RelationKind::PromptMaterialization))
       continue;
-    result.awaitingAcknowledgement = true;
+    result.awaitingConversation = true;
     const auto admittedAt =
         signedIntegerFromValue(valueMember(*state, "admittedAtMs"));
     if (admittedAt &&
@@ -582,9 +585,6 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
         submissionId,
         scalarTextFromValue(valueMember(state, "text")),
         promptState,
-        valueMember(state, "showPendingAnimation")
-            ? boolFromValue(valueMember(state, "showPendingAnimation"))
-            : false,
         scalarTextFromValue(valueMember(state, "error")),
         graphLocalPromptImagePaths(state),
         signedIntegerFromValue(valueMember(state, "admittedAtMs")),
@@ -1313,7 +1313,7 @@ projectThreadRow(nodegraph::NodeGraph::ReadAccess &read,
   row.pending = pending;
   const PendingPromptPresentation prompt =
       pendingPromptPresentation(read, thread);
-  row.awaitingPromptAcknowledgement = prompt.awaitingAcknowledgement;
+  row.awaitingPromptConversation = prompt.awaitingConversation;
   row.pendingPromptAdmittedAtMs = prompt.admittedAtMs;
   row.archived = boolFromValue(valueMember(*state, "archived"));
   return row;

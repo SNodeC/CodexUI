@@ -728,7 +728,7 @@ bool testOrderedChildIndexTracksEveryTopologyMutation() {
 
   {
     auto write = graph.write();
-    write.setParent(secondParent, second);
+    write.setParent(secondParent, second, fourth);
     changed = write.finish();
   }
   {
@@ -738,8 +738,19 @@ bool testOrderedChildIndexTracksEveryTopologyMutation() {
     passed &=
         expect(childListOwnersBelongToChange(changed) &&
                    indexedChildrenMatch(*read, firstParent, {first, third}) &&
-                   indexedChildrenMatch(*read, secondParent, {fourth, second}),
-               "reparenting reindexes both the old and new owner");
+                   indexedChildrenMatch(*read, secondParent, {second, fourth}),
+               "insertion before a sibling reindexes both owners");
+  }
+
+  {
+    auto write = graph.write();
+    write.setParent(secondParent, fourth, second);
+    passed &= expect(throws<std::invalid_argument>(
+                         [&] { write.setParent(secondParent, third, first); }),
+                     "a foreign insertion sibling is rejected before mutation");
+    passed &= expect(!write.hasPendingChanges(),
+                     "existing attachment and rejected insertion are no-ops");
+    static_cast<void>(write.finish());
   }
 
   {

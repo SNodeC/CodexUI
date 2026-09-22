@@ -394,7 +394,10 @@ public:
     // descendant mutation without adding redundant render work to the
     // transaction's affected-node notification.
     void touchRevision(const NodeRef &node);
-    void setParent(const NodeRef &parent, const NodeRef &child);
+    // Existing children retain their position. New attachments can precede a
+    // sibling without replacing or invalidating the whole ordered child list.
+    void setParent(const NodeRef &parent, const NodeRef &child,
+                   const NodeRef &before = {});
     void clearParent(const NodeRef &child);
     void replaceChildren(const NodeRef &parent,
                          std::span<const NodeRef> children);
@@ -455,7 +458,8 @@ public:
     void markInspectorRebuild(Node *thread, std::uint8_t sections);
     [[nodiscard]] bool markInspectorAppend(Node *thread, Node *turn,
                                            std::size_t first);
-    void noteInspectorChildChange(Node *parent, Node *child, bool appended);
+    void noteInspectorChildChange(Node *parent, Node *child,
+                                  std::optional<std::size_t> insertion = {});
     void noteInspectorChildrenReplacement(
         Node *parent, std::span<Node *const> previous,
         std::span<const NodeRef> next);

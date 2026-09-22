@@ -238,7 +238,7 @@ VisibleCardData cardData(std::size_t index) {
   default:
     card.kind = CardKind::LocalPrompt;
     card.payload = LocalPromptData{index, "Queued prompt " + suffix,
-                                   PromptState::Accepted, false};
+                                   PromptState::Accepted};
     break;
   }
   return card;

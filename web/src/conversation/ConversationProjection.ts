@@ -197,17 +197,6 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
 function sectionComponent(prefix: string, threadId: string, suffix: string): string {
     return `${prefix}${threadId.length}:${threadId}${suffix.length}:${suffix}`;
 }
-function admissionBoundaryPosition(anchor: AuthoritativeItemKey | undefined, atStart: boolean,
-    index: AuthoritativeItemIndex): number | undefined {
-    if (anchor) { const position = authoritativePosition(index, anchor); if (position !== undefined) return (position + 1) * 2; }
-    return atStart ? 0 : undefined;
-}
-function submissionPosition(submission: PromptSubmission, index: AuthoritativeItemIndex, materialized?: number): number {
-    const admitted = admissionBoundaryPosition(submission.admissionAnchor, submission.admissionAtStart, index);
-    if (admitted !== undefined) return admitted;
-    if (materialized !== undefined) return materialized * 2 + 1;
-    return index.ordered.length * 2 + 2;
-}
 interface ProjectedNode {
     position: number; tieBreaker: number; sectionKey: string; turnId: string; turnRoot: boolean; card: VisibleCardData;
 }
@@ -242,26 +231,17 @@ export function projectConversation(
         const item = authoritativeItems.ordered[index]!;
         const identity = `${item.key.threadId}\0${item.key.turnId}\0${item.key.itemId}`;
         const binding = bindings.get(identity);
-        if (binding && localCardVisible(binding)) continue;
         let visualKey: CardKey = item.promptAlias?.key ?? item.key;
         if (binding) visualKey = {kind: "prompt", submissionId: binding.id};
-        let position = index * 2 + 1;
-        let tieBreaker = 0;
-        if (binding) { position = submissionPosition(binding, authoritativeItems, index); tieBreaker = binding.admissionOrdinal; }
-        else if (item.promptAlias) {
-            position = admissionBoundaryPosition(item.promptAlias.admissionAnchor,
-                item.promptAlias.admissionAnchor === undefined, authoritativeItems) ?? position;
-            tieBreaker = item.promptAlias.admissionOrdinal;
-        }
-        nodes.push({position, tieBreaker, sectionKey: sectionComponent("turn:", authoritativeItems.threadId, item.key.turnId),
+        nodes.push({position: index * 2 + 1, tieBreaker: 0, sectionKey: sectionComponent("turn:", authoritativeItems.threadId, item.key.turnId),
             turnId: item.key.turnId, turnRoot: authoritativeItems.turnRoots.get(item.key.turnId) === index,
             card: authoritativeCard(item.key, item.presentation, visualKey, authoritativeThread?.cwd ?? "")});
     }
     for (const submission of localSubmissions) {
         if (!localCardVisible(submission)) continue;
-        const materialized = submission.materializedItem
-            ? authoritativePosition(authoritativeItems, submission.materializedItem) : undefined;
-        const position = submissionPosition(submission, authoritativeItems, materialized);
+        const anchored = submission.startsTurn || submission.state === "failed";
+        const anchor = submission.admissionAnchor ? authoritativePosition(authoritativeItems, submission.admissionAnchor) : undefined;
+        const position = anchored ? ((anchor ?? -1) + 1) * 2 : authoritativeItems.ordered.length * 2 + 2;
         const knownTurn = authoritativeThread !== undefined && submission.expectedTurnId !== undefined
             && authoritativeThread.turns.has(submission.expectedTurnId);
         const turnId = submission.expectedTurnId ?? "";
@@ -269,14 +249,13 @@ export function projectConversation(
         const payload: LocalPromptData = {
             submissionId: submission.id, prompt: submission.prompt,
             state: submission.state === "queued" ? "inFlight" : submission.state,
-            showPendingAnimation: (submission.state === "queued" || submission.state === "inFlight")
+            showPendingAnimation: submission.state !== "failed"
                 && nowMilliseconds - submission.admittedAtMilliseconds >= PendingAnimationDelayMilliseconds,
             error: submission.error, imagePaths: localImagePaths(submission),
             admittedAtMilliseconds: submission.admittedAtMilliseconds, requiresExplicitRecovery: false,
         };
         const turnRootPosition = authoritativeItems.turnRoots.get(turnId);
-        const turnRoot = turnRootPosition !== undefined
-            ? materialized === turnRootPosition : submission.startsTurn;
+        const turnRoot = turnRootPosition === undefined && submission.startsTurn;
         nodes.push({position, tieBreaker: submission.admissionOrdinal, sectionKey, turnId, turnRoot, card: {
             key: {kind: "prompt", submissionId: submission.id}, kind: "localPrompt", threadId: authoritativeItems.threadId,
             turnId, itemId: "", payload, status: UnknownStatus,

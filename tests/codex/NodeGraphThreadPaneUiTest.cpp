@@ -957,7 +957,7 @@ bool sortingAndPromptAnimationAreFixed() {
   QApplication::processEvents();
 
   snapshot.roots[0].recencyAt = 31;
-  snapshot.roots[0].awaitingPromptAcknowledgement = true;
+  snapshot.roots[0].awaitingPromptConversation = true;
   snapshot.roots[0].pendingPromptAdmittedAtMs =
       QDateTime::currentMSecsSinceEpoch() - 1500;
   pane.refresh(snapshot);
@@ -994,7 +994,7 @@ bool sortingAndPromptAnimationAreFixed() {
                "showing the thread pane did not resume visible animation"))
     return false;
 
-  snapshot.roots[0].awaitingPromptAcknowledgement = false;
+  snapshot.roots[0].awaitingPromptConversation = false;
   snapshot.roots[0].pendingPromptAdmittedAtMs.reset();
   pane.refresh(snapshot);
   QApplication::processEvents();
@@ -1013,7 +1013,7 @@ bool reducedMotionStopsThreadFeedbackAtTheStyleBoundary() {
   row.presentationKey = row.id;
   row.title = "Reduced motion";
   row.cwd = "/workspace";
-  row.awaitingPromptAcknowledgement = true;
+  row.awaitingPromptConversation = true;
   row.pendingPromptAdmittedAtMs = QDateTime::currentMSecsSinceEpoch() - 1500;
   ui::ThreadListSnapshot snapshot;
   snapshot.roots.push_back(row);
@@ -1246,7 +1246,7 @@ bool optimisticCreationHandsOneRowToGraphAuthority() {
   canonical.target = localTarget;
   canonical.title = "Chosen name";
   canonical.status = nodegraph::NodeStatus::Running;
-  canonical.awaitingPromptAcknowledgement = true;
+  canonical.awaitingPromptConversation = true;
   canonical.pendingPromptAdmittedAtMs =
       QDateTime::currentMSecsSinceEpoch() - 1500;
   admitted.roots.push_back(canonical);
@@ -1304,7 +1304,7 @@ bool optimisticCreationHandsOneRowToGraphAuthority() {
     return false;
 #endif
 
-  admitted.roots.front().awaitingPromptAcknowledgement = false;
+  admitted.roots.front().awaitingPromptConversation = false;
   admitted.roots.front().pendingPromptAdmittedAtMs.reset();
   pane.refresh(admitted);
   QApplication::processEvents();
@@ -1932,7 +1932,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
       imageChecksum(view->viewport()->grab().toImage()) == pixelsBefore;
 
   ui::ThreadListRow offscreen = snapshot->roots.back();
-  offscreen.awaitingPromptAcknowledgement = true;
+  offscreen.awaitingPromptConversation = true;
   offscreen.pendingPromptAdmittedAtMs =
       QDateTime::currentMSecsSinceEpoch() - 1500;
   paints.reset(view);
@@ -1944,7 +1944,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   auto *animation =
       pane.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
   const bool offscreenTimerActive = animation && animation->isActive();
-  offscreen.awaitingPromptAcknowledgement = false;
+  offscreen.awaitingPromptConversation = false;
   offscreen.pendingPromptAdmittedAtMs.reset();
   static_cast<void>(pane.applyRowPresentation(offscreen));
   settleThreadPane();
@@ -1956,7 +1956,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   ui::ThreadListRow visible = selectedRow != snapshot->roots.end()
                                   ? *selectedRow
                                   : snapshot->roots.front();
-  visible.awaitingPromptAcknowledgement = true;
+  visible.awaitingPromptConversation = true;
   visible.pendingPromptAdmittedAtMs =
       QDateTime::currentMSecsSinceEpoch() - 1500;
   QRect visibleRect = view->visualRect(view->currentIndex());
@@ -1968,7 +1968,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   waitThreadPane(170);
   const int visibleAnimationPaints = paints.paints;
   const bool visiblePaintsBounded = paints.bounded;
-  visible.awaitingPromptAcknowledgement = false;
+  visible.awaitingPromptConversation = false;
   visible.pendingPromptAdmittedAtMs.reset();
   static_cast<void>(pane.applyRowPresentation(visible));
   settleThreadPane();

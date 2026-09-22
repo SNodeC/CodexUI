@@ -596,6 +596,7 @@ bool controllerAndObserverShareProviderConversationOrder() {
     write.setField(activity, "protocolTurnId", "shared-provider-order-turn");
     write.setParent(thread, turn);
     write.setParent(turn, root);
+    write.setParent(turn, activity);
     write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
     if (controller) {
       NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
@@ -612,7 +613,6 @@ bool controllerAndObserverShareProviderConversationOrder() {
       write.relate(runtime, nodegraph::RelationKind::PendingPrompt, local);
       write.relate(thread, nodegraph::RelationKind::PendingPrompt, local);
     }
-    write.setParent(turn, activity);
     static_cast<void>(write.finish());
     return thread;
   };
@@ -1290,7 +1290,7 @@ bool preservesReadinessActivityAndProviderPaginationSemantics() {
                       std::optional<std::int64_t>{8} &&
                   threads->roots.front().lastActivityAt ==
                       std::optional<std::int64_t>{9} &&
-                  threads->roots.front().awaitingPromptAcknowledgement &&
+                  threads->roots.front().awaitingPromptConversation &&
                   threads->roots.front().pendingPromptAdmittedAtMs ==
                       std::optional<std::int64_t>{1234},
               "presentation identity, chosen-name, Recent, activity, or "

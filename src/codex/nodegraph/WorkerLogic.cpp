@@ -645,7 +645,6 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
                                                pending.attachments))},
           {"attachments", attachmentSummaries(pending.attachments)},
           {"dispatchState", Value(invalidTarget ? "failed" : "queued")},
-          {"showPendingAnimation", Value(false)},
           {"startsTurn", Value(startsTurn)},
           {"createsThread", Value(pending.createsThread)},
           {"threadId", Value(pending.thread->id().canonical)}};
@@ -1147,7 +1146,6 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
     // Request acceptance is not yet visible completion. The retained Qt card
     // keeps its original admission deadline and decides locally when delayed
     // feedback begins; worker traffic must not force or restart animation.
-    write.setField(localPrompt, "showPendingAnimation", Value(false));
     write.eraseField(localPrompt, "error");
     write.eraseField(localPrompt, "requiresExplicitRecovery");
     write.setStatus(localPrompt, NodeStatus::Running);
@@ -1196,7 +1194,6 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
     const std::string failure =
         error.empty() ? "Prompt submission failed" : std::move(error);
     write.setField(localPrompt, "dispatchState", Value("failed"));
-    write.setField(localPrompt, "showPendingAnimation", Value(false));
     write.setField(localPrompt, "error", Value(failure));
     write.setField(localPrompt, "requiresExplicitRecovery", Value(true));
     write.setStatus(localPrompt, NodeStatus::Failed);

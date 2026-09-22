@@ -554,8 +554,7 @@ QString fileChangesMetadata(const FileChangesData &data,
 }
 
 QString localPromptPhase(const LocalPromptData &prompt, bool nested) {
-  const bool waiting = prompt.state == PromptState::Queued ||
-                       prompt.state == PromptState::InFlight;
+  const bool waiting = prompt.awaitingConversation();
   if (waiting)
     return nested ? QStringLiteral("steering · pending")
                   : QStringLiteral("pending");
@@ -895,22 +894,6 @@ bool cardHasCopyContent(const VisibleCardData &card) {
                  });
       },
       card.payload);
-}
-
-bool presentationEquals(const VisibleCardData &left,
-                        const VisibleCardData &right) {
-  if (left.kind != right.kind || left.status != right.status)
-    return false;
-  const auto *first = std::get_if<LocalPromptData>(&left.payload);
-  const auto *second = std::get_if<LocalPromptData>(&right.payload);
-  if (first && second) {
-    return first->prompt == second->prompt &&
-           first->imagePaths == second->imagePaths &&
-           first->state == second->state && first->error == second->error &&
-           first->admittedAtMs == second->admittedAtMs &&
-           first->requiresExplicitRecovery == second->requiresExplicitRecovery;
-  }
-  return left.payload == right.payload;
 }
 
 bool cardHasActiveWork(const VisibleCardData &card) {
@@ -1358,8 +1341,8 @@ public:
     const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
                                        next.kind == CardKind::UserMessage;
     const bool payloadChanged = current.payload != next.payload;
-    const bool presentationChanged =
-        becomingAuthoritative || !presentationEquals(current, next);
+    const bool presentationChanged = becomingAuthoritative || payloadChanged ||
+                                     current.status != next.status;
     const bool paintOnlyStatus =
         !becomingAuthoritative && !payloadChanged &&
         current.status != next.status &&
@@ -2152,8 +2135,7 @@ public:
     const auto *prompt = std::get_if<LocalPromptData>(&current.payload);
     if (!prompt)
       return;
-    const bool waiting = prompt->state == PromptState::Queued ||
-                         prompt->state == PromptState::InFlight;
+    const bool waiting = prompt->awaitingConversation();
     const bool failed = prompt->state == PromptState::Failed;
     const bool steering = nestedConversationCard;
     const QString foreground =
@@ -2441,8 +2423,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   }
 
   const QRectF bounds = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
-  const bool waiting = prompt->state == PromptState::Queued ||
-                       prompt->state == PromptState::InFlight;
+  const bool waiting = prompt->awaitingConversation();
   const bool failed = prompt->state == PromptState::Failed;
   const bool steering = impl_->nestedConversationCard;
   const bool animated = waiting && impl_->pendingFeedbackVisible;
