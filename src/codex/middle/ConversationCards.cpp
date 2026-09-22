@@ -729,7 +729,6 @@ public:
     cursor.endEditBlock();
     preferredWidth_ = 0;
     preferredHeight_ = 0;
-    refreshPreferredHeight(std::max(1, maximumViewportSize().width()));
     updateGeometry();
   }
 

@@ -2789,6 +2789,11 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
             << " row_resize_events=" << work.rowResizes
             << " layout_requests=" << work.layoutRequests
             << " paints=" << work.paints
+            << " max_constructions=" << work.maximumConstructions
+            << " max_retirements=" << work.maximumRetirements
+            << " max_resizes=" << work.maximumRowResizes
+            << " max_layouts=" << work.maximumLayoutRequests
+            << " max_paints=" << work.maximumPaints
             << " document_constructions=" << documents.constructions
             << " document_retirements=" << documents.retirements
             << " parse_inputs=" << documents.parseInputs

@@ -903,12 +903,14 @@ bool appendMarkdownDocument(QTextDocument &document, QStringView previous,
     return false;
   const QStringView reparsedTail = next.sliced(tailState.sourceOffset);
   QTextCursor cursor(&document);
+  cursor.beginEditBlock();
   cursor.setPosition(tailState.documentPosition);
   cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
   cursor.removeSelectedText();
   cursor.insertMarkdown(reparsedTail.toString(), MarkdownFeatures);
   allowPreformattedMarkdownWrappingFrom(document,
                                         tailState.documentPosition);
+  cursor.endEditBlock();
   tailState = markdownTailState(document, next);
   return true;
 }

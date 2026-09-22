@@ -1632,8 +1632,7 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
   if (runtime)
     roots = read->related(runtime, nodegraph::RelationKind::RootThread);
   for (const nodegraph::NodeRef &thread : allThreads)
-    if (!childThreads.contains(thread.get()) &&
-        std::ranges::find(roots, thread) == roots.end())
+    if (!childThreads.contains(thread.get()))
       roots.push_back(thread);
   for (const nodegraph::NodeRef &root : roots) {
     ThreadListRow row = buildRow(buildRow, root);

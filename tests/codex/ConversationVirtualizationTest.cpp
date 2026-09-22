@@ -5965,11 +5965,18 @@ bool streamingMarkdownKeepsOneDocument() {
   auto &message = std::get<AgentMessageData>(update.payload);
   message.text += "** with a [link](https://example.com).\n\n"
                   "The final paragraph is complete.";
+  int documentChanges = 0;
+  const auto documentChange = QObject::connect(
+      document, &QTextDocument::contentsChanged, &view,
+      [&documentChanges] { ++documentChanges; });
   QElapsedTimer timer;
   timer.start();
   const auto impact = applyPresentation(view, update);
   const qint64 updateMicros = timer.nsecsElapsed() / 1000;
   settle();
+  QObject::disconnect(documentChange);
+  result &= expect(documentChanges == 1,
+                   "one streamed tail replacement publishes one document change");
 
   result &= expect(
       impact == PresentationImpact::GeometryChanged && card && body &&

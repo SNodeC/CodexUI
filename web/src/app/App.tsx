@@ -335,7 +335,7 @@ function safeHref(value: string): string | undefined {
     try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined; }
     catch { return undefined; }
 }
-function SafeMarkdown({text}: {text: string}) {
+const SafeMarkdown = memo(function SafeMarkdown({text}: {text: string}) {
     return <div className="safe-markdown"><Markdown remarkPlugins={[remarkGfm]} skipHtml components={{
         a({href, children}) {
             const safe = safeHref(href ?? "");
@@ -344,7 +344,7 @@ function SafeMarkdown({text}: {text: string}) {
         },
         img({src, alt}) { return <span className="markdown-image-reference">{alt || "Image"}{src ? ` (${src})` : ""}</span>; },
     }}>{text}</Markdown></div>;
-}
+});
 
 export function userMessageMarkdownText(text: string): string {
     const lines = text.split("\n").map(line => line.endsWith("\r") ? line.slice(0, -1) : line);
