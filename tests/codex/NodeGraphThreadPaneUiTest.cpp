@@ -1439,6 +1439,18 @@ bool pagingFollowsTheVisibleListEnd() {
   longSnapshot.roots.push_back(std::move(newest));
   pane.refresh(longSnapshot);
   QApplication::processEvents();
+  if (!require(loadMoreRequests == 0 &&
+                   tree->verticalScrollBar()->value() == 0,
+               "a new most-recent thread was hidden or requested older history"))
+    return false;
+  tree->verticalScrollBar()->setValue(tree->verticalScrollBar()->maximum());
+  QApplication::processEvents();
+  loadMoreRequests = 0;
+  appended.id = appended.presentationKey = appended.title = "long-older";
+  appended.recencyAt = 500;
+  longSnapshot.roots.push_back(std::move(appended));
+  pane.refresh(longSnapshot);
+  QApplication::processEvents();
   return require(loadMoreRequests == 1,
                  "anchor restoration requested the next thread page more than "
                  "once");
@@ -1615,16 +1627,102 @@ bool incrementalRootSortPreservesTheViewportAnchor() {
                "incremental-sort fixture omitted the promoted row"))
     return false;
   ui::ThreadListRow row = *promoted;
-  row.recencyAt = 1000;
+  row.recencyAt = 75;
   if (!require(pane.applyRowPresentation(row),
                "incremental root presentation update was rejected"))
     return false;
   QApplication::processEvents();
   const QModelIndex after = tree->indexAt(probe);
-  return require(beforeId == QStringLiteral("sort-50") &&
-                     after.data(Qt::UserRole).toString() == beforeId &&
-                     tree->visualRect(after).top() == beforeY,
-                 "incremental root sorting moved the stable viewport anchor");
+  bool passed = require(beforeId == QStringLiteral("sort-50") &&
+                            after.data(Qt::UserRole).toString() == beforeId &&
+                            tree->visualRect(after).top() == beforeY,
+                        "incremental root sorting moved the stable viewport anchor");
+  row.recencyAt = 99;
+  passed &= require(pane.applyRowPresentation(row), "tied recency was rejected");
+  QApplication::processEvents();
+  passed &= require(tree->indexAt(probe).data(Qt::UserRole).toString() == beforeId,
+                    "a recency tie stole the viewport");
+  row.recencyAt = 75;
+  passed &= require(pane.applyRowPresentation(row), "recency demotion was rejected");
+  row.recencyAt = 1000;
+  passed &= require(pane.applyRowPresentation(row),
+                    "most-recent incremental update was rejected");
+  QApplication::processEvents();
+  passed &= require(tree->topLevelItem(0) == threadItem(tree, row.id) &&
+                        tree->verticalScrollBar()->value() == 0,
+                    "incremental promotion hid the new most-recent thread");
+  return passed;
+}
+
+bool newestThreadPromotionRevealsOnce() {
+  bool passed = true;
+  for (const bool incremental : {false, true}) {
+    for (const bool startAtTop : {false, true}) {
+      nodegraph::NodeGraph graph;
+      ui::ThreadListSnapshot snapshot;
+      {
+        auto write = graph.write();
+        for (int index = 0; index < 100; ++index) {
+          ui::ThreadListRow row;
+          row.id = row.presentationKey = row.title = std::to_string(index);
+          row.recencyAt = 100 - index;
+          row.target = write.upsert({nodegraph::NodeKind::Thread, row.id});
+          snapshot.roots.push_back(std::move(row));
+        }
+        static_cast<void>(write.finish());
+      }
+      snapshot.selectedThreadId = "50";
+      middle::ThreadPane pane;
+      pane.resize(300, 500);
+      pane.refresh(snapshot);
+      pane.show();
+      QApplication::processEvents();
+      QTreeWidget *tree = threadTree(pane);
+      QTreeWidgetItem *promoted = threadItem(tree, "50");
+      if (!require(tree && promoted, "promotion fixture is missing its thread"))
+        return false;
+      tree->scrollToItem(startAtTop ? tree->topLevelItem(0) : promoted,
+                         QAbstractItemView::PositionAtTop);
+      QApplication::processEvents();
+      auto &row = snapshot.roots[50];
+      const auto apply = [&] {
+        if (incremental)
+          passed &= require(pane.applyRowPresentation(row),
+                            "prompt promotion update was rejected");
+        else
+          pane.refresh(snapshot);
+        QApplication::processEvents();
+      };
+      row.recencyAt = 1000;
+      apply();
+      passed &= require(tree->topLevelItem(0) == promoted &&
+                            tree->visualItemRect(promoted).top() == 0 &&
+                            tree->verticalScrollBar()->value() == 0,
+                        "prompt-promoted thread was left above the viewport");
+      tree->scrollToItem(threadItem(tree, "70"), QAbstractItemView::PositionAtTop);
+      QApplication::processEvents();
+      const int detachedScroll = tree->verticalScrollBar()->value();
+      row.status = nodegraph::NodeStatus::Running;
+      apply();
+      row.recencyAt = 1001;
+      apply();
+      passed &= require(tree->verticalScrollBar()->value() == detachedScroll,
+                        "already-first thread updates stole the viewport");
+      if (!incremental) {
+        snapshot.selectedThreadId = "70";
+        pane.refresh(snapshot);
+        QApplication::processEvents();
+        snapshot.roots.erase(snapshot.roots.begin() + 50);
+        QTreeWidgetItem *anchor = threadItem(tree, "70");
+        const int anchorY = tree->visualItemRect(anchor).top();
+        pane.refresh(snapshot);
+        QApplication::processEvents();
+        passed &= require(tree->visualItemRect(anchor).top() == anchorY,
+                          "removing the newest thread stole the viewport");
+      }
+    }
+  }
+  return passed;
 }
 
 class ViewportPaintProbe final : public QObject {
@@ -1969,6 +2067,7 @@ int main(int argc, char **argv) {
       codexui::codex::authoritativeSelectionWinsOverThePriorViewportAnchor();
   passed &= codexui::codex::retainedSelectionRemainsVisibleAfterReparenting();
   passed &= codexui::codex::incrementalRootSortPreservesTheViewportAnchor();
+  passed &= codexui::codex::newestThreadPromotionRevealsOnce();
   if (passed)
     std::cout << "NodeGraph ThreadPane UI tests passed\n";
   return passed ? EXIT_SUCCESS : EXIT_FAILURE;

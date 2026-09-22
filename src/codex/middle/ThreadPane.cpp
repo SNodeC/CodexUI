@@ -1241,6 +1241,8 @@ bool ThreadPane::repositionRootItem(ThreadTreeItem *item) {
   const int anchorY =
       anchorIndex.isValid() ? tree->visualRect(anchorIndex).top() : 0;
   QSignalBlocker blocked(tree);
+  const auto newestRecency =
+      tree->threadItem(tree->topLevelItem(0))->recencyAt;
   tree->takeTopLevelItem(current);
   int position = 0;
   while (position < tree->topLevelItemCount()) {
@@ -1252,7 +1254,11 @@ bool ThreadPane::repositionRootItem(ThreadTreeItem *item) {
   tree->insertTopLevelItem(position, item);
   if (tree->isVisible()) {
     tree->doItemsLayout();
-    tree->restoreViewportY(anchorItem, anchorY);
+    if (position == 0 && sortCriterion == SortCriterion::Recency &&
+        item->recencyAt > newestRecency)
+      tree->scrollToTop();
+    else
+      tree->restoreViewportY(anchorItem, anchorY);
   }
   blocked.unblock();
   updateAnimationTimer();
@@ -1274,6 +1280,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   const int anchorY =
       anchorIndex.isValid() ? tree->visualRect(anchorIndex).top() : 0;
   bool structureChanged = false;
+  bool revealNewest = false;
   if (contextMenu) {
     const ui::ThreadListRow *context =
         findPresentation(snapshot.roots, contextPresentationKey);
@@ -1369,6 +1376,11 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       item = new ThreadTreeItem(tree, row.presentationKey);
       rows.emplace(row.presentationKey, item);
     }
+    if (!parent && position == 0 && sortCriterion == SortCriterion::Recency) {
+      const auto *newest = tree->threadItem(tree->topLevelItem(0));
+      revealNewest =
+          newest && newest != item && row.recencyAt > newest->recencyAt;
+    }
     bool reparented = false;
     if (initialPopulation && !parent)
       initialRoots.push_back(item);
@@ -1455,8 +1467,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
     // before restoring its stable semantic anchor or requesting another page.
     tree->doItemsLayout();
     const auto retainedAnchor = rows.find(anchorKey);
-    if (sameSelection && retainedAnchor != rows.end() &&
-        retainedAnchor->second->target == anchorTarget)
+    if (revealNewest)
+      tree->scrollToTop();
+    else if (sameSelection && retainedAnchor != rows.end() &&
+             retainedAnchor->second->target == anchorTarget)
       tree->restoreViewportY(retainedAnchor->second, anchorY);
   }
   blocked.unblock();
