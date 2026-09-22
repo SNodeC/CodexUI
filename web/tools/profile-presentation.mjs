@@ -43,6 +43,7 @@ session.dispose();
 
 const streamedText = thread?.turns.get("turn-99")?.items.get("item-99-99")?.raw.text;
 const measurements = {
+    nodeVersion: process.version,
     authoritativeItems: [...(thread?.turns.values() ?? [])].reduce((count, turn) => count + turn.items.size, 0),
     visibleCards: projection.sections.reduce((count, section) => count + section.cards.length, 0),
     streamedDeltas: typeof streamedText === "string" ? streamedText.length - "Answer 99".length : 0,

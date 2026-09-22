@@ -495,6 +495,7 @@ try {
         "--window-size=760,900", "--noerrdialogs", url], {stdio: ["ignore", "ignore", "pipe"]});
     chrome.stderr.on("data", chunk => { chromeErrors = `${chromeErrors}${chunk}`.slice(-8000); });
     devTools = await DevTools.connect(await pageTarget(port));
+    const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
     await setWidth(devTools, 760);
@@ -657,7 +658,7 @@ try {
             reasoning_effort: "low"}},
     });
 
-    console.log(JSON.stringify({browser: "Chromium", widths: [760, 521, 360], overflow: 0,
+    console.log(JSON.stringify({browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

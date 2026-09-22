@@ -407,9 +407,17 @@ public:
   std::size_t maximumRowResizes = 0;
   std::size_t maximumLayoutRequests = 0;
   std::size_t maximumPaints = 0;
+  std::size_t maximumFramePaints = 0;
+  std::size_t paintFrames = 0;
 
 protected:
   bool eventFilter(QObject *watched, QEvent *event) override {
+    // One backing-store update delivers the child paints for a frame. A
+    // residency sample can span many such frames while admission yields.
+    if (watched == root_ && event->type() == QEvent::UpdateRequest) {
+      framePaints_ = 0;
+      ++paintFrames;
+    }
     const bool viewport =
         std::ranges::find(viewports_, watched) != viewports_.end();
     if (viewport && event->type() == QEvent::ChildAdded) {
@@ -441,11 +449,13 @@ protected:
     } else if (event->type() == QEvent::Paint) {
       ++paints;
       ++samplePaints;
+      maximumFramePaints = std::max(maximumFramePaints, ++framePaints_);
     }
     return false;
   }
 
 private:
+  std::size_t framePaints_ = 0;
   QPointer<QWidget> root_;
   std::array<QObject *, 3> viewports_{};
   std::unordered_set<QObject *> rows_;
@@ -2764,7 +2774,7 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
           work.paints <= work.constructions * 32 + 512 &&
           work.maximumRowResizes <= 256 &&
           work.maximumLayoutRequests <= 4096 &&
-          work.maximumPaints <= 2048,
+          work.paintFrames > 0 && work.maximumFramePaints <= 2048,
       "Inspector construction, churn, parsing, measurement, and per-frame work stay bounded");
   std::cout << "Inspector performance rows=" << rowCount
             << " plan_us=" << planMicros
@@ -2794,6 +2804,8 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
             << " max_resizes=" << work.maximumRowResizes
             << " max_layouts=" << work.maximumLayoutRequests
             << " max_paints=" << work.maximumPaints
+            << " max_frame_paints=" << work.maximumFramePaints
+            << " paint_frames=" << work.paintFrames
             << " document_constructions=" << documents.constructions
             << " document_retirements=" << documents.retirements
             << " parse_inputs=" << documents.parseInputs

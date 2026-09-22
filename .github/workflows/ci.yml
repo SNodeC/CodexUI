@@ -175,6 +175,17 @@ jobs:
           npm test
           npm pack --dry-run
 
+      - name: Verify CodexWebUI on Node.js 22
+        working-directory: CodexUI/codexui
+        run: |
+          npm ci --prefix web
+          npm test --prefix web
+
+      - name: Select the recorded performance-baseline runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Test and qualify CodexWebUI
         working-directory: CodexUI/codexui
         run: |

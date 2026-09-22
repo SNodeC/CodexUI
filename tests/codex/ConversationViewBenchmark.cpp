@@ -1645,6 +1645,7 @@ int main(int argc, char **argv) {
   QTextDocument *streamDocument = streamBody ? streamBody->document() : nullptr;
   qulonglong streamConstructions = 0;
   std::vector<qint64> streamTimings;
+  std::vector<qint64> streamApplyTimings;
   qulonglong streamDocumentChanges = 0;
   qulonglong streamTailLocalityChecks = 0;
   qulonglong streamMaximumLayoutRequests = 0;
@@ -1714,6 +1715,7 @@ int main(int argc, char **argv) {
     QElapsedTimer timer;
     timer.start();
     streamAccepted = applyPresentation(view, streamData).has_value();
+    streamApplyTimings.push_back(timer.nsecsElapsed() / 1000);
     processFrame();
     streamTimings.push_back(timer.nsecsElapsed() / 1000);
     streamDocumentChanges += documents.changes;
@@ -2400,6 +2402,7 @@ int main(int argc, char **argv) {
       {"normalScroll", statsJson(normalStats)},
       {"largeSeek", statsJson(seekStats)},
       {"stream", statsJson(streamStats)},
+      {"streamApply", statsJson(statistics(streamApplyTimings))},
       {"commandStream", statsJson(commandStats)},
       {"followingTailAppend", statsJson(followingAppendStats)},
       {"interactiveResizeEntryMicroseconds", resizeEntryMicroseconds},

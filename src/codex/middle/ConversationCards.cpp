@@ -708,6 +708,8 @@ public:
   }
 
   void setContent(FileChangesRendering rendering) {
+    QTextCursor cursor(document());
+    cursor.beginEditBlock();
     if (toPlainText() != rendering.text)
       setPlainText(rendering.text);
     openPaths_ = std::move(rendering.openPaths);
@@ -715,8 +717,6 @@ public:
     linkFormat.setForeground(QColor(QString::fromLatin1(UiStyle::blue)));
     linkFormat.setFontUnderline(false);
     linkFormat.setAnchor(true);
-    QTextCursor cursor(document());
-    cursor.beginEditBlock();
     for (std::size_t index = 0; index < rendering.links.size(); ++index) {
       const FileChangesRendering::Link &link = rendering.links[index];
       linkFormat.setAnchorHref(QStringLiteral("codexui-file:%1").arg(index));

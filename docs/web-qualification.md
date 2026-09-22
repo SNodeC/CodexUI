@@ -94,6 +94,11 @@ Hydration was exactly two layout/style passes in every sample; streaming was
 exactly one; idle and the semantic settings no-op were exactly zero. These are
 local regression gates, not portable hardware performance claims.
 
+CI runs functional checks on Node 22 and runs release qualification on Node 24,
+the runtime used to establish these limits. The profile prints its Node version
+and browser qualification prints the actual Chromium version. Timing limits are
+unchanged; runner timing still needs to be distinguished from semantic failures.
+
 ### Paginated-protocol requalification — 2026-09-21
 
 The browser fixture now follows metadata-only `thread/resume`,
