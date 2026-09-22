@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
 import {constants as fsConstants} from "node:fs";
-import {access, mkdtemp, readFile, rm} from "node:fs/promises";
+import {access, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
 import {createServer} from "node:http";
 import {tmpdir} from "node:os";
 import {dirname, extname, join, resolve, sep} from "node:path";
@@ -603,9 +603,18 @@ try {
     checkPerformance(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
         `semantic settings no-op exceeded its task gate: ${noOpPerformance.taskMilliseconds} ms`);
 
+    if (process.env.CODEXUI_BROWSER_CPU_PROFILE) {
+        await devTools.call("Profiler.enable");
+        await devTools.call("Profiler.setSamplingInterval", {interval: 100});
+        await devTools.call("Profiler.start");
+    }
     const beforeStream = await performanceSnapshot(devTools);
     const streamResult = await devTools.evaluate(applicationProfileStream);
     const afterStream = await performanceSnapshot(devTools);
+    if (process.env.CODEXUI_BROWSER_CPU_PROFILE) {
+        const {profile} = await devTools.call("Profiler.stop");
+        await writeFile(process.env.CODEXUI_BROWSER_CPU_PROFILE, JSON.stringify(profile));
+    }
     const streamPerformance = performanceDelta(beforeStream, afterStream);
     assert.equal(streamResult.streamedDeltas, 2_000);
     assert.equal(streamResult.textGrowth, 2_000);

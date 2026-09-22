@@ -193,6 +193,7 @@ jobs:
           npm test --prefix web
 
       - name: Profile the presentation model
+        id: web-model-profile
         if: ${{ !cancelled() }}
         working-directory: CodexUI/codexui
         run: npm run profile --prefix web
@@ -206,9 +207,28 @@ jobs:
           npm run verify:artifact --prefix web
 
       - name: Qualify the production browser application
+        id: web-browser
         if: ${{ !cancelled() && steps.web-artifact.outcome == 'success' }}
         working-directory: CodexUI/codexui
         run: npm run qualify:browser --prefix web
+
+      - name: Capture failed web timing diagnostics
+        if: ${{ !cancelled() && (steps.web-model-profile.outcome == 'failure' || steps.web-browser.outcome == 'failure') }}
+        working-directory: CodexUI/codexui
+        run: |
+          lscpu
+          free -m
+          mkdir -p _build/web-profiles
+          # Profiled retries are diagnostic only; the mandatory gates above remain failed.
+          node --cpu-prof --cpu-prof-interval=100 --cpu-prof-dir=_build/web-profiles web/tools/profile-presentation.mjs || true
+          CODEXUI_BROWSER_CPU_PROFILE=_build/web-profiles/browser.cpuprofile node web/tools/qualify-browser.mjs || true
+
+      - name: Upload failed web timing diagnostics
+        if: ${{ !cancelled() && (steps.web-model-profile.outcome == 'failure' || steps.web-browser.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-timing-diagnostics
+          path: CodexUI/codexui/_build/web-profiles
 
       - name: Stage and verify the CodexWebUI install
         if: ${{ !cancelled() && steps.web-artifact.outcome == 'success' }}
