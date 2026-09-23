@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ComposerPane.h"
+#include "codex/AttachmentInput.h"
 
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ConversationPresentation.h"
@@ -12,7 +13,9 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QImage>
 #include <QLabel>
+#include <QMimeData>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -54,6 +57,7 @@ void repolish(QWidget *widget) {
 } // namespace
 
 ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
+  attachmentPool_.setMaxThreadCount(1);
   setObjectName(QStringLiteral("composerOverlay"));
   setAttribute(Qt::WA_StyledBackground, true);
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -171,7 +175,6 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   sendButton_ = new QPushButton(QStringLiteral("Send"), composerBody_);
   sendButton_->setObjectName(QStringLiteral("composerSendButton"));
   sendButton_->setProperty("kind", "primary");
-  sendButton_->setToolTip(QStringLiteral("Send prompt (Enter)"));
   sendButton_->setFixedSize(62, ControlHeight);
   stopButton_ = new QPushButton(QStringLiteral("Stop"), composerBody_);
   stopButton_->setProperty("kind", "stop");
@@ -185,6 +188,8 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   surfacesLayout->addWidget(composer_);
 
   connect(sendButton_, &QPushButton::clicked, this, [this] { submitDraft(); });
+  connect(promptEditor_, &ExpandingPromptEditor::attachmentInput, this,
+          &ComposerPane::insertAttachments);
   connect(promptEditor_, &codexui::ExpandingPromptEditor::submitRequested, this,
           [this] { submitDraft(); });
   connect(promptEditor_, &QPlainTextEdit::textChanged, this, [this] {
@@ -214,13 +219,76 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   refreshSubmissionEnabled();
 }
 
-ComposerPane::~ComposerPane() { delete turnSettings_; }
+ComposerPane::~ComposerPane() {
+  // Workers may post to this receiver, but must finish before QObject teardown.
+  attachmentPool_.waitForDone();
+  delete turnSettings_;
+}
+
+void ComposerPane::insertAttachments(const QMimeData *source) {
+  if (!canSubmit_ || preparingAttachments_ >= MaximumAttachments) {
+    finishAttachmentInput(
+        QStringLiteral("Cannot add attachments now; wait for "
+                       "pending images or session readiness."));
+    return;
+  }
+  const auto urls = source->urls();
+  const QImage image =
+      urls.isEmpty() ? qvariant_cast<QImage>(source->imageData()) : QImage{};
+  const auto generation = draftGeneration_;
+  ++preparingAttachments_;
+  refreshSubmissionEnabled();
+  presentation::announce(*promptEditor_,
+                         QStringLiteral("Preparing attachments"));
+  // One queue preserves paste/drop order, including mixed image/file input.
+  attachmentPool_.start([this, urls, image, generation] {
+    QMimeData mime;
+    if (urls.isEmpty())
+      mime.setImageData(image);
+    else
+      mime.setUrls(urls);
+    std::vector<AttachmentDraft> prepared;
+    const QString error = appendAttachmentInput(prepared, mime);
+    QMetaObject::invokeMethod(
+        this,
+        [this, generation, prepared, error] {
+          --preparingAttachments_;
+          refreshSubmissionEnabled();
+          if (generation != draftGeneration_)
+            return;
+          QString failure = error;
+          if (failure.isEmpty()) {
+            QStringList paths;
+            for (const auto &attachment : prepared)
+              paths.push_back(QString::fromStdString(attachment.path));
+            failure = appendAttachmentFiles(attachments_, paths);
+          }
+          finishAttachmentInput(failure);
+        },
+        Qt::QueuedConnection);
+  });
+}
+
+void ComposerPane::finishAttachmentInput(QString error) {
+  if (!error.isEmpty()) {
+    if (actions_.attachmentError)
+      actions_.attachmentError(error);
+    presentation::announce(*promptEditor_, error);
+    return;
+  }
+  refreshAttachments();
+  updateGeometry();
+  presentation::announce(
+      *promptEditor_,
+      QStringLiteral("%1 attachments").arg(attachments_.size()));
+}
 
 void ComposerPane::setActions(Actions actions) {
   actions_ = std::move(actions);
 }
 
 void ComposerPane::setAttachments(std::vector<AttachmentDraft> attachments) {
+  ++draftGeneration_;
   attachments_ = std::move(attachments);
   refreshAttachments();
   updateGeometry();
@@ -322,7 +390,6 @@ void ComposerPane::setCanSubmit(bool canSubmit) {
   promptEditor_->setEnabled(true);
   canSubmit_ = canSubmit;
   refreshSubmissionEnabled();
-  attachmentButton_->setEnabled(canSubmit);
   for (QPushButton *button : attachmentPanel_->findChildren<QPushButton *>())
     button->setEnabled(true);
 }
@@ -339,6 +406,7 @@ void ComposerPane::setTurnSettingsContext(TurnSettingsContext context) {
 }
 
 void ComposerPane::clearDraft() {
+  ++draftGeneration_;
   promptEditor_->clear();
   attachments_.clear();
   refreshAttachments();
@@ -347,8 +415,8 @@ void ComposerPane::clearDraft() {
 
 void ComposerPane::submitDraft() {
   const QString prompt = promptEditor_->toPlainText();
-  if (prompt.trimmed().isEmpty() || !sendButton_->isEnabled() ||
-      !actions_.submit)
+  if ((prompt.trimmed().isEmpty() && attachments_.empty()) ||
+      !sendButton_->isEnabled() || !actions_.submit)
     return;
   std::vector<AttachmentDraft> attachments = attachments_;
   if (actions_.submit(prompt, std::move(attachments)))
@@ -356,6 +424,7 @@ void ComposerPane::submitDraft() {
 }
 
 void ComposerPane::refreshAttachments() {
+  refreshSubmissionEnabled();
   clearLayout(attachmentListLayout_);
   if (attachments_.empty()) {
     refreshAttachmentGeometry();
@@ -384,6 +453,7 @@ void ComposerPane::refreshAttachments() {
       if (attachment == attachments_.end())
         return;
       attachments_.erase(attachment);
+      refreshSubmissionEnabled();
       const int rowIndex = attachmentListLayout_->indexOf(row);
       if (QLayoutItem *item = attachmentListLayout_->takeAt(rowIndex))
         delete item;
@@ -479,9 +549,15 @@ void ComposerPane::refreshActionStyle() {
 }
 
 void ComposerPane::refreshSubmissionEnabled() {
+  sendButton_->setToolTip(preparingAttachments_
+                              ? QStringLiteral("Preparing attachments…")
+                              : QStringLiteral("Send prompt (Enter)"));
+  attachmentButton_->setEnabled(canSubmit_ && preparingAttachments_ == 0);
   static const QRegularExpression NonWhitespace(QStringLiteral("\\S"));
   sendButton_->setEnabled(
-      canSubmit_ && !promptEditor_->document()->find(NonWhitespace).isNull());
+      canSubmit_ && preparingAttachments_ == 0 &&
+      (!attachments_.empty() ||
+       !promptEditor_->document()->find(NonWhitespace).isNull()));
 }
 
 } // namespace codexui::codex::middle

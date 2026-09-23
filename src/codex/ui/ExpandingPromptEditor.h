@@ -32,8 +32,13 @@ signals:
   void submitRequested();
   void focusStateChanged(bool focused);
   void editorHeightChanged(int height);
+  // Consumed synchronously; the clipboard or drop event owns source.
+  void attachmentInput(const QMimeData *source);
 
 protected:
+  bool canInsertFromMimeData(const QMimeData *source) const override;
+  void insertFromMimeData(const QMimeData *source) override;
+  void dropEvent(QDropEvent *event) override;
   void changeEvent(QEvent *event) override;
   void focusInEvent(QFocusEvent *event) override;
   void focusOutEvent(QFocusEvent *event) override;

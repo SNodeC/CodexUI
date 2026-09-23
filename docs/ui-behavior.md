@@ -246,6 +246,24 @@ thread navigation retains them, and submission sends them to the thread that is
 visibly selected at that moment. Explicit new-thread creation still starts with
 a deliberately cleared composer.
 
+The native prompt editor accepts clipboard images and local files through Paste
+or drag/drop. These inputs share the file picker's validation, duplicate handling,
+and sixteen-attachment limit. Drops copy references, never move source files;
+ordinary text and web links remain text. Directories and unreadable files are
+rejected, and an invalid batch leaves the existing attachment list unchanged.
+Attachment-only prompts are allowed. Images/audio use the existing local-image/
+local-audio protocol inputs; other files use the existing file-link representation.
+This does not upload files to remote servers: paths must be accessible to app-server.
+
+Attachment preparation runs serially off the GUI thread, preserving input order.
+Send and the file picker wait for pending preparations while text editing remains
+available. Clearing/replacing the draft invalidates pending results. The composer
+joins its owned preparation pool before destruction; the pool never reads NodeGraph.
+Pasted pixels become private PNG files under the platform's CodexUI application-data
+directory (`attachments/`). They survive draft clearing, acknowledgement and process
+exit so queued/recovered prompts and retained history do not reference deleted files.
+These durable files currently have no automatic expiry, including unused pasted images.
+
 Accepting New Thread immediately inserts one selected orange animated row in
 the thread list. It represents a client-local draft row, not an app-server
 thread. Sending the first prompt promotes the same row to the ID returned by

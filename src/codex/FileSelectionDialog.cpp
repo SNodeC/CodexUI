@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/FileSelectionDialog.h"
+#include "codex/AttachmentInput.h"
 
 #include <QAbstractItemView>
 #include <QDir>
@@ -11,7 +12,6 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QMimeDatabase>
 #include <QModelIndex>
 #include <QPushButton>
 #include <QTreeView>
@@ -23,8 +23,6 @@
 
 namespace codexui::codex {
 namespace {
-
-constexpr int MaximumAttachments = 16;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -256,38 +254,26 @@ void FileSelectionDialog::addSelectedFiles() {
   if (!attachments)
     return;
   const QModelIndexList rows = browser->selectionModel()->selectedRows(0);
-  QMimeDatabase mimeDatabase;
+  QStringList paths;
   for (const QModelIndex &index : rows) {
     const QFileInfo info = fileSystem->fileInfo(index);
-    if (!info.isFile())
-      continue;
-    bool duplicate = false;
-    for (int itemIndex = 0; itemIndex < attachments->count(); ++itemIndex) {
-      if (attachments->item(itemIndex)->data(Qt::UserRole).toString() ==
-          info.absoluteFilePath()) {
-        duplicate = true;
-        break;
-      }
-    }
-    if (duplicate)
-      continue;
-    if (attachments->count() >= MaximumAttachments) {
-      errorLabel->setText(
-          QStringLiteral("A message can contain at most %1 attachments.")
-              .arg(MaximumAttachments));
-      errorLabel->show();
-      break;
-    }
-    const QString mime =
-        mimeDatabase.mimeTypeForFile(info, QMimeDatabase::MatchExtension).name();
-    auto *item = new QListWidgetItem(
-        QStringLiteral("%1  |  %2")
-            .arg(info.fileName(), readableSize(info.size())));
-    item->setData(Qt::UserRole, info.absoluteFilePath());
-    item->setData(Qt::UserRole + 1, mime);
-    item->setData(Qt::UserRole + 2,
-                  QVariant::fromValue<qlonglong>(info.size()));
-    item->setToolTip(info.absoluteFilePath());
+    if (info.isFile())
+      paths.push_back(info.absoluteFilePath());
+  }
+  auto selected = selectedAttachments();
+  const QString error = appendAttachmentFiles(selected, paths);
+  errorLabel->setText(error);
+  errorLabel->setVisible(!error.isEmpty());
+  for (std::size_t index = static_cast<std::size_t>(attachments->count());
+       index < selected.size(); ++index) {
+    const AttachmentDraft &file = selected[index];
+    auto *item =
+        new QListWidgetItem(QStringLiteral("%1  |  %2")
+                                .arg(text(file.name), readableSize(file.size)));
+    item->setData(Qt::UserRole, text(file.path));
+    item->setData(Qt::UserRole + 1, text(file.mimeType));
+    item->setData(Qt::UserRole + 2, QVariant::fromValue<qlonglong>(file.size));
+    item->setToolTip(text(file.path));
     attachments->addItem(item);
   }
   updateActions();

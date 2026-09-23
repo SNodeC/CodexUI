@@ -881,6 +881,9 @@ void ShellWidget::Impl::connectUi() {
         QStringLiteral("Stop request was not admitted; try again.")));
   };
   composerActions.attach = [this] { chooseAttachments(); };
+  composerActions.attachmentError = [this](QString error) {
+    showNotice(std::move(error));
+  };
   composerActions.accept = [this] {
     respondToRenderedPending(&Impl::acceptPending);
   };
@@ -2558,7 +2561,7 @@ void ShellWidget::Impl::confirmDeleteThread(const nodegraph::NodeRef &thread) {
 
 bool ShellWidget::Impl::submitPrompt(QString prompt,
                                      std::vector<AttachmentDraft> attachments) {
-  if (prompt.trimmed().isEmpty())
+  if (prompt.trimmed().isEmpty() && attachments.empty())
     return false;
   TurnSettingsPolicy &settings = middleRegion->composer().turnSettings();
   std::vector<nodegraph::Attachment> ownedAttachments;

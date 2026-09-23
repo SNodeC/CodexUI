@@ -202,6 +202,8 @@ target_link_libraries(
 
 add_library(
     codexui-middle-ui STATIC
+    src/codex/AttachmentInput.cpp
+    src/codex/AttachmentInput.h
     src/codex/FileSelectionDialog.cpp
     src/codex/FileSelectionDialog.h
     src/codex/TurnSettingsWidget.cpp

@@ -1267,6 +1267,22 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
       expect(bridge.reply(*request, {{"turnId", "wire-created-turn"}}),
              "turn/steer decodes its typed result");
     expect(!bridge.receiveAppServer(100ms), "steering is never dual-sent");
+    NodeAction imageOnly{created, NodeActionKind::SubmitPrompt};
+    imageOnly.attachments.push_back({"/tmp/pasted-image.png",
+                                     "pasted-image.png", "image/png",
+                                     std::nullopt});
+    expect(sendAction(runtime.channels(), std::move(imageOnly)),
+           "image-only steering enters the existing worker admission path");
+    request = bridge.receiveAppServer();
+    expect(
+        request && request->value("method", std::string{}) == "turn/steer" &&
+            request->at("params").at("input") ==
+                nlohmann::json::array({{{"type", "localImage"},
+                                        {"path", "/tmp/pasted-image.png"}}}),
+        "image-only input has a localImage and no fabricated empty text item");
+    if (request)
+      expect(bridge.reply(*request, {{"turnId", "wire-created-turn"}}),
+             "image-only steering decodes its typed result");
   }
 
   expect(bridge.appServerNotification("turn/completed",

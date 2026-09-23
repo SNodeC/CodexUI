@@ -757,10 +757,13 @@ private:
 nlohmann::json
 promptInput(const std::string &prompt,
             const std::vector<nodegraph::Attachment> &attachments) {
-  nlohmann::json input = nlohmann::json::array(
-      {{{"type", "text"},
-        {"text", nodegraph::composePromptMarkdown(prompt, attachments)},
-        {"text_elements", nlohmann::json::array()}}});
+  nlohmann::json input = nlohmann::json::array();
+  const std::string text =
+      nodegraph::composePromptMarkdown(prompt, attachments);
+  if (!text.empty())
+    input.push_back({{"type", "text"},
+                     {"text", text},
+                     {"text_elements", nlohmann::json::array()}});
   for (const nodegraph::Attachment &attachment : attachments) {
     if (attachment.mimeType.starts_with("image/"))
       input.push_back({{"type", "localImage"}, {"path", attachment.path}});

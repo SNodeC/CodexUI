@@ -6,6 +6,7 @@
 #include "codex/AttachmentDraft.h"
 #include "codex/TurnSettingsPolicy.h"
 
+#include <QThreadPool>
 #include <QWidget>
 
 #include <cstddef>
@@ -15,6 +16,7 @@
 class QFrame;
 class QGridLayout;
 class QLabel;
+class QMimeData;
 class QPushButton;
 class QScrollArea;
 class QToolButton;
@@ -39,6 +41,7 @@ public:
     std::function<void()> accept;
     std::function<void()> review;
     std::function<void()> deny;
+    std::function<void(QString)> attachmentError;
   };
 
   explicit ComposerPane(QWidget *parent = nullptr);
@@ -73,6 +76,8 @@ private:
   void refreshAdaptiveLayout();
   void refreshActionStyle();
   void refreshSubmissionEnabled();
+  void insertAttachments(const QMimeData *source);
+  void finishAttachmentInput(QString error);
 
   QFrame *attention_ = nullptr;
   QLabel *attentionTitle_ = nullptr;
@@ -95,6 +100,9 @@ private:
 
   Actions actions_;
   std::vector<AttachmentDraft> attachments_;
+  QThreadPool attachmentPool_;
+  std::uint64_t draftGeneration_ = 0;
+  std::size_t preparingAttachments_ = 0;
   bool activeTurn_ = false;
   bool canSubmit_ = false;
   bool expanded_ = false;

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/AttachmentInput.h"
 
 #include <QAbstractTextDocumentLayout>
+#include <QDropEvent>
 #include <QEvent>
 #include <QFocusEvent>
 #include <QInputMethodEvent>
@@ -26,7 +28,8 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget *parent)
   setPlaceholderText(QStringLiteral("Message Codex"));
   setAccessibleName(QStringLiteral("Message Codex"));
   setAccessibleDescription(
-      QStringLiteral("Enter to send. Shift+Enter inserts a new line."));
+      QStringLiteral("Enter to send. Shift+Enter inserts a new line. "
+                     "Paste images or drop files to attach them."));
   setLineWrapMode(QPlainTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -41,12 +44,41 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget *parent)
           });
 }
 
+bool ExpandingPromptEditor::canInsertFromMimeData(
+    const QMimeData *source) const {
+  return codex::isAttachmentInput(*source) ||
+         QPlainTextEdit::canInsertFromMimeData(source);
+}
+
+void ExpandingPromptEditor::insertFromMimeData(const QMimeData *source) {
+  if (codex::isAttachmentInput(*source))
+    emit attachmentInput(source);
+  else
+    QPlainTextEdit::insertFromMimeData(source);
+}
+
 void ExpandingPromptEditor::changeEvent(QEvent *event) {
   QPlainTextEdit::changeEvent(event);
   if (event && (event->type() == QEvent::ApplicationFontChange ||
                 event->type() == QEvent::FontChange ||
                 event->type() == QEvent::StyleChange))
     scheduleRemeasure();
+}
+
+void ExpandingPromptEditor::dropEvent(QDropEvent *event) {
+  if (!codex::isAttachmentInput(*event->mimeData())) {
+    QPlainTextEdit::dropEvent(event);
+    return;
+  }
+  // Attaching references a source file; never ask its drag owner to move/delete
+  // it.
+  if (isReadOnly() || !event->possibleActions().testFlag(Qt::CopyAction)) {
+    event->ignore();
+    return;
+  }
+  insertFromMimeData(event->mimeData());
+  event->setDropAction(Qt::CopyAction);
+  event->accept();
 }
 
 bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const {

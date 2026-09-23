@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "TimingPolicy.h"
+#include "codex/AttachmentInput.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
@@ -10,18 +11,28 @@
 #include "codex/ui/ExpandingPromptEditor.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QTemporaryDir>
 #include <QTextCursor>
+#include <QThread>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QUrl>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -83,6 +94,225 @@ bool promptKeyboardAndFocusContract() {
                    "Shift+Return inserts a newline without submission");
   result &= expect(editor.accessibleName() == QStringLiteral("Message Codex"),
                    "the prompt retains its accessible identity");
+  return result;
+}
+
+bool promptAttachmentAdmission() {
+  QTemporaryDir files;
+  QStringList paths;
+  bool result = expect(files.isValid(), "attachment fixture directory exists");
+  for (int index = 0; index < 17; ++index) {
+    const QString path =
+        files.filePath(QStringLiteral("file %1.dat").arg(index));
+    QFile file(path);
+    result &= expect(file.open(QIODevice::WriteOnly) && file.write("data") == 4,
+                     "attachment fixture file is readable");
+    paths.push_back(path);
+  }
+  std::vector<AttachmentDraft> draft;
+  result &=
+      expect(!appendAttachmentFiles(draft, paths).isEmpty() && draft.empty(),
+             "over-limit batches are rejected without partial admission");
+  paths.removeLast();
+  result &= expect(appendAttachmentFiles(draft, paths).isEmpty() &&
+                       draft.size() == 16,
+                   "the shared picker/drop admission accepts sixteen files");
+  const auto original = draft;
+  result &=
+      expect(appendAttachmentFiles(draft, paths).isEmpty() && draft == original,
+             "duplicate files do not consume attachment slots");
+  draft.clear();
+  result &= expect(
+      !appendAttachmentFiles(draft, {paths.front(), files.path()}).isEmpty() &&
+          draft.empty(),
+      "directories reject the whole batch rather than becoming file links");
+  result &= expect(
+      !appendAttachmentFiles(draft, {files.filePath("missing")}).isEmpty(),
+      "missing files are rejected");
+  QMimeData mixed;
+  mixed.setUrls(
+      {QUrl::fromLocalFile(paths.front()), QUrl("https://example.com/file")});
+  result &=
+      expect(!appendAttachmentInput(draft, mixed).isEmpty() && draft.empty(),
+             "mixed local and remote drops cannot silently lose files");
+  return result;
+}
+
+bool promptClipboardAndDropContract() {
+  QTemporaryDir files;
+  const QByteArray previousDataHome = qgetenv("XDG_DATA_HOME");
+  qputenv("XDG_DATA_HOME", files.path().toUtf8());
+  ComposerPane composer;
+  composer.resize(900, 300);
+  composer.show();
+  composer.setCanSubmit(true);
+  auto *editor = composer.promptEditor();
+  QCoreApplication::processEvents();
+  QString error;
+  bool admit = false;
+  int submissions = 0;
+  std::vector<AttachmentDraft> submitted;
+  ComposerPane::Actions actions;
+  actions.attachmentError = [&](QString message) {
+    error = std::move(message);
+  };
+  actions.submit = [&](QString prompt,
+                       std::vector<AttachmentDraft> attachments) {
+    ++submissions;
+    submitted = std::move(attachments);
+    return prompt.isEmpty() && admit;
+  };
+  composer.setActions(std::move(actions));
+  QToolButton *attachButton = nullptr;
+  for (auto *button : composer.findChildren<QToolButton *>())
+    if (button->accessibleName() == QStringLiteral("Attach files"))
+      attachButton = button;
+  const auto settle = [&] {
+    QElapsedTimer wait;
+    wait.start();
+    while (attachButton && !attachButton->isEnabled() &&
+           wait.elapsed() < 5000) {
+      QCoreApplication::processEvents();
+      QThread::msleep(1);
+    }
+  };
+  QApplication::clipboard()->setText(QStringLiteral("first\n\nlast"));
+  editor->paste();
+  bool result =
+      expect(editor->toPlainText() == QStringLiteral("first\n\nlast") &&
+                 composer.attachments().empty(),
+             "ordinary multiline paste is unchanged");
+  editor->clear();
+  QImage image(3840, 2160, QImage::Format_RGB32);
+  for (int y = 0; y < image.height(); ++y) {
+    auto *row = reinterpret_cast<QRgb *>(image.scanLine(y));
+    for (int x = 0; x < image.width(); ++x)
+      row[x] = qRgb(x % 256, y % 256, (x + y) % 256);
+  }
+  QApplication::clipboard()->setImage(image);
+  result &= expect(editor->canPaste(), "image clipboard enables native Paste");
+  QElapsedTimer timer;
+  timer.start();
+  editor->paste();
+  std::cerr << "4K paste dispatch: " << timer.elapsed() << " ms\n";
+  sendKey(*editor, Qt::Key_Return);
+  result &= expect(submissions == 0, "Send waits for image-file preparation");
+  QApplication::clipboard()->setText(
+      QStringLiteral("typing during preparation"));
+  editor->paste();
+  result &= expect(editor->toPlainText() ==
+                       QStringLiteral("typing during preparation"),
+                   "text editing continues while image preparation runs");
+  editor->clear();
+  settle();
+  std::cerr << "4K clipboard image ready: " << timer.elapsed() << " ms\n";
+  result &= expect(error.isEmpty() && composer.attachments().size() == 1 &&
+                       editor->toPlainText().isEmpty(),
+                   "clipboard pixels become one attachment, not prompt text");
+  if (!composer.attachments().empty()) {
+    const QString path =
+        QString::fromStdString(composer.attachments().front().path);
+    result &= expect(QImage(path) == image &&
+                         composer.attachments().front().mimeType == "image/png",
+                     "the saved image preserves pixels and is typed as PNG");
+    const auto permissions = QFile::permissions(path);
+    result &= expect(!(permissions & (QFile::ReadGroup | QFile::ReadOther)),
+                     "pasted image data is private to the user");
+    sendKey(*editor, Qt::Key_Return);
+    result &= expect(submissions == 1 && composer.attachments().size() == 1,
+                     "rejected attachment-only submission preserves the draft");
+    admit = true;
+    composer.setActiveTurn(true);
+    sendKey(*editor, Qt::Key_Return);
+    result &= expect(submissions == 2 && composer.attachments().empty() &&
+                         QFileInfo::exists(path),
+                     "image-only steering clears the draft, not its file");
+    composer.setAttachments(submitted);
+    result &= expect(
+        QImage(QString::fromStdString(composer.attachments().front().path)) ==
+            image,
+        "recovery through attachment descriptors retains a readable image");
+    composer.clearDraft();
+  }
+  QList<QUrl> urls;
+  for (const QString &name :
+       {QStringLiteral("image.png"), QStringLiteral("notes ü.txt"),
+        QStringLiteral("document.pdf"), QStringLiteral("archive.zip")}) {
+    QFile file(files.filePath(name));
+    result &= expect(file.open(QIODevice::WriteOnly) && file.write("data") == 4,
+                     "mixed drop fixture file exists");
+    urls.push_back(QUrl::fromLocalFile(file.fileName()));
+  }
+  QMimeData dropData;
+  dropData.setUrls(urls);
+  const auto drop = [&](const QMimeData &mime) {
+    QDragEnterEvent enter(QPoint(5, 5), Qt::CopyAction | Qt::MoveAction, &mime,
+                          Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(editor->viewport(), &enter);
+    QDropEvent event(QPointF(5, 5), Qt::CopyAction | Qt::MoveAction, &mime,
+                     Qt::LeftButton, Qt::NoModifier);
+    event.setDropAction(Qt::MoveAction);
+    QCoreApplication::sendEvent(editor->viewport(), &event);
+    if (!editor->isReadOnly())
+      settle();
+    return enter.isAccepted() && event.isAccepted() &&
+           event.dropAction() == Qt::CopyAction;
+  };
+  result &= expect(drop(dropData) && composer.attachments().size() == 4 &&
+                       editor->toPlainText().isEmpty(),
+                   "drop copies all file types without inserting URLs");
+  result &= expect(drop(dropData) && composer.attachments().size() == 4,
+                   "repeated drops do not duplicate attachments");
+  composer.resize(900, composer.sizeHint().height());
+  QCoreApplication::processEvents();
+  if (qEnvironmentVariableIsSet("CODEXUI_ATTACHMENT_CAPTURE"))
+    composer.grab().save(qEnvironmentVariable("CODEXUI_ATTACHMENT_CAPTURE"));
+  for (const QUrl &url : urls)
+    result &= expect(QFileInfo::exists(url.toLocalFile()),
+                     "drop never moves the source file");
+  auto *pasteData = new QMimeData;
+  pasteData->setUrls(urls);
+  composer.clearDraft();
+  QApplication::clipboard()->setMimeData(pasteData);
+  editor->paste();
+  settle();
+  result &= expect(composer.attachments().size() == 4,
+                   "file-manager copy/paste uses the same admission");
+  composer.clearDraft();
+  composer.setCanSubmit(false);
+  editor->paste();
+  result &= expect(!error.isEmpty() && composer.attachments().empty(),
+                   "unavailable attachment admission reports an error without "
+                   "changing the draft");
+  composer.setCanSubmit(true);
+  editor->setReadOnly(true);
+  result &= expect(!drop(dropData) && composer.attachments().empty(),
+                   "read-only editor rejects file drops");
+  editor->setReadOnly(false);
+  error.clear();
+  QApplication::clipboard()->setImage(image);
+  editor->paste();
+  composer.clearDraft();
+  settle();
+  result &= expect(composer.attachments().empty(),
+                   "cleared drafts do not regain an in-flight image");
+  {
+    ComposerPane closing;
+    closing.setCanSubmit(true);
+    closing.promptEditor()->paste();
+  }
+  QCoreApplication::processEvents();
+  QApplication::clipboard()->setText(
+      QStringLiteral("https://example.com/link"));
+  editor->paste();
+  result &= expect(editor->toPlainText() ==
+                       QStringLiteral("https://example.com/link"),
+                   "ordinary web links remain prompt text");
+  QApplication::clipboard()->clear();
+  if (previousDataHome.isNull())
+    qunsetenv("XDG_DATA_HOME");
+  else
+    qputenv("XDG_DATA_HOME", previousDataHome);
   return result;
 }
 
@@ -964,6 +1194,10 @@ int main(int argc, char **argv) {
     passed &= casePassed;
   };
   run("promptKeyboardAndFocusContract", promptKeyboardAndFocusContract);
+  run("promptAttachmentAdmission", promptAttachmentAdmission);
+  run("promptClipboardAndDropContract", promptClipboardAndDropContract);
+  if (argc == 2 && std::string(argv[1]) == "--attachment-input")
+    return passed ? 0 : 1;
   run("turnSettingsAreStableAccessibleProjections",
       turnSettingsAreStableAccessibleProjections);
   run("turnSettingsCatalogProjectionScalesLinearly",

@@ -28,6 +28,11 @@ separately for conversation and Inspector; neither worker accesses widgets.
 Global-pool shutdown at application destruction would be too late for these
 borrowed graph readers. Local Git/image jobs remain separate global-pool work.
 
+The composer also owns a single-worker attachment-preparation pool for pasted
+images and dropped files. It touches no graph state, returns results to the Qt
+thread, and is joined before composer destruction. Pending results are invalidated
+when the draft is cleared/replaced; image files are durable application data.
+
 There is no internal JSONL, socketpair payload path, presentation model, mirror
 graph, snapshot history, or callback framework. The complete implemented
 native contract, ownership rules, protocol inventory, backpressure behavior,
