@@ -9,6 +9,7 @@
 #include "codex/middle/MiddleRegionWidget.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -20,8 +21,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QHelpEvent>
+#include <QCursor>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QPushButton>
@@ -1142,12 +1146,55 @@ bool nestedWheelGestureHasOneRoutingOwner(bool measurePerformance) {
   return result;
 }
 
+bool tokenDetailsRemainVisible() {
+  UiStyle::TokenUsageLabel label;
+  QPalette dark = label.palette();
+  dark.setColor(QPalette::Window, Qt::black);
+  dark.setColor(QPalette::WindowText, Qt::white);
+  label.setPalette(dark);
+  label.setStyleSheet(UiStyle::applicationStyleSheet());
+  label.setUsage("Tokens 100 | In 80 | Out 20", "Tokens 100", "Total: 100\nInput: 80\nOutput: 20");
+  label.resize(300, 30);
+  label.move(100, 100);
+  label.show();
+  QCoreApplication::processEvents();
+  QHelpEvent help(QEvent::ToolTip, label.rect().center(), label.mapToGlobal(label.rect().center()));
+  QApplication::sendEvent(&label, &help);
+  auto *details = label.findChild<QLabel *>(QStringLiteral("tokenUsageDetails"));
+  bool result = expect(details && details->isVisible(), "token details open on hover");
+  if (!details) return false;
+  if (qEnvironmentVariableIsSet("CODEXUI_CAPTURE_HEADER"))
+    details->grab().save(QStringLiteral("/tmp/codexui-token-tooltip.png"));
+  result &= expect(details->palette().color(QPalette::Window) == QColor(UiStyle::panel) &&
+                       details->palette().color(QPalette::WindowText) == QColor(UiStyle::primary),
+                   "persistent token details use the shared light tooltip colors");
+  QCursor::setPos(details->geometry().center());
+  QEvent leave(QEvent::Leave);
+  QApplication::sendEvent(&label, &leave);
+  QElapsedTimer elapsed;
+  elapsed.start();
+  while (elapsed.elapsed() < 1600) {
+    QCoreApplication::processEvents();
+    QThread::msleep(10);
+  }
+  result &= expect(details->isVisible(), "details stay visible beneath the pointer without a timeout");
+  QCursor::setPos(label.mapToGlobal(label.rect().center()));
+  QApplication::sendEvent(details, &leave);
+  result &= expect(details->isVisible(), "moving back to the trigger keeps details open");
+  QCursor::setPos(10, 10);
+  QApplication::sendEvent(&label, &leave);
+  result &= expect(!details->isVisible(), "leaving both surfaces dismisses details");
+  return result;
+}
+
 bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   MiddleRegionWidget region;
+  region.setStyleSheet(UiStyle::applicationStyleSheet());
   region.resize(1500, 850);
   region.show();
-  region.setThreadHeading(QStringLiteral("Thread title"),
-                          QStringLiteral("/workspace"),
+  region.setThreadHeading(QString(300, QLatin1Char('T')),
+                          {"Tokens 48.2k | In 42.0k | Out 6.2k | Left ≈180k",
+                           "Tokens 48.2k", "Total: 48,200"},
                           QStringLiteral("Last activity: 12:00"),
                           QStringLiteral("running"), QStringLiteral("active"));
   QCoreApplication::processEvents();
@@ -1156,6 +1203,69 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   result &= expect(region.findChild<QLabel *>(
                        QStringLiteral("conversationTitle")) != nullptr,
                    "the established conversation heading remains present");
+  bool wrappedUsage = false;
+  bool fullUsage = false;
+  for (int width : {1100, 1500, 2000}) {
+    region.resize(width, 850);
+    QCoreApplication::processEvents();
+    int headings = 0;
+    for (QLabel *label : region.findChildren<QLabel *>()) {
+      if (label->property("kind") != "panelHeader")
+        continue;
+      ++headings;
+      result &= expect(label->isVisible() &&
+                           label->width() >= label->fontMetrics().horizontalAdvance(label->text()) &&
+                           label->height() >= label->fontMetrics().height(),
+                       "all panel headings retain readable geometry");
+    }
+    result &= expect(headings == 3, "all three panel headings remain present");
+    auto *tokens = region.findChild<QLabel *>(QStringLiteral("threadTokenUsage"));
+    auto *title = region.findChild<QLabel *>(QStringLiteral("conversationTitle"));
+    if (qEnvironmentVariableIsSet("CODEXUI_CAPTURE_HEADER"))
+      region.grab().save(QStringLiteral("/tmp/codexui-header-%1.png").arg(width));
+    wrappedUsage |= tokens && tokens->text().contains('\n');
+    fullUsage |= tokens && !tokens->text().contains('\n');
+    result &= expect(tokens && title && title->width() > 0 &&
+                         title->x() == title->parentWidget()->layout()->contentsMargins().left() &&
+                         title->y() + title->height() <= tokens->y() &&
+                         title->text().endsWith(QChar(0x2026)) &&
+                         title->toolTip().size() == 300 &&
+                         tokens->alignment().testFlag(Qt::AlignRight) &&
+                         tokens->property("tone") == "strong" && !tokens->wordWrap() &&
+                         tokens->hasHeightForWidth() &&
+                         tokens->text().contains("Left ≈180k") &&
+                         tokens->text().contains("Last activity: 12:00") &&
+                         tokens->height() >= tokens->heightForWidth(tokens->width()) &&
+                         tokens->toolTip() == "Total: 48,200" &&
+                         tokens->accessibleDescription() == tokens->toolTip() &&
+                         tokens->focusPolicy() == Qt::StrongFocus &&
+                         !region.findChild<QLabel *>(QStringLiteral("conversationMetadata")),
+                     "title has its own row; metadata wraps without losing fields");
+    for (const auto &line : tokens->text().split('\n'))
+      result &= expect(!line.startsWith('|') && !line.endsWith('|') &&
+                           tokens->fontMetrics().horizontalAdvance(line) <= tokens->width(),
+                       "metadata lines fit with no stray separators");
+  }
+  UiStyle::TokenUsageLabel narrow;
+  narrow.setUsage("Tokens 48.2k | In 42.0k | Out 6.2k | Left ≈180k | Last activity: 12:00",
+                  "Tokens 48.2k", "Total: 48,200");
+  narrow.resize(160, narrow.heightForWidth(160));
+  narrow.show();
+  QCoreApplication::processEvents();
+  wrappedUsage |= narrow.text().contains('\n');
+  result &= expect(narrow.text().contains("Last activity: 12:00") &&
+                       narrow.text().contains("Left ≈180k"),
+                   "narrow metadata preserves every field");
+  result &= expect(wrappedUsage && fullUsage,
+                   "metadata wraps at narrow widths and stays continuous when space permits");
+  region.setThreadHeading(QStringLiteral("Empty thread"),
+                          {"Tokens 0 | In 0 | Out 0", "Tokens 0", "No retained usage"},
+                          QStringLiteral("Last activity: 12:00"));
+  QCoreApplication::processEvents();
+  auto *tokens = region.findChild<QLabel *>(QStringLiteral("threadTokenUsage"));
+  result &= expect(tokens->text().contains(" | Last activity: 12:00") &&
+                       !tokens->text().contains("Left"),
+                   "the separator remains when context information is unavailable");
   auto *fileChangesFolding = region.findChild<QToolButton *>(
       QStringLiteral("conversationFileChangesFoldingToggle"));
   result &= expect(
@@ -1208,6 +1318,7 @@ int main(int argc, char **argv) {
       conversationOwnershipAndAtomicReconcileContract);
   run("nestedWheelGestureHasOneRoutingOwner",
       [] { return nestedWheelGestureHasOneRoutingOwner(false); });
+  run("tokenDetailsRemainVisible", tokenDetailsRemainVisible);
   run("completeMiddleSurfaceRetainsPaneAndHeadingBehavior",
       completeMiddleSurfaceRetainsPaneAndHeadingBehavior);
   if (passed)

@@ -5,11 +5,11 @@
 
 #include <QColor>
 #include <QComboBox>
+#include <QLabel>
 #include <QString>
 #include <QToolButton>
 
 class QPaintEvent;
-class QLabel;
 class QPainter;
 class QRect;
 class QWidget;
@@ -123,6 +123,26 @@ public:
 
 protected:
   void paintEvent(QPaintEvent *event) override;
+};
+
+class TokenUsageLabel final : public QLabel {
+public:
+  explicit TokenUsageLabel(QWidget *parent = nullptr);
+  ~TokenUsageLabel() override;
+  void setUsage(QString summary, QString compact, QString details);
+  QSize sizeHint() const override;
+  QSize minimumSizeHint() const override;
+  int heightForWidth(int width) const override;
+  bool hasHeightForWidth() const override { return true; }
+
+protected:
+  bool event(QEvent *event) override;
+  bool eventFilter(QObject *watched, QEvent *event) override;
+
+private:
+  QString wrappedText(int width) const;
+  QString summary_;
+  QLabel *details_;
 };
 
 class ChevronComboBox final : public QComboBox {

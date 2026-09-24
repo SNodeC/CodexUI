@@ -3,6 +3,7 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLEREGIONWIDGET_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLEREGIONWIDGET_H
 
+#include "codex/ui/UiViewState.h"
 #include <QPointer>
 #include <QWidget>
 
@@ -15,6 +16,8 @@ class QLabel;
 class QSplitter;
 class QTimer;
 class QToolButton;
+
+namespace codexui::UiStyle { class TokenUsageLabel; }
 
 namespace codexui::codex::middle {
 
@@ -36,7 +39,7 @@ public:
   [[nodiscard]] InspectorPane &inspector() const noexcept;
   [[nodiscard]] QSplitter *splitterWidget() const noexcept;
 
-  void setThreadHeading(QString title, QString metadata,
+  void setThreadHeading(QString title, const ui::TokenUsageText &usage,
                         QString trailingMetadata = {}, QString state = {},
                         QString stateTone = {});
   void showNotice(QString message, bool error = true);
@@ -64,15 +67,12 @@ private:
   };
 
   void applyConversationPresentationOptions();
-  void alignThreadHeadingBaselines();
 
   QSplitter *splitter = nullptr;
   ThreadPane *threadPane = nullptr;
   QFrame *conversationRegion = nullptr;
   QLabel *conversationTitle = nullptr;
-  QLabel *conversationMetadata = nullptr;
-  QLabel *conversationTrailingMetadata = nullptr;
-  QLabel *conversationStateSeparator = nullptr;
+  UiStyle::TokenUsageLabel *conversationTokens = nullptr;
   QLabel *conversationState = nullptr;
   QToolButton *reasoningVisibility = nullptr;
   QToolButton *updateVisibility = nullptr;

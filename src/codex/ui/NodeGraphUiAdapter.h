@@ -43,6 +43,10 @@ public:
 
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
+  [[nodiscard]] TokenUsageSnapshot tokenUsage(
+      const nodegraph::NodeRef &selectedThread,
+      const nodegraph::NodeGraph::ReadAccess &read) const;
+
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
   conversation(const nodegraph::NodeRef &thread,
                std::uint64_t *graphRevision = nullptr) const;

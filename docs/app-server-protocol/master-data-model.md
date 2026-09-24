@@ -1210,7 +1210,7 @@ Every row is one accepted notification union member. The payload type is the exh
 | `thread/environment/connected`              | `EnvironmentConnectionNotification`               | Set thread/environment live connection true                                           | X    |
 | `thread/environment/disconnected`           | `EnvironmentConnectionNotification`               | Set thread/environment live connection false                                          | X    |
 | `thread/settings/updated`                   | `ThreadSettingsUpdatedNotification`               | Replace effective ThreadSettings                                                      | X    |
-| `thread/tokenUsage/updated`                 | `ThreadTokenUsageUpdatedNotification`             | Replace thread/turn token-usage snapshot                                              | S    |
+| `thread/tokenUsage/updated`                 | `ThreadTokenUsageUpdatedNotification`             | Replace the thread token-usage snapshot; do not sum cumulative turn snapshots          | S    |
 | `turn/started`                              | `TurnStartedNotification`                         | Upsert Turn head; embedded items are initially empty                                  | S    |
 | `hook/started`                              | `HookStartedNotification`                         | Upsert hook-run state and join to thread/optional turn                                | S    |
 | `turn/completed`                            | `TurnCompletedNotification`                       | Finalize Turn status/times/error; upsert final-agent fallback only                    | S    |

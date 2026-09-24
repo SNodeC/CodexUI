@@ -11,6 +11,9 @@
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionToolButton>
+#include <QCursor>
+#include <QScreen>
+#include <QKeyEvent>
 #include <QWidget>
 
 #include <algorithm>
@@ -27,11 +30,99 @@ QLabel *makeLabel(QString value, const char *kind, QWidget *parent) {
   auto *label = new QLabel(std::move(value), parent);
   label->setProperty("kind", kind);
   label->setTextFormat(Qt::PlainText);
-  label->setWordWrap(true);
+  const bool panelHeader = QLatin1StringView(kind) == QLatin1StringView("panelHeader");
+  label->setWordWrap(!panelHeader);
   label->setMinimumWidth(0);
-  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  label->setSizePolicy(panelHeader ? QSizePolicy::Minimum : QSizePolicy::Ignored,
+                       QSizePolicy::Preferred);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse);
   return label;
+}
+
+TokenUsageLabel::TokenUsageLabel(QWidget *parent) : QLabel(parent), details_(new QLabel(this, Qt::ToolTip)) {
+  setProperty("kind", "meta");
+  setProperty("tone", "strong");
+  setTextFormat(Qt::PlainText);
+  setFocusPolicy(Qt::StrongFocus);
+  QFont numericFont = font();
+  numericFont.setFeature(QFont::Tag("tnum"), 1);
+  setFont(numericFont);
+  details_->setObjectName(QStringLiteral("tokenUsageDetails"));
+  details_->setTextFormat(Qt::PlainText);
+  details_->setMargin(8);
+  details_->setFrameStyle(QFrame::Box);
+  qApp->installEventFilter(this);
+}
+
+TokenUsageLabel::~TokenUsageLabel() { qApp->removeEventFilter(this); }
+
+void TokenUsageLabel::setUsage(QString summary, QString compact, QString details) {
+  if (summary_ == summary && toolTip() == details) return;
+  summary_ = std::move(summary);
+  setToolTip(details);
+  setAccessibleName(compact);
+  setAccessibleDescription(details);
+  details_->setText(details);
+  details_->adjustSize();
+  setText(wrappedText(contentsRect().width()));
+  updateGeometry();
+}
+
+QString TokenUsageLabel::wrappedText(int width) const {
+  QString result, line;
+  for (const QString &field : summary_.split(QStringLiteral(" | "))) {
+    const QString next = line.isEmpty() ? field : line + QStringLiteral(" | ") + field;
+    if (!line.isEmpty() && fontMetrics().horizontalAdvance(next) > width) {
+      result += line + QLatin1Char('\n');
+      line = field;
+    } else line = next;
+  }
+  return result + line;
+}
+
+QSize TokenUsageLabel::sizeHint() const {
+  return {fontMetrics().horizontalAdvance(summary_), fontMetrics().height()};
+}
+QSize TokenUsageLabel::minimumSizeHint() const {
+  int width = 0;
+  for (const auto &field : summary_.split(QStringLiteral(" | ")))
+    width = std::max(width, fontMetrics().horizontalAdvance(field));
+  return {width, fontMetrics().height()};
+}
+int TokenUsageLabel::heightForWidth(int width) const {
+  return (wrappedText(width).count(QLatin1Char('\n')) + 1) * fontMetrics().lineSpacing();
+}
+
+bool TokenUsageLabel::event(QEvent *event) {
+  if (event->type() == QEvent::ToolTip || event->type() == QEvent::FocusIn) {
+    const QRect screen = this->screen()->availableGeometry();
+    QPoint position = mapToGlobal(rect().bottomLeft());
+    position.setX(std::clamp(position.x(), screen.left(), std::max(screen.left(), screen.right() - details_->width())));
+    if (position.y() + details_->height() > screen.bottom())
+      position.setY(mapToGlobal(QPoint{}).y() - details_->height());
+    details_->move(position);
+    details_->show();
+    if (event->type() == QEvent::ToolTip) return true;
+  }
+  if (event->type() == QEvent::Hide || event->type() == QEvent::FocusOut)
+    details_->hide();
+  const bool handled = QLabel::event(event);
+  if (event->type() == QEvent::Resize || event->type() == QEvent::FontChange ||
+      event->type() == QEvent::StyleChange)
+    setText(wrappedText(contentsRect().width()));
+  return handled;
+}
+
+bool TokenUsageLabel::eventFilter(QObject *, QEvent *event) {
+  if (details_->isVisible()) {
+    if ((event->type() == QEvent::MouseMove || event->type() == QEvent::Leave) &&
+        !QRect(mapToGlobal(QPoint{}), size()).united(details_->geometry()).contains(QCursor::pos()))
+      details_->hide();
+    if (event->type() == QEvent::ApplicationDeactivate ||
+        (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape))
+      details_->hide();
+  }
+  return false;
 }
 
 void drawChevron(QPainter &painter, const QRect &indicator, bool enabled,
@@ -568,7 +659,7 @@ QString applicationStyleSheet() {
             background: %{divider};
             margin: 4px 8px;
         }
-        QToolTip { background: %{panel}; color: %{primary}; border: 1px solid %{dividerStrong}; border-radius: 6px; padding: 5px; }
+        QToolTip, QLabel#tokenUsageDetails { background: %{panel}; color: %{primary}; border: 1px solid %{dividerStrong}; border-radius: 6px; padding: 5px; }
     )QSS");
   // Stringization keeps QSS placeholders named and order-independent.
   // clang-format off

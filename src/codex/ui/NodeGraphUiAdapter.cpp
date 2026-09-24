@@ -7,6 +7,8 @@
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 
+#include <QLocale>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -33,6 +35,49 @@ using nodegraph::valueMember;
 
 UiStatus uiStatus(nodegraph::NodeStatusView status) {
   return statusFromNode(status.semantic, status.unknownText);
+}
+
+constexpr std::array<std::string_view, 6> TokenFields{
+    "totalTokens", "inputTokens", "outputTokens", "cachedInputTokens",
+    "cacheWriteInputTokens", "reasoningOutputTokens"};
+using TokenCounts = std::array<std::optional<std::int64_t>, TokenFields.size()>;
+
+TokenCounts tokenCounts(const nodegraph::Value *value) {
+  TokenCounts counts;
+  const auto *object = value ? value->asObject() : nullptr;
+  for (std::size_t i = 0; i < counts.size(); ++i) {
+    counts[i] = object ? signedIntegerFromValue(valueMember(*object, TokenFields[i]))
+                      : std::nullopt;
+    if (counts[i] && *counts[i] < 0)
+      counts[i].reset();
+  }
+  return counts;
+}
+
+std::string tokenNumber(std::optional<std::int64_t> count, bool compact) {
+  if (!count)
+    return "—";
+  if (compact && *count >= 1000) {
+    const bool millions = *count >= 1000000;
+    return (QLocale::c().toString(static_cast<double>(*count) /
+                                    (millions ? 1000000.0 : 1000.0), 'f', 1) +
+            (millions ? "M" : "k")).toStdString();
+  }
+  return QLocale(QLocale::English, QLocale::UnitedStates)
+      .toString(static_cast<qlonglong>(*count)).toStdString();
+}
+
+TokenUsageText tokenText(const TokenCounts &counts, std::string prefix) {
+  TokenUsageText text;
+  text.compact = std::move(prefix) + " " + tokenNumber(counts[0], true);
+  text.summary = text.compact + " | In " + tokenNumber(counts[1], true) +
+                 " | Out " + tokenNumber(counts[2], true);
+  constexpr std::array labels{"Total", "Input", "Output", "Cached input",
+                              "Cache-write input", "Reasoning output"};
+  for (std::size_t i = 0; i < counts.size(); ++i)
+    text.details += std::string(labels[i]) + ": " + tokenNumber(counts[i], false) + "\n";
+  text.details += "Cached input and reasoning are breakdowns, not additional totals.\n";
+  return text;
 }
 
 UiStatus uiStatusFromValue(const nodegraph::Value *value) {
@@ -1530,6 +1575,74 @@ using namespace middle;
 NodeGraphUiAdapter::NodeGraphUiAdapter(
     const nodegraph::NodeGraph &graph) noexcept
     : graph_(&graph) {}
+
+TokenUsageSnapshot NodeGraphUiAdapter::tokenUsage(
+    const nodegraph::NodeRef &selectedThread,
+    const nodegraph::NodeGraph::ReadAccess &read) const {
+  TokenUsageSnapshot result;
+  const auto state = selectedThread && read.live(selectedThread)
+                         ? read.state(selectedThread) : nullptr;
+  const auto *value = state ? valueMember(*state, "tokenUsage") : nullptr;
+  const auto *usage = value ? value->asObject() : nullptr;
+  auto counts = tokenCounts(usage ? valueMember(*usage, "total") : nullptr);
+  if (!usage) counts.fill(0);
+  result.thread = tokenText(counts, "Tokens");
+  if (usage) {
+    const auto last = tokenCounts(valueMember(*usage, "last"));
+    const auto window = signedIntegerFromValue(valueMember(*usage, "modelContextWindow"));
+    result.thread.details += "\nLatest reported usage\n" + tokenText(last, "").details +
+        "\nContext capacity: " + tokenNumber(window && *window > 0 ? window : std::nullopt, false);
+    if (window && *window > 0 && last[0]) {
+      const auto remaining = *window - std::clamp(*last[0], std::int64_t{0}, *window);
+      result.thread.summary += " | Left ≈" + tokenNumber(remaining, true);
+      result.thread.details += "\nEstimated remaining: " + tokenNumber(remaining, false) +
+          "\nBased on the latest report, not cumulative thread consumption.";
+    }
+  } else {
+    result.thread.details += "No retained usage reported; counters initialized to zero.";
+  }
+  const auto account = read.find({nodegraph::NodeKind::Account, "account/usage/read"});
+  const auto accountState = account ? read.state(account) : nullptr;
+  const auto *summaryValue = accountState ? valueMember(*accountState, "summary") : nullptr;
+  const auto *summary = summaryValue ? summaryValue->asObject() : nullptr;
+  auto lifetime = summary ? signedIntegerFromValue(valueMember(*summary, "lifetimeTokens"))
+                          : std::nullopt;
+  if (lifetime && *lifetime < 0)
+    lifetime.reset();
+  TokenCounts total;
+  total.fill(0);
+  std::array<std::size_t, TokenFields.size()> reported{};
+  const auto &threads = read.orderedNodes(nodegraph::NodeKind::Thread);
+  for (const auto &thread : threads) {
+    const auto snapshot = read.state(thread);
+    const auto *entry = valueMember(*snapshot, "tokenUsage");
+    const auto *object = entry ? entry->asObject() : nullptr;
+    const auto values = tokenCounts(object ? valueMember(*object, "total") : nullptr);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (!values[i]) continue;
+      ++reported[i];
+      if (total[i] && *values[i] <= std::numeric_limits<std::int64_t>::max() - *total[i])
+        *total[i] += *values[i];
+      else
+        total[i].reset();
+    }
+  }
+  for (std::size_t i = 0; i < total.size(); ++i)
+    if (!reported[i]) total[i].reset();
+  result.overall = tokenText(total, "Overall tokens");
+  result.overall.details += "\nScope: available thread snapshots, including archived threads.\n";
+  for (std::size_t i = 0; i < reported.size(); ++i)
+    result.overall.details += std::string(TokenFields[i]) + " coverage: " +
+        std::to_string(reported[i]) + "/" + std::to_string(threads.size()) + " threads\n";
+  result.overall.details += "\nAccount lifetime tokens: " + tokenNumber(lifetime, false) +
+      "\nSeparate account scope; input/output breakdowns are not provided.";
+  if (accountState && accountState->status == nodegraph::NodeStatus::Pending)
+    result.overall.details += "\nRefreshing account usage…";
+  if (accountState && accountState->status == nodegraph::NodeStatus::Failed)
+    result.overall.details += "\nAccount usage refresh unavailable; any account value is the last successful snapshot.";
+
+  return result;
+}
 
 std::optional<ThreadListRow>
 NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {

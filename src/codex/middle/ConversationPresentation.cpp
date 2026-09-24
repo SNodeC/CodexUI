@@ -10,6 +10,9 @@
 #include <QAccessibleWidget>
 #include <QClipboard>
 #include <QEvent>
+#include <QDesktopServices>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QFocusEvent>
 #include <QFrame>
 #include <QLabel>
@@ -100,8 +103,16 @@ MarkdownTextView::MarkdownTextView(const QString &markdown, int initialWidth,
       Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard |
       Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
   setFocusPolicy(Qt::StrongFocus);
-  setOpenExternalLinks(true);
-  setOpenLinks(true);
+  setOpenExternalLinks(false);
+  setOpenLinks(false);
+  connect(this, &QTextBrowser::anchorClicked, this, [this](QUrl link) {
+    link = document()->baseUrl().resolved(link);
+    if ((link.isRelative() || link.isLocalFile()) && !QFileInfo::exists(link.path()))
+      link.setPath(QString(link.path()).remove(QRegularExpression(QStringLiteral(":[0-9]+(?::[0-9]+)?$"))));
+    if (link.isRelative() && !link.path().isEmpty())
+      link = QUrl::fromLocalFile(QFileInfo(link.path()).absoluteFilePath());
+    QDesktopServices::openUrl(link);
+  });
   setLineWrapMode(QTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);

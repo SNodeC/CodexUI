@@ -1042,6 +1042,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   nlohmann::json threadListBaseParameters = nlohmann::json::object();
   bool modelListPending = false;
   bool permissionProfilesPending = false;
+  unsigned accountUsageRefresh = 0; // 0 idle, 1 in flight, 2 follow-up requested.
 
   const auto clearTransientState = [&] {
     pendingServerRequests.clear();
@@ -1064,6 +1065,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     threadListBaseParameters = nlohmann::json::object();
     modelListPending = false;
     permissionProfilesPending = false;
+    accountUsageRefresh = 0;
   };
 
   const auto showNotice = [&workerLogic](std::string message) {
@@ -1094,6 +1096,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   std::function<void()> requestReconnect;
   std::function<void()> requestShutdown;
   std::function<void()> hydrateProvider;
+  std::function<void()> requestAccountUsage;
   std::function<void(std::string)> hydrateHistoricalChildren;
 
   std::string expectedDisconnectReason;
@@ -1250,6 +1253,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 
 #define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)        \
   sdk.on##OperationName([&hydrateHistoricalChildren, &pendingServerRequests,   \
+                         &requestAccountUsage,                                \
                          &workerLogic](                                        \
                             codex::generated::server_notifications::           \
                                 OperationName::Params &notification) {         \
@@ -1282,6 +1286,9 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         {}, {}, {}}));                                                         \
     constexpr std::string_view appliedMethod =                                 \
         codex::generated::server_notifications::OperationName::method;         \
+    if (requestAccountUsage && (appliedMethod == "turn/completed" ||           \
+                                appliedMethod == "account/updated"))          \
+      requestAccountUsage();                                                   \
     if (hydrateHistoricalChildren && (appliedMethod == "item/started" ||       \
                                       appliedMethod == "item/completed")) {    \
       const std::string threadId =                                             \
@@ -1871,10 +1878,28 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         });
   };
 
+  requestAccountUsage = [&] {
+    if (!sdk.providerReady())
+      return;
+    if (accountUsageRefresh != 0) {
+      accountUsageRefresh = 2;
+      return;
+    }
+    accountUsageRefresh = 1;
+    dispatchRequest<codex::generated::client_requests::GetAccountTokenUsage>(
+        sdk, nlohmann::json::object(), workerLogic, {}, [&](RequestOutcome) {
+          const bool repeat = accountUsageRefresh == 2;
+          accountUsageRefresh = 0;
+          if (repeat)
+            requestAccountUsage();
+        });
+  };
+
   hydrateProvider = [&] {
     requestThreadList(nlohmann::json::object());
     requestModelList(nlohmann::json::object());
     requestPermissionProfiles(nlohmann::json::object());
+    requestAccountUsage();
   };
 
   std::function<void(nodegraph::PromptCommand)> dispatchPrompt;

@@ -608,8 +608,27 @@ This class remains the sole geometry and cross-pane event owner.
 - `threads()`, `conversation()`, `composer()`, and `inspector()` return the
   existing owned pane instances; callers must not replace them.
 - `splitterWidget()` exposes the established splitter for saved sizing/tests.
-- `setThreadHeading(title, metadata, trailingMetadata, state, tone)` patches
-  only changed heading fields and style tone.
+- `setThreadHeading(title, usage, trailingMetadata, state, tone)` gives the title
+  its own row. Usage and Last activity share one right-aligned metadata label,
+  wrapping between complete fields with uniformly spaced ` | ` separators.
+  The workspace path remains in composer settings.
+- The footer displays totals from available thread snapshots, with per-field
+  coverage and separately labelled account lifetime usage in its details.
+  `account/usage/read` runs on provider readiness, account changes and turn
+  completion. Overlapping reads coalesce; account changes retire old snapshots.
+- The heading reads the selected thread's retained `tokenUsage`; absent snapshots
+  initialize to zero, while missing fields in reported snapshots remain unknown.
+  `Left ≈…` estimates `modelContextWindow - last.totalTokens`; unavailable
+  estimates are omitted. Cache and reasoning counts are breakdowns, not additions.
+- Both token labels use persistent, keyboard-accessible details windows. Pointer
+  movement between the trigger and details keeps them open; leaving both or Escape
+  dismisses them. No tooltip timeout or polling timer is used.
+- The footer owns the sole connection/readiness indicator; the transport control
+  and footer status tooltip retain connection diagnostics.
+- Shared Markdown views disable internal navigation and dispatch links to
+  `QDesktopServices::openUrl`, letting system URL/MIME associations select the
+  application. Local file line suffixes are removed only when the literal path
+  does not exist; relative links use the document base URL when supplied.
 - `showNotice(message, error)` presents the existing non-layout-shifting timed
   notice overlay.
 - `showSidebar(value)` and `showInspector(value)` preserve splitter geometry
@@ -631,7 +650,7 @@ This class remains the sole geometry and cross-pane event owner.
 | constructor | optional parent | Constructs exactly one ThreadPane, conversation region, ComposerPane, and InspectorPane in the established splitter. |
 | pane accessors | no parameters; borrowed references | Pure; lifetime is the middle region's. |
 | splitter accessor | no parameters; borrowed pointer | Pure; caller may inspect/persist sizes but not replace ownership. |
-| `setThreadHeading` | five display values | Repeated effective tuple is a no-op. Tone changes repolish only the state label. |
+| `setThreadHeading` | title, usage projection, activity, state, tone | Repeated effective values are a no-op. Tone changes repolish only the state label. |
 | `showNotice` | message value, error flag | Empty/updated notice uses existing overlay and timer; does not change center layout allocation. |
 | pane visibility methods | bool setters / bool getters | Preserve splitter sizes and report effective visibility once through callback. |
 | `setPaneVisibilityAction` | replacement callback | Does not emit until a visibility transition. |

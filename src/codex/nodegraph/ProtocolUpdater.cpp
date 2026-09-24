@@ -1610,6 +1610,13 @@ bool applyAccountUpdate(NodeGraph::WriteAccess &write,
     return false;
 
   NodeRef account = write.upsert({NodeKind::Account, "account"});
+  if (notification || logoutResult) {
+    if (NodeRef usage = write.find({NodeKind::Account, "account/usage/read"})) {
+      for (const NodeRef &operation : write.related(usage, RelationKind::PendingOperation))
+        write.remove(operation);
+      write.remove(usage);
+    }
+  }
   if (logoutResult) {
     NodeState next;
     const std::shared_ptr<const NodeState> previous = write.state(account);
@@ -1933,6 +1940,10 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
         target = turn;
       if (!target && thread)
         target = thread;
+      if (message.method == "account/usage/read" && threadId.empty()) {
+        target = write.upsert({NodeKind::Account, message.method});
+        write.setStatus(target, NodeStatus::Pending);
+      }
     }
     if (target) {
       write.relate(target, RelationKind::PendingOperation, operation);
@@ -1956,6 +1967,15 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
       !storedMethod->asString() || *storedMethod->asString() != message.method)
     return {};
   const NodeRef acceptedOperation = operation;
+
+  if (message.method == "account/usage/read") {
+    if (NodeRef usage = write.find({NodeKind::Account, message.method})) {
+      const auto pending = write.related(usage, RelationKind::PendingOperation);
+      if (std::ranges::find(pending, operation) != pending.end())
+        write.setStatus(usage, message.kind == DecodedMessageKind::ClientResult
+                                   ? NodeStatus::Completed : NodeStatus::Failed);
+    }
+  }
 
   if (message.kind == DecodedMessageKind::ClientResult) {
     DecodedMessage correlated = message;
@@ -2198,6 +2218,16 @@ void ProtocolUpdater::applyGraphUpdate(
     NodeGraph::WriteAccess &write, const DecodedMessage &message,
     std::optional<std::uint64_t> preserveChangesAfter, bool *advancesActivity) {
   const std::string_view method = message.method;
+
+  if (method == "thread/tokenUsage/updated") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (!id.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, id});
+      if (const Value *usage = valueMember(message.payload, "tokenUsage"))
+        write.setField(thread, "tokenUsage", *usage);
+    }
+    return;
+  }
 
   if (isProviderNoticeMethod(method)) {
     NodeRef notice = write.upsert({NodeKind::Notice, "provider-notice"});

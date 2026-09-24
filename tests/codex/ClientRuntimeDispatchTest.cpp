@@ -511,13 +511,15 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
     return false;
 
   std::unordered_map<std::string, std::size_t> methods;
-  for (int count = 0; count != 4; ++count) {
+  for (int count = 0; count != 5; ++count) {
     std::optional<nlohmann::json> request = bridge.receiveAppServer();
     if (!request || !request->contains("id"))
       return false;
     const std::string method = request->value("method", std::string{});
     ++methods[method];
     nlohmann::json result{{"data", nlohmann::json::array()}};
+    if (method == "account/usage/read")
+      result = {{"summary", {{"lifetimeTokens", 12000}}}};
     if (method == "thread/list") {
       const bool firstThreadPage = methods[method] == 1;
       expect(request->at("params").value("sortKey", std::string{}) ==
@@ -539,9 +541,63 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
              std::unordered_map<std::string, std::size_t>{
                  {"thread/list", 2},
                  {"model/list", 1},
-                 {"permissionProfile/list", 1}} &&
+                 {"permissionProfile/list", 1}, {"account/usage/read", 1}} &&
          static_cast<bool>(
              findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
+}
+
+void replyAccountUsage(UnixBridge &bridge) {
+  const auto request = bridge.receiveAppServer();
+  expect(request && request->value("method", "") == "account/usage/read",
+         "turn completion refreshes account usage");
+  if (request)
+    expect(bridge.reply(*request, {{"summary", {{"lifetimeTokens", 12000}}}}),
+           "account usage snapshot is returned without sending a prompt");
+}
+
+void accountUsageRefreshIsCoalescedAndAccountScoped(UnixBridge &bridge,
+                                                   RunningRuntime &runtime) {
+  const auto hasUsage = [&](std::optional<std::int64_t> expected,
+                            NodeStatus status) {
+    auto read = runtime.graph().tryRead();
+    if (!read)
+      return false;
+    const auto node = read->find({NodeKind::Account, "account/usage/read"});
+    if (!node || read->state(node)->status != status)
+      return false;
+    const auto *value = valueMember(*read->state(node), "summary");
+    const auto *summary = value ? value->asObject() : nullptr;
+    return (summary ? signedIntegerFromValue(valueMember(*summary, "lifetimeTokens"))
+                    : std::nullopt) == expected;
+  };
+  expect(waitUntil([&] { return hasUsage(12000, NodeStatus::Completed); }),
+         "startup retrieves account usage without a prompt");
+  expect(bridge.appServerNotification("account/updated", {{"authMode", "chatgpt"}}),
+         "account change requests a fresh usage snapshot");
+  const auto old = bridge.receiveAppServer();
+  expect(old && old->value("method", "") == "account/usage/read",
+         "account usage refresh uses the dedicated read endpoint");
+  expect(bridge.appServerNotification("account/updated", {{"authMode", "apiKey"}}) &&
+             bridge.appServerNotification("account/updated", {{"authMode", "apiKey"}}),
+         "overlapping account changes reach the worker");
+  expect(!bridge.receiveAppServer(100ms), "overlapping refreshes share one in-flight read");
+  if (old)
+    expect(bridge.reply(*old, {{"summary", {{"lifetimeTokens", 999999}}}}),
+           "an old-account response arrives after the account changed");
+  const auto followup = bridge.receiveAppServer();
+  expect(followup && followup->value("method", "") == "account/usage/read",
+         "overlapping refreshes produce one follow-up read");
+  if (followup)
+    expect(bridge.replyError(*followup, -32600, "account usage unsupported"),
+           "an unsupported account reports its usage error");
+  expect(waitUntil([&] { return hasUsage(std::nullopt, NodeStatus::Failed); }),
+         "unsupported usage stays unknown and never displays the previous account total");
+  expect(!bridge.receiveAppServer(100ms), "unsupported usage does not start a retry loop");
+  expect(bridge.appServerNotification("account/updated", {{"authMode", "chatgpt"}}),
+         "supported authentication can refresh usage again");
+  replyAccountUsage(bridge);
+  expect(waitUntil([&] { return hasUsage(12000, NodeStatus::Completed); }),
+         "successful authentication recovers the account usage snapshot");
 }
 
 std::string diagnosticField(const ProtocolDiagnostic &effect, std::string_view key) {
@@ -1292,6 +1348,7 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
                                          {"status", "completed"},
                                          {"items", nlohmann::json::array()}}}}),
          "created active turn receives its authoritative completion");
+  replyAccountUsage(bridge);
 
   if (created) {
     NodeAction remove{created, NodeActionKind::Delete};
@@ -1648,6 +1705,7 @@ void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
                                          {"status", "completed"},
                                          {"items", nlohmann::json::array()}}}}),
          "the fork turn reaches an authoritative terminal state");
+  replyAccountUsage(bridge);
   runtime.drainNotifications();
 }
 
@@ -1690,6 +1748,7 @@ void ordinaryThreadPromptStillStartsAndCompletes(UnixBridge &bridge,
                                          {"status", "completed"},
                                          {"items", nlohmann::json::array()}}}}),
          "the ordinary prompt reaches an authoritative terminal state");
+  replyAccountUsage(bridge);
   runtime.drainNotifications();
 
   const auto activeTurnCleared = [&] {
@@ -1738,6 +1797,7 @@ void ordinaryThreadPromptStillStartsAndCompletes(UnixBridge &bridge,
                                          {"status", "completed"},
                                          {"items", nlohmann::json::array()}}}}),
          "the resumed prompt reaches an authoritative terminal state");
+  replyAccountUsage(bridge);
   runtime.drainNotifications();
   expect(waitUntil(activeTurnCleared),
          "the resumed prompt releases its active-turn relation");
@@ -2181,6 +2241,7 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
                           NodeStatus::Completed;
              }),
          "turn fixture is terminal before the stale stop action");
+  replyAccountUsage(bridge);
   if (finishedTurn) {
     NodeAction stop{finishedTurn, NodeActionKind::InterruptTurn};
     expect(sendAction(runtime.channels(), std::move(stop)),
@@ -2305,17 +2366,19 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
   expect(bridge.setProviderGeneration(2),
          "a new provider generation reaches the runtime");
   std::size_t refreshes = 0;
-  while (refreshes != 4) {
+  while (refreshes != 5) {
     const std::optional<nlohmann::json> refresh = bridge.receiveAppServer();
     if (!refresh)
       break;
     nlohmann::json result{{"data", nlohmann::json::array()}};
     if (refresh->value("method", std::string{}) == "thread/list")
       result["nextCursor"] = nullptr;
+    if (refresh->value("method", std::string{}) == "account/usage/read")
+      result = {{"summary", {{"lifetimeTokens", 13000}}}};
     if (bridge.reply(*refresh, std::move(result)))
       ++refreshes;
   }
-  expect(refreshes == 4 && generationInput && waitUntil([&] {
+  expect(refreshes == 5 && generationInput && waitUntil([&] {
            std::optional<NodeGraph::ReadAccess> read =
                runtime.graph().tryRead();
            if (!read)
@@ -2606,6 +2669,7 @@ int main(int argc, char **argv) {
   codexui::codex::expect(
       ready, "runtime connects and performs one initial provider hydration");
   if (ready) {
+    codexui::codex::accountUsageRefreshIsCoalescedAndAccountScoped(bridge, runtime);
     codexui::codex::idleWorkerSleepsBetweenWakeRecoveryChecks(runtime);
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);

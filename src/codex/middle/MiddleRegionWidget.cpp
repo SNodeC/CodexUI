@@ -25,7 +25,6 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
-#include <QStyle>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -251,40 +250,19 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       makeLabel(QStringLiteral("No synchronized thread"), "heading");
   conversationTitle->setObjectName(QStringLiteral("conversationTitle"));
   conversationTitle->setWordWrap(false);
-  conversationTitle->setSizePolicy(QSizePolicy::Minimum,
-                                   QSizePolicy::Preferred);
-  conversationMetadata = makeLabel({}, "meta");
-  conversationMetadata->setObjectName(QStringLiteral("conversationMetadata"));
-  conversationMetadata->setWordWrap(false);
-  conversationTrailingMetadata = makeLabel({}, "meta");
-  conversationTrailingMetadata->setObjectName(
-      QStringLiteral("conversationTrailingMetadata"));
-  conversationTrailingMetadata->setProperty("tone", "strong");
-  conversationTrailingMetadata->setWordWrap(false);
-  conversationTrailingMetadata->setSizePolicy(QSizePolicy::Minimum,
-                                              QSizePolicy::Preferred);
-  conversationStateSeparator = makeLabel(QStringLiteral("|"), "meta");
-  conversationStateSeparator->setProperty("tone", "strong");
-  conversationStateSeparator->setSizePolicy(QSizePolicy::Minimum,
-                                            QSizePolicy::Preferred);
+  conversationTitle->setToolTip(conversationTitle->text());
+  conversationTitle->installEventFilter(this);
+  conversationTokens = new UiStyle::TokenUsageLabel;
+  conversationTokens->setObjectName(QStringLiteral("threadTokenUsage"));
   conversationState = makeLabel({}, "meta");
   conversationState->setObjectName(QStringLiteral("conversationState"));
   conversationState->setSizePolicy(QSizePolicy::Minimum,
                                    QSizePolicy::Preferred);
-  conversationTitle->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-  conversationMetadata->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-  conversationTrailingMetadata->setAlignment(Qt::AlignRight | Qt::AlignTop);
-  conversationState->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-  alignThreadHeadingBaselines();
-  auto *trailingHeading = new QHBoxLayout;
-  trailingHeading->setSpacing(4);
-  trailingHeading->addWidget(conversationTrailingMetadata, 0, Qt::AlignTop);
-  trailingHeading->addWidget(conversationStateSeparator, 0, Qt::AlignTop);
-  trailingHeading->addWidget(conversationState, 0, Qt::AlignTop);
-  threadHeading->addWidget(conversationTitle, 0, Qt::AlignTop);
-  threadHeading->addWidget(conversationMetadata, 1, Qt::AlignTop);
-  threadHeading->addLayout(trailingHeading);
+  conversationTokens->setAlignment(Qt::AlignRight | Qt::AlignTop);
+  threadHeading->addWidget(conversationTitle, 1);
+  threadHeading->addWidget(conversationState);
   contentLayout->addLayout(threadHeading);
+  contentLayout->addWidget(conversationTokens);
   contentLayout->addSpacing(7);
   contentLayout->addWidget(divider());
   contentLayout->addSpacing(7);
@@ -395,6 +373,9 @@ QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
 }
 
 bool MiddleRegionWidget::eventFilter(QObject *watched, QEvent *event) {
+  if (watched == conversationTitle && event->type() == QEvent::Resize)
+    conversationTitle->setText(conversationTitle->fontMetrics().elidedText(
+        conversationTitle->toolTip(), Qt::ElideRight, conversationTitle->width()));
   const bool splitterHandle =
       watched == splitter->handle(1) || watched == splitter->handle(2);
   if (splitterHandle && event) {
@@ -410,50 +391,19 @@ bool MiddleRegionWidget::eventFilter(QObject *watched, QEvent *event) {
   return QWidget::eventFilter(watched, event);
 }
 
-void MiddleRegionWidget::setThreadHeading(QString title, QString metadata,
+void MiddleRegionWidget::setThreadHeading(QString title, const ui::TokenUsageText &usage,
                                           QString trailingMetadata,
                                           QString state, QString stateTone) {
-  const bool separatorVisible = !state.isEmpty();
-  if (conversationTitle->text() == title &&
-      conversationMetadata->text() == metadata &&
-      conversationTrailingMetadata->text() == trailingMetadata &&
-      conversationState->text() == state &&
-      conversationState->property("tone").toString() == stateTone &&
-      conversationStateSeparator->isVisible() == separatorVisible)
-    return;
-  if (conversationTitle->text() != title)
-    conversationTitle->setText(std::move(title));
-  if (conversationMetadata->text() != metadata)
-    conversationMetadata->setText(std::move(metadata));
-  if (conversationTrailingMetadata->text() != trailingMetadata)
-    conversationTrailingMetadata->setText(std::move(trailingMetadata));
-  if (conversationState->text() != state)
-    conversationState->setText(std::move(state));
-  conversationStateSeparator->setVisible(separatorVisible);
-  if (conversationState->property("tone").toString() != stateTone) {
-    conversationState->setProperty("tone", std::move(stateTone));
-    conversationState->style()->unpolish(conversationState);
-    conversationState->style()->polish(conversationState);
-  }
-  alignThreadHeadingBaselines();
-}
-
-void MiddleRegionWidget::alignThreadHeadingBaselines() {
-  conversationTitle->ensurePolished();
-  conversationMetadata->ensurePolished();
-  conversationTrailingMetadata->ensurePolished();
-  conversationStateSeparator->ensurePolished();
-  conversationState->ensurePolished();
-  const int offset =
-      std::max(0, conversationTitle->fontMetrics().ascent() -
-                      conversationMetadata->fontMetrics().ascent());
-  conversationMetadata->setContentsMargins(0, offset, 0, 0);
-  const int trailingOffset =
-      std::max(0, conversationTitle->fontMetrics().ascent() -
-                      conversationTrailingMetadata->fontMetrics().ascent());
-  conversationTrailingMetadata->setContentsMargins(0, trailingOffset, 0, 0);
-  conversationStateSeparator->setContentsMargins(0, trailingOffset, 0, 0);
-  conversationState->setContentsMargins(0, trailingOffset, 0, 0);
+  QString summary = QString::fromStdString(usage.summary);
+  if (!trailingMetadata.isEmpty())
+    summary += QStringLiteral(" | ") + trailingMetadata;
+  conversationTokens->setUsage(summary, QString::fromStdString(usage.compact),
+                               QString::fromStdString(usage.details));
+  conversationTitle->setText(conversationTitle->fontMetrics().elidedText(title, Qt::ElideRight, conversationTitle->width()));
+  conversationTitle->setToolTip(title);
+  conversationState->setText(state);
+  conversationState->setProperty("tone", stateTone);
+  presentation::setLabelTone(*conversationState, stateTone.toStdString());
 }
 
 void MiddleRegionWidget::showNotice(QString message, bool error) {

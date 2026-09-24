@@ -224,6 +224,54 @@ public:
   }
 };
 
+bool testMarkdownLinksOpenExternally() {
+  DesktopUrlCapture capture;
+  ScopedFileUrlHandler files(capture);
+  QDesktopServices::setUrlHandler("https", &capture, "open");
+  QDesktopServices::setUrlHandler("mailto", &capture, "open");
+  QTemporaryDir directory;
+  QFile file(directory.filePath("answer.md"));
+  if (!file.open(QIODevice::WriteOnly)) return false;
+  file.write("THIS MUST NOT REPLACE THE ANSWER");
+  file.close();
+  const QList<QUrl> urls{QUrl::fromLocalFile(file.fileName()),
+      QUrl::fromLocalFile(directory.filePath("file with spaces.pdf")),
+      QUrl::fromLocalFile(directory.filePath("picture.png")),
+      QUrl("https://example.com/document"), QUrl("mailto:test@example.com"),
+      QUrl::fromLocalFile(file.fileName() + ":12:3"), QUrl("answer.md")};
+  bool result = true;
+  for (const auto &url : urls) {
+    const QString markdown = QStringLiteral("Original answer [open document](%1)")
+                                 .arg(url.toString(QUrl::FullyEncoded));
+    MarkdownTextView view(markdown);
+    view.document()->setBaseUrl(QUrl::fromLocalFile(directory.path() + "/"));
+    view.resize(600, 100);
+    view.show();
+    QCoreApplication::processEvents();
+    const QString original = view.toPlainText();
+    QTextCursor cursor(view.document());
+    cursor.setPosition(original.indexOf("open document") + 2);
+    const QPoint point = view.cursorRect(cursor).center();
+    const QPoint global = view.viewport()->mapToGlobal(point);
+    const auto before = capture.urls.size();
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF(point), QPointF(global),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point), QPointF(global),
+                        Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(view.viewport(), &press);
+    QApplication::sendEvent(view.viewport(), &release);
+    QUrl expected = url.isRelative() ? view.document()->baseUrl().resolved(url) : url;
+    if (expected.path().endsWith(":12:3")) expected = QUrl::fromLocalFile(file.fileName());
+    result &= expect(capture.urls.size() == before + 1 && capture.urls.back() == expected &&
+                         view.toPlainText() == original && view.markdownSource() == markdown &&
+                         view.source().isEmpty(),
+                     "Markdown links launch through desktop services without changing the answer");
+  }
+  QDesktopServices::unsetUrlHandler("https");
+  QDesktopServices::unsetUrlHandler("mailto");
+  return result;
+}
+
 class LayoutRequestProbe final : public QObject {
 public:
   explicit LayoutRequestProbe(QWidget *root) : root_(root) {
@@ -5075,6 +5123,7 @@ int main(int argc, char **argv) {
     return focused ? 0 : 1;
   }
   bool result = testSharedPresentationContract();
+  result &= testMarkdownLinksOpenExternally();
   result &= testPerceptuallyUniformPalette();
   result &= testApplicationStyleSheetContract();
   result &= testMessageIdentityPalette();

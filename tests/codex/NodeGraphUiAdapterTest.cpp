@@ -63,6 +63,142 @@ NodeState itemState(std::string id, std::string type, std::string text) {
   return state;
 }
 
+bool tokenUsageUsesAccountAndSelectedThreadSnapshots() {
+  using namespace nodegraph;
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  NodeGraphUiAdapter adapter(graph);
+  bool passed = true;
+  const auto usage = [](int total, Value window = 1000, Value last = 50) {
+    return Value::Object{{"total", Value::Object{{"totalTokens", total},
+        {"inputTokens", total - 20}, {"outputTokens", 20},
+        {"cachedInputTokens", 10}, {"reasoningOutputTokens", 5}}},
+        {"last", Value::Object{{"totalTokens", last}}}, {"modelContextWindow", window}};
+  };
+  const auto publish = [&](const char *id, Value::Object value) {
+    static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+        "thread/tokenUsage/updated", std::nullopt,
+        {{"threadId", id}, {"turnId", "turn"}, {"tokenUsage", std::move(value)}}}));
+  };
+  const ProtocolRequestId requestId("account-usage");
+  const auto request = updater.apply({DecodedMessageKind::ClientRequest,
+      "account/usage/read", requestId, {}});
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+      "account/usage/read", requestId,
+      {{"summary", Value::Object{{"lifetimeTokens", 9000}}}}, request.primary}));
+  publish("a", usage(100));
+  publish("a", usage(200));
+  publish("a", usage(200));
+  publish("b", usage(300));
+  {
+    auto read = graph.tryRead();
+    const auto projected = adapter.tokenUsage(read->find({NodeKind::Thread, "a"}), *read);
+    passed &= require(projected.thread.compact == "Tokens 200" &&
+                          projected.overall.compact == "Overall tokens 500" &&
+                          projected.overall.details.find("Account lifetime tokens: 9,000") != std::string::npos &&
+                          projected.thread.details.find("Input: 180") != std::string::npos &&
+                          projected.thread.summary.find("Left ≈950") != std::string::npos,
+                      "account total is independent of thread sums; context uses latest usage, not cumulative usage");
+    passed &= require(read->orderedNodes(NodeKind::Turn).empty(),
+                      "usage notifications do not create turn authorities");
+  }
+  for (const auto &values : {usage(200, nullptr), usage(200, 0), usage(200, -1),
+                             usage(200, 1000, nullptr), usage(200, 1000, -1)}) {
+    publish("a", values);
+    auto read = graph.tryRead();
+    passed &= require(adapter.tokenUsage(read->find({NodeKind::Thread, "a"}), *read)
+                              .thread.summary.find("Left") == std::string::npos,
+                      "unknown or invalid context information is omitted");
+  }
+  publish("a", usage(200, 1000, 1500));
+  {
+    auto read = graph.tryRead();
+    passed &= require(adapter.tokenUsage(read->find({NodeKind::Thread, "a"}), *read)
+                              .thread.summary.find("Left ≈0") != std::string::npos,
+                      "over-capacity reports clamp remaining context to zero");
+  }
+  NodeRef missing;
+  {
+    auto write = graph.write();
+    missing = write.upsert({NodeKind::Thread, "missing"});
+    static_cast<void>(write.finish());
+  }
+  {
+    auto read = graph.tryRead();
+    const auto projected = adapter.tokenUsage(missing, *read);
+    passed &= require(projected.thread.summary == "Tokens 0 | In 0 | Out 0" &&
+                          projected.thread.details.find("Cached input: 0") != std::string::npos,
+                      "selecting a thread without retained usage starts all counters at zero");
+    passed &= require(adapter.tokenUsage(read->find({NodeKind::Thread, "b"}), *read)
+                              .thread.compact == "Tokens 300",
+                      "switching back restores only the selected thread snapshot");
+  }
+  const auto pending = updater.apply({DecodedMessageKind::ClientRequest,
+      "account/usage/read", requestId, {}});
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientError,
+      "account/usage/read", requestId, {}, pending.primary}));
+  {
+    auto read = graph.tryRead();
+    const auto projected = adapter.tokenUsage({}, *read);
+    passed &= require(projected.overall.compact == "Overall tokens 500" &&
+                          projected.overall.details.find("Account lifetime tokens: 9,000") != std::string::npos &&
+                          projected.overall.details.find("last successful") != std::string::npos,
+                      "refresh failures preserve and identify the last account snapshot");
+  }
+  const auto oldAccountRequest = updater.apply({DecodedMessageKind::ClientRequest,
+      "account/usage/read", requestId, {}});
+  static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+      "account/updated", std::nullopt, {{"authMode", "chatgpt"}}}));
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+      "account/usage/read", requestId,
+      {{"summary", Value::Object{{"lifetimeTokens", 999999}}}}, oldAccountRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    passed &= require(adapter.tokenUsage({}, *read).overall.details.find("Account lifetime tokens: —") != std::string::npos,
+                      "account changes discard old totals and reject old-account responses");
+  }
+  return passed;
+}
+
+bool tokenUsageProjectionAggregatesAvailableThreads() {
+  using namespace nodegraph;
+  NodeGraph graph;
+  NodeGraphUiAdapter adapter(graph);
+  bool passed = true;
+  std::int64_t previous = 0;
+  for (int count : {2000, 10000}) {
+    {
+      auto write = graph.write();
+      const auto account = write.upsert({NodeKind::Account, "account/usage/read"});
+      write.setField(account, "summary", Value::Object{{"lifetimeTokens", 20000}});
+      for (int i = count == 2000 ? 0 : 2000; i < count; ++i) {
+        const auto thread = write.upsert({NodeKind::Thread, std::to_string(i)});
+        write.setField(thread, "tokenUsage", Value::Object{{"total", Value::Object{
+            {"totalTokens", 100}, {"inputTokens", 80}, {"outputTokens", 20}}}});
+      }
+      static_cast<void>(write.finish());
+    }
+    auto read = graph.tryRead();
+    std::int64_t best = std::numeric_limits<std::int64_t>::max();
+    for (int repeat = 0; repeat < 5; ++repeat) {
+      const auto start = std::chrono::steady_clock::now();
+      const auto projection = adapter.tokenUsage(read->find({NodeKind::Thread, "0"}), *read);
+      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - start).count();
+      best = std::min(best, elapsed);
+      passed &= require(projection.overall.compact ==
+                            (count == 2000 ? "Overall tokens 200.0k" : "Overall tokens 1.0M") && projection.thread.compact == "Tokens 100",
+                        "overall counts include all available threads exactly once");
+    }
+    std::cout << "Token projection " << count << " threads: " << best << " us\n";
+    passed &= require(codexui::testing::timingLimit(best < 8000 &&
+                          (!previous || best < previous * 7 + 200)),
+                      "aggregate projection stays below 8ms at 10k threads with bounded linear growth");
+    previous = best;
+  }
+  return passed;
+}
+
 bool genericActivityDetailPreservesUtf8Boundaries() {
   nodegraph::NodeGraph graph;
   NodeRef thread;
@@ -3269,6 +3405,8 @@ int main() {
   using namespace codexui::codex::ui;
   bool passed = true;
   passed &= genericActivityDetailPreservesUtf8Boundaries();
+  passed &= tokenUsageUsesAccountAndSelectedThreadSnapshots();
+  passed &= tokenUsageProjectionAggregatesAvailableThreads();
   passed &= projectsCanonicalTurnStructureAndRoot();
   passed &= projectsEveryLoadedItemInCanonicalOrder();
   passed &= completeHistoryRetainsCanonicalItemOrder();

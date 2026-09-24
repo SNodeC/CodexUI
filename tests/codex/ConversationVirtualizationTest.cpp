@@ -12,6 +12,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QElapsedTimer>
+#include <QDesktopServices>
 #include <QFontInfo>
 #include <QImage>
 #include <QKeyEvent>
@@ -48,6 +49,16 @@
 
 namespace codexui::codex::middle {
 namespace {
+
+class DesktopLinkProbe final : public QObject {
+  Q_OBJECT
+public:
+  DesktopLinkProbe() { QDesktopServices::setUrlHandler("https", this, "open"); }
+  ~DesktopLinkProbe() override { QDesktopServices::unsetUrlHandler("https"); }
+  QStringList urls;
+public slots:
+  void open(const QUrl &url) { urls.push_back(url.toString()); }
+};
 
 #if defined(__SANITIZE_ADDRESS__)
 constexpr qint64 InstrumentedTimingScale = 4;
@@ -4769,15 +4780,8 @@ bool singleRendererInteractionTargetsVisibleChildren() {
       "the visible Copy hit geometry activates directly on the authoritative "
       "card");
 
-  QStringList activatedLinks;
-  if (body) {
-    body->setOpenLinks(false);
-    body->setOpenExternalLinks(false);
-    QObject::connect(body, &QTextBrowser::anchorClicked, body,
-                     [&activatedLinks](const QUrl &url) {
-                       activatedLinks.push_back(url.toString());
-                     });
-  }
+  DesktopLinkProbe desktopLinks;
+  const QStringList &activatedLinks = desktopLinks.urls;
   const int linkPosition =
       body ? body->toPlainText().indexOf(QStringLiteral("the link")) + 1 : -1;
   QTextCursor linkCursor = body ? QTextCursor(body->document()) : QTextCursor{};
@@ -7364,3 +7368,5 @@ int main(int argc, char **argv) {
     std::cout << "Conversation virtualization tests passed\n";
   return result ? EXIT_SUCCESS : EXIT_FAILURE;
 }
+
+#include "ConversationVirtualizationTest.moc"

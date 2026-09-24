@@ -262,10 +262,15 @@ bool shellChromeAffected(const nodegraph::GraphChanged &change,
     switch (node->id().kind) {
     case nodegraph::NodeKind::Connection:
       return true;
+    case nodegraph::NodeKind::Account:
+      return node->id().canonical == "account/usage/read";
     case nodegraph::NodeKind::Catalog:
       return node->id().canonical == "model" ||
              node->id().canonical == "permissionProfile";
     case nodegraph::NodeKind::Thread: {
+      if (fieldChanged(*read, node, "tokenUsage", change.revision) ||
+          read->structureChangedRevision(node) == change.revision)
+        return true;
       if (!selectedThread || node != selectedThread)
         return false;
       constexpr std::array<std::string_view, 15> Fields{
@@ -388,6 +393,7 @@ struct ShellChromeValues final {
   std::string selectedTransport;
   std::string workspace;
   std::string title;
+  ui::TokenUsageSnapshot tokenUsage;
   UiStatus status;
   std::optional<std::int64_t> lastActivityAt;
   std::size_t totalPending = 0;
@@ -437,12 +443,6 @@ void setStatusTone(QFrame *dot, const QString &tone, QLabel *label = nullptr) {
   }
 }
 
-QFrame *statusDot() {
-  auto *dot = new QFrame;
-  dot->setFixedSize(10, 10);
-  dot->setProperty("kind", "statusDot");
-  return dot;
-}
 
 } // namespace
 
@@ -623,7 +623,6 @@ struct ShellWidget::Impl final {
   QPushButton *restoreInspectorButton = nullptr;
   QLabel *workspaceBreadcrumb = nullptr;
   QPushButton *requestButton = nullptr;
-  QFrame *connectionStatusDot = nullptr;
   QToolButton *connectionButton = nullptr;
   QAction *connectAction = nullptr;
   QAction *disconnectAction = nullptr;
@@ -631,6 +630,7 @@ struct ShellWidget::Impl final {
   QPushButton *controllerButton = nullptr;
   QFrame *globalStatusDot = nullptr;
   QLabel *globalStatusLabel = nullptr;
+  UiStyle::TokenUsageLabel *overallTokens = nullptr;
 };
 
 void ShellWidget::Impl::buildUi() {
@@ -675,8 +675,6 @@ void ShellWidget::Impl::buildUi() {
   topLayout->addWidget(requestButton);
   topLayout->addWidget(controllerButton);
 
-  connectionStatusDot = statusDot();
-  connectionStatusDot->setToolTip(QStringLiteral("Not connected"));
   connectionButton = new UiStyle::ChevronToolButton;
   connectionButton->setObjectName(QStringLiteral("transportButton"));
   connectionButton->setText(QStringLiteral("Connection"));
@@ -742,13 +740,7 @@ void ShellWidget::Impl::buildUi() {
             QStringLiteral("Reconnect request was not admitted; try again.")));
       });
   connectionButton->setMenu(connectionMenu);
-  auto *connectionControl = new QWidget;
-  auto *connectionLayout = new QHBoxLayout(connectionControl);
-  connectionLayout->setContentsMargins(0, 0, 0, 0);
-  connectionLayout->setSpacing(6);
-  connectionLayout->addWidget(connectionButton);
-  connectionLayout->addWidget(connectionStatusDot);
-  topLayout->addWidget(connectionControl);
+  topLayout->addWidget(connectionButton);
   root->addWidget(top);
 
   middleRegion = new middle::MiddleRegionWidget;
@@ -759,7 +751,6 @@ void ShellWidget::Impl::buildUi() {
   statusBar->setMinimumHeight(40);
   auto *statusLayout = new QHBoxLayout(statusBar);
   statusLayout->setContentsMargins(18, 0, 24, 0);
-  statusLayout->setSpacing(10);
   auto *attribution = new QLabel(
       QStringLiteral(
           "<span style=\"color:%1;font-weight:600\">"
@@ -785,10 +776,17 @@ void ShellWidget::Impl::buildUi() {
   attribution->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   statusLayout->addWidget(attribution);
   statusLayout->addStretch();
+  overallTokens = new UiStyle::TokenUsageLabel;
+  overallTokens->setObjectName(QStringLiteral("overallTokenUsage"));
+  statusLayout->addWidget(overallTokens);
+  overallTokens->ensurePolished();
+  statusLayout->setSpacing(overallTokens->fontMetrics().horizontalAdvance(QLatin1Char(' ')));
   auto *statusCaption = makeStatusLabel(
-      QStringLiteral("Status:"), QStringLiteral("globalStatusCaption"), 60);
+      QStringLiteral("| Status"), QStringLiteral("globalStatusCaption"), 60);
   statusLayout->addWidget(statusCaption);
-  globalStatusDot = statusDot();
+  globalStatusDot = new QFrame;
+  globalStatusDot->setFixedSize(10, 10);
+  globalStatusDot->setProperty("kind", "statusDot");
   globalStatusDot->setObjectName(QStringLiteral("shellGlobalStatusDot"));
   statusLayout->addWidget(globalStatusDot);
   globalStatusLabel =
@@ -2134,6 +2132,7 @@ void ShellWidget::Impl::render(
     nodegraph::NodeRef selected = boundGraphThread;
     if (selected && !read->live(selected))
       selected.reset();
+    values.tokenUsage = uiAdapter.tokenUsage(selected, *read);
     if (selected) {
       const auto state = read->state(selected);
       values.title = exactStringFromValue(valueMember(*state, "name"));
@@ -2253,14 +2252,16 @@ void ShellWidget::Impl::render(
       const std::string_view statusToneValue = statusTone(values.status);
       const QString tone =
           QString::fromLatin1(statusToneValue.data(), statusToneValue.size());
-      middleRegion->setThreadHeading(text(values.title), text(values.workspace),
+      middleRegion->setThreadHeading(text(values.title), values.tokenUsage.thread,
                                      activity, status, tone);
     } else {
-      middleRegion->setThreadHeading(text(values.title),
-                                     text(values.workspace));
+      middleRegion->setThreadHeading(text(values.title), values.tokenUsage.thread);
     }
   }
   renderStatus(values, !replacementHydrating);
+  overallTokens->setUsage(text(values.tokenUsage.overall.summary),
+                          text(values.tokenUsage.overall.compact),
+                          text(values.tokenUsage.overall.details));
   renderedChrome = values;
   ++shellRenderCommits;
   owner->setProperty("shellRenderCommits",
@@ -2269,29 +2270,14 @@ void ShellWidget::Impl::render(
 
 void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
                                      bool updateWorkspace) {
-  QString dotTone;
-  QString dotTip;
-  if (status.connected) {
-    dotTone = QStringLiteral("success");
-    dotTip = QStringLiteral("Connected");
-  } else if (status.retrying) {
-    dotTone = QStringLiteral("warning");
-    dotTip = QStringLiteral("Disconnected, retrying");
-  } else {
-    dotTone = QStringLiteral("danger");
-    dotTip = QStringLiteral("Disconnected");
-  }
-  setStatusTone(connectionStatusDot, dotTone);
-  if (connectionStatusDot->toolTip() != dotTip)
-    connectionStatusDot->setToolTip(dotTip);
   const QString connectionText = status.selectedTransport.empty()
                                      ? QStringLiteral("Connection")
                                      : text(status.selectedTransport);
   if (connectionButton->text() != connectionText)
     connectionButton->setText(connectionText);
-  const QString connectionTip =
-      status.connected ? QStringLiteral("Connected bridge transport")
-                       : QStringLiteral("Disconnected bridge transport");
+  const QString connectionTip = status.retrying ? QStringLiteral("Disconnected, retrying")
+      : status.connected ? QStringLiteral("Connected bridge transport")
+                         : QStringLiteral("Disconnected bridge transport");
   if (connectionButton->toolTip() != connectionTip)
     connectionButton->setToolTip(connectionTip);
   connectAction->setEnabled(!status.connected);
@@ -2354,6 +2340,8 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
   }
   setStatusTone(globalStatusDot, globalTone, globalStatusLabel);
   setStatusLabelText(globalStatusLabel, globalStatus);
+  globalStatusLabel->setToolTip(connectionText + QStringLiteral(": ") + connectionTip);
+  globalStatusDot->setToolTip(globalStatusLabel->toolTip());
 
   if (updateWorkspace) {
     const QString workspace = text(status.workspace);

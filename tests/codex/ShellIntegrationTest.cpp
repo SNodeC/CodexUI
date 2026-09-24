@@ -198,6 +198,85 @@ void applyThread(WorkerLogic &worker, std::string id,
                                       {"cwd", Value("/tmp")}})}}}));
 }
 
+void makeReady(WorkerLogic &worker);
+bool selectThread(QTreeWidget *list, std::string_view id);
+QTreeWidgetItem *threadItem(QTreeWidget *list, std::string_view id, QTreeWidgetItem *parent);
+
+void tokenUsageUpdatesBothShellSurfaces(Configuration &configuration) {
+  FrontendSession session(configuration);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session),
+                     FrontendSessionTestPeer::channels(session));
+  ShellWidget shell(session);
+  shell.setStyleSheet(UiStyle::applicationStyleSheet());
+  shell.resize(1800, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "usage-a");
+  applyThread(worker, "usage-b");
+  auto *overall = shell.findChild<QLabel *>(QStringLiteral("overallTokenUsage"));
+  auto *thread = shell.findChild<QLabel *>(QStringLiteral("threadTokenUsage"));
+  const ProtocolRequestId usageRequest("startup-usage");
+  const auto request = worker.applyDetailed({DecodedMessageKind::ClientRequest,
+      "account/usage/read", usageRequest, {}});
+  static_cast<void>(worker.apply({DecodedMessageKind::ClientResult,
+      "account/usage/read", usageRequest,
+      {{"summary", Value::Object{{"lifetimeTokens", 9000}}}}, request.primary}));
+  require(spinUntil([&] {
+    return overall && overall->toolTip().contains("Account lifetime tokens: 9,000");
+  }), "startup account response fills the footer before any thread usage arrives");
+  const auto publish = [&](const char *id, int total) {
+    static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+        "thread/tokenUsage/updated", std::nullopt,
+        {{"threadId", id}, {"turnId", "usage-turn"},
+         {"tokenUsage", Value::Object{{"total", Value::Object{
+             {"totalTokens", total}, {"inputTokens", total - 10}, {"outputTokens", 10}}},
+             {"last", Value::Object{{"totalTokens", 50}}}, {"modelContextWindow", 1000}}}}}));
+  };
+  publish("usage-a", 100);
+  publish("usage-b", 200);
+  require(spinUntil([&] {
+    return overall && overall->accessibleName() == "Overall tokens 300";
+  }), "background thread usage contributes to overall totals");
+  auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
+  require(selectThread(list, "usage-a"), "usage test selects first thread");
+  require(spinUntil([&] { return thread && thread->accessibleName() == "Tokens 100"; }),
+          "selected usage appears in the message header");
+  auto *workspace = shell.findChild<QLineEdit *>(QStringLiteral("codexWorkspace"));
+  require(workspace && workspace->text() == "/tmp" &&
+              !shell.findChild<QLabel *>(QStringLiteral("conversationMetadata")),
+          "workspace remains in composer settings and leaves the message header");
+  publish("usage-b", 400);
+  require(spinUntil([&] {
+    return overall->accessibleName() == "Overall tokens 500" &&
+           thread->accessibleName() == "Tokens 100";
+  }), "background cumulative replacement updates overall totals, not the selected thread");
+  require(selectThread(list, "usage-b"), "usage test selects second thread");
+  require(spinUntil([&] { return thread->accessibleName() == "Tokens 400"; }),
+          "thread selection switches the usage snapshot");
+  require(thread->toolTip().contains("Estimated remaining: 950"),
+          "context remaining uses the latest reported usage");
+  applyThread(worker, "usage-empty");
+  require(spinUntil([&] { return threadItem(list, "usage-empty", nullptr) != nullptr; }),
+          "a thread without retained usage becomes selectable");
+  require(selectThread(list, "usage-empty"), "selecting a thread without usage");
+  require(spinUntil([&] { return thread->accessibleName() == "Tokens 0"; }) &&
+              !thread->text().contains("Left"),
+          "a thread without retained usage starts at zero and omits context");
+  for (int width : {1100, 1800}) {
+    shell.resize(width, 850);
+    QCoreApplication::processEvents();
+    if (qEnvironmentVariableIsSet("CODEXUI_CAPTURE_HEADER"))
+      shell.grab().save(QStringLiteral("/tmp/codexui-shell-%1.png").arg(width));
+    auto *status = shell.findChild<QLabel *>(QStringLiteral("globalStatusCaption"));
+    auto *activity = shell.findChild<QLabel *>(QStringLiteral("threadTokenUsage"));
+    require(overall && status && overall->x() + overall->width() <= status->x() &&
+                activity && overall->property("tone") == activity->property("tone") &&
+                overall->palette().color(QPalette::WindowText) == activity->palette().color(QPalette::WindowText) &&
+                status->text() == "| Status" && !overall->text().contains('\n'),
+            "footer usage precedes Status with the same strong text color as Last Activity");
+  }
+}
+
 void applyScrollableThreadContent(WorkerLogic &worker, std::string threadId,
                                   std::string suffix) {
   const std::string turnId = "scroll-turn-" + suffix;
@@ -5456,6 +5535,7 @@ int main(int argc, char **argv) {
   core::SNodeC::init(argc, argv);
 
   using namespace codexui::codex;
+  tokenUsageUpdatesBothShellSurfaces(*configuration);
   graphNotificationsPrecedeRetirementRelease(*configuration);
   massRetirementIsSliced(*configuration);
   selectedRemovalUnbindsBeforeWorkerRetirement(*configuration);
