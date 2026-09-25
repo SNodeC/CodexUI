@@ -22,6 +22,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QHelpEvent>
+#include <QFocusEvent>
 #include <QCursor>
 #include <QKeyEvent>
 #include <QLabel>
@@ -1153,7 +1154,7 @@ bool tokenDetailsRemainVisible() {
   dark.setColor(QPalette::WindowText, Qt::white);
   label.setPalette(dark);
   label.setStyleSheet(UiStyle::applicationStyleSheet());
-  label.setUsage("Tokens 100 | In 80 | Out 20", "Tokens 100", "Total: 100\nInput: 80\nOutput: 20");
+  label.setUsage("Tokens 100 | In 80 | Out 20", "Total: 100\nInput: 80\nOutput: 20");
   label.resize(300, 30);
   label.move(100, 100);
   label.show();
@@ -1184,6 +1185,17 @@ bool tokenDetailsRemainVisible() {
   QCursor::setPos(10, 10);
   QApplication::sendEvent(&label, &leave);
   result &= expect(!details->isVisible(), "leaving both surfaces dismisses details");
+  QFocusEvent focus(QEvent::FocusIn, Qt::TabFocusReason);
+  QApplication::sendEvent(&label, &focus);
+  result &= expect(details->isVisible() && label.accessibleName() == "Tokens 100",
+                   "keyboard focus opens details with the unchanged token accessibility name");
+  label.setUsage("Tokens 200 | In 160 | Out 40", "Total: 200\nInput: 160\nOutput: 40");
+  result &= expect(details->isVisible() && details->text().contains("Total: 200") &&
+                       label.accessibleName() == "Tokens 200",
+                   "visible details and accessibility update with the latest usage");
+  QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+  QApplication::sendEvent(&label, &escape);
+  result &= expect(!details->isVisible(), "Escape dismisses keyboard-opened details");
   return result;
 }
 
@@ -1194,7 +1206,7 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   region.show();
   region.setThreadHeading(QString(300, QLatin1Char('T')),
                           {"Tokens 48.2k | In 42.0k | Out 6.2k | Left ≈180k",
-                           "Tokens 48.2k", "Total: 48,200"},
+                           "Total: 48,200"},
                           QStringLiteral("Last activity: 12:00"),
                           QStringLiteral("running"), QStringLiteral("active"));
   QCoreApplication::processEvents();
@@ -1248,7 +1260,7 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   }
   UiStyle::TokenUsageLabel narrow;
   narrow.setUsage("Tokens 48.2k | In 42.0k | Out 6.2k | Left ≈180k | Last activity: 12:00",
-                  "Tokens 48.2k", "Total: 48,200");
+                  "Total: 48,200");
   narrow.resize(160, narrow.heightForWidth(160));
   narrow.show();
   QCoreApplication::processEvents();
@@ -1259,7 +1271,7 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   result &= expect(wrappedUsage && fullUsage,
                    "metadata wraps at narrow widths and stays continuous when space permits");
   region.setThreadHeading(QStringLiteral("Empty thread"),
-                          {"Tokens 0 | In 0 | Out 0", "Tokens 0", "No retained usage"},
+                          {"Tokens 0 | In 0 | Out 0", "No retained usage"},
                           QStringLiteral("Last activity: 12:00"));
   QCoreApplication::processEvents();
   auto *tokens = region.findChild<QLabel *>(QStringLiteral("threadTokenUsage"));

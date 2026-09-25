@@ -50,17 +50,16 @@ TokenUsageLabel::TokenUsageLabel(QWidget *parent) : QLabel(parent), details_(new
   details_->setObjectName(QStringLiteral("tokenUsageDetails"));
   details_->setTextFormat(Qt::PlainText);
   details_->setMargin(8);
-  details_->setFrameStyle(QFrame::Box);
   qApp->installEventFilter(this);
 }
 
 TokenUsageLabel::~TokenUsageLabel() { qApp->removeEventFilter(this); }
 
-void TokenUsageLabel::setUsage(QString summary, QString compact, QString details) {
+void TokenUsageLabel::setUsage(QString summary, QString details) {
   if (summary_ == summary && toolTip() == details) return;
   summary_ = std::move(summary);
   setToolTip(details);
-  setAccessibleName(compact);
+  setAccessibleName(summary_.section(QStringLiteral(" | "), 0, 0));
   setAccessibleDescription(details);
   details_->setText(details);
   details_->adjustSize();
@@ -93,35 +92,30 @@ int TokenUsageLabel::heightForWidth(int width) const {
   return (wrappedText(width).count(QLatin1Char('\n')) + 1) * fontMetrics().lineSpacing();
 }
 
-bool TokenUsageLabel::event(QEvent *event) {
-  if (event->type() == QEvent::ToolTip || event->type() == QEvent::FocusIn) {
-    const QRect screen = this->screen()->availableGeometry();
-    QPoint position = mapToGlobal(rect().bottomLeft());
-    position.setX(std::clamp(position.x(), screen.left(), std::max(screen.left(), screen.right() - details_->width())));
-    if (position.y() + details_->height() > screen.bottom())
-      position.setY(mapToGlobal(QPoint{}).y() - details_->height());
-    details_->move(position);
-    details_->show();
-    if (event->type() == QEvent::ToolTip) return true;
+bool TokenUsageLabel::eventFilter(QObject *watched, QEvent *event) {
+  const auto type = event->type();
+  if (watched == this) {
+    if (type == QEvent::ToolTip || type == QEvent::FocusIn) {
+      const QRect screen = this->screen()->availableGeometry();
+      QPoint position = mapToGlobal(rect().bottomLeft());
+      position.setX(std::clamp(position.x(), screen.left(), std::max(screen.left(), screen.right() - details_->width())));
+      if (position.y() + details_->height() > screen.bottom())
+        position.setY(mapToGlobal(QPoint{}).y() - details_->height());
+      details_->move(position);
+      details_->show();
+      if (type == QEvent::ToolTip) return true;
+    }
+    if (type == QEvent::Hide || type == QEvent::FocusOut)
+      details_->hide();
+    if (type == QEvent::Resize || type == QEvent::FontChange || type == QEvent::StyleChange)
+      setText(wrappedText(contentsRect().width()));
   }
-  if (event->type() == QEvent::Hide || event->type() == QEvent::FocusOut)
+  if (details_->isVisible() &&
+      (((type == QEvent::MouseMove || type == QEvent::Leave) &&
+        !QRect(mapToGlobal(QPoint{}), size()).united(details_->geometry()).contains(QCursor::pos())) ||
+       type == QEvent::ApplicationDeactivate ||
+       (type == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)))
     details_->hide();
-  const bool handled = QLabel::event(event);
-  if (event->type() == QEvent::Resize || event->type() == QEvent::FontChange ||
-      event->type() == QEvent::StyleChange)
-    setText(wrappedText(contentsRect().width()));
-  return handled;
-}
-
-bool TokenUsageLabel::eventFilter(QObject *, QEvent *event) {
-  if (details_->isVisible()) {
-    if ((event->type() == QEvent::MouseMove || event->type() == QEvent::Leave) &&
-        !QRect(mapToGlobal(QPoint{}), size()).united(details_->geometry()).contains(QCursor::pos()))
-      details_->hide();
-    if (event->type() == QEvent::ApplicationDeactivate ||
-        (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape))
-      details_->hide();
-  }
   return false;
 }
 

@@ -69,8 +69,8 @@ std::string tokenNumber(std::optional<std::int64_t> count, bool compact) {
 
 TokenUsageText tokenText(const TokenCounts &counts, std::string prefix) {
   TokenUsageText text;
-  text.compact = std::move(prefix) + " " + tokenNumber(counts[0], true);
-  text.summary = text.compact + " | In " + tokenNumber(counts[1], true) +
+  text.summary = std::move(prefix) + " " + tokenNumber(counts[0], true) +
+                 " | In " + tokenNumber(counts[1], true) +
                  " | Out " + tokenNumber(counts[2], true);
   constexpr std::array labels{"Total", "Input", "Output", "Cached input",
                               "Cache-write input", "Reasoning output"};
@@ -1580,14 +1580,27 @@ TokenUsageSnapshot NodeGraphUiAdapter::tokenUsage(
     const nodegraph::NodeRef &selectedThread,
     const nodegraph::NodeGraph::ReadAccess &read) const {
   TokenUsageSnapshot result;
-  const auto state = selectedThread && read.live(selectedThread)
-                         ? read.state(selectedThread) : nullptr;
-  const auto *value = state ? valueMember(*state, "tokenUsage") : nullptr;
-  const auto *usage = value ? value->asObject() : nullptr;
-  auto counts = tokenCounts(usage ? valueMember(*usage, "total") : nullptr);
-  if (!usage) counts.fill(0);
-  result.thread = tokenText(counts, "Tokens");
-  if (usage) {
+  TokenCounts total;
+  total.fill(0);
+  std::array<std::size_t, TokenFields.size()> reported{};
+  result.thread = tokenText(total, "Tokens");
+  result.thread.details += "No retained usage reported; counters initialized to zero.";
+  const auto &threads = read.orderedNodes(nodegraph::NodeKind::Thread);
+  for (const auto &thread : threads) {
+    const auto snapshot = read.state(thread);
+    const auto *entry = valueMember(*snapshot, "tokenUsage");
+    const auto *usage = entry ? entry->asObject() : nullptr;
+    const auto values = tokenCounts(usage ? valueMember(*usage, "total") : nullptr);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (!values[i]) continue;
+      ++reported[i];
+      if (total[i] && *values[i] <= std::numeric_limits<std::int64_t>::max() - *total[i])
+        *total[i] += *values[i];
+      else
+        total[i].reset();
+    }
+    if (thread != selectedThread || !usage) continue;
+    result.thread = tokenText(values, "Tokens");
     const auto last = tokenCounts(valueMember(*usage, "last"));
     const auto window = signedIntegerFromValue(valueMember(*usage, "modelContextWindow"));
     result.thread.details += "\nLatest reported usage\n" + tokenText(last, "").details +
@@ -1598,8 +1611,6 @@ TokenUsageSnapshot NodeGraphUiAdapter::tokenUsage(
       result.thread.details += "\nEstimated remaining: " + tokenNumber(remaining, false) +
           "\nBased on the latest report, not cumulative thread consumption.";
     }
-  } else {
-    result.thread.details += "No retained usage reported; counters initialized to zero.";
   }
   const auto account = read.find({nodegraph::NodeKind::Account, "account/usage/read"});
   const auto accountState = account ? read.state(account) : nullptr;
@@ -1609,24 +1620,6 @@ TokenUsageSnapshot NodeGraphUiAdapter::tokenUsage(
                           : std::nullopt;
   if (lifetime && *lifetime < 0)
     lifetime.reset();
-  TokenCounts total;
-  total.fill(0);
-  std::array<std::size_t, TokenFields.size()> reported{};
-  const auto &threads = read.orderedNodes(nodegraph::NodeKind::Thread);
-  for (const auto &thread : threads) {
-    const auto snapshot = read.state(thread);
-    const auto *entry = valueMember(*snapshot, "tokenUsage");
-    const auto *object = entry ? entry->asObject() : nullptr;
-    const auto values = tokenCounts(object ? valueMember(*object, "total") : nullptr);
-    for (std::size_t i = 0; i < values.size(); ++i) {
-      if (!values[i]) continue;
-      ++reported[i];
-      if (total[i] && *values[i] <= std::numeric_limits<std::int64_t>::max() - *total[i])
-        *total[i] += *values[i];
-      else
-        total[i].reset();
-    }
-  }
   for (std::size_t i = 0; i < total.size(); ++i)
     if (!reported[i]) total[i].reset();
   result.overall = tokenText(total, "Overall tokens");

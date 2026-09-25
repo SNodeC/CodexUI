@@ -2260,7 +2260,6 @@ void ShellWidget::Impl::render(
   }
   renderStatus(values, !replacementHydrating);
   overallTokens->setUsage(text(values.tokenUsage.overall.summary),
-                          text(values.tokenUsage.overall.compact),
                           text(values.tokenUsage.overall.details));
   renderedChrome = values;
   ++shellRenderCommits;

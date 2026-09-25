@@ -129,14 +129,13 @@ class TokenUsageLabel final : public QLabel {
 public:
   explicit TokenUsageLabel(QWidget *parent = nullptr);
   ~TokenUsageLabel() override;
-  void setUsage(QString summary, QString compact, QString details);
+  void setUsage(QString summary, QString details);
   QSize sizeHint() const override;
   QSize minimumSizeHint() const override;
   int heightForWidth(int width) const override;
   bool hasHeightForWidth() const override { return true; }
 
 protected:
-  bool event(QEvent *event) override;
   bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:

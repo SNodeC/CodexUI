@@ -93,8 +93,8 @@ bool tokenUsageUsesAccountAndSelectedThreadSnapshots() {
   {
     auto read = graph.tryRead();
     const auto projected = adapter.tokenUsage(read->find({NodeKind::Thread, "a"}), *read);
-    passed &= require(projected.thread.compact == "Tokens 200" &&
-                          projected.overall.compact == "Overall tokens 500" &&
+    passed &= require(projected.thread.summary == "Tokens 200 | In 180 | Out 20 | Left ≈950" &&
+                          projected.overall.summary == "Overall tokens 500 | In 460 | Out 40" &&
                           projected.overall.details.find("Account lifetime tokens: 9,000") != std::string::npos &&
                           projected.thread.details.find("Input: 180") != std::string::npos &&
                           projected.thread.summary.find("Left ≈950") != std::string::npos,
@@ -130,7 +130,7 @@ bool tokenUsageUsesAccountAndSelectedThreadSnapshots() {
                           projected.thread.details.find("Cached input: 0") != std::string::npos,
                       "selecting a thread without retained usage starts all counters at zero");
     passed &= require(adapter.tokenUsage(read->find({NodeKind::Thread, "b"}), *read)
-                              .thread.compact == "Tokens 300",
+                              .thread.summary == "Tokens 300 | In 280 | Out 20 | Left ≈950",
                       "switching back restores only the selected thread snapshot");
   }
   const auto pending = updater.apply({DecodedMessageKind::ClientRequest,
@@ -140,7 +140,7 @@ bool tokenUsageUsesAccountAndSelectedThreadSnapshots() {
   {
     auto read = graph.tryRead();
     const auto projected = adapter.tokenUsage({}, *read);
-    passed &= require(projected.overall.compact == "Overall tokens 500" &&
+    passed &= require(projected.overall.summary == "Overall tokens 500 | In 460 | Out 40" &&
                           projected.overall.details.find("Account lifetime tokens: 9,000") != std::string::npos &&
                           projected.overall.details.find("last successful") != std::string::npos,
                       "refresh failures preserve and identify the last account snapshot");
@@ -186,8 +186,10 @@ bool tokenUsageProjectionAggregatesAvailableThreads() {
       const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - start).count();
       best = std::min(best, elapsed);
-      passed &= require(projection.overall.compact ==
-                            (count == 2000 ? "Overall tokens 200.0k" : "Overall tokens 1.0M") && projection.thread.compact == "Tokens 100",
+      passed &= require(projection.overall.summary ==
+                            (count == 2000 ? "Overall tokens 200.0k | In 160.0k | Out 40.0k"
+                                           : "Overall tokens 1.0M | In 800.0k | Out 200.0k") &&
+                            projection.thread.summary == "Tokens 100 | In 80 | Out 20",
                         "overall counts include all available threads exactly once");
     }
     std::cout << "Token projection " << count << " threads: " << best << " us\n";

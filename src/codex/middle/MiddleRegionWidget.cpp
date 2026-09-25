@@ -397,7 +397,7 @@ void MiddleRegionWidget::setThreadHeading(QString title, const ui::TokenUsageTex
   QString summary = QString::fromStdString(usage.summary);
   if (!trailingMetadata.isEmpty())
     summary += QStringLiteral(" | ") + trailingMetadata;
-  conversationTokens->setUsage(summary, QString::fromStdString(usage.compact),
+  conversationTokens->setUsage(summary,
                                QString::fromStdString(usage.details));
   conversationTitle->setText(conversationTitle->fontMetrics().elidedText(title, Qt::ElideRight, conversationTitle->width()));
   conversationTitle->setToolTip(title);

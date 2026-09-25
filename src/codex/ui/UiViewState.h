@@ -20,7 +20,6 @@ namespace codexui::codex::ui {
 
 struct TokenUsageText {
   std::string summary;
-  std::string compact;
   std::string details;
   bool operator==(const TokenUsageText &) const = default;
 };
