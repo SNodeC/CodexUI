@@ -103,6 +103,14 @@ void mergeObject(NodeGraph::WriteAccess &write, const NodeRef &node,
                  bool omitResultThreadSettings = false) {
   NodeState next = *write.state(node);
   for (const auto &[key, value] : object) {
+    // Sparse retained history must not erase already observed lifecycle facts.
+    if (value.isNull() &&
+        (node->id().kind == NodeKind::Turn ||
+         node->id().kind == NodeKind::Item) &&
+        (key == "startedAt" || key == "completedAt" || key == "startedAtMs" ||
+         key == "completedAtMs" || key == "durationMs") &&
+        signedIntegerFromValue(valueMember(next, key)))
+      continue;
     if ((!omittedChildField.empty() && key == omittedChildField) ||
         (omitResultThreadSettings && threadSetting(key) &&
          threadSetting(key)->acceptedFromResult))

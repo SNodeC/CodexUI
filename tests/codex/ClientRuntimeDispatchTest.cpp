@@ -248,7 +248,8 @@ public:
                    {"params", std::move(parameters)}}}});
   }
 
-  bool appServerNotification(std::string method, nlohmann::json parameters) {
+  bool appServerNotification(std::string method, nlohmann::json parameters,
+                             std::int64_t emittedAtMs = 1234567890123) {
     return send({{"kind", "appserver"},
                  {"connectionId", "runtime-test"},
                  {"role", "controller"},
@@ -256,6 +257,7 @@ public:
                  {"payload",
                   {{"jsonrpc", "2.0"},
                    {"method", std::move(method)},
+                   {"emittedAtMs", emittedAtMs},
                    {"params", std::move(parameters)}}}});
   }
 
@@ -847,6 +849,16 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
                ? std::string{}
                : diagnosticField(*found, "authority");
   };
+  for (const auto &diagnostic : notificationDiagnostics) {
+    const auto emitted =
+        signedIntegerFromValue(valueMember(diagnostic.details, "emittedAtMs"));
+    const auto recorded =
+        signedIntegerFromValue(valueMember(diagnostic.details, "recordedAtMs"));
+    if (diagnosticField(diagnostic, "subject") == "skills/changed")
+      expect(emitted == 1234567890123 && recorded && *recorded != *emitted,
+             "server emission time and local boundary-record time remain "
+             "distinct");
+  }
   expect(authorityFor("skills/changed") == "none" &&
              authorityFor("thread/goal/cleared") == "remove",
          "state-neutral and removal notifications remain distinguishable");
@@ -887,6 +899,14 @@ void protocolDiagnosticsPreserveMetadataWithoutPayloads(
     if (diagnosticField(effect, "direction") == "server result")
       reverseResult = &effect;
   }
+  const auto *clockTimes =
+      reverseResult ? valueMember(reverseResult->details, "timing") : nullptr;
+  expect(clockTimes && clockTimes->asArray() &&
+             clockTimes->asArray()->size() == 1 &&
+             exactStringFromValue(clockTimes->asArray()->front().find(
+                 "field")) == "currentTimeAt",
+         "client-reported clock response keeps its schema timestamp without "
+         "retaining other payload");
   expect(reverseRequest && reverseResult &&
              diagnosticField(*reverseRequest, "authority") == "merge" &&
              diagnosticField(*reverseResult, "authority") == "remove" &&

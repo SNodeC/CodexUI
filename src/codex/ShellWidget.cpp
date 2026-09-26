@@ -805,6 +805,12 @@ void ShellWidget::Impl::connectUi() {
         QStringLiteral("More threads could not be requested; try again.")));
   };
   threadActions.hide = [this] { middleRegion->showSidebar(false); };
+  const auto showTiming = [this](nodegraph::NodeRef target) {
+    middleRegion->showInspector(true);
+    middleRegion->inspector().showTiming(std::move(target));
+  };
+  threadActions.timing = showTiming;
+  middleRegion->conversation().setTimingAction(showTiming);
   threadActions.select = [this](const nodegraph::NodeRef &thread) {
     selectGraphThread(thread, ThreadSelectionOrigin::User);
   };
@@ -1053,6 +1059,7 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   pendingConversationAuthorityReplacement = false;
   pendingStructuralConversationDelta.reset();
   boundGraphThread = std::move(selectedThread);
+  middleRegion->inspector().clearTimingTarget();
   routedThreadRevision = 0;
   routedConversationRevision = 0;
   graphPanesBound = true;

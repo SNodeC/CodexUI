@@ -3,6 +3,8 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 
+#include "codex/ProtocolTiming.h"
+
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/NodeGraph.h"
 
@@ -182,6 +184,8 @@ struct VisibleCardData {
   // Stable action/lifetime identity supplied by the adapter. Widgets retain
   // it but never inspect graph state through it.
   nodegraph::NodeRef target;
+
+  ProtocolTimes timing{};
 
   bool operator==(const VisibleCardData &) const = default;
 };

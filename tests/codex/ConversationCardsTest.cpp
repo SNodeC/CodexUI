@@ -4260,6 +4260,9 @@ bool testPendingPromptAnimation() {
   result &=
       expect(card.applyPresentation(materialized) != PresentationImpact::None,
              "authoritative materialization retains the settled card");
+  // Match ConversationView's public geometry contract before comparing frames:
+  // promotion removes pending chrome and returns GeometryChanged.
+  static_cast<void>(card.settleHeightForWidth(card.width()));
   const QImage settled = card.grab().toImage();
   spin(100);
   result &= expect(settled == card.grab().toImage(),

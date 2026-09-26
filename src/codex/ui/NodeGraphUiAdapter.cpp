@@ -483,6 +483,7 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
                          {}};
 
   result.status = statusFromState(state);
+  result.timing = protocolTimes(state.fields, "ItemLifecycle");
   if (result.kind == CardKind::AgentActivity)
     result.status = agentUiStatus(state);
   else if (result.kind == CardKind::ImageGeneration && type == "imageView")
@@ -746,6 +747,14 @@ VisibleCardData conversationCardData(nodegraph::NodeGraph::ReadAccess &read,
                                          std::move(turnId), state, threadCwd);
   if (key)
     result.key = *key;
+  const auto turn = read.parent(item);
+  if (turn &&
+      read.isRelated(turn, nodegraph::RelationKind::TurnRootItem, item)) {
+    auto timing = protocolTimes(read.state(turn)->fields, "Turn");
+    for (auto &time : timing)
+      time.field = "turn/" + time.field;
+    result.timing.insert(result.timing.end(), timing.begin(), timing.end());
+  }
   return result;
 }
 
@@ -1332,6 +1341,7 @@ projectThreadRow(nodegraph::NodeGraph::ReadAccess &read,
   row.id = thread->id().canonical;
   row.presentationKey = threadRowPresentationKey(thread, *state);
   row.target = thread;
+  row.timing = protocolTimes(state->fields, "Thread");
   row.title = scalarTextFromValue(valueMember(*state, "localNameOverlay"));
   if (row.title.empty())
     row.title = scalarTextFromValue(valueMember(*state, "name"));
@@ -1960,6 +1970,80 @@ NodeGraphUiAdapter::inspector(const nodegraph::NodeRef &selectedThread,
   const bool wantState = projection == InspectorProjection::State;
   result.threadIncarnation = thread ? thread->incarnation() : 0;
   result.changes.threadId = thread ? thread->id().canonical : std::string{};
+  if (projection == InspectorProjection::Timing) {
+    auto target = request.timingTarget ? request.timingTarget : thread;
+    result.timingTitle = "No object selected";
+    if (target && !read->live(target)) {
+      result.timingTitle = "Object is no longer available";
+      return result;
+    }
+    if (target)
+      result.timingTitle =
+          std::string(nodeKindName(target->id().kind)) + ": " +
+          nodegraph::protocolCanonicalId(*read->state(target), target);
+    const auto appendTimes = [&](const nodegraph::Value::Object &fields,
+                                 std::string_view type,
+                                 const std::string &scope) {
+      for (auto &time : protocolTimes(fields, type)) {
+        if (result.timing.size() >= 128)
+          break;
+        time.field = scope + "/" + time.field;
+        result.timing.push_back(std::move(time));
+      }
+    };
+    for (; target;) {
+      const auto kind = target->id().kind;
+      const std::string_view type =
+          kind == nodegraph::NodeKind::Item      ? "ItemLifecycle"
+          : kind == nodegraph::NodeKind::Turn    ? "Turn"
+          : kind == nodegraph::NodeKind::Thread  ? "Thread"
+          : kind == nodegraph::NodeKind::Project ? "Project"
+                                                 : "";
+      if (type.empty())
+        break;
+      const auto state = read->state(target);
+      appendTimes(state->fields, type, std::string(type));
+      if (kind == nodegraph::NodeKind::Thread) {
+        if (const auto *goal = valueMember(*state, "goal");
+            goal && goal->asObject())
+          appendTimes(*goal->asObject(), "ThreadGoal", "Goal");
+        target = read->relatedAt(target,
+                                 nodegraph::RelationKind::ProjectMembership, 0);
+      } else {
+        target = read->parent(target);
+      }
+    }
+    // Current peripheral facts, not a second history database. Use kind indexes
+    // and a bounded page; do no conversation-wide or arbitrary-payload scan.
+    using Kind = nodegraph::NodeKind;
+    const std::pair<Kind, std::string_view> domains[]{
+        {Kind::Account, "GetAccountRateLimitsResponse"},
+        {Kind::Account, "GetWorkspaceMessagesResponse"},
+        {Kind::Hook, "HookRunSummary"},
+        {Kind::Plugin, "PluginSummary"},
+        {Kind::Catalog, "ModelListResponse"},
+        {Kind::ExternalAgentImport, "ExternalAgentConfigImportHistory"}};
+    std::size_t visited = 0;
+    for (const auto &[kind, type] : domains) {
+      for (const auto &node : read->orderedNodes(kind)) {
+        if (++visited > 64 || result.timing.size() >= 128)
+          break;
+        const auto state = read->state(node);
+        const auto id = nodegraph::protocolCanonicalId(*state, node);
+        auto end = std::min(id.size(), std::size_t{192});
+        while (end && end < id.size() &&
+               (static_cast<unsigned char>(id[end]) & 0xc0U) == 0x80U)
+          --end;
+        const std::string scope =
+            std::string(nodeKindName(kind)) + ":" + id.substr(0, end);
+        appendTimes(state->fields, type, scope);
+      }
+    }
+    if (visited > 64 || result.timing.size() >= 128)
+      result.timing.push_back(protocolTime(
+          "Timestamp display limit reached; further entries omitted", {}));
+    return result;
+  }
 
   std::map<std::string, std::size_t, std::less<>> kindCounts;
   nlohmann::json domains = nlohmann::json::array();
@@ -2135,6 +2219,23 @@ bool NodeGraphUiAdapter::inspectorAffected(
     const nodegraph::NodeGraph::ReadAccess &access) const {
   if (projection == InspectorProjection::Protocol)
     return false;
+  if (projection == InspectorProjection::Timing)
+    return change.rescanRequired || !change.removed.empty() ||
+           std::ranges::any_of(change.affected, [&](const auto &node) {
+             return node && access.live(node) &&
+                    std::ranges::any_of(
+                        std::array{"startedAt", "completedAt", "durationMs",
+                                   "startedAtMs", "completedAtMs", "createdAt",
+                                   "updatedAt", "recencyAt", "sectionEnteredAt",
+                                   "goal", "projectId", "data", "messages",
+                                   "rateLimits", "rateLimitsByLimitId",
+                                   "rateLimitResetCredits", "installedAt",
+                                   "failure"},
+                        [&](const char *field) {
+                          return fieldChanged(access, node, field,
+                                              change.revision);
+                        });
+           });
   if (change.rescanRequired)
     return true;
   if (projection == InspectorProjection::State) {
@@ -2447,7 +2548,12 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
           read->structureChangedRevision(node) == change.revision;
       const bool statusChanged =
           read->statusChangedRevision(node) == change.revision;
-      if (!structureChanged && !statusChanged)
+      const bool timingChanged = std::ranges::any_of(
+          std::array{"startedAt", "completedAt", "durationMs"},
+          [&](const char *field) {
+            return fieldChanged(*read, node, field, change.revision);
+          });
+      if (!structureChanged && !statusChanged && !timingChanged)
         return;
       route.affected = true;
       route.structural = route.structural || structureChanged || statusChanged;

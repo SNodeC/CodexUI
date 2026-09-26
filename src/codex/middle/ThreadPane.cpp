@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ThreadPane.h"
+#include "codex/ui/TimingPresentation.h"
 
 #include "codex/UiStatus.h"
 #include "codex/middle/MiddleTypes.h"
@@ -131,6 +132,7 @@ public:
   std::string cwd;
   UiStatus status;
   std::optional<std::int64_t> createdAt;
+  ProtocolTimes timing;
   std::optional<std::int64_t> recencyAt;
   std::optional<std::int64_t> lastActivityAt;
   std::size_t pending = 0;
@@ -354,6 +356,8 @@ QString itemDescription(const ThreadTreeItem &item) {
           item.parent() ? static_cast<const ThreadTreeItem *>(item.parent())
                         : nullptr)
     details.push_back(QStringLiteral("Parent: %1").arg(displayTitle(*parent)));
+  details << QStringLiteral("Server timestamps:\n") +
+                 ui::timingDetails(item.timing);
   return details.join(QLatin1Char('\n'));
 }
 
@@ -1121,6 +1125,7 @@ bool ThreadPane::applyItemPresentation(
   assign(item->cwd, row.cwd);
   assign(item->status, row.status);
   assign(item->createdAt, row.createdAt);
+  assign(item->timing, row.timing);
   assign(item->recencyAt, row.recencyAt);
   assign(item->lastActivityAt, row.lastActivityAt);
   assign(item->pending, row.pending);
@@ -1657,6 +1662,7 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     });
   };
   QAction *reload = addAction(QStringLiteral("Reload"), &Actions::reload);
+  addAction(QStringLiteral("Timing details"), &Actions::timing);
   QAction *rename = addAction(QStringLiteral("Rename"), &Actions::rename);
   QAction *fork = addAction(QStringLiteral("Quick fork"), &Actions::fork);
   QAction *forkWithOptions = addAction(QStringLiteral("Fork with options…"),

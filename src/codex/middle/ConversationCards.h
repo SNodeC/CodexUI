@@ -187,6 +187,7 @@ public:
 
 signals:
   void foldRequested(bool collapsed);
+  void timingRequested(nodegraph::NodeRef target);
   void intrinsicGeometryChanged();
   void recoveryRequested();
   void noticeRequested(QString message, bool error);

@@ -111,6 +111,8 @@ add_library(
     codexui-nodegraph-json STATIC
     src/codex/NodeGraphJson.cpp
     src/codex/NodeGraphJson.h
+    src/codex/ProtocolTiming.cpp
+    src/codex/ProtocolTiming.h
 )
 target_compile_features(codexui-nodegraph-json PUBLIC cxx_std_20)
 target_include_directories(codexui-nodegraph-json PUBLIC src)
@@ -135,10 +137,14 @@ add_library(
     codexui-ui-style STATIC
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
+    src/codex/ui/TimingPresentation.cpp
+    src/codex/ui/TimingPresentation.h
 )
 target_compile_features(codexui-ui-style PUBLIC cxx_std_20)
 target_include_directories(codexui-ui-style PUBLIC src)
-target_link_libraries(codexui-ui-style PUBLIC Qt6::Widgets)
+target_link_libraries(
+    codexui-ui-style PUBLIC Qt6::Widgets codexui-nodegraph-json codexui-nodegraph
+)
 target_link_libraries(codexui-ui-style PRIVATE codexui-build-options)
 
 add_library(
@@ -728,6 +734,23 @@ if(BUILD_TESTING)
         codexui-inspector-graph-test
         tests/codex/NodeGraphInspectorUiTest.cpp
     )
+    qt_add_executable(
+        codexui-timestamp-presentation-test tests/codex/TimestampPresentationTest.cpp
+    )
+    target_link_libraries(
+        codexui-timestamp-presentation-test PRIVATE codexui-middle-ui
+    )
+    foreach(timing_dpr IN ITEMS 1 1.25 1.5 2)
+        string(REPLACE "." "_" timing_dpr_name "${timing_dpr}")
+        add_test(
+            NAME codexui-timestamps-dpr-${timing_dpr_name}
+            COMMAND codexui-timestamp-presentation-test
+        )
+        set_tests_properties(
+            codexui-timestamps-dpr-${timing_dpr_name} PROPERTIES TIMEOUT 30
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${timing_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough"
+        )
+    endforeach()
     target_compile_features(codexui-inspector-graph-test PRIVATE cxx_std_20)
     target_include_directories(codexui-inspector-graph-test PRIVATE src)
     target_link_libraries(

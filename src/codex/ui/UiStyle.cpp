@@ -295,6 +295,13 @@ QString applicationStyleSheet() {
             background: transparent;
             border-color: transparent;
         }
+        QToolButton#cardTimingButton {
+          color: %{secondary}; background: transparent;
+          border-color: transparent; padding: 0; font-weight: 400;
+        }
+        QToolButton#cardTimingButton:hover, QToolButton#cardTimingButton:focus {
+          border-color: %{blue};
+        }
         QPushButton[kind="infoChoice"] {
           background: %{panel};
           border: 1px solid %{divider};

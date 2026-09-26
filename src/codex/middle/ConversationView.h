@@ -63,6 +63,9 @@ public:
   setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
   void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
   void setNoticeAction(std::function<void(QString, bool)> action);
+  void setTimingAction(std::function<void(nodegraph::NodeRef)> action) {
+    timingAction_ = std::move(action);
+  }
   void setReconciliationFinishedAction(
       std::function<void(const std::string &, ReconciliationResult, bool)>
           action);
@@ -314,6 +317,7 @@ private:
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
   std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
   std::function<void(QString, bool)> noticeAction_;
+  std::function<void(nodegraph::NodeRef)> timingAction_;
   std::function<void(const std::string &, ReconciliationResult, bool)>
       reconciliationFinishedAction_;
 

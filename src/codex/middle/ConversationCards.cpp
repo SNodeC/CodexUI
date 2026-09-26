@@ -7,6 +7,7 @@
 #include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
 
+#include "codex/ui/TimingPresentation.h"
 #include <QAbstractTextDocumentLayout>
 #include <QColor>
 #include <QCoreApplication>
@@ -36,6 +37,7 @@
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionFocusRect>
+#include <QStyleOptionToolButton>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextCursor>
@@ -1206,6 +1208,33 @@ bool CommandOutputView::isAtBottom() const {
   return verticalScrollBar()->value() >= verticalScrollBar()->maximum();
 }
 
+class TimingButton final : public QToolButton {
+public:
+  using QToolButton::QToolButton;
+  QSize minimumSizeHint() const override {
+    return {fontMetrics().horizontalAdvance(QStringLiteral("◷")) + 8,
+            fontMetrics().height()};
+  }
+  QSize sizeHint() const override {
+    return {fontMetrics().horizontalAdvance(
+                QStringLiteral("00:00:00–00:00:00 · 000.000 s")),
+            fontMetrics().height()};
+  }
+
+protected:
+  void paintEvent(QPaintEvent *) override {
+    QStyleOptionToolButton option;
+    initStyleOption(&option);
+    option.text =
+        width() <
+                fontMetrics().horizontalAdvance(QStringLiteral("00:00:00")) + 8
+            ? QStringLiteral("◷")
+            : fontMetrics().elidedText(text(), Qt::ElideRight, width() - 8);
+    QPainter painter(this);
+    style()->drawComplexControl(QStyle::CC_ToolButton, &option, &painter, this);
+  }
+};
+
 class ConversationCard::Impl final {
 public:
   Impl(ConversationCard *owner, const VisibleCardData &initial,
@@ -1231,7 +1260,18 @@ public:
     disclosure = new presentation::DisclosureButton(
         QStringLiteral("Expand card"), QStringLiteral("Collapse card"), header);
     disclosure->setObjectName(QStringLiteral("cardDisclosureButton"));
-    headerLayout->addWidget(title, 1);
+    headerLayout->addWidget(title, 3);
+    timing = new TimingButton(header);
+    timing->setObjectName(QStringLiteral("cardTimingButton"));
+    timing->setAccessibleName(QStringLiteral("Timing details"));
+    timing->setAutoRaise(true);
+    timing->setFocusPolicy(Qt::StrongFocus);
+    timing->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    headerLayout->addWidget(timing, 1, Qt::AlignVCenter);
+    QObject::connect(timing, &QToolButton::clicked, owner, [this] {
+      emit this->owner->timingRequested(current.target);
+    });
+    refreshTiming();
     headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
     headerLayout->addSpacing(
         presentation::CardHeaderMetrics::CopyDisclosureSpacing);
@@ -1341,6 +1381,7 @@ public:
     const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
                                        next.kind == CardKind::UserMessage;
     const bool payloadChanged = current.payload != next.payload;
+    const bool timingChanged = current.timing != next.timing;
     const bool presentationChanged = becomingAuthoritative || payloadChanged ||
                                      current.status != next.status;
     const bool paintOnlyStatus =
@@ -1385,8 +1426,11 @@ public:
                                before->cwd != after->cwd;
     }
     current = next;
+    if (timingChanged)
+      refreshTiming();
     if (!presentationChanged)
-      return PresentationImpact::None;
+      return timingChanged ? PresentationImpact::PaintOnly
+                           : PresentationImpact::None;
     if (paintOnlyStatus) {
       setActiveWork(cardHasActiveWork(next));
       return PresentationImpact::PaintOnly;
@@ -1715,8 +1759,8 @@ public:
         policy &= ~static_cast<int>(Qt::TabFocus);
       control->setFocusPolicy(static_cast<Qt::FocusPolicy>(policy));
     };
-    QWidget *controls[] = {copy,    disclosure, markdownBody, detail,
-                           command, output,     fileChanges,  recovery};
+    QWidget *controls[] = {copy,    timing, disclosure,  markdownBody, detail,
+                           command, output, fileChanges, recovery};
     for (QWidget *control : controls)
       updateControl(control);
     if (images) {
@@ -1741,6 +1785,13 @@ public:
     setExplicitVisibility(disclosure, expandable);
     setExplicitVisibility(content, expandable && !collapsed);
     refreshPhaseSpacing();
+  }
+
+  void refreshTiming() {
+    const QString summary = ui::timingSummary(current.timing);
+    timing->setText(summary.isEmpty() ? QStringLiteral("—") : summary);
+    timing->setToolTip(ui::timingDetails(current.timing));
+    presentation::setAccessibleDescriptionIfChanged(*timing, timing->toolTip());
   }
 
   void refreshCopyPresentation() {
@@ -2212,6 +2263,7 @@ public:
   QWidget *header = nullptr;
   QHBoxLayout *headerLayout = nullptr;
   QLabel *title = nullptr;
+  TimingButton *timing = nullptr;
   QLabel *phase = nullptr;
   presentation::CopyButton *copy = nullptr;
   presentation::DisclosureButton *disclosure = nullptr;

@@ -47,6 +47,7 @@ public:
     ThreadAction forkWithOptions;
     ThreadAction toggleArchive;
     ThreadAction remove;
+    ThreadAction timing;
   };
 
   explicit ThreadPane(QWidget *parent = nullptr);

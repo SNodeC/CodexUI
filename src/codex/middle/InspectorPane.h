@@ -46,6 +46,8 @@ public:
   static void prepareMarkdown(ui::InspectorSnapshot &snapshot);
 
   void setHideAction(std::function<void()> hide);
+  void showTiming(nodegraph::NodeRef target = {});
+  void clearTimingTarget() { timingTarget.reset(); }
   void setRefreshRequestedAction(std::function<void()> refresh);
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
@@ -100,6 +102,8 @@ private:
   RowViewport *requestRows = nullptr;
   DiffViewer *diffViewer = nullptr;
   QPlainTextEdit *stateView = nullptr;
+  QPlainTextEdit *timingView = nullptr;
+  nodegraph::NodeRef timingTarget;
   QPlainTextEdit *protocolLog = nullptr;
   QLabel *protocolStats = nullptr;
 

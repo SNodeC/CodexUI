@@ -38,6 +38,7 @@
 #endif
 #include <utils/Timeval.h>
 
+#include "codex/ProtocolTiming.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -628,6 +629,21 @@ public:
     }
     for (auto &[key, value] : scopeDetails)
       details.try_emplace(std::move(key), std::move(value));
+    const auto emitted = message.find("emittedAtMs");
+    if (fromAppServer && emitted != message.end() &&
+        emitted->is_number_integer())
+      details.emplace("emittedAtMs", valueFromJson(*emitted));
+    if (scope) {
+      nodegraph::Value::Array times;
+      for (const auto &time : protocolTimes(*scope, method, response))
+        times.emplace_back(nodegraph::Value::Object{
+            {"field", time.field},
+            {"value",
+             time.value ? nodegraph::Value(*time.value) : nodegraph::Value{}},
+            {"unavailableZero", time.unavailableZero}});
+      if (!times.empty())
+        details.emplace("timing", std::move(times));
+    }
     deliver(std::move(details), channels);
   }
 
@@ -645,6 +661,7 @@ private:
 
   void deliver(nodegraph::Value::Object details,
                nodegraph::ThreadChannels &channels) {
+    details.emplace("recordedAtMs", wallClockMilliseconds());
     details.emplace("sequence", nodegraph::Value(++sequence_));
     details.emplace("connectionGeneration",
                     nodegraph::Value(generations_.connection));

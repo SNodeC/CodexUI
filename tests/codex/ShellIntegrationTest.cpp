@@ -27,6 +27,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFontInfo>
@@ -700,6 +701,98 @@ void massRetirementIsSliced(Configuration &configuration) {
               !laterOrdinaryMisclassified && read && read->retiredCount() == 0,
           "sliced mass retirement observes and acknowledges every NodeRef "
           "against its authority boundary with a bounded Qt graph read");
+}
+
+void timestampDetailsUseExistingShell(Configuration &configuration) {
+  FrontendSession session(configuration);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session),
+                     FrontendSessionTestPeer::channels(session));
+  ShellWidget shell(session);
+  shell.setStyleSheet(UiStyle::applicationStyleSheet());
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "timing-shell", "Timestamp layout qualification");
+  static_cast<void>(
+      worker.apply({DecodedMessageKind::ServerNotification,
+                    "turn/started",
+                    {},
+                    {{"threadId", "timing-shell"},
+                     {"turn", Value::Object{{"id", "timing-turn"},
+                                            {"status", "inProgress"},
+                                            {"startedAt", 1790000000}}}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/started",
+       {},
+       {{"threadId", "timing-shell"},
+        {"turnId", "timing-turn"},
+        {"startedAtMs", 1790000000123LL},
+        {"item",
+         Value::Object{
+             {"id", "timing-item"},
+             {"type", "agentMessage"},
+             {"text", "A timestamp projected through the real shell."}}}}}));
+  markThreadReady(session, worker, "timing-shell");
+  auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
+  require(
+      spinUntil([&] { return threadItem(list, "timing-shell") != nullptr; }) &&
+          selectThread(list, "timing-shell") && spinUntil([&] {
+            return shell.findChild<QToolButton *>("cardTimingButton") !=
+                   nullptr;
+          }),
+      "timestamp shell renders the authoritative fixture");
+  auto *button = shell.findChild<QToolButton *>("cardTimingButton");
+  if (!button)
+    return;
+  button->click();
+  auto *details = shell.findChild<QPlainTextEdit *>("timingInfoView");
+  require(spinUntil([&] {
+            return details && details->isVisible() &&
+                   details->toPlainText().contains(
+                       "1790000000123 Unix milliseconds");
+          }),
+          "card action routes to the same existing Info panel through the "
+          "worker projection");
+  const QFont normal = shell.font();
+  const QString destination =
+      qEnvironmentVariable("CODEXUI_TIMESTAMP_SCREENSHOTS");
+  if (!destination.isEmpty())
+    QDir().mkpath(destination);
+  for (int fontDelta : {0, 5}) {
+    QFont font = normal;
+    font.setPointSize(normal.pointSize() + fontDelta);
+    shell.setFont(font);
+    for (int width : {800, 1500}) {
+      shell.resize(width, 850);
+      spin(80);
+      auto *card = shell.findChild<middle::ConversationCard *>();
+      auto *copy =
+          card ? card->findChild<QToolButton *>("cardCopyButton") : nullptr;
+      require(card && copy && button->isVisible() &&
+                  !button->geometry().intersects(copy->geometry()) &&
+                  details->isVisible(),
+              "full-shell timing remains accessible without overlapping Copy "
+              "at narrow/wide widths and larger fonts");
+      if (!destination.isEmpty())
+        require(shell.grab().save(
+                    destination +
+                    QStringLiteral("/shell-timing-%1-font-%2-dpr-%3.png")
+                        .arg(width)
+                        .arg(fontDelta)
+                        .arg(shell.devicePixelRatioF())),
+                "capture full-shell timestamp layout");
+    }
+  }
+  applyThread(worker, "timing-other", "Another thread");
+  markThreadReady(session, worker, "timing-other");
+  require(
+      spinUntil([&] { return threadItem(list, "timing-other") != nullptr; }) &&
+          selectThread(list, "timing-other") && spinUntil([&] {
+            return details->toPlainText().contains("timing-other") &&
+                   !details->toPlainText().contains("1790000000123");
+          }),
+      "thread switching retires the previous timing selection");
 }
 
 void selectedRemovalUnbindsBeforeWorkerRetirement(
@@ -5536,6 +5629,7 @@ int main(int argc, char **argv) {
 
   using namespace codexui::codex;
   tokenUsageUpdatesBothShellSurfaces(*configuration);
+  timestampDetailsUseExistingShell(*configuration);
   graphNotificationsPrecedeRetirementRelease(*configuration);
   massRetirementIsSliced(*configuration);
   selectedRemovalUnbindsBeforeWorkerRetirement(*configuration);

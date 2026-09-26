@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/InspectorPane.h"
+#include "codex/ui/TimingPresentation.h"
 
 #include "codex/DiffViewer.h"
 #include "codex/PendingRequestPolicy.h"
@@ -52,6 +53,7 @@ constexpr int MaximumProtocolLines = 2000;
 constexpr int InfoChoicePage = 0;
 constexpr int StatePage = 1;
 constexpr int ProtocolPage = 2;
+constexpr int TimingPage = 3;
 constexpr int InspectorRowMargin = 12;
 constexpr int InspectorRowSpacing = 8;
 constexpr int InspectorRowOverscan = 2;
@@ -1429,15 +1431,30 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolChoice->setObjectName(QStringLiteral("protocolInfoChoice"));
   choicesLayout->addWidget(stateChoice);
   choicesLayout->addWidget(protocolChoice);
+  auto *timingChoice =
+      infoChoice(QStringLiteral("Timing"),
+                 QStringLiteral("Selected object and thread timestamps"));
+  timingChoice->setObjectName(QStringLiteral("timingInfoChoice"));
+  choicesLayout->addWidget(timingChoice);
   choicesLayout->addStretch();
 
   QPushButton *stateBack = nullptr;
   QPushButton *protocolBack = nullptr;
+  QPushButton *timingBack = nullptr;
   infoStack->addWidget(choices);
   infoStack->addWidget(
       infoDetail(QStringLiteral("State"), stateView, &stateBack));
   infoStack->addWidget(
       infoDetail(QStringLiteral("Protocol"), protocolContent, &protocolBack));
+  timingView = new QPlainTextEdit;
+  timingView->setObjectName(QStringLiteral("timingInfoView"));
+  timingView->setReadOnly(true);
+  timingView->setAccessibleName(QStringLiteral("Timing details"));
+  infoStack->addWidget(
+      infoDetail(QStringLiteral("Timing"), timingView, &timingBack));
+  connect(timingChoice, &QPushButton::clicked, this, [this] { showTiming(); });
+  connect(timingBack, &QPushButton::clicked, this,
+          [this] { infoStack->setCurrentIndex(InfoChoicePage); });
   connect(stateChoice, &QPushButton::clicked, this,
           [this] { infoStack->setCurrentIndex(StatePage); });
   connect(protocolChoice, &QPushButton::clicked, this, [this] {
@@ -1482,6 +1499,14 @@ void InspectorPane::setHideAction(std::function<void()> hide) {
   hideAction = std::move(hide);
 }
 
+void InspectorPane::showTiming(nodegraph::NodeRef target) {
+  timingTarget = std::move(target);
+  inspectorTabs->setCurrentIndex(4);
+  infoStack->setCurrentIndex(TimingPage);
+  if (refreshRequested)
+    refreshRequested();
+}
+
 void InspectorPane::setRefreshRequestedAction(std::function<void()> refresh) {
   refreshRequested = std::move(refresh);
 }
@@ -1497,6 +1522,11 @@ void InspectorPane::setRequestActions(RequestAction review,
 ui::InspectorRowRequest
 InspectorPane::rowRequest(ui::InspectorProjection projection) const {
   switch (projection) {
+  case ui::InspectorProjection::Timing: {
+    ui::InspectorRowRequest request;
+    request.timingTarget = timingTarget;
+    return request;
+  }
   case ui::InspectorProjection::Plan:
     return planRows->rowRequest();
   case ui::InspectorProjection::Agents:
@@ -1517,6 +1547,8 @@ InspectorPane::currentProjection() const {
       ui::InspectorProjection::Plan, ui::InspectorProjection::Agents,
       ui::InspectorProjection::Changes, ui::InspectorProjection::Requests};
   const int tab = inspectorTabs->currentIndex();
+  if (tab == 4 && infoStack->currentIndex() == TimingPage)
+    return ui::InspectorProjection::Timing;
   if (tab >= 0 && tab < static_cast<int>(projections.size()))
     return projections[static_cast<std::size_t>(tab)];
   if (tab == 4 && (infoStack->currentIndex() == StatePage ||
@@ -1565,6 +1597,21 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
     agentsRows->apply(snapshot.agents);
   }
   currentThreadIncarnation = snapshot.threadIncarnation;
+  if (projection == ui::InspectorProjection::Timing) {
+    const QString details =
+        QString::fromStdString(snapshot.timingTitle) + QStringLiteral("\n\n") +
+        ui::timingDetails(snapshot.timing) +
+        QStringLiteral(
+            "\n\nEvent timestamps are reported by app-server, not inferred "
+            "from arrival or ordering."
+            "\nCurrent retained project, goal, hook, account, plugin and model "
+            "times are included when supplied. Other event/response times "
+            "(including approvals, files and remote control) appear with "
+            "their raw field paths in Info → Protocol."
+            "\nProtocol history is bounded; absent fields are not fabricated.");
+    if (timingView->toPlainText() != details)
+      timingView->setPlainText(details);
+  }
   if (projection == ui::InspectorProjection::Changes)
     changes = snapshot.changes;
   else if (projection == ui::InspectorProjection::Requests)
@@ -1594,6 +1641,7 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
 }
 
 void InspectorPane::retireThreadPresentation() {
+  timingView->clear();
   expandedAgentIds.clear();
   diffViewer->setRepositoryContext({}, {}, {}, {});
   stateSnapshot.clear();
@@ -1803,8 +1851,13 @@ bool InspectorPane::appendProtocolDiagnostic(
     }
     return visible;
   }
+  const auto recordedAt =
+      signedIntegerFromValue(valueMember(diagnostic.details, "recordedAtMs"));
   const QString timestamp =
-      QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"));
+      recordedAt ? QDateTime::fromMSecsSinceEpoch(*recordedAt)
+                       .toLocalTime()
+                       .toString(Qt::ISODateWithMs)
+                 : QStringLiteral("local record time unavailable");
   std::vector<QString> recorded;
   const auto record = [this, &recorded](QString line) {
     while (protocolLines.size() >= MaximumProtocolLines)
@@ -1833,7 +1886,7 @@ bool InspectorPane::appendProtocolDiagnostic(
                .arg(*dropped)
                .arg(sequence.value_or(0)));
 
-  QStringList parts{QStringLiteral("[%1]").arg(timestamp)};
+  QStringList parts{QStringLiteral("[recorded locally: %1]").arg(timestamp)};
   if (sequence && *sequence != 0)
     parts << QStringLiteral("#%1").arg(*sequence);
   if (const auto connection = unsignedIntegerFromValue(
@@ -1858,6 +1911,29 @@ bool InspectorPane::appendProtocolDiagnostic(
       parts << QStringLiteral("%1=%2").arg(text(key), value);
   }
   record(parts.join(QStringLiteral("  ")));
+  ProtocolTimes times;
+  if (const auto emitted = signedIntegerFromValue(
+          valueMember(diagnostic.details, "emittedAtMs")))
+    times.push_back(protocolTime("app-server/emittedAtMs", emitted));
+  if (const auto *values = valueMember(diagnostic.details, "timing");
+      values && values->asArray())
+    for (const auto &value : *values->asArray()) {
+      const auto *object = value.asObject();
+      if (!object)
+        continue;
+      times.push_back(
+          protocolTime(exactStringFromValue(valueMember(*object, "field")),
+                       signedIntegerFromValue(valueMember(*object, "value")),
+                       boolFromValue(valueMember(*object, "unavailableZero"))));
+    }
+  for (const auto &time : times) {
+    const QString provenance = time.field == "currentTimeAt"
+                                   ? QStringLiteral("client clock: ")
+                                   : QStringLiteral("protocol: ");
+    record(QStringLiteral("  ") + provenance +
+           ui::timingDetails({time}).replace(QLatin1Char('\n'),
+                                             QStringLiteral(" · ")));
+  }
 
   const std::string direction =
       scalarTextFromValue(valueMember(diagnostic.details, "direction"));

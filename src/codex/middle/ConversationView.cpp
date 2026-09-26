@@ -2650,6 +2650,11 @@ ConversationCard *ConversationView::createCard(const VisibleCardData &data,
   QElapsedTimer constructionTimer;
   constructionTimer.start();
   auto *card = new ConversationCard(data, collapsed, parent, width);
+  connect(card, &ConversationCard::timingRequested, this,
+          [this](nodegraph::NodeRef target) {
+            if (timingAction_)
+              timingAction_(std::move(target));
+          });
   card->setNestedPresentation(nested);
   connect(card, &ConversationCard::foldRequested, this,
           [this, key, card](bool collapsed) {

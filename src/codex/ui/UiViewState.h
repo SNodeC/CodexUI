@@ -36,7 +36,8 @@ enum class InspectorProjection {
   Changes,
   Requests,
   State,
-  Protocol
+  Protocol,
+  Timing
 };
 inline constexpr std::size_t MaximumInspectorRows = 50;
 
@@ -46,6 +47,7 @@ struct InspectorRowRequest final {
   std::string anchorKey;
   std::string focusedKey;
   std::vector<std::string> retainedKeys;
+  nodegraph::NodeRef timingTarget{};
 };
 
 inline std::string threadPresentationKey(std::string_view threadId,
@@ -72,6 +74,7 @@ struct ThreadListRow {
   bool awaitingPromptConversation = false;
   bool archived = false;
   std::vector<ThreadListRow> children;
+  ProtocolTimes timing{};
 
   bool operator==(const ThreadListRow &) const = default;
 };
@@ -168,6 +171,8 @@ struct InspectorSnapshot {
   InspectorChangesSnapshot changes;
   InspectorPageSnapshot requests;
   InspectorStateSnapshot state;
+  ProtocolTimes timing{};
+  std::string timingTitle{};
 
   bool operator==(const InspectorSnapshot &) const = default;
 };

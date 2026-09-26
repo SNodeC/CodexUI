@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationItemModel.h"
+#include "codex/ui/TimingPresentation.h"
 
 #include <QString>
 #include <algorithm>
@@ -143,7 +144,10 @@ QString accessibleCardText(const VisibleCardData &card) {
     markAccessibleTextTruncated(detail);
   }
   const QString label = cardLabel(card.kind);
-  return detail.isEmpty() ? label : label + QStringLiteral("\n") + detail;
+  const QString timing = ui::timingSummary(card.timing);
+  const QString heading =
+      timing.isEmpty() ? label : label + QStringLiteral(" · ") + timing;
+  return detail.isEmpty() ? heading : heading + QStringLiteral("\n") + detail;
 }
 
 bool structurallyCompatible(const CardKey &beforeKey, CardKind beforeKind,
@@ -1643,7 +1647,8 @@ void ConversationItemModel::updateRow(RowNode *node, int rowIndex,
   if (before.activeTurn != replacement.activeTurn)
     roles.push_back(ActiveTurnRole);
   if (before.card.payload != replacement.card.payload ||
-      before.card.status != replacement.card.status) {
+      before.card.status != replacement.card.status ||
+      before.card.timing != replacement.card.timing) {
     roles.push_back(PresentationRole);
     roles.push_back(Qt::AccessibleTextRole);
   }
