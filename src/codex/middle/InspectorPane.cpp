@@ -151,7 +151,7 @@ void refreshInfoText(QPlainTextEdit &view, const QString &text) {
   for (const QStringView line : QStringView(text).tokenize(u'\n')) {
     if (!block.isValid()) {
       edit.movePosition(QTextCursor::End);
-      edit.insertText(QStringLiteral("\n") + line);
+      edit.insertText(QStringLiteral("\n") + line.toString());
       continue;
     }
     const QString previous = block.text();
