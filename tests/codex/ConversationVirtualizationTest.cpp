@@ -5643,6 +5643,133 @@ bool keyboardNavigationAndViewIsolation() {
                        second.selectionModel()->selectedIndexes().isEmpty(),
                    "child focus moves only its owning view's navigation "
                    "cursor and does not create semantic selection");
+  ConversationSnapshot tallSnapshot = snapshot;
+  std::string tallText;
+  for (int line = 0; line < 60; ++line)
+    tallText += "Tall focused content " + std::to_string(line) + "\n\n";
+  std::get<AgentMessageData>(tallSnapshot.sections[0].cards[0].payload).text =
+      tallText;
+  result &= expect(changed(second.reconcile(tallSnapshot)),
+                   "tall keyboard fixture reconciles");
+  second.activateWindow();
+  second.setFocus();
+  second.scrollTo(second.conversationModel()->index(0),
+                  QAbstractItemView::PositionAtTop);
+  settle();
+  QPointer<ConversationCard> tallCard = materializedCard(
+      second, stableKey(tallSnapshot.sections[0].cards[0].key));
+  auto *copy = tallCard ? tallCard->findChild<QToolButton *>(
+                              QStringLiteral("cardCopyButton")) : nullptr;
+  auto *body = tallCard ? tallCard->findChild<MarkdownTextView *>() : nullptr;
+  result &= expect(copy && body, "tall card exposes native focus controls");
+  if (copy && body) {
+    const auto bounds = [&second](QWidget *widget) {
+      return QRect(widget->mapTo(second.viewport(), QPoint{}), widget->size());
+    };
+    const QSize cardSize = tallCard->size();
+    second.verticalScrollBar()->setValue(100);
+    settle();
+    result &= expect(copy->visibleRegion().isEmpty(),
+                     "partially visible tall card has a clipped header");
+    copy->setFocus(Qt::OtherFocusReason);
+    result &= expect(second.verticalScrollBar()->value() == 100,
+                     "automatic focus restoration does not request scrolling");
+    second.setFocus();
+    copy->setFocus(Qt::ShortcutFocusReason);
+    settle();
+    result &= expect(copy->hasFocus() &&
+                         second.viewport()->rect().contains(bounds(copy)) &&
+                         tallCard && tallCard->size() == cardSize,
+                     "child focus reveals its header without remeasuring or "
+                     "replacing the tall renderer");
+    second.verticalScrollBar()->setValue(100);
+    settle();
+    result &= expect(copy->hasFocus() && copy->visibleRegion().isEmpty() &&
+                         second.verticalScrollBar()->value() == 100,
+                     "manual scrolling with unchanged focus is not undone");
+    body->setFocus(Qt::ShortcutFocusReason);
+    settle();
+    result &= expect(body->hasFocus() &&
+                         second.verticalScrollBar()->value() == 100,
+                     "oversized focused body spanning both edges does not "
+                     "jump to an opposite card edge");
+    second.scrollTo(second.conversationModel()->index(7),
+                    QAbstractItemView::PositionAtCenter);
+    settle();
+    auto *last = materializedCard(
+        second, stableKey(tallSnapshot.sections[7].cards[0].key));
+    auto *lastCopy = last ? last->findChild<QToolButton *>(
+                                   QStringLiteral("cardCopyButton")) : nullptr;
+    if (lastCopy) {
+      second.verticalScrollBar()->setValue(
+          second.verticalScrollBar()->value() + bounds(lastCopy).top() -
+          second.viewport()->height() + 2);
+      lastCopy->setFocus(Qt::ShortcutFocusReason);
+      settle();
+    }
+    result &= expect(lastCopy && lastCopy->hasFocus() &&
+                         second.viewport()->rect().contains(bounds(lastCopy)),
+                     "forward focus reveals controls clipped at the lower edge");
+  }
+  ConversationView navigation;
+  navigation.resize(520, 180);
+  navigation.show();
+  result &= expect(changed(navigation.reconcile(tallSnapshot)),
+                   "cold-history navigation fixture reconciles");
+  navigation.activateWindow();
+  navigation.setFocus();
+  settle();
+  auto *bar = navigation.verticalScrollBar();
+  result &= expect(navigation.mode() == ConversationView::Mode::Following &&
+                       bar->value() == bar->maximum(),
+                   "new conversation initially follows its tail");
+  for (int pass = 0; pass < 2; ++pass) {
+    sendKey(navigation, Qt::Key_End);
+    sendKey(navigation, Qt::Key_Home);
+    settle();
+    result &= expect(navigation.currentIndex().row() == 0 &&
+                         bar->value() == bar->minimum() &&
+                         navigation.mode() == ConversationView::Mode::Paused,
+                     "Home owns cold and measured history admission over follow");
+    bar->setValue(bar->maximum());
+    sendKey(navigation, Qt::Key_Home);
+    result &= expect(navigation.currentIndex().row() == 0 &&
+                         bar->value() == bar->minimum(),
+                     "Home reveals an unchanged current row after scrolling");
+    sendKey(navigation, Qt::Key_PageDown);
+    const int page = navigation.currentIndex().row();
+    result &= expect(page > 0 && navigation.visualRect(navigation.currentIndex())
+                                    .intersects(navigation.viewport()->rect()),
+                     "PageDown navigates out of an oversized first row");
+    sendKey(navigation, Qt::Key_PageUp);
+    result &= expect(navigation.currentIndex().row() < page,
+                     "PageUp preserves native cursor calculation");
+    sendKey(navigation, Qt::Key_End);
+    bar->setValue(bar->minimum());
+    sendKey(navigation, Qt::Key_End);
+    result &= expect(navigation.currentIndex().row() == 7 &&
+                         navigation.viewport()->rect().contains(
+                             navigation.visualRect(navigation.currentIndex())),
+                     "End reveals an unchanged last row after scrolling");
+  }
+  QKeyEvent controlHome(QEvent::KeyPress, Qt::Key_Home, Qt::ControlModifier);
+  QApplication::sendEvent(&navigation, &controlHome);
+  result &= expect(navigation.currentIndex().row() == 0 &&
+                       navigation.selectionModel()->selectedIndexes() ==
+                           QModelIndexList{navigation.currentIndex()},
+                   "Ctrl navigation retains Qt single-selection semantics");
+  QKeyEvent shiftHome(QEvent::KeyPress, Qt::Key_Home, Qt::ShiftModifier);
+  QApplication::sendEvent(&navigation, &shiftHome);
+  result &= expect(navigation.currentIndex().row() == 0 &&
+                       navigation.selectionModel()->selectedIndexes() ==
+                           QModelIndexList{navigation.currentIndex()},
+                   "Shift navigation retains native single-row selection");
+  navigation.setAutoScroll(false);
+  sendKey(navigation, Qt::Key_End);
+  result &= expect(!navigation.hasAutoScroll() &&
+                       navigation.viewport()->rect().contains(
+                           navigation.visualRect(navigation.currentIndex())),
+                   "explicit navigation preserves the automatic-scroll policy");
   return result;
 }
 
@@ -6188,8 +6315,16 @@ bool runtimeGeometryEnvironmentKeepsOneInteractiveRenderer() {
   const qulonglong reflows =
       view.property("conversationGeometryEnvironmentReflows").toULongLong();
 
+  std::vector<QPointer<ConversationCard>> styledResidents;
+  for (ConversationCard *resident : view.findChildren<ConversationCard *>())
+    styledResidents.emplace_back(resident);
   qApp->setStyleSheet(originalStyleSheet +
-                      QStringLiteral("\nQWidget { font-size: 18pt; }"));
+                      QStringLiteral("\nQWidget { font-size: 18pt; }"
+                                     "QScrollBar:vertical { width: 40px; }"));
+  result &= expect(std::ranges::none_of(styledResidents,
+                                       [](const auto &card) { return card.isNull(); }),
+                   "stylesheet-driven viewport resize cannot destroy cards "
+                   "while Qt is traversing them for repolish");
   settle();
   result &= expect(waitForResidency(view),
                    "style reflow settles the same bounded residency window");

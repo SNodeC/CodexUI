@@ -92,6 +92,17 @@ enum class RuntimeActionKind : std::uint8_t {
   ClaimController,
   ReleaseController,
   RefreshCatalogs,
+  RefreshThreadGroups,
+  LoadThreadGroup,
+  CreateProject,
+  UpdateProject,
+  DeleteProject,
+  MoveProject,
+  CreateSection,
+  UpdateSection,
+  DeleteSection,
+  AssignProject,
+  AssignSection,
 };
 
 struct RuntimeAction final {

@@ -69,9 +69,10 @@ void expect(bool condition, std::string_view message) {
 
 class UnixBridge final {
 public:
-  UnixBridge() {
+  explicit UnixBridge(std::string_view suffix = {}) {
     path_ = "/tmp/codexui-runtime-dispatch-" +
-            std::to_string(static_cast<long long>(::getpid())) + ".sock";
+            std::to_string(static_cast<long long>(::getpid())) +
+            std::string(suffix) + ".sock";
     static_cast<void>(::unlink(path_.c_str()));
     listener_ =
         ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -513,7 +514,7 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
     return false;
 
   std::unordered_map<std::string, std::size_t> methods;
-  for (int count = 0; count != 5; ++count) {
+  for (int count = 0; count != 7; ++count) {
     std::optional<nlohmann::json> request = bridge.receiveAppServer();
     if (!request || !request->contains("id"))
       return false;
@@ -542,8 +543,11 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
   return methods ==
              std::unordered_map<std::string, std::size_t>{
                  {"thread/list", 2},
+                 {"project/list", 1},
+                 {"threadSection/list", 1},
                  {"model/list", 1},
-                 {"permissionProfile/list", 1}, {"account/usage/read", 1}} &&
+                 {"permissionProfile/list", 1},
+                 {"account/usage/read", 1}} &&
          static_cast<bool>(
              findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
 }
@@ -1252,9 +1256,11 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
       {"/tmp/wire-image.png", "wire-image.png", "image/png", std::nullopt});
   create.payload = {
       {"requestedName", Value("Unsupported ephemeral name")},
+      {"sectionId", Value("wire-section")},
       {"threadStart",
        Value(Value::Object{
            {"cwd", Value("/tmp/wire-create")},
+           {"projectId", Value("wire-project")},
            {"baseInstructions", Value("Ephemeral base instructions")},
            {"developerInstructions", Value("Ephemeral developer instructions")},
            {"ephemeral", Value(true)}})},
@@ -1272,6 +1278,7 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
           request->at("params").value("developerInstructions", std::string{}) ==
               "Ephemeral developer instructions" &&
           request->at("params").value("ephemeral", false) &&
+          request->at("params").value("projectId", "") == "wire-project" &&
           !request->at("params").contains("historyMode"),
       "Create Thread keeps ephemeral instructions and leaves app-server's "
       "legacy history default authoritative");
@@ -1286,6 +1293,14 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
                                    {"turns", nlohmann::json::array()}}}}),
          "thread/start decodes the canonical created thread");
 
+  request = bridge.receiveAppServer();
+  expect(request && request->value("method", "") == "thread/section/move" &&
+             request->at("params").value("sectionId", "") == "wire-section",
+         "new-thread section assignment follows successful creation");
+  if (request)
+    expect(bridge.replyError(*request, -32000, "section assignment failed"),
+           "section failure retains the created thread and does not resend the "
+           "first prompt");
   request = bridge.receiveAppServer();
   const nlohmann::json input =
       request && request->contains("params")
@@ -1923,6 +1938,298 @@ void runtimeRefreshActionsHaveExactRequestCardinality(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void threadOrganisationUsesBoundedAuthoritativeRequests(
+    UnixBridge &bridge, RunningRuntime &runtime) {
+  const auto action = [&](RuntimeActionKind kind, nlohmann::json parameters) {
+    RuntimeAction request{kind};
+    request.payload = *valueFromJson(parameters).asObject();
+    expect(sendAction(runtime.channels(), std::move(request)),
+           "organisation action enters worker");
+  };
+  const nlohmann::json project{{"id", "runtime-project"},
+                               {"name", "Runtime project"},
+                               {"roots", nlohmann::json::array()},
+                               {"metadata", {{"foreign", "retain"}}},
+                               {"position", 0},
+                               {"createdAt", 1},
+                               {"updatedAt", 2}};
+  const nlohmann::json section{{"id", "runtime-section"},
+                               {"name", "Runtime section"},
+                               {"createdAt", 1},
+                               {"updatedAt", 2},
+                               {"appearance", nullptr}};
+  const auto respondPage = [&](const nlohmann::json &request) {
+    const auto method = request.value("method", "");
+    auto data = nlohmann::json::array();
+    if (method == "project/list")
+      data.push_back(project);
+    else if (method == "threadSection/list")
+      data.push_back(section);
+    else
+      expect(method == "thread/list",
+             "mutation refreshes only organisational lists");
+    expect(bridge.reply(request, {{"data", data}, {"nextCursor", nullptr}}),
+           "list reply delivered");
+  };
+  const auto drainPages = [&] {
+    int count = 0;
+    while (const auto request = bridge.receiveAppServer(120ms)) {
+      respondPage(*request);
+      if (++count > 12) {
+        expect(false, "mutation must not crawl unopened groups");
+        break;
+      }
+    }
+  };
+  action(RuntimeActionKind::RefreshThreadGroups, nlohmann::json::object());
+  auto first = bridge.receiveAppServer();
+  auto second = bridge.receiveAppServer();
+  expect(first && second && !bridge.receiveAppServer(80ms),
+         "two catalog reads, no eager history or extra reads");
+  if (!first || !second)
+    return;
+  respondPage(*first);
+  respondPage(*second);
+  expect(
+      static_cast<bool>(
+          findNode(runtime.graph(), {NodeKind::Project, "runtime-project"})) &&
+          static_cast<bool>(findNode(
+              runtime.graph(), {NodeKind::ThreadSection, "runtime-section"})),
+      "catalog replies establish authoritative group entities");
+
+  for (int i = 0; i != 3; ++i)
+    action(RuntimeActionKind::LoadThreadGroup,
+           {{"parameters",
+             {{"projectId", "runtime-project"},
+              {"searchTerm", "query-" + std::to_string(i)},
+              {"archived", i == 1}}}});
+  first = bridge.receiveAppServer();
+  second = bridge.receiveAppServer();
+  expect(first && second && !bridge.receiveAppServer(80ms),
+         "group reads have an exact two-request ceiling");
+  if (!first || !second)
+    return;
+  expect(first->at("params").value("limit", 0) == 100 &&
+             first->at("params").value("useStateDbOnly", false),
+         "group discovery is bounded and never starts a rollout repair");
+  auto archived = listedThread();
+  archived["id"] = "archived-discovery";
+  expect(bridge.reply(*second, {{"data", nlohmann::json::array({archived})},
+                                {"nextCursor", nullptr}}),
+         "archived list response has no per-thread archive flag");
+  auto third = bridge.receiveAppServer();
+  expect(third && !bridge.receiveAppServer(80ms),
+         "finishing one read admits only the next queued query");
+  expect(bridge.reply(*first, {{"data", nlohmann::json::array()},
+                               {"nextCursor", "group-next"}}),
+         "group cursor delivered");
+  if (third)
+    respondPage(*third);
+  expect(
+      waitUntil([&] {
+        auto read = runtime.graph().tryRead();
+        const auto node =
+            read ? read->find({NodeKind::Thread, "archived-discovery"})
+                 : NodeRef{};
+        return node && boolFromValue(
+                           valueMember(read->state(node)->fields, "archived"));
+      }),
+      "archive membership comes from the correlated authoritative list filter");
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"parameters",
+           {{"projectId", "runtime-project"},
+            {"searchTerm", "query-0"},
+            {"archived", false}}}});
+  auto page = bridge.receiveAppServer();
+  expect(page && page->at("params").value("cursor", "") == "group-next",
+         "each group retains its own cursor");
+  if (page)
+    expect(bridge.replyError(*page, -32000, "retryable"),
+           "group page failure delivered");
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"parameters",
+           {{"projectId", "runtime-project"},
+            {"searchTerm", "query-0"},
+            {"archived", false}}}});
+  page = bridge.receiveAppServer();
+  expect(page && page->at("params").value("cursor", "") == "group-next",
+         "failed group cursor remains retryable");
+  if (page)
+    respondPage(*page);
+
+  action(RuntimeActionKind::UpdateProject,
+         {{"projectId", "runtime-project"},
+          {"name", "Renamed"},
+          {"description", "Description 日本語"}});
+  auto request = bridge.receiveAppServer();
+  expect(request && request->value("method", "") == "project/read",
+         "editing metadata reads latest map before replacement");
+  if (!request)
+    return;
+  auto fresh = project;
+  fresh["metadata"]["concurrent-client"] = "new value";
+  expect(bridge.reply(*request, {{"project", fresh}}),
+         "fresh project metadata delivered");
+  request = bridge.receiveAppServer();
+  expect(
+      request && request->value("method", "") == "project/update" &&
+          request->at("params").at("metadata") ==
+              nlohmann::json({{"foreign", "retain"},
+                              {"concurrent-client", "new value"},
+                              {"codexui.description", "Description 日本語"}}),
+      "description update preserves all other clients' metadata keys");
+  if (request)
+    expect(bridge.reply(*request, {{"project", fresh}}),
+           "project update succeeds");
+  drainPages();
+
+  action(RuntimeActionKind::AssignSection,
+         {{"threadId", "runtime-thread"}, {"sectionId", "runtime-section"}});
+  request = bridge.receiveAppServer();
+  expect(request && request->value("method", "") == "thread/section/move",
+         "section assignment uses its exact protocol operation");
+  if (request)
+    expect(bridge.reply(*request, nlohmann::json::object()),
+           "empty section move acknowledgement delivered");
+  drainPages();
+  expect(waitUntil([&] {
+           auto read = runtime.graph().tryRead();
+           const auto thread =
+               read ? read->find({NodeKind::Thread, "runtime-thread"})
+                    : NodeRef{};
+           return thread && read->relatedCount(
+                                thread, RelationKind::SectionMembership) == 1;
+         }),
+         "empty response applies correlated section membership without a UI "
+         "overlay");
+
+  struct MutationCase {
+    RuntimeActionKind kind;
+    const char *method;
+    nlohmann::json parameters;
+    nlohmann::json result;
+  };
+  auto createdProject = project;
+  createdProject["id"] = "created-project";
+  auto createdSection = section;
+  createdSection["id"] = "created-section";
+  auto assignedThread = listedThread();
+  assignedThread["projectId"] = "runtime-project";
+  const std::vector<MutationCase> mutations{
+      {RuntimeActionKind::CreateProject,
+       "project/create",
+       {{"name", "Created"},
+        {"roots", nlohmann::json::array()},
+        {"idempotencyKey", "unique-create-operation"}},
+       {{"project", createdProject}}},
+      {RuntimeActionKind::MoveProject,
+       "project/move",
+       {{"projectId", "created-project"},
+        {"beforeProjectId", "runtime-project"}},
+       {{"project", createdProject}}},
+      {RuntimeActionKind::AssignProject,
+       "thread/metadata/update",
+       {{"threadId", "runtime-thread"}, {"projectId", "runtime-project"}},
+       {{"thread", assignedThread}}},
+      {RuntimeActionKind::CreateSection,
+       "threadSection/create",
+       {{"name", "Created"}},
+       {{"section", createdSection}}},
+      {RuntimeActionKind::UpdateSection,
+       "threadSection/update",
+       {{"sectionId", "created-section"},
+        {"name", "Renamed"},
+        {"appearance", nullptr}},
+       {{"section", createdSection}}},
+      {RuntimeActionKind::AssignSection,
+       "thread/section/move",
+       {{"threadId", "runtime-thread"}, {"sectionId", nullptr}},
+       nlohmann::json::object()},
+      {RuntimeActionKind::DeleteSection,
+       "threadSection/delete",
+       {{"sectionId", "created-section"}},
+       nlohmann::json::object()},
+      {RuntimeActionKind::DeleteProject,
+       "project/delete",
+       {{"projectId", "created-project"}},
+       nlohmann::json::object()}};
+  for (const auto &mutation : mutations) {
+    action(mutation.kind, mutation.parameters);
+    request = bridge.receiveAppServer();
+    expect(request && request->value("method", "") == mutation.method &&
+               request->at("params") == mutation.parameters,
+           std::string("exact typed organisational mutation: ") +
+               mutation.method);
+    if (request)
+      expect(bridge.reply(*request, mutation.result),
+             "typed organisational result delivered");
+    drainPages();
+  }
+
+  // A filter abandoned and then recreated must not accept its old reply.
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"parameters", {{"searchTerm", "old"}}},
+          {"reset", true},
+          {"refresh", true}});
+  auto old = bridge.receiveAppServer();
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"parameters", {{"searchTerm", "new"}}},
+          {"reset", true},
+          {"refresh", true}});
+  auto current = bridge.receiveAppServer();
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"parameters", {{"searchTerm", "old"}}},
+          {"reset", true},
+          {"refresh", true}});
+  auto stale = listedThread();
+  stale["id"] = "obsolete-query-thread";
+  if (old)
+    expect(bridge.reply(*old, {{"data", nlohmann::json::array({stale})},
+                               {"nextCursor", nullptr}}),
+           "obsolete result delivered");
+  auto recreated = bridge.receiveAppServer();
+  expect(recreated && recreated->at("params").value("searchTerm", "") == "old",
+         "recreated query gets its own request identity");
+  if (current)
+    respondPage(*current);
+  if (recreated)
+    respondPage(*recreated);
+  expect(waitUntil([&] {
+           return recreated &&
+                  operationRetired(runtime.graph(), recreated->at("id"));
+         }),
+         "recreated request completes");
+  {
+    auto read = runtime.graph().tryRead();
+    expect(read && !read->find({NodeKind::Thread, "obsolete-query-thread"}),
+           "obsolete query data never enters graph");
+  }
+  expect(bridge.setRole("observer", "other-controller"),
+         "observer role delivered");
+  action(RuntimeActionKind::CreateSection, {{"name", "forbidden"}});
+  expect(!bridge.receiveAppServer(150ms),
+         "observer organisation mutation never reaches wire");
+  expect(bridge.setRole("controller", "runtime-test"),
+         "controller role restored");
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"method", "project/list"},
+          {"refresh", true},
+          {"parameters", nlohmann::json::object()}});
+  request = bridge.receiveAppServer();
+  expect(request && request->value("method", "") == "project/list",
+         "capability failure is scoped to its catalog");
+  if (request)
+    expect(bridge.replyError(*request, -32601, "method not found"),
+           "older server rejects project API");
+  action(RuntimeActionKind::LoadThreadGroup,
+         {{"method", "project/list"},
+          {"refresh", true},
+          {"parameters", nlohmann::json::object()}});
+  expect(!bridge.receiveAppServer(120ms),
+         "unsupported catalog does not retry in a loop");
+  runtime.drainNotifications();
+}
+
 void failedWakeUsesBoundedWorkerRecovery(UnixBridge &bridge,
                                          RunningRuntime &runtime) {
   RuntimeAction refresh{RuntimeActionKind::RefreshThreads};
@@ -2386,7 +2693,7 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
   expect(bridge.setProviderGeneration(2),
          "a new provider generation reaches the runtime");
   std::size_t refreshes = 0;
-  while (refreshes != 5) {
+  while (refreshes != 7) {
     const std::optional<nlohmann::json> refresh = bridge.receiveAppServer();
     if (!refresh)
       break;
@@ -2398,7 +2705,7 @@ void workerRevalidatesCurrentAuthorityAndRetainsResponses(
     if (bridge.reply(*refresh, std::move(result)))
       ++refreshes;
   }
-  expect(refreshes == 5 && generationInput && waitUntil([&] {
+  expect(refreshes == 7 && generationInput && waitUntil([&] {
            std::optional<NodeGraph::ReadAccess> read =
                runtime.graph().tryRead();
            if (!read)
@@ -2669,6 +2976,27 @@ void explicitReconnectsControlTheLatestFlow(UnixBridge &bridge,
   }
 }
 
+void endpointReconfigurationUsesTheSelectedAddress(UnixBridge &bridge,
+                                                   RunningRuntime &runtime) {
+  UnixBridge alternative("-alternative");
+  expect(alternative.valid(), "the alternative endpoint has its own listener");
+  UnixBridge *previous = &bridge;
+  for (UnixBridge *next : {&alternative, &bridge}) {
+    RuntimeAction configure;
+    configure.kind = RuntimeActionKind::ConfigureConnection;
+    configure.payload = {{"transport", Value("unix")},
+                         {"path", Value(next->path())}};
+    expect(sendAction(runtime.channels(), std::move(configure)),
+           "an endpoint change reaches the existing connection transition");
+    expect(waitUntil([&] { return previous->peerClosed(); }),
+           "reconfiguration closes the previous endpoint");
+    expect(next->acceptClient(),
+           "reconfiguration connects to the new endpoint, including a reused client");
+    previous = next;
+    runtime.drainNotifications();
+  }
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -2715,9 +3043,12 @@ int main(int argc, char **argv) {
         bridge, runtime);
     codexui::codex::unknownInboundIsRetainedWithoutCorruptingKnownState(
         bridge, runtime);
+    codexui::codex::threadOrganisationUsesBoundedAuthoritativeRequests(bridge,
+                                                                       runtime);
     codexui::codex::workerRevalidatesCurrentAuthorityAndRetainsResponses(
         bridge, runtime);
     codexui::codex::explicitReconnectsControlTheLatestFlow(bridge, runtime);
+    codexui::codex::endpointReconfigurationUsesTheSelectedAddress(bridge, runtime);
   }
   runtime.channels().failNextQtToWorkerWakeForTest();
   const auto shutdownStarted = std::chrono::steady_clock::now();

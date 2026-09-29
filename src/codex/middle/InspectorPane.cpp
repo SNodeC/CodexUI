@@ -20,8 +20,8 @@
 #include <QHideEvent>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
 #include <QPlainTextEdit>
-#include <QPointer>
 #include <QPushButton>
 #include <QScopedValueRollback>
 #include <QScrollBar>
@@ -29,10 +29,15 @@
 #include <QStackedWidget>
 #include <QStyleOptionButton>
 #include <QTabWidget>
+#include <QTextBlock>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+
+#if QT_CONFIG(accessibility)
+#include <QAccessibleWidget>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -58,6 +63,68 @@ constexpr int InspectorRowMargin = 12;
 constexpr int InspectorRowSpacing = 8;
 constexpr int InspectorRowOverscan = 2;
 
+class ProtocolScrollBar final : public QScrollBar {
+public:
+  ProtocolScrollBar();
+};
+
+#if QT_CONFIG(accessibility)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+using AccessibleScrollBarBase = QAccessibleWidgetV2;
+#else
+using AccessibleScrollBarBase = QAccessibleWidget;
+#endif
+
+class ProtocolScrollBarAccessible final : public AccessibleScrollBarBase,
+                                          public QAccessibleValueInterface {
+public:
+  explicit ProtocolScrollBarAccessible(ProtocolScrollBar *bar)
+      : AccessibleScrollBarBase(bar, QAccessible::ScrollBar) {
+    addControllingSignal(QStringLiteral("valueChanged(int)"));
+  }
+  void *interface_cast(QAccessible::InterfaceType type) override {
+    if (type == QAccessible::ValueInterface)
+      return static_cast<QAccessibleValueInterface *>(this);
+    return AccessibleScrollBarBase::interface_cast(type);
+  }
+  QString text(QAccessible::Text type) const override {
+    return type == QAccessible::Value ? QString::number(bar()->value())
+                                     : AccessibleScrollBarBase::text(type);
+  }
+  QVariant currentValue() const override { return bar()->value(); }
+  QVariant maximumValue() const override { return bar()->maximum(); }
+  QVariant minimumValue() const override { return bar()->minimum(); }
+  QVariant minimumStepSize() const override { return bar()->singleStep(); }
+  void setCurrentValue(const QVariant &value) override {
+    // Accessible scrolling is input, unlike geometry-driven setValue().
+    // Default tracking routes this through the native SliderMove action.
+    if (bar()->isEnabled())
+      bar()->setSliderPosition(value.toInt());
+  }
+
+private:
+  ProtocolScrollBar *bar() const {
+    return static_cast<ProtocolScrollBar *>(object());
+  }
+};
+#endif
+
+ProtocolScrollBar::ProtocolScrollBar() : QScrollBar(Qt::Vertical) {
+#if QT_CONFIG(accessibility)
+  static const bool registered = [] {
+    QAccessible::installFactory(
+        [](const QString &, QObject *object) -> QAccessibleInterface * {
+          if (auto *bar = dynamic_cast<ProtocolScrollBar *>(object))
+            return new ProtocolScrollBarAccessible(bar);
+          return nullptr;
+        });
+    return true;
+  }();
+  static_cast<void>(registered);
+#endif
+  setAccessibleName(QStringLiteral("Protocol log scroll position"));
+}
+
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
@@ -68,6 +135,48 @@ QStringList texts(const std::vector<std::string> &values) {
   for (const std::string &value : values)
     result.push_back(text(value));
   return result;
+}
+
+// Same-context Info refresh: leave unchanged blocks and their Qt cursors intact.
+void refreshInfoText(QPlainTextEdit &view, const QString &text) {
+  if (view.toPlainText() == text)
+    return;
+  if (view.document()->isEmpty()) {
+    view.setPlainText(text);
+    return;
+  }
+  QTextCursor edit(view.document());
+  edit.beginEditBlock();
+  QTextBlock block = view.document()->begin();
+  for (const QStringView line : QStringView(text).tokenize(u'\n')) {
+    if (!block.isValid()) {
+      edit.movePosition(QTextCursor::End);
+      edit.insertText(QStringLiteral("\n") + line);
+      continue;
+    }
+    const QString previous = block.text();
+    qsizetype first = 0, oldEnd = previous.size(), newEnd = line.size();
+    while (first < oldEnd && first < newEnd && previous[first] == line[first])
+      ++first;
+    while (oldEnd > first && newEnd > first &&
+           previous[oldEnd - 1] == line[newEnd - 1]) {
+      --oldEnd;
+      --newEnd;
+    }
+    if (previous != line) {
+      edit.setPosition(block.position() + static_cast<int>(first));
+      edit.setPosition(block.position() + static_cast<int>(oldEnd),
+                       QTextCursor::KeepAnchor);
+      edit.insertText(line.sliced(first, newEnd - first).toString());
+    }
+    block = block.next();
+  }
+  if (block.isValid()) {
+    edit.setPosition(block.position() - 1);
+    edit.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+    edit.removeSelectedText();
+  }
+  edit.endEditBlock();
 }
 
 bool sensitiveDiagnosticText(std::string_view value) {
@@ -160,6 +269,7 @@ protected:
 
 QPushButton *infoChoice(const QString &title, const QString &description) {
   auto *button = new InfoChoiceButton;
+  button->setAccessibleName(title);
   button->setProperty("kind", "infoChoice");
   button->setMinimumHeight(64);
   button->setCursor(Qt::PointingHandCursor);
@@ -264,24 +374,32 @@ public:
     title->setWordWrap(false);
     title->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     heading->addWidget(title, 0, Qt::AlignBaseline);
-    name_ = makeLabel({}, "code");
+    name_ = new QLineEdit(this);
     name_->setObjectName(QStringLiteral("agentName"));
-    name_->setWordWrap(false);
-    name_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    heading->addWidget(name_, 1, Qt::AlignBaseline);
+    name_->setProperty("kind", "code");
+    name_->setReadOnly(true);
+    name_->setAccessibleName(QStringLiteral("Agent name"));
+    name_->setMinimumWidth(0);
+    name_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    heading->addWidget(name_, 1);
+    layout->addLayout(heading);
+    auto *actions = new QHBoxLayout;
+    actions->setContentsMargins(0, 0, 0, 0);
+    actions->setSpacing(4);
     status_ = makeLabel({}, "meta");
     status_->setObjectName(QStringLiteral("agentStatus"));
     status_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
-    heading->addWidget(status_, 0, Qt::AlignBaseline);
+    actions->addWidget(status_, 0, Qt::AlignVCenter);
+    actions->addStretch(1);
     copy_ = new presentation::CopyButton(QStringLiteral("Copy agent content"),
                                          this);
     copy_->setObjectName(QStringLiteral("agentCopyButton"));
     disclosure_ = new presentation::DisclosureButton(
         QStringLiteral("Expand agent"), QStringLiteral("Collapse agent"), this);
     disclosure_->setObjectName(QStringLiteral("agentDisclosureButton"));
-    heading->addWidget(copy_, 0, Qt::AlignRight | Qt::AlignVCenter);
-    heading->addWidget(disclosure_, 0, Qt::AlignRight | Qt::AlignVCenter);
-    layout->addLayout(heading);
+    actions->addWidget(copy_, 0, Qt::AlignRight | Qt::AlignVCenter);
+    actions->addWidget(disclosure_, 0, Qt::AlignRight | Qt::AlignVCenter);
+    layout->addLayout(actions);
 
     content_ = new QWidget(this);
     content_->setObjectName(QStringLiteral("agentCardContent"));
@@ -316,8 +434,10 @@ public:
     const QStringList pathParts = agentPath.split('/', Qt::SkipEmptyParts);
     const QString agentName =
         !pathParts.isEmpty() ? pathParts.back() : text(agent.tool);
-    if (name_->text() != agentName)
+    if (name_->text() != agentName) {
       name_->setText(agentName);
+      name_->setCursorPosition(0);
+    }
     if (name_->toolTip() != agentPath)
       name_->setToolTip(agentPath);
     presentation::setAccessibleNameIfChanged(
@@ -378,7 +498,7 @@ private:
       label->setVisible(visible);
   }
 
-  QLabel *name_ = nullptr;
+  QLineEdit *name_ = nullptr;
   QLabel *status_ = nullptr;
   presentation::CopyButton *copy_ = nullptr;
   presentation::DisclosureButton *disclosure_ = nullptr;
@@ -499,18 +619,9 @@ public:
 
 private:
   void invoke(const RequestAction &action) {
-    if (action && target_) {
-      QPointer<RequestFrame> guard(this);
-      invokingAction_ = true;
+    if (action && target_)
       action(target_);
-      if (guard)
-        invokingAction_ = false;
-    }
   }
-
-  [[nodiscard]] bool invokingAction() const noexcept { return invokingAction_; }
-
-  friend class RowViewport;
 
   InspectorPane *owner_ = nullptr;
   QLabel *title_ = nullptr;
@@ -520,7 +631,6 @@ private:
   QPushButton *accept_ = nullptr;
   QPushButton *review_ = nullptr;
   nodegraph::NodeRef target_;
-  bool invokingAction_ = false;
 };
 
 class InspectorPane::RowViewport final : public QAbstractScrollArea {
@@ -545,15 +655,13 @@ public:
               Resident *destination = residentFor(current);
               if (!source && !destination)
                 return;
-              const QScopedValueRollback dispatching(
-                  dispatchingRow_, source ? source->widget : nullptr);
               synchronize();
             });
   }
 
   ~RowViewport() override {
     QObject::disconnect(qApp, nullptr, this, nullptr);
-    releaseAll(false);
+    // Resident children retain Qt ownership, including after the event loop exits.
   }
 
   [[nodiscard]] ui::InspectorRowRequest rowRequest() const {
@@ -596,7 +704,7 @@ public:
     active_ = active;
     if (!active_) {
       pendingFocus_.reset();
-      releaseAll(true);
+      releaseAll();
       return;
     }
     synchronize();
@@ -615,7 +723,7 @@ public:
       if (orderChanged)
         pendingFocus_.reset();
       if (replace)
-        releaseAll(true);
+        releaseAll();
       pageData_ = std::move(next);
       if (orderChanged)
         rebuildHeightIndex();
@@ -717,20 +825,17 @@ protected:
     if (!active_ || event->type() != QEvent::Wheel)
       return QAbstractScrollArea::eventFilter(watched, event);
     auto *wheel = static_cast<QWheelEvent *>(event);
-    int delta = wheel->pixelDelta().y();
-    if (delta == 0)
-      delta =
-          wheel->angleDelta().y() / 120 * verticalScrollBar()->singleStep() * 3;
-    if (delta == 0)
-      return false;
+    if (!wheel->angleDelta().isNull()) {
+      if (watched == verticalScrollBar() || watched == horizontalScrollBar())
+        return false;
+      QAbstractScrollArea::wheelEvent(wheel);
+      return wheel->isAccepted();
+    }
     QScrollBar *bar = verticalScrollBar();
-    const int next =
-        std::clamp(bar->value() - delta, bar->minimum(), bar->maximum());
+    const int next = std::clamp(bar->value() - wheel->pixelDelta().y(),
+                                bar->minimum(), bar->maximum());
     if (next == bar->value())
       return false;
-    Resident *source = residentFor(qobject_cast<QWidget *>(watched));
-    const QScopedValueRollback dispatching(dispatchingRow_,
-                                           source ? source->widget : nullptr);
     bar->setValue(next);
     wheel->accept();
     return true;
@@ -798,6 +903,7 @@ private:
   struct Anchor {
     std::string key;
     int pixelOffset = 0;
+    bool atBottom = false; // End-of-list intent survives estimated-height updates.
   };
 
   struct PendingFocus {
@@ -1140,9 +1246,9 @@ private:
     });
   }
 
-  void releaseAll(bool transferFocus) {
+  void releaseAll() {
     for (Resident &resident : residents_)
-      release(resident.widget, transferFocus);
+      release(resident.widget, true);
     residents_.clear();
   }
 
@@ -1156,14 +1262,10 @@ private:
         owner_->inspectorTabs->setFocus(Qt::OtherFocusReason);
     }
     widget->hide();
-    auto *request = dynamic_cast<RequestFrame *>(widget);
-    if (focusedRow || widget == dispatchingRow_ ||
-        (request && request->invokingAction())) {
-      widget->setParent(nullptr);
-      widget->deleteLater();
-    } else {
-      delete widget;
-    }
+    // Ancestor repolish can resize us while Qt still traverses these objects.
+    // Remove residency now; reclaim only after the active Qt event returns.
+    widget->setParent(nullptr);
+    widget->deleteLater();
   }
 
   bool measure(const Resident &resident) {
@@ -1236,6 +1338,9 @@ private:
   Anchor captureAnchor() const {
     if (rowCount() == 0)
       return {};
+    if (verticalScrollBar()->maximum() > 0 &&
+        verticalScrollBar()->value() == verticalScrollBar()->maximum())
+      return {{}, 0, true};
     const qint64 scroll = verticalScrollBar()->value();
     const qint64 contentY = std::max<qint64>(0, scroll - InspectorRowMargin);
     const std::size_t row = heights_.rowAt(contentY);
@@ -1252,6 +1357,10 @@ private:
   }
 
   void restoreAnchor(const Anchor &anchor) {
+    if (anchor.atBottom) {
+      verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+      return;
+    }
     if (anchor.key.empty())
       return;
     std::optional<std::size_t> row = rowForKey(pageData_, anchor.key);
@@ -1296,7 +1405,6 @@ private:
   bool active_ = false;
   bool synchronizing_ = false;
   bool admissionScheduled_ = false;
-  QWidget *dispatchingRow_ = nullptr;
 };
 
 InspectorPane::AgentFrame *
@@ -1357,7 +1465,7 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   heading->addStretch();
   auto *hide = new QPushButton(QStringLiteral("Hide"));
   hide->setProperty("kind", "subtle");
-  hide->setMinimumSize(58, 24);
+  hide->setMinimumHeight(24);
   connect(hide, &QPushButton::clicked, this, [this] {
     if (hideAction)
       hideAction();
@@ -1372,6 +1480,8 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
 
   inspectorTabs = new QTabWidget;
   inspectorTabs->setDocumentMode(true);
+  inspectorTabs->setElideMode(Qt::ElideNone);
+  inspectorTabs->setUsesScrollButtons(true);
   planRows = new RowViewport(this, RowViewport::Page::Plan,
                              QStringLiteral("inspectorPlanRows"),
                              QStringLiteral("Plan"));
@@ -1385,6 +1495,7 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
 
   stateView = new QPlainTextEdit;
   stateView->setObjectName(QStringLiteral("stateInfoView"));
+  stateView->setAccessibleName(QStringLiteral("Application state"));
   stateView->setProperty("kind", "infoViewer");
   stateView->setReadOnly(true);
   stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
@@ -1395,21 +1506,22 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolLayout->setContentsMargins(0, 0, 0, 0);
   protocolLayout->setSpacing(6);
   protocolLog = new QPlainTextEdit;
+  protocolLog->setVerticalScrollBar(new ProtocolScrollBar);
   protocolLog->setObjectName(QStringLiteral("protocolInfoLog"));
+  protocolLog->setAccessibleName(QStringLiteral("Protocol log"));
   protocolLog->setProperty("kind", "infoViewer");
   protocolLog->setReadOnly(true);
   protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   protocolLog->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   protocolLog->document()->setMaximumBlockCount(MaximumProtocolLines);
-  connect(protocolLog->verticalScrollBar(), &QScrollBar::valueChanged, this,
-          [this](int value) {
-            if (mutatingProtocolLog)
-              return;
+  connect(protocolLog->verticalScrollBar(), &QScrollBar::actionTriggered, this,
+          [this](int) {
+            // Layout/focus changes are not a change in user follow intent.
+            ++protocolScrollRevision;
             QScrollBar *scrollBar = protocolLog->verticalScrollBar();
+            const int value = scrollBar->sliderPosition();
             protocolFollowsTail = value >= scrollBar->maximum() - 1;
-            if (!protocolFollowsTail)
-              protocolPausedScrollValue = value;
           });
   protocolStats = makeLabel({}, "meta");
   protocolStats->setObjectName(QStringLiteral("protocolInfoStats"));
@@ -1500,6 +1612,8 @@ void InspectorPane::setHideAction(std::function<void()> hide) {
 }
 
 void InspectorPane::showTiming(nodegraph::NodeRef target) {
+  if (timingTarget != target)
+    timingView->clear();
   timingTarget = std::move(target);
   inspectorTabs->setCurrentIndex(4);
   infoStack->setCurrentIndex(TimingPage);
@@ -1609,8 +1723,7 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
             "(including approvals, files and remote control) appear with "
             "their raw field paths in Info → Protocol."
             "\nProtocol history is bounded; absent fields are not fabricated.");
-    if (timingView->toPlainText() != details)
-      timingView->setPlainText(details);
+    refreshInfoText(*timingView, details);
   }
   if (projection == ui::InspectorProjection::Changes)
     changes = snapshot.changes;
@@ -1644,7 +1757,6 @@ void InspectorPane::retireThreadPresentation() {
   timingView->clear();
   expandedAgentIds.clear();
   diffViewer->setRepositoryContext({}, {}, {}, {});
-  stateSnapshot.clear();
   stateView->clear();
 }
 
@@ -1706,12 +1818,7 @@ void InspectorPane::refreshState() {
     rendered += "\n\n[State display truncated at 32 KiB; retained bytes: " +
                 std::to_string(total) + "]";
   }
-  const QByteArray next(rendered.data(),
-                        static_cast<qsizetype>(rendered.size()));
-  if (next == stateSnapshot)
-    return;
-  stateSnapshot = next;
-  stateView->setPlainText(text(rendered));
+  refreshInfoText(*stateView, text(rendered));
 }
 
 void InspectorPane::refreshProtocolStats() {
@@ -1743,8 +1850,8 @@ void InspectorPane::showProtocolTail() {
     pendingProtocolLines.clear();
     return;
   }
-  const ScrollPosition position{protocolFollowsTail, protocolPausedScrollValue};
-  mutatingProtocolLog = true;
+  const ScrollPosition position{protocolFollowsTail,
+                                protocolLog->verticalScrollBar()->value()};
   protocolLog->setPlainText(value);
   pendingProtocolLines.clear();
   restoreProtocolScroll(position.followsTail, position.value);
@@ -1765,8 +1872,8 @@ void InspectorPane::flushProtocolPresentation() {
   for (QString &line : pendingProtocolLines)
     lines.push_back(std::move(line));
   pendingProtocolLines.clear();
-  const ScrollPosition position{protocolFollowsTail, protocolPausedScrollValue};
-  mutatingProtocolLog = true;
+  const ScrollPosition position{protocolFollowsTail,
+                                protocolLog->verticalScrollBar()->value()};
   protocolLog->appendPlainText(lines.join(QLatin1Char('\n')));
   restoreProtocolScroll(position.followsTail, position.value);
   refreshProtocolStats();
@@ -1785,10 +1892,6 @@ void InspectorPane::restoreProtocolScroll(bool followsTail, int pausedValue) {
     if (revision != protocolScrollRevision)
       return;
     restoreScrollPosition(protocolLog, position);
-    protocolFollowsTail = position.followsTail;
-    if (!position.followsTail)
-      protocolPausedScrollValue = protocolLog->verticalScrollBar()->value();
-    mutatingProtocolLog = false;
   });
 }
 

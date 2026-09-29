@@ -63,23 +63,20 @@ public:
     title = new QLabel(QStringLiteral("CodexUI"), this);
     title->setObjectName(QStringLiteral("codexBrandTitle"));
     title->setProperty("kind", "applicationTitle");
-    title->setWordWrap(false);
     updateTitleFont();
 
     subtitle = new QLabel(QStringLiteral("Codex agent workspace"), this);
     subtitle->setObjectName(QStringLiteral("codexBrandSubtitle"));
     subtitle->setProperty("kind", "meta");
-    subtitle->setWordWrap(false);
 
     setAccessibleName(QStringLiteral("CodexUI, Codex agent workspace"));
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    setFixedHeight(BrandMarkSize);
   }
 
   QSize sizeHint() const override {
     return {BrandMarkSize + 12 + title->sizeHint().width() + 12 +
                 subtitle->sizeHint().width(),
-            BrandMarkSize};
+            std::max(BrandMarkSize, subtitle->fontMetrics().height())};
   }
 
 protected:
@@ -117,19 +114,21 @@ private:
   }
 
   void layoutChildren() {
-    mark->setGeometry(0, 0, BrandMarkSize, BrandMarkSize);
+    const int naturalHeight = sizeHint().height();
+    const int markY = (naturalHeight - BrandMarkSize) / 2;
+    mark->setGeometry(0, markY, BrandMarkSize, BrandMarkSize);
     int x = BrandMarkSize + 12;
     const int titleWidth = title->sizeHint().width();
-    title->setGeometry(x, 0, titleWidth, BrandMarkSize);
+    title->setGeometry(x, markY, titleWidth, BrandMarkSize);
     x += titleWidth + 12;
 
     const QFontMetrics titleMetrics(title->font());
     const QFontMetrics subtitleMetrics(subtitle->font());
     const int titleBaseline =
-        (BrandMarkSize - titleMetrics.height()) / 2 + titleMetrics.ascent();
+        markY + (BrandMarkSize - titleMetrics.height()) / 2 + titleMetrics.ascent();
     const int subtitleY =
         std::clamp(titleBaseline - subtitleMetrics.ascent(), 0,
-                   BrandMarkSize - subtitleMetrics.height());
+                   naturalHeight - subtitleMetrics.height());
     subtitle->setGeometry(x, subtitleY, subtitle->sizeHint().width(),
                           subtitleMetrics.height());
   }

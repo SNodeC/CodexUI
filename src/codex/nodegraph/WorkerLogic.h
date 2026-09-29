@@ -52,6 +52,7 @@ struct PromptCommand final {
   Value::Object turnOptions;
   std::string requestedName;
   std::string creationCorrelation;
+  std::string sectionId;
 };
 
 struct PromptTransition final {
@@ -85,6 +86,9 @@ public:
       std::optional<std::string> providerState, std::string detail = {});
 
   [[nodiscard]] ChannelSendStatus connectionSettings(Value::Object settings);
+  // Current paging/capability facts, owned by the worker, projected by Qt.
+  [[nodiscard]] ChannelSendStatus threadBrowserState(std::string key,
+                                                     Value::Object fields);
 
   [[nodiscard]] ChannelSendStatus threadHydration(const NodeRef &thread,
                                                   std::string state,
@@ -155,6 +159,7 @@ private:
     Value::Object turnOptions;
     std::string requestedName;
     std::string creationCorrelation;
+    std::string sectionId;
     bool createsThread = false;
   };
 

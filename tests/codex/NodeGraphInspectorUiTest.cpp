@@ -22,6 +22,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMimeData>
 #include <QPlainTextEdit>
@@ -1681,6 +1682,7 @@ bool establishedAgentsWidgetContractIsRetained() {
     removed.agents.validRetainedKeys.emplace();
     pane.refresh(removed, ui::InspectorProjection::Agents);
     QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     result &= expect(replacementFrame.isNull(),
                      "removing an Agent retires its retained object tree");
     pane.refresh(reincarnated, ui::InspectorProjection::Agents);
@@ -1997,6 +1999,7 @@ bool planAndRequestUpdatesRetainUnaffectedRows() {
   QPointer<QFrame> retiredRequest = requestOne;
   pane.refresh(snapshot, ui::InspectorProjection::Requests);
   QCoreApplication::processEvents();
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   QFrame *replacementFrame = nullptr;
   for (QFrame *frame :
        pane.findChildren<QFrame *>(QStringLiteral("inspectorRequestFrame")))
@@ -2046,6 +2049,7 @@ bool partialProjectionRetiresTheWholeThreadPresentation() {
   const bool firstPlanMaterialized = firstPlan;
   pane.tabs()->setCurrentIndex(1);
   QCoreApplication::processEvents();
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   const auto firstAgentFrames =
       pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"));
   QPointer<QFrame> firstAgentFrame =
@@ -2069,6 +2073,7 @@ bool partialProjectionRetiresTheWholeThreadPresentation() {
               {agentRow("stable-agent", std::move(secondAgent))});
   pane.refresh(secondAgents, ui::InspectorProjection::Agents);
   QCoreApplication::processEvents();
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   const bool selectedTabRetained = pane.tabs()->currentIndex() == 0;
   const bool replacementStayedLazy =
       pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))
@@ -2144,6 +2149,7 @@ bool hiddenRequestProjectionRetiresExactTargets() {
               {requestRow(requestDescriptor(second))}, 2);
   pane.refresh(secondRequests, ui::InspectorProjection::Requests);
   QCoreApplication::processEvents();
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   const auto hiddenFrames =
       pane.findChildren<QFrame *>(QStringLiteral("inspectorRequestFrame"));
   const bool hiddenReplacementStayedLazy = hiddenFrames.empty();
@@ -2281,6 +2287,21 @@ bool stateAndProtocolRemainUsefulBoundedAndRedacted() {
   middle::InspectorPane pane;
   pane.resize(440, 700);
   pane.refresh(*snapshot, ui::InspectorProjection::State);
+#if QT_CONFIG(accessibility)
+  for (const auto &[objectName, name] : {
+           std::pair{"stateInfoChoice", "State"},
+           std::pair{"protocolInfoChoice", "Protocol"},
+           std::pair{"timingInfoChoice", "Timing"},
+           std::pair{"stateInfoView", "Application state"},
+           std::pair{"protocolInfoLog", "Protocol log"},
+           std::pair{"timingInfoView", "Timing details"}}) {
+    auto *control = pane.findChild<QWidget *>(QString::fromLatin1(objectName));
+    auto *accessible = QAccessible::queryAccessibleInterface(control);
+    result &= expect(accessible && accessible->text(QAccessible::Name) ==
+                                       QString::fromLatin1(name),
+                     "Info controls expose their semantic names through Qt accessibility");
+  }
+#endif
   nodegraph::ProtocolDiagnostic diagnostic;
   diagnostic.details = {{"sequence", nodegraph::Value(std::uint64_t{7})},
                         {"direction", nodegraph::Value("server notification")},
@@ -2333,6 +2354,272 @@ bool stateAndProtocolRemainUsefulBoundedAndRedacted() {
           state->toPlainText().contains(QStringLiteral("Visible thread")) &&
           !state->toPlainText().contains(QStringLiteral("must-not-leak")),
       "the visible State page retains graph inspection content");
+  return result;
+}
+
+bool protocolFollowTracksInputNotLayout() {
+  middle::InspectorPane pane;
+  pane.resize(440, 620);
+  pane.show();
+  pane.tabs()->setCurrentIndex(4);
+  pane.findChild<QPushButton *>("protocolInfoChoice")->click();
+  auto *view = pane.findChild<QPlainTextEdit *>("protocolInfoLog");
+  auto *bar = view->verticalScrollBar();
+  int sequence = 0;
+  const auto append = [&] {
+    nodegraph::ProtocolDiagnostic diagnostic;
+    diagnostic.details = {{"subject", std::string(140, 'x') +
+                                         std::to_string(++sequence)}};
+    static_cast<void>(pane.appendProtocolDiagnostic(diagnostic));
+    pane.flushProtocolPresentation();
+  };
+  for (int i = 0; i < 200; ++i)
+    append();
+  QCoreApplication::processEvents();
+  bool result = expect(bar->maximum() > 0 && bar->value() == bar->maximum(),
+                       "Protocol starts following its bounded document");
+
+  // Qt's lazy layout and focus handling also set the scrollbar value.
+  // Such a geometry update must not be mistaken for explicit user input.
+  bar->setValue(bar->maximum() / 2);
+  append();
+  QCoreApplication::processEvents();
+  result &= expect(bar->value() == bar->maximum(),
+                   "layout-only scrollbar movement does not detach Protocol");
+
+  bar->triggerAction(QAbstractSlider::SliderPageStepSub);
+  const int detached = bar->value();
+  append();
+  QCoreApplication::processEvents();
+  result &= expect(detached < bar->maximum() && bar->value() == detached,
+                   "explicit Protocol scrolling detaches and preserves position");
+
+  // Finishing a selection drag can adjust visibility after its last action.
+  bar->setValue(detached - 2);
+  const int settled = bar->value();
+  append();
+  QCoreApplication::processEvents();
+  result &= expect(bar->value() == settled,
+                   "detached Protocol retains Qt's final selection position");
+
+  bar->triggerAction(QAbstractSlider::SliderToMaximum);
+  append(); // Restoration is queued; newer input owns the final position.
+  bar->triggerAction(QAbstractSlider::SliderToMinimum);
+  QCoreApplication::processEvents();
+  result &= expect(bar->value() == bar->minimum(),
+                   "new input supersedes a queued Protocol restoration");
+  append();
+  QCoreApplication::processEvents();
+  result &= expect(bar->value() == bar->minimum(),
+                   "later diagnostics preserve the new detached position");
+
+  bar->setSliderDown(true);
+  bar->setSliderPosition(bar->maximum());
+  bar->setSliderDown(false);
+  append();
+  QCoreApplication::processEvents();
+  result &= expect(bar->value() == bar->maximum(),
+                   "dragging Protocol to its bottom resumes following");
+#if QT_CONFIG(accessibility)
+  auto *accessible = QAccessible::queryAccessibleInterface(bar);
+  auto *value = accessible ? accessible->valueInterface() : nullptr;
+  result &= expect(value, "Protocol scrollbar exposes native accessible values");
+  if (value) {
+    const auto identity = QAccessible::uniqueId(accessible);
+    result &= expect(accessible->role() == QAccessible::ScrollBar &&
+                         !accessible->text(QAccessible::Name).isEmpty() &&
+                         value->minimumValue().toInt() == bar->minimum() &&
+                         value->maximumValue().toInt() == bar->maximum() &&
+                         value->minimumStepSize().toInt() == bar->singleStep(),
+                     "Protocol accessible scrollbar retains range and semantics");
+    value->setCurrentValue(bar->minimum());
+    append();
+    QCoreApplication::processEvents();
+    result &= expect(bar->value() == bar->minimum(),
+                     "accessible Protocol scrolling also detaches following");
+    value->setCurrentValue(bar->maximum());
+    append();
+    QCoreApplication::processEvents();
+    result &= expect(bar->value() == bar->maximum() &&
+                         QAccessible::uniqueId(
+                             QAccessible::queryAccessibleInterface(bar)) == identity,
+                     "accessible bottom resumes following with stable identity");
+    int inputActions = 0;
+    const auto connection = QObject::connect(
+        bar, &QScrollBar::actionTriggered, &pane,
+        [&inputActions](int) { ++inputActions; });
+    value->setCurrentValue(value->currentValue());
+    result &= expect(inputActions == 0,
+                     "an unchanged accessible value does not invent input");
+    bar->setEnabled(false);
+    value->setCurrentValue(bar->minimum());
+    result &= expect(accessible->state().disabled && inputActions == 0 &&
+                         bar->value() == bar->maximum(),
+                     "disabled accessible scrolling cannot change follow intent");
+    bar->setEnabled(true);
+    append();
+    value->setCurrentValue(bar->minimum());
+    QCoreApplication::processEvents();
+    result &= expect(bar->value() == bar->minimum(),
+                     "accessible input supersedes queued Protocol restoration");
+    QObject::disconnect(connection);
+  }
+#endif
+  return result;
+}
+
+bool infoRefreshPreservesReadingState() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef first, second;
+  {
+    auto write = graph.write();
+    first = write.upsert({nodegraph::NodeKind::Item, "first-timing"});
+    second = write.upsert({nodegraph::NodeKind::Item, "second-timing"});
+    static_cast<void>(write.finish());
+  }
+  middle::InspectorPane pane;
+  pane.resize(440, 620);
+  pane.show();
+  pane.activateWindow();
+  pane.tabs()->setCurrentIndex(4);
+  bool result = true;
+  for (const auto projection : {ui::InspectorProjection::State,
+                                 ui::InspectorProjection::Timing}) {
+    const bool timing = projection == ui::InspectorProjection::Timing;
+    auto *choice = pane.findChild<QPushButton *>(
+        timing ? "timingInfoChoice" : "stateInfoChoice");
+    auto *view = pane.findChild<QPlainTextEdit *>(
+        timing ? "timingInfoView" : "stateInfoView");
+    if (!expect(choice && view, "both Info reading surfaces exist")) {
+      result = false;
+      continue;
+    }
+    choice->click();
+    if (timing)
+      pane.showTiming(first);
+    ui::InspectorSnapshot snapshot;
+    snapshot.threadIncarnation = timing ? 2 : 1;
+    snapshot.timingTitle = "Selected timing object";
+    for (int i = 0; i < 120; ++i) {
+      snapshot.state.state["row-" + std::to_string(i)] =
+          "Readable Unicode αβγ content " + std::string(100, 'x');
+      snapshot.timing.push_back(
+          {"hook-" + std::to_string(i) + ".durationMs", 1000,
+           TimeUnit::DurationMilliseconds});
+    }
+    pane.refresh(snapshot, projection);
+    QCoreApplication::processEvents();
+    view->setFocus();
+    QTextDocument *document = view->document();
+    QTextCursor cursor(document);
+    cursor.setPosition(140);
+    cursor.setPosition(80, QTextCursor::KeepAnchor);
+    view->setTextCursor(cursor);
+    view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum() / 2);
+    QCoreApplication::processEvents();
+    const int scroll = view->verticalScrollBar()->value();
+    const QString selected = view->textCursor().selectedText();
+    snapshot.state.state["row-99"] = "Updated content";
+    snapshot.timing.back().value = 9000;
+    pane.refresh(snapshot, projection);
+    QCoreApplication::processEvents();
+    result &= expect(view->toPlainText().contains(
+                         timing ? QStringLiteral("9.000 s")
+                                : QStringLiteral("Updated content")),
+                     "Info refresh presents the changed facts without suppressing updates");
+    if (view->verticalScrollBar()->value() != scroll)
+      std::cerr << "Info " << (timing ? "Timing" : "State")
+                << " scroll " << scroll << " -> "
+                << view->verticalScrollBar()->value() << " max "
+                << view->verticalScrollBar()->maximum() << '\n';
+    result &= expect(scroll > 0 && view->document() == document &&
+                         view->hasFocus() &&
+                         view->verticalScrollBar()->value() == scroll &&
+                         view->textCursor().anchor() == 140 &&
+                         view->textCursor().position() == 80 &&
+                         view->textCursor().selectedText() == selected,
+                     "Info refresh preserves document, focus, reverse selection and scroll");
+    int changes = 0;
+    const auto connection = QObject::connect(
+        document, &QTextDocument::contentsChanged, [&] { ++changes; });
+    pane.refresh(snapshot, projection);
+    QCoreApplication::processEvents();
+    result &= expect(changes == 0 &&
+                         view->verticalScrollBar()->value() == scroll,
+                     "unchanged Info refresh does not mutate the document or viewport");
+    QObject::disconnect(connection);
+    if (timing) {
+      pane.showTiming(first);
+      pane.refresh(snapshot, projection);
+      result &= expect(view->textCursor().selectedText() == selected &&
+                           view->verticalScrollBar()->value() == scroll,
+                       "reopening the same timing target preserves reading state");
+      pane.showTiming(second);
+      pane.refresh(snapshot, projection);
+    } else {
+      ++snapshot.threadIncarnation;
+      pane.refresh(snapshot, projection);
+    }
+    result &= expect(view->verticalScrollBar()->value() == 0 &&
+                         view->textCursor().position() == 0 &&
+                         !view->textCursor().hasSelection(),
+                     "new thread or timing target deliberately resets Info reading state");
+    QTextCursor interior(document);
+    const QString marker = timing ? QStringLiteral("hook-55")
+                                  : QStringLiteral("row-55");
+    const int markerPosition = view->toPlainText().indexOf(marker);
+    interior.setPosition(markerPosition);
+    interior.setPosition(markerPosition + marker.size(), QTextCursor::KeepAnchor);
+    view->setTextCursor(interior);
+    snapshot.state.state["row-0"] = "Another update";
+    snapshot.state.state["row-99"] = "And another update";
+    snapshot.timing.front().value = 2000;
+    snapshot.timing.back().value = 3000;
+    pane.refresh(snapshot, projection);
+    QCoreApplication::processEvents();
+    result &= expect(view->textCursor().selectedText() == marker,
+                     "independent updates on both sides retain an unchanged selected field");
+    if (timing) {
+      for (const auto *title : {"Unicode 😀 suffix", "Unicode 😁 suffix",
+                                "Unicode 𐀀 suffix", "Unicode 😀 suffix",
+                                "Multiple\r\nlines", "Multiple\nlines"}) {
+        const QString beforeTitleChange = view->toPlainText();
+        const QString details = beforeTitleChange.mid(
+            beforeTitleChange.indexOf(QStringLiteral("\n\n")));
+        snapshot.timingTitle = title;
+        pane.refresh(snapshot, projection);
+        QPlainTextEdit reference;
+        reference.setPlainText(QString::fromUtf8(title));
+        result &= expect(view->toPlainText() == reference.toPlainText() + details,
+                         "incremental Timing edits preserve complete UTF-16 text");
+      }
+      view->setLineWrapMode(QPlainTextEdit::NoWrap);
+      snapshot.timingTitle = std::string(240, 'x');
+      pane.refresh(snapshot, projection);
+      QCoreApplication::processEvents();
+      view->horizontalScrollBar()->setValue(
+          view->horizontalScrollBar()->maximum() / 2);
+      const int horizontal = view->horizontalScrollBar()->value();
+      snapshot.timing.back().value = 4000;
+      pane.refresh(snapshot, projection);
+      QCoreApplication::processEvents();
+      result &= expect(horizontal > 0 &&
+                           view->horizontalScrollBar()->value() == horizontal,
+                       "Info refresh also preserves horizontal reading position");
+      view->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    }
+    view->selectAll();
+    view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+    snapshot.state.state = {{"short", true}};
+    snapshot.timing.clear();
+    pane.refresh(snapshot, projection);
+    QCoreApplication::processEvents();
+    result &= expect(view->verticalScrollBar()->value() ==
+                         view->verticalScrollBar()->maximum() &&
+                         view->textCursor().selectionEnd() ==
+                             document->characterCount() - 1,
+                     "shrinking Info content clamps viewport and selection to valid bounds");
+  }
   return result;
 }
 
@@ -2479,8 +2766,8 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
     view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
     return waitFor([&] {
       for (QFrame *row : view->findChildren<QFrame *>(rowName)) {
-        QLabel *label = row->findChild<QLabel *>(labelName);
-        if (label && label->text().contains(expected) && !row->isHidden() &&
+        QWidget *label = row->findChild<QWidget *>(labelName);
+        if (label && label->property("text").toString().contains(expected) && !row->isHidden() &&
             row->geometry().intersects(view->viewport()->rect()))
           return row->geometry().bottom() >= view->viewport()->height() - 16;
       }
@@ -2569,7 +2856,7 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
   QFrame *lastAgentFrame = nullptr;
   for (QFrame *frame :
        pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))) {
-    QLabel *name = frame->findChild<QLabel *>(QStringLiteral("agentName"));
+    QLineEdit *name = frame->findChild<QLineEdit *>(QStringLiteral("agentName"));
     if (name && name->text() ==
                     QStringLiteral("agent-%1").arg(rowCount - 1)) {
       lastAgentFrame = frame;
@@ -2630,6 +2917,8 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
   agents->verticalScrollBar()->setValue(agents->verticalScrollBar()->maximum() /
                                         2);
   QCoreApplication::processEvents();
+  result &= expect(settleResidency(),
+                   "Agent middle viewport settles before saving its hidden-tab anchor");
   recordWork();
   const int agentAnchor = agents->verticalScrollBar()->value();
 
@@ -2830,6 +3119,60 @@ bool inspectorResidencyPerformance(std::size_t rowCount) {
   return result;
 }
 
+bool narrowAgentHeaderRetainsIdentityAndControls() {
+  WindowedInspectorData data;
+  data.threadIncarnation = 91;
+  ui::InspectorAgentRow agent;
+  const QString name = QStringLiteral("helper-α🙂").repeated(30);
+  agent.agentPath = "root/" + name.toStdString();
+  agent.status = nodegraph::NodeStatus::Completed;
+  data.agents.push_back(agentRow("header-agent", agent));
+  middle::InspectorPane pane;
+  QFont font = pane.font();
+  font.setPointSize(16);
+  pane.setFont(font);
+  pane.setStyleSheet(UiStyle::applicationStyleSheet());
+  pane.resize(200, 720);
+  pane.show();
+  data.bind(pane);
+  pane.tabs()->setCurrentIndex(1);
+  QCoreApplication::processEvents();
+  auto *field = pane.findChild<QLineEdit *>(QStringLiteral("agentName"));
+  auto *title = pane.findChild<QLabel *>(QStringLiteral("agentTitle"));
+  auto *status = pane.findChild<QLabel *>(QStringLiteral("agentStatus"));
+  auto *copy = pane.findChild<QToolButton *>(QStringLiteral("agentCopyButton"));
+  auto *disclosure = pane.findChild<QToolButton *>(QStringLiteral("agentDisclosureButton"));
+  if (!expect(field && title && status && copy && disclosure,
+              "narrow Agent header exposes name, title, status and controls"))
+    return false;
+  bool passed = expect(field->isReadOnly() && field->text() == name &&
+                           field->width() > 30 && field->cursorPosition() == 0 &&
+                           field->toolTip() == QString::fromStdString(agent.agentPath) &&
+                           title->width() >= title->sizeHint().width() &&
+                           status->width() >= status->sizeHint().width() &&
+                           status->y() >= field->geometry().bottom() &&
+                           copy->geometry().right() < disclosure->x(),
+                       "long names stay bounded without clipping title, status or actions");
+  pane.activateWindow();
+  field->setFocus(Qt::TabFocusReason);
+  QCoreApplication::processEvents();
+  field->selectAll();
+  field->copy();
+  const QRect geometry = field->geometry();
+  data.present(pane, ui::InspectorProjection::Agents);
+  QCoreApplication::processEvents();
+  passed &= expect(field == pane.findChild<QLineEdit *>(QStringLiteral("agentName")) &&
+                       field->selectedText() == name && field->geometry() == geometry &&
+                       QApplication::clipboard()->text() == name,
+                   "no-op refresh preserves the name object, selection, Copy and geometry");
+  const auto *accessible = QAccessible::queryAccessibleInterface(field);
+  passed &= expect(accessible && accessible->state().readOnly &&
+                       accessible->text(QAccessible::Name) == QStringLiteral("Agent name") &&
+                       accessible->text(QAccessible::Value) == name,
+                   "the bounded name exposes its complete read-only accessible value");
+  return passed;
+}
+
 bool focusedAgentRendererRemainsAuthoritative() {
   WindowedInspectorData data;
   data.threadIncarnation = 88;
@@ -2872,7 +3215,7 @@ bool focusedAgentRendererRemainsAuthoritative() {
   QFrame *first = nullptr;
   for (QFrame *frame :
        pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))) {
-    QLabel *name = frame->findChild<QLabel *>(QStringLiteral("agentName"));
+    QLineEdit *name = frame->findChild<QLineEdit *>(QStringLiteral("agentName"));
     if (name && name->text() == QStringLiteral("focus-agent-0")) {
       first = frame;
       break;
@@ -2945,6 +3288,36 @@ bool focusedAgentRendererRemainsAuthoritative() {
     QCoreApplication::processEvents();
     result &= expect(view->verticalScrollBar()->value() > beforeWheel,
                      "wheel input over Markdown scrolls the owning viewport");
+    struct NativeWheelBar : QScrollBar {
+      using QScrollBar::wheelEvent;
+    } native;
+    auto *bar = view->verticalScrollBar();
+    native.setRange(bar->minimum(), bar->maximum());
+    native.setSingleStep(bar->singleStep());
+    native.setPageStep(bar->pageStep());
+    const int savedLines = QApplication::wheelScrollLines();
+    for (int lines : {1, 3, 7}) {
+      QApplication::setWheelScrollLines(lines);
+      for (QWidget *receiver : {view->viewport(), markdown->viewport()}) {
+        bar->setValue(300);
+        native.setValue(bar->value());
+        for (int delta : {-120, -1, -1, -1, -1, 4, 120}) {
+          QWheelEvent reference({}, {}, QPoint(0, -17), QPoint(0, delta),
+                                Qt::NoButton, Qt::NoModifier,
+                                Qt::ScrollUpdate, false);
+          QWheelEvent input(QPointF(local), receiver->mapToGlobal(local),
+                            reference.pixelDelta(), reference.angleDelta(),
+                            Qt::NoButton, Qt::NoModifier,
+                            Qt::ScrollUpdate, false);
+          native.wheelEvent(&reference);
+          QApplication::sendEvent(receiver, &input);
+          result &= expect(bar->value() == native.value(),
+                           "Inspector background and Markdown use the same "
+                           "native wheel distance and fractional accumulation");
+        }
+      }
+    }
+    QApplication::setWheelScrollLines(savedLines);
     view->verticalScrollBar()->setValue(0);
     QCoreApplication::processEvents();
     markdown->setFocus(Qt::TabFocusReason);
@@ -2961,6 +3334,39 @@ bool focusedAgentRendererRemainsAuthoritative() {
                   .size() <= 51,
       "scrolling pins the exact focused Agent renderer and selection at a bounded cost");
 
+  const auto lastFrame = [&]() -> QFrame * {
+    for (auto *frame :
+         pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))) {
+      auto *name = frame->findChild<QLineEdit *>(QStringLiteral("agentName"));
+      if (name && name->text() == QStringLiteral("focus-agent-199") &&
+          !frame->isHidden())
+        return frame;
+    }
+    return nullptr;
+  };
+  result &= expect(waitFor([&] { return lastFrame() != nullptr; }),
+                   "bottom row admission completes before the reflow checks");
+  // Exact anchor preservation needs room on both sides. At the bottom, final
+  // row measurements can shrink the range and correctly clamp the old offset.
+  if (view)
+    view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum() -
+                                       view->viewport()->height());
+  result &= expect(waitFor([&] {
+    bool topCovered = false;
+    bool bottomCovered = false;
+    if (!view)
+      return false;
+    for (auto *frame :
+         pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))) {
+      if (frame == pinned || frame->isHidden())
+        continue;
+      topCovered |= frame->y() <= 0 && frame->geometry().bottom() >= 0;
+      bottomCovered |= frame->y() < view->viewport()->height() &&
+                       frame->geometry().bottom() >=
+                           view->viewport()->height() - 1;
+    }
+    return topCovered && bottomCovered;
+  }), "the interior viewport is measured before capturing its anchor");
   QFrame *anchorFrame = nullptr;
   if (view) {
     for (QFrame *frame :
@@ -2973,12 +3379,14 @@ bool focusedAgentRendererRemainsAuthoritative() {
   }
   QPointer<QFrame> retainedAnchor = anchorFrame;
   const int anchorTop = anchorFrame ? anchorFrame->geometry().top() : 0;
+  const int originalPinnedHeight = pinned ? pinned->height() : 0;
   QFont changedFont = pane.font();
   changedFont.setPointSizeF(changedFont.pointSizeF() + 1.0);
   pane.setFont(changedFont);
   const bool fontReflowStable = waitFor([&] {
     return
       retainedAnchor && retainedAnchor->geometry().top() == anchorTop && pinned &&
+          pinned->height() != originalPinnedHeight &&
           pinnedMarkdown && pinnedMarkdown->document() == document &&
           pinnedMarkdown->hasFocus() &&
           pinnedMarkdown->textCursor().selectionStart() == selectionStart &&
@@ -2988,17 +3396,43 @@ bool focusedAgentRendererRemainsAuthoritative() {
       fontReflowStable,
       "font reflow preserves the semantic anchor and focused Agent renderer");
   const int styleAnchorTop = retainedAnchor ? retainedAnchor->geometry().top() : 0;
+  const int fontPinnedHeight = pinned ? pinned->height() : 0;
   pane.setStyleSheet(QStringLiteral(
-      "QFrame#inspectorAgentFrame { border: 1px solid transparent; }"));
+      "QFrame#inspectorAgentFrame { border: 3px solid transparent; }"));
   const bool styleReflowStable = waitFor([&] {
     return
       retainedAnchor && retainedAnchor->geometry().top() == styleAnchorTop &&
-          pinned && pinnedMarkdown && pinnedMarkdown->document() == document &&
+          pinned && pinned->height() != fontPinnedHeight &&
+          pinnedMarkdown && pinnedMarkdown->document() == document &&
           pinnedMarkdown->hasFocus();
   });
   result &= expect(
       styleReflowStable,
       "style reflow preserves the semantic anchor and focused Agent renderer");
+
+  if (view)
+    view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+  result &= expect(waitFor([&] { return lastFrame() != nullptr; }),
+                   "bottom row is resident before the boundary reflow");
+  // A taller viewport reduces the valid maximum: keeping the old top anchor
+  // would require scrolling beyond the end. The symmetric row margin remains.
+  const int bottomViewportHeight = view ? view->viewport()->height() : 0;
+  pane.resize(pane.width(), pane.height() + 100);
+  const bool bottomReflowStable = waitFor([&] {
+    const QFrame *last = lastFrame();
+    return view && last && pinned &&
+           view->viewport()->height() > bottomViewportHeight &&
+           view->verticalScrollBar()->value() ==
+               view->verticalScrollBar()->maximum() &&
+           last->geometry().bottom() + 1 ==
+               view->viewport()->height() - last->geometry().left() &&
+           pinnedMarkdown && pinnedMarkdown->document() == document &&
+           pinnedMarkdown->hasFocus() &&
+           pinnedMarkdown->textCursor().selectionStart() == selectionStart &&
+           pinnedMarkdown->textCursor().selectionEnd() == selectionEnd;
+  });
+  result &= expect(bottomReflowStable,
+      "bottom reflow clamps to the measured content end without losing focus or selection");
 
   pane.resize(360, 760);
   QCoreApplication::processEvents();
@@ -3009,7 +3443,7 @@ bool focusedAgentRendererRemainsAuthoritative() {
   const bool nextDelivered = sendTab();
   const bool nextFocused = waitFor([&] {
     QFrame *frame = focusedFrame();
-    QLabel *name = frame ? frame->findChild<QLabel *>(
+    QLineEdit *name = frame ? frame->findChild<QLineEdit *>(
                                QStringLiteral("agentName"))
                          : nullptr;
     return name && name->text() == QStringLiteral("focus-agent-1") && view &&
@@ -3078,8 +3512,8 @@ bool focusedAgentRendererRemainsAuthoritative() {
       if (!frame ||
           frame->objectName() != QStringLiteral("inspectorAgentFrame"))
         continue;
-      QLabel *name =
-          frame->findChild<QLabel *>(QStringLiteral("agentName"));
+      QLineEdit *name =
+          frame->findChild<QLineEdit *>(QStringLiteral("agentName"));
       const int row = name ? name->text().section('-', -1).toInt() : -1;
       accessibleOrder &= row > previousAccessibleRow &&
                          child->state().invisible == frame->isHidden();
@@ -3114,7 +3548,7 @@ bool focusedAgentRendererRemainsAuthoritative() {
       return std::ranges::any_of(
           pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame")),
           [view](QFrame *frame) {
-            QLabel *name = frame->findChild<QLabel *>(
+            QLineEdit *name = frame->findChild<QLineEdit *>(
                 QStringLiteral("agentName"));
             return name && name->text() == QStringLiteral("focus-agent-0") &&
                    !frame->isHidden() &&
@@ -3195,8 +3629,8 @@ bool expandedAgentStateIsBoundedAndExact() {
         pane.rowRequest(ui::InspectorProjection::Agents).retainedKeys;
     for (QFrame *frame : pane.findChildren<QFrame *>(
              QStringLiteral("inspectorAgentFrame"))) {
-      QLabel *name =
-          frame->findChild<QLabel *>(QStringLiteral("agentName"));
+      QLineEdit *name =
+          frame->findChild<QLineEdit *>(QStringLiteral("agentName"));
       const std::string key =
           name ? "agent:" + name->text().toStdString() : std::string{};
       if (!key.empty() &&
@@ -3212,7 +3646,7 @@ bool expandedAgentStateIsBoundedAndExact() {
                                  : nullptr;
   const std::string newKey =
       newFrame
-          ? "agent:" + newFrame->findChild<QLabel *>(
+          ? "agent:" + newFrame->findChild<QLineEdit *>(
                            QStringLiteral("agentName"))
                            ->text()
                            .toStdString()
@@ -3319,6 +3753,53 @@ bool rowViewportRetiresOnlyAfterWheelDispatch() {
   return result;
 }
 
+bool rowRetirementPreservesQtTraversalLifetime() {
+  WindowedInspectorData data;
+  data.threadIncarnation = 93;
+  for (int index = 0; index < 200; ++index) {
+    ui::InspectorAgentRow agent;
+    agent.agentPath = "root/retirement-" + std::to_string(index);
+    data.agents.push_back(agentRow(std::to_string(index), std::move(agent)));
+  }
+  QPointer<QFrame> ownedAtTeardown;
+  bool result = true;
+  {
+    middle::InspectorPane pane;
+    pane.resize(440, 720);
+    pane.show();
+    data.bind(pane);
+    pane.tabs()->setCurrentIndex(1);
+    auto *view = pane.findChild<QAbstractScrollArea *>("inspectorAgentRows");
+    result &= expect(waitFor([&] {
+      return view && view->verticalScrollBar()->maximum() > 0 &&
+             !pane.findChildren<QFrame *>("inspectorAgentFrame").empty();
+    }), "the retirement fixture admits its initial rows");
+    std::vector<QPointer<QFrame>> traversal;
+    for (auto *frame : pane.findChildren<QFrame *>("inspectorAgentFrame"))
+      traversal.emplace_back(frame);
+    if (view) {
+      view->setFocus();
+      view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+      data.present(pane, ui::InspectorProjection::Agents);
+    }
+    for (const auto &frame : traversal)
+      result &= expect(frame && frame->isHidden() && !frame->parentWidget(),
+                       "retired rows leave residency but survive Qt's current traversal");
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    result &= expect(std::ranges::all_of(traversal, [](const auto &frame) {
+      return frame.isNull();
+    }), "all retired rows are reclaimed at the deferred-delete boundary");
+    result &= expect(waitFor([&] {
+      const auto frames = pane.findChildren<QFrame *>("inspectorAgentFrame");
+      if (!frames.empty()) ownedAtTeardown = frames.front();
+      return !ownedAtTeardown.isNull();
+    }), "replacement rows remain owned by the viewport");
+  }
+  result &= expect(ownedAtTeardown.isNull(),
+                   "owner teardown destroys residents without requiring another event loop");
+  return result;
+}
+
 bool threadReplacementReanchorsBeforePaging() {
   WindowedInspectorData data;
   data.threadIncarnation = 90;
@@ -3361,7 +3842,7 @@ bool threadReplacementReanchorsBeforePaging() {
   const bool firstRowVisible = waitFor([&] {
     for (QFrame *frame :
          pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))) {
-      QLabel *name = frame->findChild<QLabel *>(QStringLiteral("agentName"));
+      QLineEdit *name = frame->findChild<QLineEdit *>(QStringLiteral("agentName"));
       if (name && name->text() == QStringLiteral("thread-b-0") &&
           !frame->isHidden() && view &&
           frame->geometry().intersects(view->viewport()->rect()))
@@ -3529,14 +4010,19 @@ int main(int argc, char **argv) {
   }
   if (argc == 3 && std::string_view(argv[1]) == "--geometry") {
     bool passed = codexui::codex::requestedDprIsActive(std::stod(argv[2]));
+    passed &= codexui::codex::narrowAgentHeaderRetainsIdentityAndControls();
+    passed &= codexui::codex::infoRefreshPreservesReadingState();
+    passed &= codexui::codex::protocolFollowTracksInputNotLayout();
     passed &= codexui::codex::focusedAgentRendererRemainsAuthoritative();
     passed &= codexui::codex::rowViewportRetiresOnlyAfterWheelDispatch();
+    passed &= codexui::codex::rowRetirementPreservesQtTraversalLifetime();
     passed &= codexui::codex::threadReplacementReanchorsBeforePaging();
     passed &=
         codexui::codex::requestResidencyPreservesIdentityAndSafeLifetime();
     return passed ? 0 : 1;
   }
   bool passed = true;
+  passed &= codexui::codex::narrowAgentHeaderRetainsIdentityAndControls();
   passed &= codexui::codex::logicalAgentsRemainDeduplicated();
   passed &=
       codexui::codex::agentPresentationIdentityFollowsExactGraphLifetime();
@@ -3549,9 +4035,12 @@ int main(int argc, char **argv) {
   passed &= codexui::codex::hiddenRequestProjectionRetiresExactTargets();
   passed &= codexui::codex::changesTabShowsCanonicalThreadRepositoryChanges();
   passed &= codexui::codex::stateAndProtocolRemainUsefulBoundedAndRedacted();
+  passed &= codexui::codex::infoRefreshPreservesReadingState();
+  passed &= codexui::codex::protocolFollowTracksInputNotLayout();
   passed &= codexui::codex::focusedAgentRendererRemainsAuthoritative();
   passed &= codexui::codex::expandedAgentStateIsBoundedAndExact();
   passed &= codexui::codex::rowViewportRetiresOnlyAfterWheelDispatch();
+  passed &= codexui::codex::rowRetirementPreservesQtTraversalLifetime();
   passed &= codexui::codex::threadReplacementReanchorsBeforePaging();
   passed &= codexui::codex::requestResidencyPreservesIdentityAndSafeLifetime();
   if (passed)

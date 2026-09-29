@@ -4,6 +4,7 @@
 
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
+#include "codex/ThreadBrowser.h"
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 
@@ -1371,6 +1372,16 @@ projectThreadRow(nodegraph::NodeGraph::ReadAccess &read,
   row.awaitingPromptConversation = prompt.awaitingConversation;
   row.pendingPromptAdmittedAtMs = prompt.admittedAtMs;
   row.archived = boolFromValue(valueMember(*state, "archived"));
+  if (read.relatedCount(thread, nodegraph::RelationKind::ProjectMembership))
+    row.projectId =
+        read.relatedAt(thread, nodegraph::RelationKind::ProjectMembership, 0)
+            ->id()
+            .canonical;
+  if (read.relatedCount(thread, nodegraph::RelationKind::SectionMembership))
+    row.sectionId =
+        read.relatedAt(thread, nodegraph::RelationKind::SectionMembership, 0)
+            ->id()
+            .canonical;
   return row;
 }
 
@@ -1665,7 +1676,8 @@ NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
 
 std::optional<ThreadListSnapshot>
 NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
-                            std::uint64_t *graphRevision) const {
+                            std::uint64_t *graphRevision,
+                            const ThreadBrowserOptions *browser) const {
   if (!graph_)
     return std::nullopt;
   auto read = graph_->tryRead();
@@ -1764,6 +1776,324 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
     ThreadListRow row = buildRow(buildRow, thread);
     if (!row.id.empty())
       result.roots.push_back(std::move(row));
+  }
+  if (browser) {
+    const auto catalogState = [&](std::string_view method,
+                                  const nlohmann::json &parameters) {
+      const auto node = read->find(
+          {nodegraph::NodeKind::Catalog, threadBrowserKey(method, parameters)});
+      return node ? read->state(node)
+                  : std::shared_ptr<const nodegraph::NodeState>{};
+    };
+    const auto projects =
+        catalogState("project/list", nlohmann::json::object());
+    const auto sections =
+        catalogState("threadSection/list", nlohmann::json::object());
+    result.groupingAvailable =
+        projects && sections &&
+        !boolFromValue(valueMember(*projects, "unsupported")) &&
+        !boolFromValue(valueMember(*sections, "unsupported"));
+    if (connection) {
+      const auto state = read->state(connection);
+      if (const auto *settings = valueMember(*state, "settings"))
+        result.serverIdentity = jsonFromValue(*settings).dump();
+    }
+    const auto groups = [&](nodegraph::NodeKind kind,
+                            std::vector<ThreadGroup> &destination) {
+      for (const auto &node : read->orderedNodes(kind)) {
+        const auto state = read->state(node);
+        const std::string name =
+            exactStringFromValue(valueMember(*state, "name"));
+        destination.push_back({node->id().canonical,
+                               name.empty() ? node->id().canonical : name, node,
+                               jsonFromValue(nodegraph::Value(state->fields))});
+      }
+    };
+    groups(nodegraph::NodeKind::Project, result.projects);
+    groups(nodegraph::NodeKind::ThreadSection, result.sections);
+    const auto groupName = [](const auto &groups, const std::string &id,
+                              std::string fallback) {
+      const auto found = std::ranges::find(groups, id, &ThreadGroup::id);
+      return found == groups.end() ? (id.empty() ? fallback : id) : found->name;
+    };
+    const auto sectionAppearance = [&](ThreadListRow &row) {
+      const auto found =
+          std::ranges::find(result.sections, row.sectionId, &ThreadGroup::id);
+      if (found == result.sections.end())
+        return;
+      row.details = "Shared section across projects\n" + found->fields.dump(2);
+      const auto appearance = found->fields.find("appearance");
+      if (appearance == found->fields.end() || !appearance->is_object())
+        return;
+      const auto icon = appearance->find("icon");
+      if (icon != appearance->end() && icon->is_string() &&
+          !icon->get_ref<const std::string &>().empty())
+        row.title = icon->get<std::string>() + " " + row.title;
+      const auto color = appearance->find("color");
+      if (color != appearance->end() && color->is_string())
+        row.appearanceColor = color->get<std::string>();
+    };
+    nlohmann::json filter = nlohmann::json::object();
+    if (browser->archived != 2)
+      filter["archived"] = browser->archived == 1;
+    if (!browser->title.empty())
+      filter["searchTerm"] = browser->title;
+    const auto pageRow = [&](std::string method, nlohmann::json parameters) {
+      ThreadListRow row;
+      row.kind = ThreadRowKind::Page;
+      row.presentationKey = threadBrowserKey(method, parameters);
+      row.query = {{"method", method}, {"parameters", parameters}};
+      const auto state = catalogState(method, parameters);
+      const bool loaded = state && boolFromValue(valueMember(*state, "loaded"));
+      row.pendingPage = state && boolFromValue(valueMember(*state, "pending"));
+      const std::string error =
+          state ? exactStringFromValue(valueMember(*state, "error")) : "";
+      const bool more = state && boolFromValue(valueMember(*state, "hasMore"));
+      const bool unsupported =
+          state && boolFromValue(valueMember(*state, "unsupported"));
+      row.title = row.pendingPage  ? "Loading…"
+                  : !error.empty() ? "Retry loading…"
+                  : !loaded        ? "Load threads…"
+                  : more           ? "Load more…"
+                                   : "";
+      if (unsupported) {
+        row.title = "Not supported by this server";
+        row.query = nullptr;
+      }
+      row.details = error;
+      row.order = std::numeric_limits<std::int64_t>::max();
+      return row;
+    };
+    const auto appendPages = [&](std::vector<ThreadListRow> &rows,
+                                 std::string method,
+                                 nlohmann::json parameters) {
+      const int count =
+          method == "thread/list" && browser->archived == 2 ? 2 : 1;
+      for (int page = 0; page < count; ++page) {
+        if (count == 2)
+          parameters["archived"] = page != 0;
+        auto row = pageRow(method, parameters);
+        if (row.title.empty())
+          continue;
+        if (count == 2)
+          row.title += page ? " (archived)" : " (active)";
+        rows.push_back(std::move(row));
+      }
+    };
+    const bool grouped = browser->grouping != ThreadGrouping::Ungrouped &&
+                         result.groupingAvailable;
+    // Flatten once, retaining the original parent identity. Membership decides
+    // placement; graph ancestry remains unchanged and accessible by navigation.
+    std::vector<ThreadListRow> flat;
+    flat.reserve(allThreads.size());
+    const auto flatten = [&](const auto &self, std::vector<ThreadListRow> rows,
+                             nodegraph::NodeRef parent) -> void {
+      for (auto &row : rows) {
+        auto children = std::move(row.children);
+        row.children.clear();
+        row.parentThread = parent;
+        const auto target = row.target;
+        if ((browser->archived == 2 ||
+             row.archived == (browser->archived == 1)) &&
+            (browser->title.empty() ||
+             QString::fromStdString(row.title).contains(
+                 QString::fromStdString(browser->title), Qt::CaseInsensitive)))
+          flat.push_back(std::move(row));
+        self(self, std::move(children), target);
+      }
+    };
+    flatten(flatten, std::move(result.roots), {});
+    result.roots.clear();
+    const auto familyKey = [&](const ThreadListRow &row) {
+      if (!grouped)
+        return std::string{};
+      return browser->grouping == ThreadGrouping::Sections
+                 ? row.sectionId
+                 : nlohmann::json::array({row.projectId, row.sectionId}).dump();
+    };
+    std::unordered_map<const nodegraph::Node *, std::size_t> positions;
+    positions.reserve(flat.size());
+    for (std::size_t i = 0; i < flat.size(); ++i)
+      positions.emplace(flat[i].target.get(), i);
+    std::vector<std::vector<std::size_t>> descendants(flat.size());
+    std::vector<std::size_t> roots;
+    for (std::size_t i = 0; i < flat.size(); ++i) {
+      const auto parent = positions.find(flat[i].parentThread.get());
+      if (parent != positions.end() &&
+          familyKey(flat[i]) == familyKey(flat[parent->second]))
+        descendants[parent->second].push_back(i);
+      else
+        roots.push_back(i);
+    }
+    const auto family = [&](const auto &self,
+                            std::size_t index) -> ThreadListRow {
+      ThreadListRow row = std::move(flat[index]);
+      for (auto child : descendants[index])
+        row.children.push_back(self(self, child));
+      return row;
+    };
+    std::map<std::string, ThreadListRow> grouping;
+    const auto ensureGroup = [&](const std::string &id,
+                                 bool project) -> ThreadListRow & {
+      auto [entry, inserted] = grouping.try_emplace(id);
+      auto &row = entry->second;
+      if (inserted) {
+        row.id = id;
+        row.kind = project ? ThreadRowKind::Project : ThreadRowKind::Section;
+        row.presentationKey =
+            std::string(project ? "project:" : "section:") + id;
+        row.projectId = project ? id : std::string{};
+        row.sectionId = project ? std::string{} : id;
+        row.title = groupName(project ? result.projects : result.sections, id,
+                              project ? "No project" : "Unsectioned");
+        auto parameters = filter;
+        parameters[project ? "projectId" : "sectionId"] =
+            id.empty() ? nlohmann::json(nullptr) : nlohmann::json(id);
+        if (!project && browser->manualSections && !id.empty()) {
+          parameters["sortKey"] = "section_position";
+          parameters["sortDirection"] = "asc";
+        }
+        row.query = {{"method", "thread/list"}, {"parameters", parameters}};
+        const auto &source = project ? result.projects : result.sections;
+        const auto found = std::ranges::find(source, id, &ThreadGroup::id);
+        if (found != source.end()) {
+          row.target = found->target;
+          const auto &fields = found->fields;
+          if (fields.contains("recencyAt") &&
+              fields["recencyAt"].is_number_integer())
+            row.recencyAt = fields["recencyAt"].get<std::int64_t>();
+          row.order = fields.value("position", std::int64_t{0});
+          row.details = fields.dump(2);
+        }
+        if (!project)
+          sectionAppearance(row);
+      }
+      return row;
+    };
+    if (grouped) {
+      const bool project = browser->grouping == ThreadGrouping::Projects;
+      for (const auto &group : project ? result.projects : result.sections)
+        ensureGroup(group.id, project);
+      ensureGroup({}, project);
+      for (const auto index : roots) {
+        auto row = family(family, index);
+        auto &parent =
+            ensureGroup(project ? row.projectId : row.sectionId, project);
+        if (row.recencyAt > parent.recencyAt)
+          parent.recencyAt = row.recencyAt;
+        parent.children.push_back(std::move(row));
+      }
+      for (auto &[id, group] : grouping) {
+        if (project) {
+          std::map<std::string, ThreadListRow> subsections;
+          const auto ensureSection =
+              [&](const std::string &sectionId) -> ThreadListRow & {
+            auto [entry, inserted] = subsections.try_emplace(sectionId);
+            auto &section = entry->second;
+            if (inserted) {
+              section.kind = ThreadRowKind::Section;
+              section.id = sectionId;
+              section.sectionId = sectionId;
+              section.projectId = id;
+              section.presentationKey =
+                  "project-section:" +
+                  nlohmann::json::array({id, sectionId}).dump();
+              section.title =
+                  groupName(result.sections, sectionId, "Unsectioned");
+              const auto found = std::ranges::find(result.sections, sectionId,
+                                                   &ThreadGroup::id);
+              if (found != result.sections.end())
+                section.target = found->target;
+              sectionAppearance(section);
+              auto parameters = group.query.at("parameters");
+              parameters["sectionId"] = sectionId;
+              if (browser->manualSections) {
+                parameters["sortKey"] = "section_position";
+                parameters["sortDirection"] = "asc";
+              }
+              section.query = {{"method", "thread/list"},
+                               {"parameters", parameters}};
+            }
+            return section;
+          };
+          if (id.empty())
+            for (const auto &section : result.sections)
+              if (!read->hasIncomingRelation(
+                      section.target,
+                      nodegraph::RelationKind::SectionMembership))
+                ensureSection(section.id);
+          std::vector<ThreadListRow> children;
+          for (auto &row : group.children) {
+            if (row.sectionId.empty())
+              children.push_back(std::move(row));
+            else
+              ensureSection(row.sectionId).children.push_back(std::move(row));
+          }
+          for (auto &[sectionId, section] : subsections)
+            children.push_back(std::move(section));
+          group.children = std::move(children);
+        }
+        result.roots.push_back(std::move(group));
+      }
+    } else {
+      for (const auto index : roots)
+        result.roots.push_back(family(family, index));
+    }
+    const auto addPages = [&](const auto &self,
+                              std::vector<ThreadListRow> &rows) -> void {
+      for (auto &row : rows) {
+        self(self, row.children);
+        if (row.query.is_null())
+          continue;
+        const auto parameters = row.query.at("parameters");
+        if (browser->manualSections && row.kind == ThreadRowKind::Section) {
+          std::unordered_map<std::string, std::int64_t> rank;
+          // The API sorts active and archived pages independently; in All,
+          // preserve each server order and place active threads first.
+          for (int page = 0; page < (browser->archived == 2 ? 2 : 1); ++page) {
+            auto query = parameters;
+            if (browser->archived == 2)
+              query["archived"] = page != 0;
+            const auto state = catalogState("thread/list", query);
+            const auto *ids = state ? valueMember(*state, "ids") : nullptr;
+            if (ids && ids->asArray())
+              for (const auto &id : *ids->asArray())
+                rank.emplace(exactStringFromValue(&id), rank.size());
+          }
+          for (auto &child : row.children) {
+            const auto position = rank.find(child.id);
+            child.order = position == rank.end()
+                              ? std::numeric_limits<std::int64_t>::max() - 1
+                              : position->second;
+          }
+        }
+        appendPages(row.children, "thread/list", parameters);
+      }
+    };
+    addPages(addPages, result.roots);
+    // Absence of membership is not another enclosing group. Standalone
+    // sections and wholly ungrouped threads are peers of project cards.
+    if (grouped) {
+      std::vector<ThreadListRow> outer;
+      for (auto &row : result.roots) {
+        if (!row.id.empty()) {
+          outer.push_back(std::move(row));
+          continue;
+        }
+        for (auto &child : row.children) {
+          if (child.kind == ThreadRowKind::Page)
+            child.title = "Unassigned · " + child.title;
+          outer.push_back(std::move(child));
+        }
+      }
+      result.roots = std::move(outer);
+    }
+    appendPages(result.roots,
+                grouped ? (browser->grouping == ThreadGrouping::Projects
+                               ? "project/list"
+                               : "threadSection/list")
+                        : "thread/list",
+                grouped ? nlohmann::json::object() : filter);
   }
   return result;
 }

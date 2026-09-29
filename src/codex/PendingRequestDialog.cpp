@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/PendingRequestDialog.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -112,7 +113,7 @@ void addRequestDisclosure(QVBoxLayout *layout, const nlohmann::json &request) {
 QComboBox *
 addDecisionEditor(QVBoxLayout *layout,
                   const std::vector<PendingRequestAction> &requestActions) {
-  auto *decision = new QComboBox;
+  auto *decision = new UiStyle::ChevronComboBox;
   for (const PendingRequestAction &action : requestActions)
     decision->addItem(text(action.label), text(action.value));
   auto *label = wrapped(QStringLiteral("Decision"), "title");
@@ -142,8 +143,9 @@ struct QuestionEditor {
 
 std::optional<PendingRequestSubmission> PendingRequestDialog::present(
     const PendingRequestDescriptor &request, QWidget *parent,
-    const PendingRequestSubmission *initialSubmission) {
-  QDialog dialog(parent);
+    const PendingRequestSubmission *initialSubmission,
+    const std::function<void(QPushButton *)> &observeSubmit) {
+  UiStyle::ScrollFormDialog dialog(parent);
   const QString dialogTitle =
       text(PendingRequestPolicy::dialogTitle(request.kind));
   dialog.setWindowTitle(dialogTitle);
@@ -154,9 +156,7 @@ std::optional<PendingRequestSubmission> PendingRequestDialog::present(
   root->setSpacing(10);
   root->addWidget(wrapped(dialogTitle, "heading"));
 
-  auto *scroll = new QScrollArea;
-  scroll->setWidgetResizable(true);
-  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  auto *scroll = dialog.formScrollArea();
   auto *content = new QWidget;
   auto *contentLayout = new QVBoxLayout(content);
   contentLayout->setContentsMargins(0, 0, 8, 0);
@@ -274,7 +274,12 @@ std::optional<PendingRequestSubmission> PendingRequestDialog::present(
     if (acceptsContent && raw.contains("requestedSchema")) {
       auto *structuredLabel =
           wrapped(QStringLiteral("Structured response (JSON)"), "title");
-      structuredContent = new QPlainTextEdit(QStringLiteral("{}"));
+      structuredContent = new UiStyle::DialogTextEdit;
+      QObject::connect(structuredContent, &QPlainTextEdit::cursorPositionChanged,
+                       &dialog, [&dialog, structuredContent] {
+                         dialog.revealFormFocus(structuredContent);
+                       });
+      structuredContent->setPlainText(QStringLiteral("{}"));
       structuredLabel->setBuddy(structuredContent);
       contentLayout->addWidget(structuredLabel);
       structuredContent->setMinimumHeight(150);
@@ -315,6 +320,10 @@ std::optional<PendingRequestSubmission> PendingRequestDialog::present(
   auto *buttons =
       new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
   buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Submit"));
+  buttons->button(QDialogButtonBox::Ok)->setEnabled(
+      request.availability == PendingRequestAvailability::Actionable);
+  if (observeSubmit)
+    observeSubmit(buttons->button(QDialogButtonBox::Ok));
   nlohmann::json acceptedAnswers = nlohmann::json::object();
   nlohmann::json acceptedStructuredContent = nullptr;
   QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {

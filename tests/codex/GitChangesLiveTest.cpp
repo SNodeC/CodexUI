@@ -5,13 +5,19 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QAccessible>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QLabel>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QListWidget>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <QThread>
@@ -175,6 +181,156 @@ bool testSnapshotMetadataRefresh() {
   }();
   return expect(updated,
                 "diff presentation updates when only line totals change");
+}
+
+bool testDiffHeadersRemainReadable() {
+  DiffViewer viewer;
+  viewer.setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  auto *provider = viewer.findChild<GitDiffProvider *>();
+  auto *diff = viewer.findChild<QPlainTextEdit *>(QStringLiteral("codexDiffText"));
+  auto *title = viewer.findChild<QLineEdit *>(QStringLiteral("codexDiffSelectedFile"));
+  QPushButton *copy = nullptr;
+  QPushButton *review = nullptr;
+  for (auto *button : viewer.findChildren<QPushButton *>()) {
+    if (button->text() == QStringLiteral("Copy"))
+      copy = button;
+    if (button->text() == QStringLiteral("Open review"))
+      review = button;
+  }
+  if (!expect(provider && diff && title && copy && review, "preview controls exist"))
+    return false;
+  const auto key = [title](int code, Qt::KeyboardModifiers modifiers = Qt::NoModifier,
+                           QString text = {}) {
+    QKeyEvent press(QEvent::KeyPress, code, modifiers, text);
+    QKeyEvent release(QEvent::KeyRelease, code, modifiers, text);
+    QApplication::sendEvent(title, &press);
+    QApplication::sendEvent(title, &release);
+  };
+  GitDiffFile file;
+  file.repositoryRoot = QStringLiteral("/qualification");
+  file.status = QStringLiteral("Modified");
+  file.patch = QStringLiteral("@@ -1 +1 @@\n-before\n+after");
+  GitDiffSnapshot snapshot;
+  snapshot.repositoryRoots = {file.repositoryRoot};
+  bool result = true;
+  viewer.show();
+  for (int pointSize : {9, 16}) {
+    QFont font = viewer.font();
+    font.setPointSize(pointSize);
+    viewer.setFont(font);
+    for (int width : {300, 404}) {
+      viewer.resize(width, 720);
+      for (const QString &path : {
+               QStringLiteral("changed.txt"),
+               QStringLiteral("directory with spaces/α🙂/") +
+                   QString(120, QLatin1Char('w')) + QStringLiteral(".cpp")}) {
+        file.path = path;
+        file.absolutePath = file.repositoryRoot + QLatin1Char('/') + path;
+        snapshot.files = {file};
+        provider->snapshotReady(snapshot);
+        QCoreApplication::processEvents();
+        result &= expect(title->text() == path && viewer.width() == width &&
+                             title->width() >= width - 30 &&
+                             title->height() >= title->sizeHint().height() &&
+                             title->cursorPosition() == 0 && title->isReadOnly(),
+                         "complete filename starts at its beginning without widening the pane");
+        for (auto *button : {copy, review})
+          result &= expect(title && button->isEnabled() &&
+                               viewer.rect().contains(button->geometry()) &&
+                               !title->geometry().intersects(button->geometry()),
+                           "preview actions remain visible and do not overlap the title");
+        copy->click();
+        result &= expect(QApplication::clipboard()->text() == file.patch &&
+                             diff->toPlainText() == file.patch,
+                         "header reflow preserves the displayed and copied diff");
+        title->setFocus();
+        key(Qt::Key_End);
+        result &= expect(title->cursorPosition() == path.size(),
+                         "keyboard navigation reaches the end of the complete path");
+        for (int i = 0; i < 4; ++i)
+          key(Qt::Key_Left, Qt::ShiftModifier);
+        key(Qt::Key_C, Qt::ControlModifier);
+        result &= expect(QApplication::clipboard()->text() == path.right(4),
+                         "partial filename Copy exposes the suffix beyond the initial viewport");
+        key(Qt::Key_Home);
+        result &= expect(title->cursorPosition() == 0,
+                         "keyboard navigation returns to the path beginning");
+        key(Qt::Key_A, Qt::ControlModifier);
+        key(Qt::Key_C, Qt::ControlModifier);
+        result &= expect(QApplication::clipboard()->text() == path,
+                         "filename Copy preserves every Unicode character and trailing suffix");
+        provider->snapshotReady(snapshot);
+        result &= expect(title->selectedText() == path && title->hasFocus(),
+                         "unchanged snapshot preserves filename selection and focus");
+        key(Qt::Key_X, Qt::NoModifier, QStringLiteral("x"));
+        key(Qt::Key_Backspace);
+        QApplication::clipboard()->setText(QStringLiteral("replacement"));
+        key(Qt::Key_V, Qt::ControlModifier);
+        result &= expect(title->text() == path,
+                         "read-only filename rejects typing, deletion and paste");
+#if QT_CONFIG(accessibility)
+        auto *accessible = QAccessible::queryAccessibleInterface(title);
+        result &= expect(accessible && accessible->state().readOnly &&
+                             accessible->text(QAccessible::Name) == QStringLiteral("Selected file") &&
+                             accessible->text(QAccessible::Value) == path,
+                         "accessibility exposes the full read-only filename");
+#endif
+      }
+    }
+  }
+  review->click();
+  QCoreApplication::processEvents();
+  auto *reviewTitle = viewer.findChild<QLineEdit *>(QStringLiteral("codexReviewSelectedFile"));
+  if (!expect(reviewTitle, "review uses a selectable filename field"))
+    return false;
+  for (int width : {900, 1200}) {
+    reviewTitle->window()->resize(width, 780);
+    QCoreApplication::processEvents();
+    result &= expect(reviewTitle->window()->width() == width &&
+                         reviewTitle->text() == file.path && reviewTitle->isReadOnly() &&
+                         reviewTitle->height() >= reviewTitle->sizeHint().height(),
+                     "long review filename remains readable without widening its window");
+    reviewTitle->setFocus();
+    reviewTitle->selectAll();
+    reviewTitle->copy();
+    result &= expect(QApplication::clipboard()->text() == file.path,
+                     "review filename Copy includes the entire Unicode path");
+    snapshot.files.front().patch += QStringLiteral("\n+updated");
+    provider->snapshotReady(snapshot);
+    result &= expect(reviewTitle->selectedText() == file.path && reviewTitle->hasFocus(),
+                     "changed diff content preserves unchanged filename selection and focus");
+  }
+#if QT_CONFIG(accessibility)
+  for (auto *list : viewer.findChildren<QListWidget *>()) {
+    auto *accessible = QAccessible::queryAccessibleInterface(list);
+    const QString expected = list->objectName() == QStringLiteral("codexDiffFiles")
+                                 ? QStringLiteral("Changed files") : QStringLiteral("Review files");
+    result &= expect(accessible && accessible->text(QAccessible::Name) == expected,
+                     "both file lists have semantic accessible names");
+  }
+  auto *reviewAccessible = QAccessible::queryAccessibleInterface(reviewTitle);
+  result &= expect(reviewAccessible && reviewAccessible->state().readOnly &&
+                       reviewAccessible->text(QAccessible::Name) == QStringLiteral("Selected file") &&
+                       reviewAccessible->text(QAccessible::Value) == file.path,
+                   "review filename is fully represented in accessibility");
+  for (const auto &[objectName, name] : {
+           std::pair{"codexDiffText", "Changes diff"},
+           std::pair{"codexReviewUnified", "Unified diff"},
+           std::pair{"codexReviewBefore", "Before changes"},
+           std::pair{"codexReviewAfter", "After changes"}}) {
+    auto *control = viewer.findChild<QPlainTextEdit *>(QString::fromLatin1(objectName));
+    auto *accessible = QAccessible::queryAccessibleInterface(control);
+    result &= expect(accessible && accessible->state().readOnly &&
+                         accessible->text(QAccessible::Name) == QString::fromLatin1(name),
+                     "preview and review panes expose distinct read-only accessible identities");
+  }
+#endif
+  snapshot.files.clear();
+  provider->snapshotReady(snapshot);
+  result &= expect(title->text().isEmpty() && reviewTitle->text().isEmpty() &&
+                       !copy->isEnabled() && !review->isEnabled(),
+                   "empty changes clear the filename and disable preview actions");
+  return result;
 }
 
 bool testContextSwitchCancelsOldSnapshot() {
@@ -401,6 +557,7 @@ int main(int argc, char **argv) {
   git_libgit2_init();
   bool result = testEmptySnapshotLoadingState();
   result &= testSnapshotMetadataRefresh();
+  result &= testDiffHeadersRemainReadable();
   result &= testContextSwitchCancelsOldSnapshot();
   result &= testLiveWorkingTreeChanges();
   git_libgit2_shutdown();

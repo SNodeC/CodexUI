@@ -98,6 +98,7 @@ FileSelectionDialog::FileSelectionDialog(
   fileSystem->setRootPath(QStringLiteral("/"));
   browser = new QTreeView;
   browser->setObjectName(QStringLiteral("codexFileBrowser"));
+  browser->setAccessibleName(QStringLiteral("Filesystem browser"));
   browser->setModel(fileSystem);
   browser->setRootIsDecorated(false);
   browser->setItemsExpandable(false);
@@ -118,8 +119,9 @@ FileSelectionDialog::FileSelectionDialog(
 
   if (mode == Mode::Attachments) {
     auto *selectionHeader = new QHBoxLayout;
-    selectionHeader->addWidget(
-        dialogLabel(QStringLiteral("Selected files"), "title"));
+    auto *selectionLabel =
+        dialogLabel(QStringLiteral("Selected files"), "title");
+    selectionHeader->addWidget(selectionLabel);
     selectionHeader->addStretch();
     addButton = new QPushButton(QStringLiteral("Add selected"));
     addButton->setFixedHeight(30);
@@ -131,6 +133,8 @@ FileSelectionDialog::FileSelectionDialog(
     root->addLayout(selectionHeader);
 
     attachments = new QListWidget;
+    selectionLabel->setBuddy(attachments);
+    attachments->setAccessibleName(selectionLabel->text());
     attachments->setObjectName(QStringLiteral("codexAttachmentList"));
     attachments->setSelectionMode(QAbstractItemView::ExtendedSelection);
     attachments->setMaximumHeight(128);

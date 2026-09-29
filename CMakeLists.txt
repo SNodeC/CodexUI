@@ -448,6 +448,16 @@ if(BUILD_TESTING)
         endforeach()
     endforeach()
 
+    foreach(thread_dpr IN ITEMS 1 1.25 1.5 2)
+        string(REPLACE "." "_" thread_dpr_name "${thread_dpr}")
+        set(group_benchmark "codexui-thread-groups-performance-10000-dpr-${thread_dpr_name}")
+        add_test(NAME ${group_benchmark}
+            COMMAND codexui-nodegraph-thread-pane-ui-test 10000 ${thread_dpr} gates grouped)
+        set_tests_properties(${group_benchmark} PROPERTIES
+            TIMEOUT 45 RUN_SERIAL TRUE LABELS "performance;qt;thread-pane"
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${thread_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough")
+    endforeach()
+
     add_executable(
         codexui-nodegraph-json-test
         tests/codex/nodegraph/NodeGraphJsonTest.cpp

@@ -3,8 +3,9 @@
 #ifndef CODEXUI_CODEX_NEWTHREADDIALOG_H
 #define CODEXUI_CODEX_NEWTHREADDIALOG_H
 
-#include <QDialog>
+#include "codex/ui/UiStyle.h"
 #include <QString>
+#include <string>
 
 class QCheckBox;
 class QLabel;
@@ -19,9 +20,11 @@ struct NewThreadDraft {
   QString baseInstructions;
   QString developerInstructions;
   bool ephemeral = false;
+  std::string projectId{};
+  std::string sectionId{};
 };
 
-class NewThreadDialog final : public QDialog {
+class NewThreadDialog final : public UiStyle::ScrollFormDialog {
 public:
   enum class Purpose { Create, Fork };
 

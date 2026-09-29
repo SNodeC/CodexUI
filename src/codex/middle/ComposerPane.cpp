@@ -9,6 +9,7 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QDir>
+#include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -150,7 +151,9 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   attachmentListLayout_ = new QVBoxLayout(attachmentContent);
   attachmentListLayout_->setContentsMargins(0, 0, 0, 0);
   attachmentListLayout_->setSpacing(4);
+  attachmentListLayout_->setSizeConstraint(QLayout::SetMinimumSize);
   attachmentListScroll_->setWidget(attachmentContent);
+  attachmentContent->installEventFilter(this);
   attachmentPanelLayout->addWidget(attachmentListScroll_);
   attachmentPanel_->hide();
   composerLayout->addWidget(attachmentPanel_);
@@ -165,7 +168,8 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   attachmentButton_ = new QToolButton(composerBody_);
   attachmentButton_->setProperty("kind", "composerAction");
   attachmentButton_->setIcon(
-      QIcon::fromTheme(QIcon::ThemeIcon::MailAttachment));
+      QIcon::fromTheme(QIcon::ThemeIcon::MailAttachment,
+                       style()->standardIcon(QStyle::SP_FileIcon)));
   attachmentButton_->setIconSize(QSize(16, 16));
   attachmentButton_->setToolTip(QStringLiteral("Attach files"));
   attachmentButton_->setAccessibleName(QStringLiteral("Attach files"));
@@ -175,10 +179,12 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   sendButton_ = new QPushButton(QStringLiteral("Send"), composerBody_);
   sendButton_->setObjectName(QStringLiteral("composerSendButton"));
   sendButton_->setProperty("kind", "primary");
-  sendButton_->setFixedSize(62, ControlHeight);
+  sendButton_->setMinimumSize(62, ControlHeight);
+  sendButton_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
   stopButton_ = new QPushButton(QStringLiteral("Stop"), composerBody_);
   stopButton_->setProperty("kind", "stop");
-  stopButton_->setFixedSize(54, ControlHeight);
+  stopButton_->setMinimumSize(54, ControlHeight);
+  stopButton_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
   stopButton_->hide();
 
   composerGrid_->addWidget(attachmentButton_, 0, 0);
@@ -389,6 +395,7 @@ void ComposerPane::setCanSubmit(bool canSubmit) {
   // entered while earlier submissions await their real app-server callback.
   promptEditor_->setEnabled(true);
   canSubmit_ = canSubmit;
+  stopButton_->setEnabled(canSubmit);
   refreshSubmissionEnabled();
   for (QPushButton *button : attachmentPanel_->findChildren<QPushButton *>())
     button->setEnabled(true);
@@ -426,16 +433,13 @@ void ComposerPane::submitDraft() {
 void ComposerPane::refreshAttachments() {
   refreshSubmissionEnabled();
   clearLayout(attachmentListLayout_);
-  if (attachments_.empty()) {
-    refreshAttachmentGeometry();
-    return;
-  }
+  attachmentPanel_->setVisible(!attachments_.empty());
 
   for (const AttachmentDraft &attachment : attachments_) {
     const std::string attachmentPath = attachment.path;
     const QString attachmentName = text(attachment.name);
     auto *row = new QWidget;
-    row->setFixedHeight(AttachmentRowHeight);
+    row->setMinimumHeight(AttachmentRowHeight);
     auto *rowLayout = new QHBoxLayout(row);
     rowLayout->setContentsMargins(0, 2, 0, 2);
     rowLayout->setSpacing(5);
@@ -444,7 +448,8 @@ void ComposerPane::refreshAttachments() {
     remove->setAccessibleName(
         QStringLiteral("Remove %1").arg(attachmentName));
     remove->setToolTip(QStringLiteral("Remove attachment"));
-    remove->setFixedSize(18, 18);
+    remove->setMinimumSize(18, 18);
+    remove->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     remove->setProperty("kind", "destructiveCompact");
     connect(remove, &QPushButton::clicked, this,
             [this, row, attachmentPath, attachmentName] {
@@ -459,7 +464,7 @@ void ComposerPane::refreshAttachments() {
         delete item;
       row->hide();
       row->deleteLater();
-      refreshAttachmentGeometry();
+      attachmentPanel_->setVisible(!attachments_.empty());
       QWidget *focusTarget = nullptr;
       if (rowIndex >= 0 && rowIndex < attachmentListLayout_->count())
         focusTarget = attachmentListLayout_->itemAt(rowIndex)->widget();
@@ -485,21 +490,27 @@ void ComposerPane::refreshAttachments() {
     rowLayout->addWidget(remove, 0, Qt::AlignVCenter);
     attachmentListLayout_->addWidget(row);
   }
-
-  refreshAttachmentGeometry();
 }
 
-void ComposerPane::refreshAttachmentGeometry() {
-  const bool hasAttachments = !attachments_.empty();
-  attachmentPanel_->setVisible(hasAttachments);
-  if (!hasAttachments) {
-    attachmentListScroll_->setFixedHeight(0);
-    return;
+bool ComposerPane::eventFilter(QObject *watched, QEvent *event) {
+  if (watched == attachmentListScroll_->widget() &&
+      (event->type() == QEvent::LayoutRequest ||
+       event->type() == QEvent::Resize)) {
+    // Qt invalidates these hints on content, font and width changes.
+    const int rows =
+        std::min(attachmentListLayout_->count(), MaximumVisibleAttachments);
+    const int width = attachmentListScroll_->widget()->width();
+    int height = std::max(0, rows - 1) * attachmentListLayout_->spacing();
+    for (int row = 0; row < rows; ++row) {
+      const auto *item = attachmentListLayout_->itemAt(row);
+      const int hint = item->hasHeightForWidth()
+                           ? item->heightForWidth(width)
+                           : item->sizeHint().height();
+      height += std::max(item->minimumSize().height(), hint);
+    }
+    attachmentListScroll_->setFixedHeight(height);
   }
-  const int visibleRows = std::min<int>(static_cast<int>(attachments_.size()),
-                                       MaximumVisibleAttachments);
-  attachmentListScroll_->setFixedHeight(visibleRows * AttachmentRowHeight +
-                                        (visibleRows - 1) * 4);
+  return QWidget::eventFilter(watched, event);
 }
 
 void ComposerPane::refreshAdaptiveLayout() {

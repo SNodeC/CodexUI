@@ -5,9 +5,11 @@
 
 #include "codex/PendingRequestPolicy.h"
 
+#include <functional>
 #include <optional>
 
 class QWidget;
+class QPushButton;
 
 namespace codexui::codex {
 
@@ -15,7 +17,8 @@ class PendingRequestDialog final {
 public:
   [[nodiscard]] static std::optional<PendingRequestSubmission>
   present(const PendingRequestDescriptor &request, QWidget *parent,
-          const PendingRequestSubmission *initialSubmission = nullptr);
+          const PendingRequestSubmission *initialSubmission = nullptr,
+          const std::function<void(QPushButton *)> &observeSubmit = {});
 };
 
 } // namespace codexui::codex

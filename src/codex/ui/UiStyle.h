@@ -5,13 +5,16 @@
 
 #include <QColor>
 #include <QComboBox>
+#include <QDialog>
 #include <QLabel>
+#include <QPlainTextEdit>
 #include <QString>
 #include <QToolButton>
 
 class QPaintEvent;
 class QPainter;
 class QRect;
+class QScrollArea;
 class QWidget;
 
 namespace codexui::UiStyle {
@@ -125,6 +128,30 @@ protected:
   void paintEvent(QPaintEvent *event) override;
 };
 
+class ScrollFormDialog : public QDialog {
+public:
+  explicit ScrollFormDialog(QWidget *parent = nullptr);
+  QScrollArea *formScrollArea() const { return scroll_; }
+  void revealFormFocus(QWidget *control);
+
+protected:
+  bool event(QEvent *event) override;
+  bool focusNextPrevChild(bool next) override;
+
+private:
+  QScrollArea *scroll_;
+};
+
+// Dialog editors keep the active insertion point visible across geometry changes.
+class DialogTextEdit final : public QPlainTextEdit {
+public:
+  explicit DialogTextEdit(QWidget *parent = nullptr);
+
+protected:
+  void changeEvent(QEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
+};
+
 class TokenUsageLabel final : public QLabel {
 public:
   explicit TokenUsageLabel(QWidget *parent = nullptr);
@@ -146,7 +173,9 @@ private:
 
 class ChevronComboBox final : public QComboBox {
 public:
-  using QComboBox::QComboBox;
+  explicit ChevronComboBox(QWidget *parent = nullptr) : QComboBox(parent) {
+    setProperty("codexChevron", true);
+  }
 
 protected:
   void paintEvent(QPaintEvent *event) override;

@@ -11,6 +11,50 @@
 #include <utility>
 
 namespace codexui::nodegraph {
+
+ChannelSendStatus WorkerLogic::threadBrowserState(std::string key,
+                                                  Value::Object fields) {
+  auto write = graph_.write();
+  if (fields.empty()) {
+    if (const auto catalog = write.find({NodeKind::Catalog, key}))
+      write.remove(catalog);
+    return publish(write.finish());
+  }
+  const auto method = exactStringFromValue(valueMember(fields, "method"));
+  const auto truth = [&](std::string_view name) {
+    const auto *value = valueMember(fields, name);
+    return value && value->asBool() && *value->asBool();
+  };
+  if ((method == "project/list" || method == "threadSection/list") &&
+      truth("loaded") && !truth("pending") && !truth("hasMore") &&
+      exactStringFromValue(valueMember(fields, "error")).empty()) {
+    std::unordered_set<std::string> present;
+    const auto *ids = valueMember(fields, "ids");
+    if (ids && ids->asArray())
+      for (const auto &id : *ids->asArray())
+        present.insert(exactStringFromValue(&id));
+    const auto *previous = valueMember(fields, "previousIds");
+    const auto boundary =
+        unsignedIntegerFromValue(valueMember(fields, "startedAt")).value_or(0);
+    if (previous && previous->asArray())
+      for (const auto &value : *previous->asArray()) {
+        const std::string id = exactStringFromValue(&value);
+        if (present.contains(id))
+          continue;
+        const auto node =
+            write.find({method == "project/list" ? NodeKind::Project
+                                                 : NodeKind::ThreadSection,
+                        id});
+        if (node && write.changedRevision(node) <= boundary)
+          removeThreadGroup(write, node);
+      }
+  }
+  const auto catalog = write.upsert({NodeKind::Catalog, std::move(key)});
+  NodeState state;
+  state.fields = std::move(fields);
+  write.replaceState(catalog, std::move(state));
+  return publish(write.finish());
+}
 namespace {
 
 std::string stringField(const NodeState &state, std::string_view name) {
@@ -506,6 +550,7 @@ WorkerLogic::admitFirstPrompt(RuntimeAction action,
           takeObject(action.payload, "turnStart"))
     pending.turnOptions = std::move(*turnOptions);
   pending.requestedName = takeString(action.payload, "requestedName");
+  pending.sectionId = takeString(action.payload, "sectionId");
   pending.options = options ? std::move(*options) : std::move(action.payload);
   return admit(std::move(pending), activityAt, admittedAtMs);
 }
@@ -659,6 +704,8 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
         if (!pending.requestedName.empty())
           promptState.fields.emplace("requestedName",
                                      Value(pending.requestedName));
+        if (!pending.sectionId.empty())
+          promptState.fields.emplace("sectionId", Value(pending.sectionId));
       }
       if (invalidTarget) {
         promptState.fields.emplace("error", Value(invalidTargetReason));
@@ -845,6 +892,7 @@ WorkerLogic::takeNextPrompt(NodeGraph::WriteAccess &write,
     command.attachments = std::move(pending.attachments);
     command.turnOptions = std::move(pending.turnOptions);
     command.requestedName = std::move(pending.requestedName);
+    command.sectionId = std::move(pending.sectionId);
     command.creationCorrelation = std::move(pending.creationCorrelation);
 
     if (!pending.createsThread) {

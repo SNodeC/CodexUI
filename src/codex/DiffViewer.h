@@ -14,6 +14,7 @@
 class QComboBox;
 class QFileSystemWatcher;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
@@ -66,7 +67,7 @@ private:
   QLabel *truncationSummary = nullptr;
   QLabel *additionSummary = nullptr;
   QLabel *deletionSummary = nullptr;
-  QLabel *selectedFile = nullptr;
+  QLineEdit *selectedFile = nullptr;
   QListWidget *files = nullptr;
   QPlainTextEdit *diff = nullptr;
   QPushButton *copyButton = nullptr;

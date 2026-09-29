@@ -78,7 +78,8 @@ public:
 
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread,
-          std::uint64_t *graphRevision = nullptr) const;
+          std::uint64_t *graphRevision = nullptr,
+          const ThreadBrowserOptions *browser = nullptr) const;
 
   [[nodiscard]] std::optional<ThreadListRow>
   threadRow(const nodegraph::NodeRef &thread) const;

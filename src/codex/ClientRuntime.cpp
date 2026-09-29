@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ClientRuntime.h"
+#include "codex/ThreadBrowser.h"
 
 #include "codex/Configuration.h"
 #include "codex/InternalProtocolOperations.h"
@@ -304,6 +305,28 @@ runtimeActionDiagnosticSubject(nodegraph::RuntimeActionKind kind) {
     return "connection/controller/release";
   case RefreshCatalogs:
     return "catalog/refresh";
+  case RefreshThreadGroups:
+    return "thread-groups/refresh";
+  case LoadThreadGroup:
+    return "thread-groups/page";
+  case CreateProject:
+    return "project/create";
+  case UpdateProject:
+    return "project/update";
+  case DeleteProject:
+    return "project/delete";
+  case MoveProject:
+    return "project/move";
+  case CreateSection:
+    return "threadSection/create";
+  case UpdateSection:
+    return "threadSection/update";
+  case DeleteSection:
+    return "threadSection/delete";
+  case AssignProject:
+    return "thread/metadata/update";
+  case AssignSection:
+    return "thread/section/move";
   }
   return "local/runtime-action";
 }
@@ -1050,13 +1073,31 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   std::unordered_set<nodegraph::NodeRef> resumedPromptAdmissions;
   std::unordered_map<nodegraph::NodeRef, nodegraph::PromptCommand>
       promptsWaitingForHydration;
-  bool threadListPending = false;
-  bool threadListRepairPending = false;
-  bool threadListLoadMoreRequested = false;
-  std::uint64_t threadListCycle = 0;
-  std::string threadListNextCursor;
-  std::unordered_set<std::string> threadListSeenCursors;
-  nlohmann::json threadListBaseParameters = nlohmann::json::object();
+  struct BrowserPage {
+    std::string method;
+    nlohmann::json parameters;
+    std::string cursor;
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> ids;
+    std::vector<std::string> previousIds;
+    std::uint64_t startedAt = 0;
+    std::uint64_t cycle = 0;
+    std::uint64_t pending =
+        0; // Exact query cycle owning the in-flight request.
+    bool wanted = false;
+    bool loaded = false;
+    bool repair = false;
+    bool needsRepair = false;
+    bool unsupported = false;
+    std::string error;
+  };
+  std::map<std::string, BrowserPage> browserPages;
+  std::deque<std::string> browserQueue;
+  std::size_t browserReads = 0;
+  std::uint64_t browserEpoch = 0;
+  std::uint64_t browserQuerySequence = 0;
+  std::string activeThreadQuery;
+  std::function<void()> refreshThreadGroups;
   bool modelListPending = false;
   bool permissionProfilesPending = false;
   unsigned accountUsageRefresh = 0; // 0 idle, 1 in flight, 2 follow-up requested.
@@ -1073,13 +1114,11 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     pendingItemPages = 0;
     resumedPromptAdmissions.clear();
     promptsWaitingForHydration.clear();
-    threadListPending = false;
-    threadListRepairPending = false;
-    threadListLoadMoreRequested = false;
-    ++threadListCycle;
-    threadListNextCursor.clear();
-    threadListSeenCursors.clear();
-    threadListBaseParameters = nlohmann::json::object();
+    browserPages.clear();
+    browserQueue.clear();
+    browserReads = 0;
+    ++browserEpoch;
+    activeThreadQuery.clear();
     modelListPending = false;
     permissionProfilesPending = false;
     accountUsageRefresh = 0;
@@ -1270,7 +1309,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 
 #define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)        \
   sdk.on##OperationName([&hydrateHistoricalChildren, &pendingServerRequests,   \
-                         &requestAccountUsage,                                \
+                         &requestAccountUsage, &refreshThreadGroups,           \
                          &workerLogic](                                        \
                             codex::generated::server_notifications::           \
                                 OperationName::Params &notification) {         \
@@ -1297,14 +1336,21 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         nodegraph::DecodedMessageKind::ServerNotification,                     \
         std::string(                                                           \
             codex::generated::server_notifications::OperationName::method),    \
-        std::nullopt, decodedObject(notification.getPayload()), expected,      \
+        std::nullopt,                                                          \
+        decodedObject(notification.getPayload()),                              \
+        expected,                                                              \
         threadActivityAt(                                                      \
             codex::generated::server_notifications::OperationName::method),    \
-        {}, {}, {}}));                                                         \
+        {},                                                                    \
+        {},                                                                    \
+        {}}));                                                                 \
     constexpr std::string_view appliedMethod =                                 \
         codex::generated::server_notifications::OperationName::method;         \
+    if constexpr (appliedMethod == "project/changed")                          \
+      if (refreshThreadGroups)                                                 \
+        refreshThreadGroups();                                                 \
     if (requestAccountUsage && (appliedMethod == "turn/completed" ||           \
-                                appliedMethod == "account/updated"))          \
+                                appliedMethod == "account/updated"))           \
       requestAccountUsage();                                                   \
     if (hydrateHistoricalChildren && (appliedMethod == "item/started" ||       \
                                       appliedMethod == "item/completed")) {    \
@@ -1506,10 +1552,10 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     configuredClient.getConfig()->Instance::setDisabled(false);
     auto *const clientHandle = &configuredClient;
     auto *const config = configuredClient.getConfig();
+    config->Remote::renew();
     selectedTransport = std::move(transport);
     selectedTransportLabel = std::move(label);
-    const std::string connectionLabel = selectedTransportLabel;
-    connectSelected = [&, clientHandle, connectionLabel] {
+    connectSelected = [&, clientHandle, connectionLabel = selectedTransportLabel] {
       publishTransportEvent("retrying", "Connecting using " + connectionLabel);
       selectedFlow = clientHandle->connect(
           [&, connectionLabel](const auto &, core::socket::State state) {
@@ -1741,132 +1787,194 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         return pending;
       };
 
-  const auto normalizedThreadListParameters = [](nlohmann::json parameters) {
-    parameters.erase("cursor");
-    parameters.erase("useStateDbOnly");
-    parameters["sortKey"] = "recency_at";
-    parameters["sortDirection"] = "desc";
-    parameters["limit"] = 100;
-    return parameters;
+  const auto publishBrowserPage = [&](const std::string &key,
+                                      const BrowserPage &page) {
+    static_cast<void>(workerLogic.threadBrowserState(
+        key, decodedObject({{"method", page.method},
+                            {"parameters", page.parameters},
+                            {"ids", page.ids},
+                            {"pending", page.pending || page.wanted},
+                            {"loaded", page.loaded},
+                            {"hasMore", !page.cursor.empty()},
+                            {"unsupported", page.unsupported},
+                            {"error", page.error},
+                            {"previousIds", page.previousIds},
+                            {"startedAt", page.startedAt}})));
   };
 
-  const auto requestThreadListPage =
-      [&](nlohmann::json parameters,
-          std::function<void(RequestOutcome)> completed) {
-        threadListPending = true;
-        dispatchRequest<codex::generated::client_requests::ThreadList>(
-            sdk, std::move(parameters), workerLogic, {},
-            [&,
-             completed = std::move(completed)](RequestOutcome outcome) mutable {
-              threadListPending = false;
-              completed(std::move(outcome));
-            });
-      };
-
-  std::function<void()> requestMoreThreads;
-  requestMoreThreads = [&] {
-    if (threadListPending || threadListRepairPending) {
-      threadListLoadMoreRequested = true;
+  std::function<void()> pumpBrowserPages;
+  const auto queueBrowserPage = [&](const std::string &key, bool refresh) {
+    auto &page = browserPages.at(key);
+    if (page.unsupported)
       return;
+    if (refresh) {
+      page.cycle = ++browserQuerySequence;
+      page.previousIds = page.ids;
+      page.startedAt = graph.publishedRevision();
+      page.cursor.clear();
+      page.seen.clear();
+      page.loaded = false;
     }
-    if (threadListNextCursor.empty())
-      return;
-    const std::string cursor = threadListNextCursor;
-    if (!threadListSeenCursors.insert(cursor).second) {
-      threadListNextCursor.clear();
-      threadListLoadMoreRequested = false;
-      return;
+    if (!page.wanted) {
+      page.wanted = true;
+      browserQueue.push_back(key);
     }
-    const std::uint64_t cycle = threadListCycle;
-    nlohmann::json parameters = threadListBaseParameters;
-    parameters["useStateDbOnly"] = true;
-    parameters["cursor"] = cursor;
-    requestThreadListPage(
-        std::move(parameters), [&, cycle, cursor](RequestOutcome outcome) {
-          if (cycle != threadListCycle)
-            return;
-          if (outcome.stale) {
-            threadListSeenCursors.erase(cursor);
-            threadListLoadMoreRequested = false;
-            return;
-          }
-          if (!outcome.ok) {
-            threadListSeenCursors.erase(cursor);
-            threadListLoadMoreRequested = false;
-            showNotice(outcome.error);
-            return;
-          }
-          threadListNextCursor = std::move(outcome.nextCursor);
-          if (threadListLoadMoreRequested) {
-            threadListLoadMoreRequested = false;
-            requestMoreThreads();
-          }
-        });
+    publishBrowserPage(key, page);
+    pumpBrowserPages();
   };
-
-  const auto requestThreadListRepair = [&](std::uint64_t cycle) {
-    if (cycle != threadListCycle || threadListPending)
-      return;
-    threadListRepairPending = true;
-    nlohmann::json parameters = threadListBaseParameters;
-    parameters["useStateDbOnly"] = false;
-    requestThreadListPage(
-        std::move(parameters), [&, cycle](RequestOutcome outcome) {
-          if (cycle != threadListCycle)
-            return;
-          threadListRepairPending = false;
-          if (outcome.stale)
-            return;
-          if (!outcome.ok) {
-            showNotice(outcome.error);
-            if (threadListLoadMoreRequested) {
-              threadListLoadMoreRequested = false;
-              requestMoreThreads();
-            }
-            return;
-          }
-          threadListNextCursor = std::move(outcome.nextCursor);
-          if (threadListLoadMoreRequested) {
-            threadListLoadMoreRequested = false;
-            requestMoreThreads();
-          }
-        });
-  };
-
-  const auto requestThreadList = [&](nlohmann::json parameters) {
-    if (threadListPending)
-      return;
-    const std::uint64_t cycle = ++threadListCycle;
-    threadListRepairPending = true;
-    threadListLoadMoreRequested = false;
-    threadListNextCursor.clear();
-    threadListSeenCursors.clear();
-    threadListBaseParameters =
-        normalizedThreadListParameters(std::move(parameters));
-    nlohmann::json fastParameters = threadListBaseParameters;
-    fastParameters["useStateDbOnly"] = true;
-    requestThreadListPage(
-        std::move(fastParameters), [&, cycle](RequestOutcome outcome) {
-          if (cycle != threadListCycle)
-            return;
-          if (outcome.stale) {
-            threadListRepairPending = false;
-            return;
-          }
-          if (!outcome.ok) {
-            showNotice(outcome.error);
-          } else {
-            threadListNextCursor = std::move(outcome.nextCursor);
-          }
-          const nodegraph::WorkerGenerations expectedGenerations =
-              workerLogic.generations();
+  pumpBrowserPages = [&] {
+    // One scheduler for catalogs and filtered thread pages. Never recursively
+    // hydrate conversations as a consequence of expanding an organisational
+    // row.
+    while (browserReads < 2 && !browserQueue.empty()) {
+      const std::string key = browserQueue.front();
+      browserQueue.pop_front();
+      auto &page = browserPages.at(key);
+      if (page.pending) {
+        browserQueue.push_back(key);
+        break;
+      }
+      page.wanted = false;
+      if (page.loaded && page.cursor.empty() && !page.repair) {
+        publishBrowserPage(key, page);
+        continue;
+      }
+      const bool repair = std::exchange(page.repair, false);
+      const std::string cursor = repair ? std::string{} : page.cursor;
+      if (!cursor.empty() && !page.seen.insert(cursor).second) {
+        page.error =
+            "The server repeated a pagination cursor. Refresh to retry.";
+        page.cursor.clear();
+        publishBrowserPage(key, page);
+        continue;
+      }
+      page.pending = page.cycle;
+      ++browserReads;
+      publishBrowserPage(key, page);
+      auto parameters = page.parameters;
+      if (!cursor.empty())
+        parameters["cursor"] = cursor;
+      if (page.method == "thread/list")
+        parameters["useStateDbOnly"] = !repair;
+      const auto cycle = page.cycle;
+      const auto epoch = browserEpoch;
+      auto completed = [&, key, cursor, cycle, epoch,
+                        repair](RequestOutcome outcome,
+                                nodegraph::DecodedMessage decoded) {
+        if (epoch != browserEpoch)
+          return;
+        --browserReads;
+        if (!browserPages.contains(key)) {
+          decoded.kind = nodegraph::DecodedMessageKind::ClientError;
+          decoded.payload = {};
+          static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+          pumpBrowserPages();
+          return;
+        }
+        auto &current = browserPages.at(key);
+        if (cycle != current.cycle) {
+          // Retire the request, but do not let an obsolete query apply its
+          // data.
+          decoded.kind = nodegraph::DecodedMessageKind::ClientError;
+          decoded.payload = {};
+          static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+          if (current.pending == cycle)
+            current.pending = 0;
+          pumpBrowserPages();
+          return;
+        }
+        current.pending = false;
+        const auto payload = decoded.payload;
+        static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+        current.error = outcome.ok ? std::string{} : outcome.error;
+        if (!outcome.ok) {
+          const auto code =
+              nodegraph::signedIntegerFromValue(valueMember(payload, "code"));
+          current.unsupported = code && *code == -32601;
+          if (!cursor.empty())
+            current.seen.erase(cursor);
+        } else {
+          if (cursor.empty())
+            current.ids.clear();
+          std::unordered_set<std::string> seen(current.ids.begin(),
+                                               current.ids.end());
+          const auto *data = valueMember(payload, "data");
+          if (data && data->asArray())
+            for (const auto &value : *data->asArray())
+              if (const auto *object = value.asObject()) {
+                const std::string id =
+                    exactStringFromValue(valueMember(*object, "id"));
+                if (!id.empty() && seen.insert(id).second)
+                  current.ids.push_back(id);
+              }
+          current.cursor = std::move(outcome.nextCursor);
+          current.loaded = true;
+        }
+        publishBrowserPage(key, current);
+        // Preserve the existing one initial rollout-repair pass, never one per
+        // project/section. The timer is the existing fast-list-before-repair
+        // seam.
+        if (!repair && cursor.empty() &&
+            std::exchange(current.needsRepair, false)) {
           static_cast<void>(core::timer::Timer::singleshotTimer(
-              [&, cycle, expectedGenerations] {
-                if (workerLogic.generations() == expectedGenerations)
-                  requestThreadListRepair(cycle);
+              [&, key, cycle, epoch] {
+                if (epoch != browserEpoch)
+                  return;
+                auto found = browserPages.find(key);
+                if (found == browserPages.end() || found->second.cycle != cycle)
+                  return;
+                found->second.repair = true;
+                queueBrowserPage(key, false);
               },
               utils::Timeval({0, 50000})));
-        });
+        }
+        pumpBrowserPages();
+      };
+      using namespace codex::generated::client_requests;
+      const auto dispatch = [&]<typename Operation>() {
+        dispatchRequestHandled<Operation>(
+            sdk, std::move(parameters), workerLogic, {},
+            [](const nodegraph::ProtocolRequestId &) {}, std::move(completed));
+      };
+      if (page.method == "project/list")
+        dispatch.template operator()<ProjectList>();
+      else if (page.method == "threadSection/list")
+        dispatch.template operator()<ThreadSectionList>();
+      else
+        dispatch.template operator()<ThreadList>();
+    }
+  };
+
+  const auto requestBrowserPage = [&](std::string method,
+                                      nlohmann::json parameters, bool refresh,
+                                      bool initialRepair = false) {
+    parameters = threadBrowserParameters(method, std::move(parameters));
+    const std::string key = threadBrowserKey(method, parameters);
+    auto [found, inserted] = browserPages.try_emplace(key);
+    if (inserted) {
+      found->second.cycle = ++browserQuerySequence;
+      found->second.method = std::move(method);
+      found->second.parameters = std::move(parameters);
+    }
+    found->second.needsRepair |= initialRepair;
+    if (inserted || refresh ||
+        (!found->second.pending && !found->second.wanted))
+      queueBrowserPage(key, refresh);
+    return key;
+  };
+  const auto requestThreadList = [&](nlohmann::json parameters) {
+    activeThreadQuery =
+        requestBrowserPage("thread/list", std::move(parameters), true, true);
+  };
+  const auto requestMoreThreads = [&] {
+    if (browserPages.contains(activeThreadQuery))
+      queueBrowserPage(activeThreadQuery, false);
+  };
+  refreshThreadGroups = [&] {
+    if (!sdk.providerReady())
+      return;
+    requestBrowserPage("project/list", nlohmann::json::object(), true);
+    requestBrowserPage("threadSection/list", nlohmann::json::object(), true);
   };
 
   const auto requestModelList = [&](nlohmann::json parameters) {
@@ -1914,6 +2022,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 
   hydrateProvider = [&] {
     requestThreadList(nlohmann::json::object());
+    refreshThreadGroups();
     requestModelList(nlohmann::json::object());
     requestPermissionProfiles(nlohmann::json::object());
     requestAccountUsage();
@@ -1992,6 +2101,19 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                   [&showNotice](RequestOutcome renameOutcome) {
                     if (!renameOutcome.stale && !renameOutcome.ok)
                       showNotice(renameOutcome.error);
+                  });
+            }
+            if (!pending->sectionId.empty()) {
+              dispatchRequest<
+                  codex::generated::client_requests::ThreadSectionMove>(
+                  sdk,
+                  {{"threadId", threadId}, {"sectionId", pending->sectionId}},
+                  workerLogic, pending->thread,
+                  [&showNotice](RequestOutcome outcome) {
+                    if (!outcome.stale && !outcome.ok)
+                      showNotice("Thread created, but section assignment "
+                                 "failed. Use Assign section to retry: " +
+                                 outcome.error);
                   });
             }
             dispatchPrompt(std::move(*pending));
@@ -2848,9 +2970,181 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     beginTransition(true, std::move(selection), "local-transport-switch");
   };
 
+  const auto browserMutation = [&]<typename Operation>(
+                                   nlohmann::json parameters) {
+    if (!sdk.providerReady() || !sdk.isController()) {
+      showNotice(
+          "Controller authority changed. No organisation change was sent.");
+      return;
+    }
+    dispatchRequest<Operation>(sdk, std::move(parameters), workerLogic, {},
+                               [&](RequestOutcome outcome) {
+                                 if (outcome.stale)
+                                   return;
+                                 if (!outcome.ok) {
+                                   showNotice(outcome.error);
+                                   return;
+                                 }
+                                 // Responses/notifications own membership.
+                                 // Refresh the already opened queries only; do
+                                 // not crawl unopened groups after a mutation.
+                                 std::vector<std::string> keys;
+                                 for (const auto &[key, page] : browserPages)
+                                   if (!page.unsupported)
+                                     keys.push_back(key);
+                                 for (const auto &key : keys)
+                                   queueBrowserPage(key, true);
+                               });
+  };
   const auto dispatchRuntimeAction = [&](nodegraph::RuntimeAction action) {
     using enum nodegraph::RuntimeActionKind;
     switch (action.kind) {
+    case RefreshThreadGroups:
+      refreshThreadGroups();
+      return;
+    case LoadThreadGroup: {
+      if (!sdk.providerReady())
+        return;
+      auto payload = jsonObject(std::move(action.payload));
+      const std::string method = payload.value("method", "thread/list");
+      if (method != "thread/list" && method != "project/list" &&
+          method != "threadSection/list")
+        return;
+      if (payload.value("reset", false)) {
+        const auto parameters =
+            payload.value("parameters", nlohmann::json::object());
+        for (auto it = browserPages.begin(); it != browserPages.end();) {
+          const auto &page = it->second;
+          if (page.method == "thread/list" &&
+              (page.parameters.value("searchTerm", "") !=
+                   parameters.value("searchTerm", "") ||
+               (!payload.value("includeArchived", false) &&
+                page.parameters.value("archived", false) !=
+                    parameters.value("archived", false)))) {
+            const auto key = it->first;
+            std::erase(browserQueue, key);
+            static_cast<void>(workerLogic.threadBrowserState(key, {}));
+            it = browserPages.erase(it);
+          } else
+            ++it;
+        }
+      }
+      requestBrowserPage(method,
+                         payload.value("parameters", nlohmann::json::object()),
+                         payload.value("refresh", false));
+      return;
+    }
+    case CreateProject:
+    case UpdateProject:
+    case DeleteProject:
+    case MoveProject:
+    case CreateSection:
+    case UpdateSection:
+    case DeleteSection:
+    case AssignProject:
+    case AssignSection: {
+      if (!sdk.providerReady() || !sdk.isController()) {
+        rejectRuntimeAction(
+            action, "Only the controller can change thread organisation.");
+        return;
+      }
+      auto parameters = jsonObject(std::move(action.payload));
+      for (const auto &[field, kind] : std::array{
+               std::pair{"threadId", nodegraph::NodeKind::Thread},
+               std::pair{"projectId", nodegraph::NodeKind::Project},
+               std::pair{"sectionId", nodegraph::NodeKind::ThreadSection}}) {
+        const auto value = parameters.find(field);
+        if (value == parameters.end() || value->is_null() || *value == "")
+          continue;
+        if (!value->is_string() ||
+            !currentNode({kind, value->get<std::string>()})) {
+          rejectRuntimeAction(action,
+                              "The selected thread or group is no longer "
+                              "available. Refresh and try again.");
+          return;
+        }
+      }
+      using namespace codex::generated::client_requests;
+      switch (action.kind) {
+      case CreateProject:
+        if (parameters.value("idempotencyKey", "").empty()) {
+          rejectRuntimeAction(
+              action, "Project creation requires a unique operation identity.");
+          return;
+        }
+        browserMutation.template operator()<ProjectCreate>(
+            std::move(parameters));
+        break;
+      case UpdateProject: {
+        // Metadata is a replacement map, not a patch. Fetch current values on
+        // the worker, preserve other clients' keys, change only our
+        // description.
+        const std::string id = parameters.value("projectId", "");
+        dispatchRequest<ProjectRead>(
+            sdk, {{"projectId", id}}, workerLogic, {},
+            [&, parameters = std::move(parameters),
+             id](RequestOutcome outcome) mutable {
+              if (outcome.stale)
+                return;
+              if (!outcome.ok) {
+                showNotice(outcome.error);
+                return;
+              }
+              const auto state = currentNodeState(
+                  currentNode({nodegraph::NodeKind::Project, id}));
+              if (!state) {
+                showNotice("The project is no longer available.");
+                return;
+              }
+              const auto *metadata = valueMember(*state, "metadata");
+              nlohmann::json updated = metadata ? jsonFromValue(*metadata)
+                                                : nlohmann::json::object();
+              if (parameters.contains("description")) {
+                const std::string description = parameters.at("description");
+                parameters.erase("description");
+                if (description.empty())
+                  updated.erase(ProjectDescriptionKey);
+                else
+                  updated[ProjectDescriptionKey] = description;
+                parameters["metadata"] = std::move(updated);
+              }
+              browserMutation.template operator()<ProjectUpdate>(
+                  std::move(parameters));
+            });
+        break;
+      }
+      case DeleteProject:
+        browserMutation.template operator()<ProjectDelete>(
+            std::move(parameters));
+        break;
+      case MoveProject:
+        browserMutation.template operator()<ProjectMove>(std::move(parameters));
+        break;
+      case CreateSection:
+        browserMutation.template operator()<ThreadSectionCreate>(
+            std::move(parameters));
+        break;
+      case UpdateSection:
+        browserMutation.template operator()<ThreadSectionUpdate>(
+            std::move(parameters));
+        break;
+      case DeleteSection:
+        browserMutation.template operator()<ThreadSectionDelete>(
+            std::move(parameters));
+        break;
+      case AssignProject:
+        browserMutation.template operator()<ThreadMetadataUpdate>(
+            std::move(parameters));
+        break;
+      case AssignSection:
+        browserMutation.template operator()<ThreadSectionMove>(
+            std::move(parameters));
+        break;
+      default:
+        break;
+      }
+      return;
+    }
     case RefreshThreads:
       requestThreadList(jsonObject(std::move(action.payload)));
       return;

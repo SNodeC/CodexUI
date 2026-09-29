@@ -145,6 +145,76 @@ ApplyResult applyCorrelatedResult(ProtocolUpdater &updater,
   return updater.apply(std::move(result));
 }
 
+void groupedListsPreserveInterveningAssignments() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const Value::Object oldThread{
+      {"id", "group-thread"},
+      {"name", "Grouped thread"},
+      {"projectId", "project-one"},
+      {"section", Value::Object{{"id", "section-one"}, {"name", "One"}}}};
+  static_cast<void>(
+      applyCorrelatedResult(updater, {DecodedMessageKind::ClientResult,
+                                      "thread/list",
+                                      {},
+                                      {{"data", Value::Array{oldThread}}}}));
+  const ProtocolRequestId pageId("older-group-page");
+  const auto page = updater.apply({DecodedMessageKind::ClientRequest,
+                                   "thread/list",
+                                   pageId,
+                                   {{"projectId", "project-one"}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification,
+       "thread/project/updated",
+       {},
+       {{"threadId", "group-thread"}, {"projectId", "project-two"}}}));
+  static_cast<void>(applyCorrelatedResult(
+      updater,
+      {DecodedMessageKind::ClientResult, "thread/section/move", {}, {}},
+      {{"threadId", "group-thread"}, {"sectionId", "section-two"}}));
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+                                   "thread/list",
+                                   pageId,
+                                   {{"data", Value::Array{oldThread}}},
+                                   page.primary}));
+  {
+    auto read = graph.tryRead();
+    const auto thread = read->find({NodeKind::Thread, "group-thread"});
+    const auto project = read->related(thread, RelationKind::ProjectMembership);
+    const auto section = read->related(thread, RelationKind::SectionMembership);
+    require(project.size() == 1 &&
+                project.front()->id().canonical == "project-two" &&
+                section.size() == 1 &&
+                section.front()->id().canonical == "section-two",
+            "a delayed filtered page cannot undo newer project or section "
+            "assignments");
+  }
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification,
+       "project/changed",
+       {},
+       {{"projectId", "project-two"}, {"changeType", "deleted"}}}));
+  {
+    auto read = graph.tryRead();
+    const auto thread = read->find({NodeKind::Thread, "group-thread"});
+    require(thread && !read->find({NodeKind::Project, "project-two"}) &&
+                read->related(thread, RelationKind::ProjectMembership).empty(),
+            "a project deletion notification removes grouping, not its thread");
+  }
+  static_cast<void>(applyCorrelatedResult(
+      updater,
+      {DecodedMessageKind::ClientResult, "thread/section/move", {}, {}},
+      {{"threadId", "group-thread"}, {"sectionId", nullptr}}));
+  {
+    auto read = graph.tryRead();
+    const auto thread = read->find({NodeKind::Thread, "group-thread"});
+    require(thread &&
+                read->related(thread, RelationKind::SectionMembership).empty(),
+            "an empty success result applies explicit-null section removal "
+            "through request correlation");
+  }
+}
+
 void catalogIsComplete() {
   const auto methods = protocolMethods();
   require(methods.size() == 257, "catalog has all 257 methods");
@@ -5335,6 +5405,7 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
 
 int main() {
   catalogIsComplete();
+  groupedListsPreserveInterveningAssignments();
   everyKnownMethodDispatches();
   nestedEntitiesAndStreamsStayCurrent();
   streamedTextIsBoundedAndReportsOmission();

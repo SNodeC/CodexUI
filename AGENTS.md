@@ -2,6 +2,10 @@
 
 The global engineering instructions in `~/.codex/AGENTS.md` apply in full.
 
+## Required reading: native interactive qualification
+
+[Canonical interactive Xvfb test suite and visual approval matrix](docs/native-ui-ux-qualification-inventory.md).
+
 ## System boundaries
 
 - `NodeGraph` is the authoritative application-state boundary.

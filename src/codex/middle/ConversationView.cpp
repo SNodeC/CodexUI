@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QPaintEvent>
 #include <QPainter>
@@ -813,6 +814,22 @@ ConversationView::ConversationView(QWidget *parent)
                 selectionModel()->setCurrentIndex(
                     index, QItemSelectionModel::NoUpdate);
                 setAutoScroll(autoScroll);
+                if (!applying_ && focused != focusedCard &&
+                    window()->testAttribute(Qt::WA_KeyboardFocusChange)) {
+                  const QRect bounds(focused->mapTo(viewport(), QPoint{}),
+                                     focused->size());
+                  const int above = bounds.top();
+                  const int below = bounds.bottom() - viewport()->height() + 1;
+                  // Reveal the control, not its entire card. A text surface
+                  // spanning both viewport edges already needs no movement.
+                  const int delta =
+                      std::clamp(0, std::min(above, below), std::max(above, below));
+                  if (delta != 0) {
+                    const int value = verticalScrollBar()->value() + delta;
+                    handleUserScrollValue(value);
+                    setScrollValue(value);
+                  }
+                }
               }
             }
           });
@@ -2488,7 +2505,7 @@ void ConversationView::scheduleInteractiveResizeReflow() {
 
 void ConversationView::reflowAfterResize(ReflowCause cause) {
   const bool invalidateEnvironment = cause == ReflowCause::Environment;
-  if (applying_ || materializing_) {
+  if (applying_ || materializing_ || geometryEnvironmentReflowPending_) {
     if (cause == ReflowCause::ResizeFrame)
       scheduleInteractiveResizeReflow();
     return;
@@ -3549,7 +3566,13 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
 }
 
 void ConversationView::wheelEvent(QWheelEvent *event) {
-  QAbstractItemView::wheelEvent(event);
+  if (event->angleDelta().isNull() && !event->pixelDelta().isNull()) {
+    verticalScrollBar()->setValue(verticalScrollBar()->value() -
+                                  event->pixelDelta().y());
+    event->accept();
+  } else {
+    QAbstractItemView::wheelEvent(event);
+  }
   const int verticalDelta = !event->pixelDelta().isNull()
                                 ? event->pixelDelta().y()
                                 : event->angleDelta().y();
@@ -3559,22 +3582,21 @@ void ConversationView::wheelEvent(QWheelEvent *event) {
 
 bool ConversationView::event(QEvent *event) {
   const bool keyboardInput = event->type() == QEvent::KeyPress;
+  const int key = keyboardInput ? static_cast<QKeyEvent *>(event)->key() : 0;
+  const bool rowNavigation =
+      key == Qt::Key_Home || key == Qt::Key_End || key == Qt::Key_PageUp ||
+      key == Qt::Key_PageDown || key == Qt::Key_Up || key == Qt::Key_Down;
   const bool focusChange =
       event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut;
   if (keyboardInput)
     window()->setAttribute(Qt::WA_KeyboardFocusChange, true);
-  const bool handled = QAbstractItemView::event(event);
-  if (keyboardInput || focusChange)
-    updateFocusDecoration(currentIndex());
-  bool geometryEnvironmentChanged = event->type() == QEvent::FontChange ||
-                                    event->type() == QEvent::StyleChange;
-  geometryEnvironmentChanged = geometryEnvironmentChanged ||
-                               event->type() == QEvent::DevicePixelRatioChange;
+  const bool geometryEnvironmentChanged =
+      event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange ||
+      event->type() == QEvent::DevicePixelRatioChange;
   if (geometryEnvironmentChanged && stagingHost_ &&
       !geometryEnvironmentReflowPending_) {
-    // Application stylesheet repolish can notify this view before its
-    // descendants. Reconcile after that event batch so every renderer cache
-    // observes one final effective font/style/DPR.
+    // Styling can synchronously resize/scroll the viewport. Reconcile once
+    // repolish finishes traversing widgets with their final font/style/DPR.
     geometryEnvironmentReflowPending_ = true;
     QMetaObject::invokeMethod(
         this,
@@ -3584,6 +3606,23 @@ bool ConversationView::event(QEvent *event) {
         },
         Qt::QueuedConnection);
   }
+  // Qt owns selection; explicit navigation owns the reveal, including when
+  // the current index is unchanged. Automatic reveals must retain follow mode.
+  const bool autoScroll = hasAutoScroll();
+  if (rowNavigation)
+    setAutoScroll(false);
+  const bool handled = QAbstractItemView::event(event);
+  if (rowNavigation) {
+    setAutoScroll(autoScroll);
+    const ScrollHint hint = key == Qt::Key_Home ? PositionAtTop
+                            : key == Qt::Key_End ? PositionAtBottom
+                                                : EnsureVisible;
+    revealRow(currentIndex(), hint, true);
+    if (currentIndex().isValid())
+      event->accept();
+  }
+  if (keyboardInput || focusChange)
+    updateFocusDecoration(currentIndex());
   return handled;
 }
 

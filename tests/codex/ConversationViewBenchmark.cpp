@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QPersistentModelIndex>
 #include <QPlainTextEdit>
+#include <QProxyStyle>
 #include <QScreen>
 #include <QScrollBar>
 #include <QStyle>
@@ -1037,6 +1038,19 @@ QJsonObject statsJson(const SampleStats &stats) {
 
 int main(int argc, char **argv) {
   BenchmarkApplication application(argc, argv);
+  // Geometry/no-op pixel checks require a stationary presentation. Accepted
+  // local prompts still animate until authoritative conversation entry; their
+  // normal-motion lifecycle is covered by ConversationCardsTest.
+  class ReducedMotionStyle final : public QProxyStyle {
+    int styleHint(StyleHint hint, const QStyleOption *option,
+                  const QWidget *widget,
+                  QStyleHintReturn *returnData) const override {
+      return hint == SH_Widget_Animation_Duration
+                 ? 0
+                 : QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+  };
+  application.setStyle(new ReducedMotionStyle);
   using namespace codexui::codex::middle;
   const QString activeApplicationStyle = qApp->style()->name();
   const QString activeApplicationStyleClass =
@@ -1455,6 +1469,10 @@ int main(int argc, char **argv) {
         structuralCommitCorrect && rootAActive &&
         structuralCommitSampleCount ==
             static_cast<std::size_t>(StructuralCommitSamples);
+    // Even a failed/partially applied swap must not turn the later independent
+    // no-op check into a real root replacement.
+    static_cast<void>(view.reconcile(ConversationSnapshot{canonical}));
+    processFrame();
   }
 
   QScrollBar *const scrollBar = view.verticalScrollBar();

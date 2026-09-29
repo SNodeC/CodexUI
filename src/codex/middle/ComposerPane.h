@@ -72,7 +72,7 @@ public:
 private:
   void submitDraft();
   void refreshAttachments();
-  void refreshAttachmentGeometry();
+  bool eventFilter(QObject *watched, QEvent *event) override;
   void refreshAdaptiveLayout();
   void refreshActionStyle();
   void refreshSubmissionEnabled();

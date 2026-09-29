@@ -13,6 +13,7 @@
 #include <QStyleOptionToolButton>
 #include <QCursor>
 #include <QScreen>
+#include <QScrollArea>
 #include <QKeyEvent>
 #include <QWidget>
 
@@ -24,6 +25,54 @@ namespace codexui::UiStyle {
 bool animationsEnabled(const QWidget &widget) {
   return widget.style()->styleHint(QStyle::SH_Widget_Animation_Duration,
                                    nullptr, &widget) > 0;
+}
+
+ScrollFormDialog::ScrollFormDialog(QWidget *parent)
+    : QDialog(parent), scroll_(new QScrollArea(this)) {
+  scroll_->setWidgetResizable(true);
+  scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+}
+
+bool ScrollFormDialog::event(QEvent *event) {
+  const bool handled = QDialog::event(event);
+  // Qt lays out the dialog before delivering these geometry events.
+  if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::Resize)
+    revealFormFocus(focusWidget());
+  return handled;
+}
+
+bool ScrollFormDialog::focusNextPrevChild(bool next) {
+  if (!QDialog::focusNextPrevChild(next))
+    return false;
+  revealFormFocus(focusWidget());
+  return true;
+}
+
+void ScrollFormDialog::revealFormFocus(QWidget *control) {
+  if (control && control->hasFocus() && scroll_->isAncestorOf(control))
+    scroll_->ensureWidgetVisible(control);
+}
+
+DialogTextEdit::DialogTextEdit(QWidget *parent) : QPlainTextEdit(parent) {
+  // Settle the inner caret before enclosing forms consume its cursor rectangle.
+  connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this] {
+    if (hasFocus() && !isReadOnly())
+      ensureCursorVisible();
+  });
+}
+
+void DialogTextEdit::changeEvent(QEvent *event) {
+  QPlainTextEdit::changeEvent(event);
+  if ((event->type() == QEvent::FontChange ||
+       event->type() == QEvent::ApplicationFontChange) && hasFocus() && !isReadOnly())
+    ensureCursorVisible();
+}
+
+void DialogTextEdit::resizeEvent(QResizeEvent *event) {
+  QPlainTextEdit::resizeEvent(event);
+  // The viewport and document now have their final width for this resize.
+  if (hasFocus() && !isReadOnly())
+    ensureCursorVisible();
 }
 
 QLabel *makeLabel(QString value, const char *kind, QWidget *parent) {
@@ -239,14 +288,14 @@ QString applicationStyleSheet() {
             font-size: %{compact}pt;
             font-weight: 600;
         }
-        QLabel[kind="heading"] { font-size: %{heading}pt; font-weight: 600; }
+        QLabel[kind="heading"], QLineEdit[kind="heading"] { font-size: %{heading}pt; font-weight: 600; }
         QLabel[kind="applicationTitle"] { font-weight: 700; }
         QLabel[kind="brand"] { font-size: %{section}pt; font-weight: 600; }
-        QLabel[kind="title"] { font-size: %{standard}pt; font-weight: 600; }
+        QLabel[kind="title"], QLineEdit[kind="title"] { font-size: %{standard}pt; font-weight: 600; }
         QLabel[kind="messagePhase"] { font-size: %{standard}pt; font-weight: 400; }
         QLabel[kind="messagePhase"][tone="steering"] { color: %{tealText}; }
         QLabel[kind="body"] { font-size: %{standard}pt; }
-        QLabel[kind="code"] { font-family: monospace; font-size: %{standard}pt; font-weight: 400; }
+        QLabel[kind="code"], QLineEdit[kind="code"] { font-family: monospace; font-size: %{standard}pt; font-weight: 400; }
         QLabel[kind="meta"] { color: %{secondary}; font-size: %{compact}pt; }
         QLabel[kind="meta"][tone="strong"] { color: %{primary}; }
         QLabel[kind="small"] { color: %{secondary}; font-size: %{compact}pt; }
@@ -272,14 +321,13 @@ QString applicationStyleSheet() {
             font-weight: 600;
         }
         QPushButton[comboPeer="true"] { min-height: 30px; max-height: 30px; }
+        QDialogButtonBox QPushButton { min-height: 30px; padding: 3px 12px; }
         QPushButton:hover, QToolButton:hover { background: %{hover}; border-color: %{dividerStrong}; }
         QPushButton:pressed, QToolButton:pressed { background: %{blueSelected}; border-color: %{blueBorder}; }
         QPushButton:focus, QToolButton:focus { border-color: %{blue}; }
-        QPushButton:disabled, QToolButton:disabled { color: %{placeholder}; background: %{appBackground}; border-color: %{divider}; }
         QPushButton[kind="primary"] { background: %{blue}; border-color: %{blue}; color: %{onAccent}; }
         QPushButton[kind="primary"]:hover { background: %{blueHover}; border-color: %{blueHover}; }
         QPushButton[kind="primary"]:pressed { background: %{bluePressed}; border-color: %{bluePressed}; }
-        QPushButton[kind="primary"]:disabled { color: %{placeholder}; background: %{appBackground}; border-color: %{divider}; }
         QPushButton[kind="history"] { background: %{blueSelected}; border-color: %{blueBorder}; color: %{blueText}; }
         QPushButton[kind="history"]:hover { background: %{blueSelectedHover}; border-color: %{blueBorderHover}; }
         QPushButton[kind="request"] { background: %{orangeSurface}; border-color: %{orangeBorder}; color: %{orangeText}; }
@@ -287,7 +335,6 @@ QString applicationStyleSheet() {
         QPushButton[kind="steer"] { background: %{teal}; border-color: %{teal}; color: %{onAccent}; }
         QPushButton[kind="steer"]:hover { background: %{tealHover}; border-color: %{tealHover}; color: %{onAccent}; }
         QPushButton[kind="steer"]:pressed { background: %{tealPressed}; border-color: %{tealPressed}; color: %{onAccent}; }
-        QPushButton[kind="steer"]:disabled { color: %{placeholder}; background: %{appBackground}; border-color: %{divider}; }
         QPushButton[kind="cancel"] { background: %{neutralSurface}; border-color: %{neutralBorder}; color: %{secondaryStrong}; }
         QPushButton[kind="cancel"]:hover { background: %{neutralSurfaceHover}; border-color: %{neutralBorderHover}; }
         QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
@@ -354,6 +401,7 @@ QString applicationStyleSheet() {
         QPushButton[kind="destructiveCompact"] { background: %{red}; border: 0; color: %{onAccent}; border-radius: 4px; padding: 0; font-weight: 700; }
         QPushButton[kind="destructiveCompact"]:hover { background: %{redHover}; }
         QPushButton[kind="destructiveCompact"]:pressed { background: %{redPressed}; }
+        QPushButton:disabled, QToolButton:disabled, QPushButton[kind]:disabled, QToolButton[kind]:disabled { color: %{placeholder}; background: %{appBackground}; border-color: %{divider}; }
         QPushButton[codexChevron="true"] { padding-right: 20px; }
         QPushButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
         QToolButton[codexChevron="true"] { padding-right: 20px; }
@@ -620,11 +668,13 @@ QString applicationStyleSheet() {
         QSplitter::handle { background: %{divider}; }
         QSplitter::handle:horizontal { width: 8px; }
         QTabBar { background: transparent; }
+        QTabBar QToolButton { padding: 0; }
         QTabBar::tab {
             background: transparent;
             color: %{secondary};
-            min-width: 62px;
-            height: 32px;
+            min-width: 42px;
+            min-height: 32px;
+            padding: 0 10px;
             border-radius: 7px;
             font-size: %{compact}pt;
         }

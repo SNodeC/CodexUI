@@ -108,15 +108,12 @@ private:
   QLabel *protocolStats = nullptr;
 
   std::deque<std::string> expandedAgentIds;
-  QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;
   std::deque<QString> pendingProtocolLines;
   std::uint64_t observedSequence = 0;
   std::size_t protocolTelemetryCount = 0;
   bool protocolFollowsTail = true;
-  bool mutatingProtocolLog = false;
-  int protocolPausedScrollValue = 0;
   std::uint64_t protocolScrollRevision = 0;
 };
 

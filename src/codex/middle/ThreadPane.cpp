@@ -3,6 +3,7 @@
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/TimingPresentation.h"
 
+#include "codex/ThreadBrowser.h"
 #include "codex/UiStatus.h"
 #include "codex/middle/MiddleTypes.h"
 #include "codex/ui/UiStyle.h"
@@ -12,29 +13,40 @@
 #include <QAccessibleWidget>
 #include <QActionGroup>
 #include <QCollator>
+#include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QEvent>
+#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QInputDialog>
 #include <QItemSelectionModel>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLinearGradient>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QSettings>
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <QVariant>
 
@@ -140,6 +152,15 @@ public:
   bool draft = false;
   bool awaitingPrompt = false;
   qint64 animationEpoch = 0;
+  ui::ThreadRowKind kind = ui::ThreadRowKind::Thread;
+  std::string projectId;
+  std::string sectionId;
+  nodegraph::NodeRef parentThread;
+  std::string details;
+  std::int64_t order = 0;
+  nlohmann::json query;
+  bool pendingPage = false;
+  std::string appearanceColor;
 #if QT_CONFIG(accessibility)
   QAccessible::Id accessibleId = 0;
 #endif
@@ -184,6 +205,7 @@ public:
   [[nodiscard]] bool isContextHighlighted(const ThreadTreeItem *item) const {
     return item && item->presentationKey == owner_->contextPresentationKey;
   }
+  void activateItem(ThreadTreeItem *item) { owner_->activateBrowserRow(item); }
   void restoreViewportY(ThreadTreeItem *item, int y) {
     if (!item)
       return;
@@ -200,6 +222,16 @@ public:
   }
   template <typename Row>
   [[nodiscard]] bool rowBefore(const Row &left, const Row &right) const {
+    if (left.kind != right.kind)
+      return left.kind < right.kind;
+    if (left.kind == ui::ThreadRowKind::Section)
+      return alphaBefore(left.title, left.id, right.title, right.id);
+    if ((left.kind == ui::ThreadRowKind::Project &&
+         owner_->browserOptions().manualProjects) ||
+        (left.kind == ui::ThreadRowKind::Thread && !left.sectionId.empty() &&
+         owner_->browserOptions().manualSections))
+      return left.order != right.order ? left.order < right.order
+                                       : left.id < right.id;
     const auto criterion = owner_->currentSortCriterion();
     if (criterion == ThreadPane::SortCriterion::Alphanumeric)
       return alphaBefore(left.title, left.id, right.title, right.id);
@@ -247,6 +279,8 @@ protected:
     QTreeWidget::showEvent(event);
     owner_->updateAnimationTimer();
     owner_->requestMoreNearListEnd();
+    if (owner_->providerReady && owner_->actions.refreshGroups)
+      owner_->actions.refreshGroups();
   }
 
   void resizeEvent(QResizeEvent *event) override {
@@ -311,7 +345,9 @@ ThreadTreeItem::~ThreadTreeItem() {
 
 bool ThreadTreeItem::operator<(const QTreeWidgetItem &other) const {
   const auto &right = static_cast<const ThreadTreeItem &>(other);
-  return draft != right.draft ? draft : owner->rowBefore(*this, right);
+  return kind == right.kind && draft != right.draft
+             ? draft
+             : owner->rowBefore(*this, right);
 }
 
 namespace {
@@ -322,6 +358,10 @@ QString displayTitle(const ThreadTreeItem &item) {
     result = text(item.id.substr(0, 12));
   if (item.pending != 0)
     result.prepend(QStringLiteral("! "));
+  if (item.kind == ui::ThreadRowKind::Project)
+    result.prepend(QStringLiteral("Project · "));
+  else if (item.kind == ui::ThreadRowKind::Section && !item.parent())
+    result.prepend(QStringLiteral("Section · "));
   return result;
 }
 
@@ -334,6 +374,8 @@ int itemLevel(const ThreadTreeItem *item) {
 }
 
 QString itemDescription(const ThreadTreeItem &item) {
+  if (item.kind != ui::ThreadRowKind::Thread)
+    return displayTitle(item) + QLatin1Char('\n') + text(item.details);
   QStringList details{
       displayTitle(item),
       QStringLiteral("Status: %1").arg(text(displayStatus(item.status))),
@@ -392,9 +434,51 @@ public:
     effective.rect = row;
     if (tree_->isContextHighlighted(item))
       effective.state |= QStyle::State_MouseOver;
-    QStyledItemDelegate::paint(painter, effective, index);
+    const auto *outer = item;
+    while (outer->parent())
+      outer = tree_->threadItem(outer->parent());
+    const bool grouped = outer->kind == ui::ThreadRowKind::Project ||
+                         outer->kind == ui::ThreadRowKind::Section;
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
+    if (!grouped && item->kind != ui::ThreadRowKind::Page) {
+      const bool selected = effective.state.testFlag(QStyle::State_Selected);
+      const bool hovered = effective.state.testFlag(QStyle::State_MouseOver);
+      painter->setPen(
+          QColor(QString::fromLatin1(selected  ? UiStyle::blueBorder
+                                     : hovered ? UiStyle::dividerStrong
+                                               : UiStyle::divider)));
+      painter->setBrush(
+          QColor(QString::fromLatin1(selected  ? UiStyle::blueSelected
+                                     : hovered ? UiStyle::hover
+                                               : UiStyle::panel)));
+      painter->drawRoundedRect(QRectF(row).adjusted(0.5, 3.5, -0.5, -3.5), 8,
+                               8);
+    }
+    if (!grouped && item->kind == ui::ThreadRowKind::Page)
+      painter->fillRect(row, QColor(QString::fromLatin1(UiStyle::sidebar)));
+    if (grouped) {
+      // Paint only this row's slice of the enclosing card. Qt continues to own
+      // row geometry, disclosure, input and accessibility; no container
+      // widgets.
+      const auto *last = outer;
+      while (last->isExpanded() && last->childCount())
+        last = tree_->threadItem(last->child(last->childCount() - 1));
+      QRectF surface = tree_->rowRect(tree_->indexFromItem(outer));
+      surface.setBottom(tree_->rowRect(tree_->indexFromItem(last)).bottom());
+      surface.adjust(0.5, 3.5, -0.5, -3.5);
+      painter->setClipRect(row, Qt::IntersectClip);
+      painter->setPen(QColor(QString::fromLatin1(UiStyle::blueBorder)));
+      painter->setBrush(QColor(QString::fromLatin1(UiStyle::panel)));
+      painter->drawRoundedRect(surface, 8.0, 8.0);
+      QPainterPath clip;
+      clip.addRoundedRect(surface.adjusted(1, 1, -1, -1), 7, 7);
+      painter->setClipPath(clip, Qt::IntersectClip);
+      if (effective.state.testFlag(QStyle::State_Selected) ||
+          effective.state.testFlag(QStyle::State_MouseOver))
+        painter->fillRect(row.adjusted(2, 0, -2, 0),
+                          QColor(QString::fromLatin1(UiStyle::blueSurface)));
+    }
 
     const bool feedback = item->draft || item->awaitingPrompt;
     const QRectF feedbackSurface = QRectF(row).adjusted(1.0, 4.0, -1.0, -4.0);
@@ -405,7 +489,10 @@ public:
           item->draft ? 1.0 : 1.5));
       painter->setBrush(QColor(QString::fromLatin1(
           item->draft ? UiStyle::orangeSurface : UiStyle::blueSurface)));
-      painter->drawRoundedRect(feedbackSurface, 8.0, 8.0);
+      if (grouped)
+        painter->fillRect(row.adjusted(2, 0, -2, 0), painter->brush());
+      else
+        painter->drawRoundedRect(feedbackSurface, 8.0, 8.0);
     }
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -447,17 +534,29 @@ public:
                             QRectF(row).center().y());
     painter->setPen(Qt::NoPen);
     painter->setBrush(statusColor(item->status, item->pending, item->draft));
-    painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
+    if (item->kind == ui::ThreadRowKind::Thread)
+      painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
+    else if (!item->appearanceColor.empty()) {
+      const QColor color(text(item->appearanceColor));
+      if (color.isValid()) {
+        painter->setBrush(color);
+        painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
+      }
+    }
 
     QFont titleFont = option.font;
-    titleFont.setWeight(QFont::Medium);
+    titleFont.setWeight(item->kind == ui::ThreadRowKind::Thread
+                            ? QFont::Medium
+                            : QFont::DemiBold);
     painter->setFont(titleFont);
     painter->setPen(QColor(QString::fromLatin1(UiStyle::primary)));
     const QRect titleRect(contentLeft + 24, row.top(),
                           row.right() - contentLeft - 31, row.height());
     const QString title = QFontMetrics(titleFont).elidedText(
-        displayTitle(*item), Qt::ElideRight, titleRect.width());
-    painter->drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, title);
+        displayTitle(*item).simplified(), Qt::ElideRight, titleRect.width());
+    painter->drawText(titleRect,
+                      Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
+                      title);
     if (item->childCount() != 0) {
       const QRect indicator(itemRect.left() - ThreadIndent +
                                 DisclosureIndicatorOffset,
@@ -624,6 +723,9 @@ public:
       tree_->setCurrentItem(current);
       current->setSelected(true);
       tree_->setFocus(Qt::OtherFocusReason);
+      if (action == QAccessibleActionInterface::pressAction() &&
+          current->kind != ui::ThreadRowKind::Thread)
+        tree_->activateItem(current);
     }
   }
   QStringList keyBindingsForAction(const QString &action) const override {
@@ -997,12 +1099,113 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
        {SortCriterion::Created,
         addSortAction(QStringLiteral("Created"), SortCriterion::Created)},
        {SortCriterion::Recency,
-        addSortAction(QStringLiteral("Recent"), SortCriterion::Recency)}}};
+        addSortAction(QStringLiteral("Recent"), SortCriterion::Recency)},
+       {SortCriterion::SectionOrder,
+        addSortAction(QStringLiteral("Section order"),
+                      SortCriterion::SectionOrder)}}};
   sortButton->setMenu(sortMenu);
   sortButton->setToolTip(QStringLiteral("Sort threads"));
+  sortActions.back().action->setToolTip(
+      QStringLiteral("Server section order. In All, active threads precede "
+                     "archived threads, each in its server order."));
   updateSortButton();
   toolbar->addWidget(sortButton);
+  groupButton = new UiStyle::ChevronToolButton;
+  groupButton->setObjectName(QStringLiteral("threadGroupingButton"));
+  groupButton->setText(QStringLiteral("Projects"));
+  groupButton->setAccessibleName(QStringLiteral("Group threads"));
+  groupButton->setToolTip(QStringLiteral("Group threads"));
+  groupButton->setProperty("kind", "subtle");
+  groupButton->setProperty("codexChevron", true);
+  groupButton->setMinimumHeight(28);
+  groupButton->setPopupMode(QToolButton::InstantPopup);
+  auto *groupsMenu = new QMenu(groupButton);
+  auto *groupModes = new QActionGroup(groupsMenu);
+  for (const auto &[label, mode] : std::array{
+           std::pair{QStringLiteral("Projects → Sections"),
+                     ui::ThreadGrouping::Projects},
+           std::pair{QStringLiteral("Sections"), ui::ThreadGrouping::Sections},
+           std::pair{QStringLiteral("Ungrouped"),
+                     ui::ThreadGrouping::Ungrouped}}) {
+    auto *action = groupsMenu->addAction(label, this, [this, mode] {
+      browser.grouping = mode;
+      changeBrowser();
+    });
+    action->setCheckable(true);
+    action->setData(static_cast<int>(mode));
+    groupModes->addAction(action);
+  }
+  auto *manual = groupsMenu->addAction(QStringLiteral("Manual project order"));
+  manual->setCheckable(true);
+  connect(manual, &QAction::toggled, this, [this](bool enabled) {
+    browser.manualProjects = enabled;
+    changeBrowser();
+  });
+  groupsMenu->addSeparator();
+  groupsMenu->addAction(QStringLiteral("New project…"), this, [this] {
+    if (canControl)
+      editGroup(true);
+  });
+  groupsMenu->addAction(QStringLiteral("New section…"), this, [this] {
+    if (canControl)
+      editGroup(false);
+  });
+  groupsMenu->addAction(QStringLiteral("Refresh groups"), this, [this] {
+    if (actions.refreshGroups)
+      actions.refreshGroups();
+  });
+  for (const auto &[label, method] : std::array{
+           std::pair{QStringLiteral("Load more projects"), "project/list"},
+           std::pair{QStringLiteral("Load more sections"),
+                     "threadSection/list"}})
+    groupsMenu->addAction(label, this, [this, method] {
+      if (actions.browse)
+        actions.browse(
+            {{"method", method}, {"parameters", nlohmann::json::object()}});
+    });
+  groupButton->setMenu(groupsMenu);
+  connect(groupsMenu, &QMenu::aboutToShow, this,
+          [this, groupsMenu, manual, groupModes] {
+    for (auto *action : groupModes->actions())
+      action->setChecked(action->data().toInt() ==
+                         static_cast<int>(browser.grouping));
+    QSignalBlocker blocked(manual);
+    manual->setChecked(browser.manualProjects);
+    for (auto *action : groupsMenu->actions())
+      if (action->text().startsWith(QStringLiteral("New ")))
+        action->setEnabled(canControl && groupingAvailable);
+  });
+  toolbar->insertWidget(0, groupButton);
   layout->addLayout(toolbar);
+  auto *filters = new QHBoxLayout;
+  auto *search = new QLineEdit;
+  search->setObjectName(QStringLiteral("threadTitleSearch"));
+  search->setPlaceholderText(QStringLiteral("Search titles · Enter"));
+  search->setAccessibleName(QStringLiteral("Search thread titles"));
+  search->setMinimumWidth(0);
+  search->setClearButtonEnabled(true);
+  auto *archive = new UiStyle::ChevronComboBox;
+  archive->setObjectName(QStringLiteral("threadArchiveFilter"));
+  archive->addItems({QStringLiteral("Active"), QStringLiteral("Archived"),
+                     QStringLiteral("All")});
+  archive->setAccessibleName(QStringLiteral("Thread archive filter"));
+  connect(search, &QLineEdit::returnPressed, this, [this, search] {
+    browser.title = search->text().trimmed().toUtf8().toStdString();
+    changeBrowser();
+  });
+  connect(search, &QLineEdit::textChanged, this, [this](const QString &value) {
+    if (value.isEmpty() && !browser.title.empty()) {
+      browser.title.clear();
+      changeBrowser();
+    }
+  });
+  connect(archive, &QComboBox::currentIndexChanged, this, [this](int value) {
+    browser.archived = value;
+    changeBrowser();
+  });
+  filters->addWidget(search, 1);
+  filters->addWidget(archive);
+  layout->addLayout(filters);
 
   tree = new ThreadTreeWidget(this);
   tree->setObjectName(QStringLiteral("threadList"));
@@ -1029,29 +1232,17 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   auto *treeStyle = new ThreadTreeStyle;
   treeStyle->setParent(tree);
   tree->setStyle(treeStyle);
-  tree->setStyleSheet(
-      QStringLiteral(
-          "QTreeWidget#threadList{background:transparent;border:0;outline:0;"
-          "show-decoration-selected:0;}"
-          "QTreeWidget#threadList::item{min-height:30px;background:%1;"
-          "border:1px solid %2;border-radius:8px;margin:3px 0;"
-          "padding:2px 8px;color:%3;}"
-          "QTreeWidget#threadList::item:hover{background:%4;"
-          "border-color:%5;}"
-          "QTreeWidget#threadList::item:selected{background:%6;"
-          "border-color:%7;color:%3;font-weight:600;}")
-          .arg(QString::fromLatin1(UiStyle::panel),
-               QString::fromLatin1(UiStyle::divider),
-               QString::fromLatin1(UiStyle::primary),
-               QString::fromLatin1(UiStyle::hover),
-               QString::fromLatin1(UiStyle::dividerStrong),
-               QString::fromLatin1(UiStyle::blueSelected),
-               QString::fromLatin1(UiStyle::blueBorder)));
+  tree->setStyleSheet(QStringLiteral(
+      "QTreeWidget#threadList{background:transparent;border:0;outline:0;"
+      "show-decoration-selected:0;}"
+      "QTreeWidget#threadList::item{background:transparent;border:0;"
+      "min-height:30px;}"));
 
   connect(tree, &QTreeWidget::currentItemChanged, this,
           [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
             const auto *selected = tree->threadItem(current);
-            if (!selected || !selected->target ||
+            if (!selected || selected->kind != ui::ThreadRowKind::Thread ||
+                !selected->target ||
                 std::exchange(selectionDispatchPending, true))
               return;
             // Selection actions may retire rows. Let Qt finish changing its
@@ -1068,9 +1259,27 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
           });
   connect(tree, &QTreeWidget::customContextMenuRequested, this,
           [this](const QPoint &position) { showContextMenu(position); });
+  connect(tree, &QTreeWidget::itemActivated, this,
+          [this](QTreeWidgetItem *item) {
+            activateBrowserRow(tree->threadItem(item));
+          });
+  connect(tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem *item) {
+    if (tree->threadItem(item)->kind == ui::ThreadRowKind::Page)
+      activateBrowserRow(tree->threadItem(item));
+  });
   connect(tree, &QTreeWidget::itemExpanded, this,
           [this](QTreeWidgetItem *item) {
             updateAnimationTimer();
+            const auto kind = tree->threadItem(item)->kind;
+            if (!tree->signalsBlocked() &&
+                (kind == ui::ThreadRowKind::Project ||
+                 kind == ui::ThreadRowKind::Section)) {
+              QSettings().setValue(
+                  settingsKey() + QStringLiteral("/expanded/") +
+                      text(tree->threadItem(item)->presentationKey),
+                  true);
+              activateBrowserRow(tree->threadItem(item));
+            }
 #if QT_CONFIG(accessibility)
             sendThreadExpansionEvent(
                 tree->accessibleItemForEvent(tree->threadItem(item)));
@@ -1079,6 +1288,13 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   connect(tree, &QTreeWidget::itemCollapsed, this,
           [this](QTreeWidgetItem *item) {
             updateAnimationTimer();
+            const auto kind = tree->threadItem(item)->kind;
+            if (kind == ui::ThreadRowKind::Project ||
+                kind == ui::ThreadRowKind::Section)
+              QSettings().setValue(
+                  settingsKey() + QStringLiteral("/expanded/") +
+                      text(tree->threadItem(item)->presentationKey),
+                  false);
 #if QT_CONFIG(accessibility)
             sendThreadExpansionEvent(
                 tree->accessibleItemForEvent(tree->threadItem(item)));
@@ -1096,6 +1312,313 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 ThreadPane::~ThreadPane() { delete tree; }
 
 void ThreadPane::setActions(Actions next) { actions = std::move(next); }
+
+QString ThreadPane::settingsKey() const {
+  return QStringLiteral("threads/") +
+         QString::fromLatin1(
+             QCryptographicHash::hash(QByteArray::fromStdString(serverIdentity),
+                                      QCryptographicHash::Sha256)
+                 .toHex());
+}
+
+void ThreadPane::changeBrowser() {
+  QSettings settings;
+  settings.setValue(settingsKey() + "/grouping",
+                    static_cast<int>(browser.grouping));
+  settings.setValue(settingsKey() + "/manualProjects", browser.manualProjects);
+  settings.setValue(settingsKey() + "/sort", static_cast<int>(sortCriterion));
+  groupButton->setText(browser.grouping == ui::ThreadGrouping::Projects
+                           ? QStringLiteral("Projects")
+                       : browser.grouping == ui::ThreadGrouping::Sections
+                           ? QStringLiteral("Sections")
+                           : QStringLiteral("Ungrouped"));
+  if (actions.browserChanged)
+    actions.browserChanged();
+  if (actions.browse) {
+    nlohmann::json parameters = nlohmann::json::object();
+    parameters["archived"] = browser.archived == 1;
+    if (!browser.title.empty())
+      parameters["searchTerm"] = browser.title;
+    actions.browse({{"parameters", parameters},
+                    {"refresh", true},
+                    {"reset", true},
+                    {"includeArchived", browser.archived == 2}});
+    if (browser.archived == 2) {
+      parameters["archived"] = true;
+      actions.browse({{"parameters", parameters}, {"refresh", true}});
+    }
+    // Existing expanded groups are refreshed with the new filters by the next
+    // projection's page rows. No network call is made from a paint operation.
+  }
+}
+
+void ThreadPane::activateBrowserRow(ThreadTreeItem *item) {
+  if (!item || item->query.is_null() || item->pendingPage || !actions.browse ||
+      !providerReady)
+    return;
+  if (item->kind == ui::ThreadRowKind::Page) {
+    // A failed page is retried only by an explicit click, never by a refresh
+    // loop.
+    actions.browse(item->query);
+  } else {
+    for (int i = 0; i < item->childCount(); ++i) {
+      auto *child = tree->threadItem(item->child(i));
+      if (child->kind == ui::ThreadRowKind::Page && child->details.empty()) {
+        activateBrowserRow(child);
+      }
+    }
+  }
+}
+
+void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
+  const auto &source = project ? projects : sections;
+  const auto found = std::ranges::find(source, id, &ui::ThreadGroup::id);
+  const nlohmann::json fields =
+      found == source.end() ? nlohmann::json::object() : found->fields;
+  QDialog dialog(this);
+  dialog.setObjectName(QStringLiteral("threadGroupDialog"));
+  dialog.setWindowTitle(project ? QStringLiteral("Project")
+                                : QStringLiteral("Section"));
+  dialog.resize(520, project ? 480 : 300);
+  auto *layout = new QVBoxLayout(&dialog);
+  auto *form = new QFormLayout;
+  form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  auto *name = new QLineEdit(text(fields.value("name", std::string{})));
+  name->setObjectName(QStringLiteral("groupName"));
+  name->setReadOnly(readOnly);
+  form->addRow(QStringLiteral("Name"), name);
+  QPlainTextEdit *roots = nullptr;
+  QPlainTextEdit *description = nullptr;
+  QLineEdit *icon = nullptr;
+  QLineEdit *color = nullptr;
+  if (project) {
+    roots = new UiStyle::DialogTextEdit;
+    roots->setObjectName(QStringLiteral("projectRoots"));
+    roots->setProperty("kind", "dialogEditor");
+    roots->setReadOnly(readOnly);
+    roots->setMaximumHeight(90);
+    QStringList paths;
+    for (const auto &root : fields.value("roots", nlohmann::json::array()))
+      paths.push_back(text(root.value("path", std::string{})));
+    roots->setPlainText(paths.join('\n'));
+    roots->setPlaceholderText(
+        QStringLiteral("Absolute workspace paths, one per line"));
+    form->addRow(QStringLiteral("Roots"), roots);
+    description = new UiStyle::DialogTextEdit;
+    description->setObjectName(QStringLiteral("projectDescription"));
+    description->setProperty("kind", "dialogEditor");
+    description->setReadOnly(readOnly);
+    const auto metadata = fields.value("metadata", nlohmann::json::object());
+    description->setPlainText(
+        text(metadata.value(ProjectDescriptionKey, std::string{})));
+    form->addRow(QStringLiteral("Description"), description);
+    layout->addWidget(UiStyle::makeLabel(
+        QStringLiteral(
+            "Descriptions organise work; they are not model instructions."),
+        "muted"));
+    if (readOnly) {
+      auto *details = new QPlainTextEdit(text(fields.dump(2)));
+      details->setReadOnly(true);
+      details->setAccessibleName(
+          QStringLiteral("Project metadata and timestamps"));
+      form->addRow(QStringLiteral("Metadata"), details);
+    }
+  } else {
+    const auto appearance =
+        fields.contains("appearance") && fields["appearance"].is_object()
+            ? fields["appearance"]
+            : nlohmann::json::object();
+    const auto component = [&](const char *key) {
+      const auto found = appearance.find(key);
+      return found != appearance.end() && found->is_string()
+                 ? text(found->get<std::string>())
+                 : QString{};
+    };
+    icon = new QLineEdit(component("icon"));
+    color = new QLineEdit(component("color"));
+    icon->setReadOnly(readOnly);
+    color->setReadOnly(readOnly);
+    form->addRow(QStringLiteral("Icon"), icon);
+    form->addRow(QStringLiteral("Colour"), color);
+    layout->addWidget(UiStyle::makeLabel(
+        QStringLiteral(
+            "Sections are shared across projects. Changes apply everywhere."),
+        "muted"));
+  }
+  layout->addLayout(form, 1);
+  auto *error = UiStyle::makeLabel({}, "muted");
+  error->setWordWrap(true);
+  layout->addWidget(error);
+  auto *buttons = new QDialogButtonBox(readOnly ? QDialogButtonBox::Close
+                                                : QDialogButtonBox::Save |
+                                                      QDialogButtonBox::Cancel);
+  layout->addWidget(buttons);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+    if (!canControl || !actions.manage)
+      return;
+    if (name->text().trimmed().isEmpty()) {
+      error->setText(QStringLiteral("Enter a name."));
+      return;
+    }
+    nlohmann::json parameters{{"name", name->text().trimmed().toStdString()}};
+    if (project) {
+      parameters["roots"] = nlohmann::json::array();
+      for (const auto &path :
+           roots->toPlainText().split('\n', Qt::SkipEmptyParts)) {
+        if (!QDir::isAbsolutePath(path.trimmed())) {
+          error->setText(
+              QStringLiteral("Workspace roots must be absolute paths."));
+          return;
+        }
+        parameters["roots"].push_back({{"path", path.trimmed().toStdString()}});
+      }
+      const auto value = description->toPlainText().toStdString();
+      if (id.empty()) {
+        parameters["metadata"] = {{ProjectDescriptionKey, value}};
+        parameters["idempotencyKey"] =
+            QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+      } else {
+        parameters["projectId"] = id;
+        parameters["description"] = value;
+      }
+    } else {
+      if (!id.empty())
+        parameters["sectionId"] = id;
+      parameters["appearance"] = {
+          {"icon", icon->text().isEmpty()
+                       ? nlohmann::json(nullptr)
+                       : nlohmann::json(icon->text().toStdString())},
+          {"color", color->text().isEmpty()
+                        ? nlohmann::json(nullptr)
+                        : nlohmann::json(color->text().toStdString())}};
+    }
+    using enum nodegraph::RuntimeActionKind;
+    actions.manage(project ? (id.empty() ? CreateProject : UpdateProject)
+                           : (id.empty() ? CreateSection : UpdateSection),
+                   std::move(parameters));
+    dialog.accept();
+  });
+  dialog.exec();
+}
+
+void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
+  using enum nodegraph::RuntimeActionKind;
+  const auto invoke = [this, menu](QString label,
+                                   nodegraph::RuntimeActionKind kind,
+                                   nlohmann::json parameters) {
+    auto *action = menu->addAction(
+        label, this, [this, kind, parameters = std::move(parameters)] {
+          if (canControl && actions.manage)
+            actions.manage(kind, parameters);
+        });
+    action->setEnabled(canControl && groupingAvailable);
+  };
+  const bool project = item->kind == ui::ThreadRowKind::Project;
+  const bool group = item->kind != ui::ThreadRowKind::Thread;
+  const std::string id = item->id;
+  if (group) {
+    menu->addAction(
+            QStringLiteral("New thread here…"), this,
+            [this, projectId = item->projectId, sectionId = item->sectionId] {
+              const auto found =
+                  std::ranges::find(projects, projectId, &ui::ThreadGroup::id);
+              std::string cwd;
+              if (found != projects.end()) {
+                const auto roots =
+                    found->fields.value("roots", nlohmann::json::array());
+                if (!roots.empty())
+                  cwd = roots.front().value("path", "");
+              }
+              if (canControl && actions.newGroupedThread)
+                actions.newGroupedThread(projectId, sectionId, cwd);
+            })
+        ->setEnabled(canControl);
+    if (!id.empty()) {
+      menu->addAction(QStringLiteral("Details…"), this,
+                      [this, project, id] { editGroup(project, id, true); });
+      menu->addAction(QStringLiteral("Edit…"), this,
+                      [this, project, id] {
+                        if (canControl)
+                          editGroup(project, id);
+                      })
+          ->setEnabled(canControl);
+      menu->addAction(
+              QStringLiteral("Delete group…"), this,
+              [this, project, id] {
+                if (canControl && actions.manage &&
+                    QMessageBox::question(
+                        this, QStringLiteral("Delete group"),
+                        QStringLiteral("Delete this group? Its threads will be "
+                                       "retained, not deleted.")) ==
+                        QMessageBox::Yes)
+                  actions.manage(project ? DeleteProject : DeleteSection,
+                                 {{project ? "projectId" : "sectionId", id}});
+              })
+          ->setEnabled(canControl);
+    }
+    if (project && !id.empty()) {
+      auto *before = menu->addMenu(QStringLiteral("Move project before"));
+      before->setEnabled(canControl);
+      for (const auto &entry : projects)
+        if (entry.id != id)
+          before->addAction(
+              text(entry.name), this, [this, id, destination = entry.id] {
+                if (canControl && actions.manage)
+                  actions.manage(
+                      MoveProject,
+                      {{"projectId", id}, {"beforeProjectId", destination}});
+              });
+      invoke(QStringLiteral("Move project to end"), MoveProject,
+             {{"projectId", id}});
+    }
+    return;
+  }
+  if (item->parentThread)
+    menu->addAction(QStringLiteral("Go to parent"), this,
+                    [this, target = item->parentThread] {
+                      if (actions.select)
+                        actions.select(target);
+                    });
+  for (bool isProject : {true, false}) {
+    auto *assign = menu->addMenu(isProject ? QStringLiteral("Assign project")
+                                           : QStringLiteral("Assign section"));
+    assign->setEnabled(canControl && groupingAvailable);
+    for (const auto &destination : isProject ? projects : sections)
+      assign->addAction(
+          text(destination.name) + " · " + text(destination.id), this,
+          [this, isProject, id, destinationId = destination.id] {
+            if (canControl && actions.manage)
+              actions.manage(
+                  isProject ? AssignProject : AssignSection,
+                  {{"threadId", id},
+                   {isProject ? "projectId" : "sectionId", destinationId}});
+          });
+  }
+  invoke(QStringLiteral("Remove from project"), AssignProject,
+         {{"threadId", id}, {"projectId", ""}});
+  invoke(QStringLiteral("Remove from section"), AssignSection,
+         {{"threadId", id}, {"sectionId", nullptr}});
+  if (!item->sectionId.empty()) {
+    auto *before =
+        menu->addMenu(QStringLiteral("Move before in shared section"));
+    before->setEnabled(canControl);
+    for (const auto &[key, row] : rows)
+      if (row != item && row->kind == ui::ThreadRowKind::Thread &&
+          row->sectionId == item->sectionId)
+        before->addAction(
+            text(row->title), this,
+            [this, id, section = item->sectionId, beforeId = row->id] {
+              if (canControl && actions.manage)
+                actions.manage(AssignSection, {{"threadId", id},
+                                               {"sectionId", section},
+                                               {"beforeThreadId", beforeId}});
+            });
+    invoke(QStringLiteral("Move to end of shared section"), AssignSection,
+           {{"threadId", id}, {"sectionId", item->sectionId}});
+  }
+  menu->addSeparator();
+}
 
 bool ThreadPane::applyItemPresentation(
     ThreadTreeItem *item, const ui::ThreadListRow &row, bool draft,
@@ -1130,6 +1653,13 @@ bool ThreadPane::applyItemPresentation(
   assign(item->lastActivityAt, row.lastActivityAt);
   assign(item->pending, row.pending);
   assign(item->archived, row.archived);
+  assign(item->kind, row.kind);
+  assign(item->projectId, row.projectId);
+  assign(item->sectionId, row.sectionId);
+  assign(item->details, row.details);
+  assign(item->query, row.query);
+  assign(item->pendingPage, row.pendingPage);
+  assign(item->appearanceColor, row.appearanceColor);
   assign(item->draft, draft);
   assign(item->awaitingPrompt, row.awaitingPromptConversation);
   assign(item->animationEpoch,
@@ -1164,6 +1694,7 @@ void ThreadPane::beginOptimisticThread(std::string id,
   draft.cwd = std::move(cwd);
   static_cast<void>(applyItemPresentation(draftItem, draft, true,
                                           QDateTime::currentMSecsSinceEpoch()));
+  static_cast<void>(repositionRootItem(draftItem));
   tree->setCurrentItem(draftItem);
   updateAnimationTimer();
 }
@@ -1186,8 +1717,11 @@ void ThreadPane::setSortCriterion(SortCriterion criterion) {
   if (sortCriterion == criterion)
     return;
   sortCriterion = criterion;
+  browser.manualSections = criterion == SortCriterion::SectionOrder;
   updateSortButton();
   sortRootItems();
+  if (actions.browserChanged)
+    changeBrowser();
 }
 
 ThreadPane::SortCriterion ThreadPane::currentSortCriterion() const noexcept {
@@ -1274,6 +1808,23 @@ bool ThreadPane::repositionRootItem(ThreadTreeItem *item) {
 }
 
 void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
+  projects = snapshot.projects;
+  sections = snapshot.sections;
+  groupingAvailable = snapshot.groupingAvailable;
+  if (serverIdentity != snapshot.serverIdentity) {
+    serverIdentity = snapshot.serverIdentity;
+    const QSettings settings;
+    browser.grouping = static_cast<ui::ThreadGrouping>(std::clamp(
+        settings.value(settingsKey() + "/grouping", 0).toInt(), 0, 2));
+    browser.manualProjects =
+        settings.value(settingsKey() + "/manualProjects", false).toBool();
+    sortCriterion = static_cast<SortCriterion>(
+        std::clamp(settings.value(settingsKey() + "/sort", 2).toInt(), 0, 3));
+    browser.manualSections = sortCriterion == SortCriterion::SectionOrder;
+    updateSortButton();
+    if (actions.browserChanged)
+      actions.browserChanged();
+  }
   const QModelIndex anchorIndex =
       tree->isVisible()
           ? tree->indexAt(QPoint(tree->viewport()->width() / 2, 0))
@@ -1298,6 +1849,12 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   }
   providerReady = snapshot.providerReady;
   canControl = snapshot.canControl;
+  groupButton->setText(!groupingAvailable ? QStringLiteral("Groups unavailable")
+                       : browser.grouping == ui::ThreadGrouping::Projects
+                           ? QStringLiteral("Projects")
+                       : browser.grouping == ui::ThreadGrouping::Sections
+                           ? QStringLiteral("Sections")
+                           : QStringLiteral("Ungrouped"));
 
   const auto *currentBefore = tree->threadItem(tree->currentItem());
   const bool hadCurrent = currentBefore != nullptr;
@@ -1378,6 +1935,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       return;
     auto found = rows.find(row.presentationKey);
     ThreadTreeItem *item = found == rows.end() ? nullptr : found->second;
+    const bool createdItem = !item;
     if (!item) {
       item = new ThreadTreeItem(tree, row.presentationKey);
       rows.emplace(row.presentationKey, item);
@@ -1398,13 +1956,32 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       draftItem = nullptr;
     }
     static_cast<void>(applyItemPresentation(item, row, false, {}, false));
-    if (row.id == snapshot.selectedThreadId) {
+    // These describe placement, not a targeted status/title presentation.
+    item->parentThread = row.parentThread;
+    item->order = row.order;
+    if (row.kind == ui::ThreadRowKind::Thread &&
+        row.id == snapshot.selectedThreadId) {
       selected = item;
       selectedReparented = reparented || ancestorReparented;
     }
-    for (int child = 0; child < static_cast<int>(row.children.size()); ++child)
-      reconcile(row.children[static_cast<std::size_t>(child)], item, child,
+    std::vector<const ui::ThreadListRow *> children;
+    for (const auto &child : row.children)
+      children.push_back(&child);
+    if (row.kind != ui::ThreadRowKind::Thread)
+      std::ranges::stable_sort(children,
+                               [this](const auto *left, const auto *right) {
+                                 return tree->rowBefore(*left, *right);
+                               });
+    for (std::size_t child = 0; child < children.size(); ++child)
+      reconcile(*children[child], item, static_cast<int>(child),
                 reparented || ancestorReparented);
+    if (createdItem && row.kind != ui::ThreadRowKind::Thread &&
+        row.kind != ui::ThreadRowKind::Page)
+      item->setExpanded(
+          QSettings()
+              .value(settingsKey() + "/expanded/" + text(item->presentationKey),
+                     false)
+              .toBool());
   };
 
   std::vector<const ui::ThreadListRow *> roots;
@@ -1419,13 +1996,20 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   const bool retainDraft =
       draftItem &&
       !findPresentation(snapshot.roots, draftItem->presentationKey);
-  int rootPosition = retainDraft ? 1 : 0;
+  const int draftPosition = static_cast<int>(
+      std::ranges::lower_bound(roots, ui::ThreadRowKind::Thread, {},
+                               [](const auto *row) { return row->kind; }) -
+      roots.begin());
+  int rootPosition = 0;
   if (retainDraft) {
     wanted.insert(draftItem->presentationKey);
-    static_cast<void>(place(draftItem, nullptr, 0));
+    static_cast<void>(place(draftItem, nullptr, draftPosition));
   }
-  for (const ui::ThreadListRow *row : roots)
+  for (const ui::ThreadListRow *row : roots) {
+    if (retainDraft && rootPosition == draftPosition)
+      ++rootPosition;
     reconcile(*row, nullptr, rootPosition++, false);
+  }
   if (!initialRoots.isEmpty()) {
     tree->addTopLevelItems(initialRoots);
     structureChanged = true;
@@ -1594,6 +2178,21 @@ void ThreadPane::updateAnimationTimer(bool repaint) {
 }
 
 void ThreadPane::requestMoreNearListEnd() {
+  if (actions.browse) {
+    QModelIndex index = tree->indexAt(QPoint(tree->viewport()->width() / 2, 0));
+    if (!index.isValid())
+      index = tree->model()->index(0, 0);
+    while (index.isValid()) {
+      if (tree->visualRect(index).top() >= tree->viewport()->height())
+        break;
+      auto *item = tree->threadItem(index);
+      if (item->kind == ui::ThreadRowKind::Page && !item->pendingPage &&
+          item->details.empty())
+        activateBrowserRow(item);
+      index = tree->indexBelow(index);
+    }
+    return;
+  }
   if (!actions.loadMore || tree->topLevelItemCount() == 0)
     return;
   const QScrollBar *scroll = tree->verticalScrollBar();
@@ -1609,6 +2208,8 @@ ThreadPane::visiblySelectedThread() const {
   if (selected.size() != 1 || !selected.front())
     return std::nullopt;
   const ThreadTreeItem *item = tree->threadItem(selected.front());
+  if (item->kind != ui::ThreadRowKind::Thread)
+    return std::nullopt;
   return VisibleThread{item->id, item->presentationKey, item->target};
 }
 
@@ -1632,7 +2233,7 @@ void ThreadPane::updateContextRow(const std::string &presentationKey) {
 
 void ThreadPane::showContextMenu(const QPoint &position) {
   auto *item = tree->threadItem(tree->itemAt(position));
-  if (!item || !item->target)
+  if (!item || item->kind == ui::ThreadRowKind::Page)
     return;
   if (contextMenu)
     contextMenu->close();
@@ -1653,6 +2254,12 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     menu->deleteLater();
   });
   const nodegraph::NodeRef target = item->target;
+  if (item->kind != ui::ThreadRowKind::Thread) {
+    showGroupMenu(menu, item);
+    menu->popup(tree->viewport()->mapToGlobal(position));
+    return;
+  }
+  showGroupMenu(menu, item);
   const auto addAction = [this, menu, target](QString label,
                                               ThreadAction Actions::*member) {
     return menu->addAction(std::move(label), this, [this, target, member] {

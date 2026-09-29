@@ -20,6 +20,7 @@
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
+#include <algorithm>
 #include <array>
 #include <initializer_list>
 #include <utility>
@@ -30,6 +31,62 @@ namespace {
 constexpr int SettingControlHeight = 32;
 constexpr int SettingLabelSpacing = 5;
 constexpr int TransientChoiceRole = Qt::UserRole + 1;
+
+// The same eight controls reflow; no resize callbacks or alternate controls.
+class SettingsGrid final : public QGridLayout {
+public:
+  using QGridLayout::QGridLayout;
+  bool hasHeightForWidth() const override { return true; }
+  QSize minimumSize() const override {
+    const auto margins = contentsMargins();
+    return {2 * cellWidth() + horizontalSpacing() + margins.left() +
+                margins.right(),
+            heightForWidth(4 * (cellWidth() + horizontalSpacing()) +
+                           margins.left() + margins.right())};
+  }
+  int heightForWidth(int width) const override {
+    int height = 0;
+    const int cols = columns(width);
+    for (int first = 0; first < count(); first += cols) {
+      int rowHeight = 0;
+      for (int i = first; i < std::min(first + cols, count()); ++i)
+        rowHeight = std::max(rowHeight, itemAt(i)->sizeHint().height());
+      height += rowHeight + (first ? verticalSpacing() : 0);
+    }
+    return height + contentsMargins().top() + contentsMargins().bottom();
+  }
+  void setGeometry(const QRect &rect) override {
+    if (count() == 8) {
+      int row, col, rowSpan, colSpan;
+      getItemPosition(7, &row, &col, &rowSpan, &colSpan);
+      const int cols = columns(rect.width());
+      if (col + 1 != cols) {
+        std::array<QLayoutItem *, 8> items;
+        for (auto &item : items)
+          item = takeAt(0);
+        for (int column = 0; column < 4; ++column)
+          setColumnStretch(column, column < cols ? 1 : 0);
+        for (int i = 0; i < 8; ++i)
+          addItem(items[i], i / cols, i % cols);
+      }
+    }
+    QGridLayout::setGeometry(rect);
+  }
+
+private:
+  int cellWidth() const {
+    int width = 1;
+    for (int i = 0; i < count(); ++i)
+      width = std::max(width, itemAt(i)->widget()->minimumSizeHint().width());
+    return width;
+  }
+  int columns(int width) const {
+    width -= contentsMargins().left() + contentsMargins().right();
+    const int cells = (width + horizontalSpacing()) /
+                      (cellWidth() + horizontalSpacing());
+    return cells >= 4 ? 4 : 2;
+  }
+};
 
 QString text(const std::string &value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -75,9 +132,8 @@ void selectValue(QComboBox *combo, const QString &value,
 QComboBox *compactCombo(const char *name) {
   auto *combo = new UiStyle::ChevronComboBox;
   combo->setObjectName(QString::fromLatin1(name));
-  combo->setProperty("codexChevron", true);
-  combo->setFixedHeight(SettingControlHeight);
-  combo->setMinimumContentsLength(4);
+  combo->setMinimumHeight(SettingControlHeight);
+  combo->setMinimumContentsLength(14);
   combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   return combo;
 }
@@ -90,14 +146,10 @@ QWidget *labelled(const QString &caption, QWidget *control,
   layout->setSpacing(SettingLabelSpacing);
   auto *label = new QLabel(caption);
   label->setProperty("kind", "settingLabel");
-  const int labelHeight = label->fontMetrics().height();
-  label->setFixedHeight(labelHeight);
   label->setBuddy(buddy ? buddy : control);
   (buddy ? buddy : control)->setAccessibleName(caption);
   layout->addWidget(label);
   layout->addWidget(control);
-  surface->setFixedHeight(labelHeight + SettingLabelSpacing +
-                          SettingControlHeight);
   surface->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
   return surface;
 }
@@ -127,7 +179,7 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
     : QWidget(parent), settings(policy) {
   setObjectName(QStringLiteral("codexTurnSettings"));
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-  auto *root = new QGridLayout(this);
+  auto *root = new SettingsGrid(this);
   root->setContentsMargins(10, 8, 10, 8);
   root->setHorizontalSpacing(8);
   root->setVerticalSpacing(8);
@@ -147,10 +199,9 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
   combo(TurnSettingField::Model)->setEditable(true);
   cwd = new QLineEdit;
   cwd->setObjectName(QStringLiteral("codexWorkspace"));
-  cwd->setFixedHeight(SettingControlHeight);
+  cwd->setMinimumHeight(SettingControlHeight);
   cwd->setPlaceholderText(QStringLiteral("Thread default workspace"));
   auto *workspacePicker = new QWidget;
-  workspacePicker->setFixedHeight(SettingControlHeight);
   auto *workspaceLayout = new QHBoxLayout(workspacePicker);
   workspaceLayout->setContentsMargins(0, 0, 0, 0);
   workspaceLayout->setSpacing(6);
@@ -167,7 +218,7 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
   more->setProperty("codexChevron", true);
   more->setPopupMode(QToolButton::InstantPopup);
   more->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  more->setFixedHeight(SettingControlHeight);
+  more->setMinimumHeight(SettingControlHeight);
 
   addSetting(root, QStringLiteral("Model"), combo(TurnSettingField::Model), 0,
              0);

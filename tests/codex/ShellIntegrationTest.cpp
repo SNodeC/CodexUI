@@ -6,6 +6,8 @@
 #include "AccessibilityEventProbe.h"
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
+#include "codex/FileSelectionDialog.h"
+#include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/ShellWidget.h"
 #include "codex/middle/ComposerPane.h"
@@ -36,6 +38,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
@@ -45,6 +48,7 @@
 #include <QPointer>
 #include <QProxyStyle>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QThread>
@@ -1316,6 +1320,11 @@ void applicationFontChangeRegeneratesUiGeometry(Configuration &configuration) {
       spin();
 
       const QString enlargedStyleSheet = qApp->styleSheet();
+      const auto *statusCaption = shell.findChild<QLabel *>(
+          QStringLiteral("globalStatusCaption"));
+      require(statusCaption && statusCaption->width() >=
+                                   statusCaption->minimumSizeHint().width(),
+              "the status caption accommodates the enlarged application font");
       const int expectedEditorMaximum =
           editor->fontMetrics().lineSpacing() *
               codexui::ExpandingPromptEditor::maximumVisibleLineCount() +
@@ -1366,6 +1375,30 @@ void applicationFontChangeRegeneratesUiGeometry(Configuration &configuration) {
               "an identical application-font event is a semantic pixel, "
               "geometry, focus, identity, and stylesheet no-op");
       editor->removeEventFilter(&styleProbe);
+      auto *subtitle = shell.findChild<QLabel *>("codexBrandSubtitle");
+      require(subtitle, "the brand exposes its subtitle");
+      if (subtitle) {
+        QWidget *lockup = brandTitle->parentWidget();
+        for (int points : {9, 16, 24, 32, 9}) {
+          QFont font = originalFont;
+          font.setPointSize(points);
+          QApplication::setFont(font);
+          spin();
+          require(lockup->height() >= subtitle->fontMetrics().height() &&
+                      lockup->rect().contains(subtitle->geometry()) &&
+                      lockup->rect().contains(brandTitle->geometry()) &&
+                      subtitle->height() >= subtitle->fontMetrics().height(),
+                  "brand text fits its natural container through enlarged "
+                  "font transitions without clipping or invalid clamp bounds");
+          const QRect subtitleGeometry = subtitle->geometry();
+          QEvent noOp(QEvent::ApplicationFontChange);
+          QApplication::sendEvent(qApp, &noOp);
+          spin();
+          require(subtitle->geometry() == subtitleGeometry &&
+                      titleIdentity == brandTitle,
+                  "an unchanged font preserves brand geometry and identity");
+        }
+      }
     }
   }
   QApplication::setFont(originalFont);
@@ -2148,6 +2181,53 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
                    !threadAnimation->isActive();
           }),
           "authoritative history entry stops both animations on the same card");
+}
+
+void conversationProjectionRetriesWithoutAnotherGraphNotification(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  auto &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, FrontendSessionTestPeer::channels(session));
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "projection-retry");
+  applyScrollableThreadContent(worker, "projection-retry", "retry");
+  markThreadReady(session, worker, "projection-retry");
+  auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
+  auto *view = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QAbstractScrollArea *>(QStringLiteral("conversationScroll")));
+  require(spinUntil([&] { return threadItem(list, "projection-retry"); }) &&
+              selectThread(list, "projection-retry") && view &&
+              spinUntil([&] { return view->conversationModel()->rowCount() == 1; }),
+          "projection retry starts from a fully presented thread");
+  if (!view || view->conversationModel()->rowCount() != 1)
+    return;
+  spin(100);
+  GraphChange change;
+  {
+    auto write = graph.write();
+    const auto thread = write.find({NodeKind::Thread, "projection-retry"});
+    const auto turn = write.children(thread).front();
+    NodeState state;
+    state.fields = {{"type", "agentMessage"}, {"text", "Previously pending row"}};
+    const auto item = write.upsert({NodeKind::Item, "projection-retry-added"},
+                                   std::move(state));
+    write.setParent(turn, item);
+    change = write.finish();
+  }
+  FrontendSessionTestPeer::deliverGraphChanged(
+      session, {change.revision, {}, {}, true, {}, 0});
+  {
+    // Hold the writer across the existing deferred projection start. Releasing
+    // an unchanged transaction emits no notification to rescue a lost retry.
+    auto contended = graph.write();
+    spin(650);
+    static_cast<void>(contended.finish());
+  }
+  require(spinUntil([&] { return view->conversationModel()->rowCount() == 2; }, 3000),
+          "a contended projection retries after unlock without another event");
 }
 
 void initialHydrationRetainsAllLoadedRowsWithBoundedResidency(
@@ -5003,6 +5083,7 @@ void hiddenInspectorRequestsRetireWithTheirExactInteraction(
   inspector->tabs()->setCurrentIndex(0);
   spin(20);
   static_cast<void>(worker.resolveInteraction(request.primary));
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   require(spinUntil([&] { return requestFrame.isNull(); }),
           "removing an Interaction retires its Request widget while that tab "
           "is hidden");
@@ -5342,6 +5423,60 @@ void reverseInteractionCarriesOnlyAuthoredResponse(
           "deliberate recovery");
 }
 
+void openRequestTracksAuthorityAndRetirement(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  Value::Object question{{"id", Value("answer")},
+                         {"header", Value("Question")},
+                         {"question", Value("Keep this answer")},
+                         {"isOther", Value(true)},
+                         {"options", Value(Value::Array{})}};
+  const auto request = worker.applyDetailed(
+      {DecodedMessageKind::ServerRequest, "item/tool/requestUserInput",
+       ProtocolRequestId("review-lifetime"),
+       {{"questions", Value(Value::Array{Value(std::move(question))})}}});
+  auto *review = shell.findChild<QPushButton *>("pendingRequestReviewButton");
+  require(spinUntil([&] { return review && review->isVisible() && review->isEnabled(); }),
+          "request is available for review");
+  if (!review || !request.primary)
+    return;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    auto *buttons = dialog ? dialog->findChild<QDialogButtonBox *>() : nullptr;
+    auto *answer = dialog ? dialog->findChild<QLineEdit *>() : nullptr;
+    require(buttons && answer, "review exposes native submission and answer controls");
+    if (!buttons || !answer) {
+      if (dialog) dialog->reject();
+      return;
+    }
+    answer->setText(QStringLiteral("Preserve α🙂"));
+    auto *submit = buttons->button(QDialogButtonBox::Ok);
+    static_cast<void>(worker.bridgeState("test-controller", "observer", "other", 1, "ready"));
+    require(spinUntil([&] { return !submit->isEnabled(); }),
+            "open review disables submission when control is lost");
+    static_cast<void>(worker.bridgeState("test-controller", "controller", "test-controller", 1, "ready"));
+    require(spinUntil([&] { return submit->isEnabled(); }) &&
+                answer->text() == QStringLiteral("Preserve α🙂"),
+            "restored authority preserves the exact editor and authored answer");
+    static_cast<void>(worker.resolveInteraction(request.primary));
+    require(spinUntil([&] { return !submit->isEnabled() && submit->text() == "Resolved"; }),
+            "retired request stops appearing actionable without a click");
+    submit->click();
+    const auto actions = takeQtMessages(channels);
+    require(std::ranges::none_of(actions, [](const auto &message) {
+              const auto *action = std::get_if<NodeAction>(&message);
+              return action && action->kind == NodeActionKind::ResolveInteraction;
+            }), "disabled review sends no response for the retired request");
+    dialog->reject();
+  });
+  review->click();
+}
+
 void compactAttentionKeepsExactVisibleTarget(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -5579,6 +5714,221 @@ void pendingRequestValidationRetainsInput() {
       "invalid MCP JSON remains editable until valid authored input exists");
 }
 
+void dialogControlsHaveSemanticLabels() {
+#if QT_CONFIG(accessibility)
+  const auto named = [](QWidget *widget, const QString &name, QAccessible::Role role) {
+    auto *accessible = widget ? QAccessible::queryAccessibleInterface(widget) : nullptr;
+    if (!accessible || accessible->role() != role ||
+        accessible->text(QAccessible::Name) != name)
+      std::cerr << "Accessible control: expected " << name.toStdString()
+                << ", observed " << (accessible ? accessible->text(QAccessible::Name).toStdString() : "<missing>")
+                << '\n';
+    require(accessible && accessible->role() == role &&
+                accessible->text(QAccessible::Name) == name,
+            "dialog control exposes its semantic accessible name and role");
+  };
+  for (auto mode : {FileSelectionDialog::Mode::Workspace,
+                    FileSelectionDialog::Mode::Attachments}) {
+    FileSelectionDialog dialog(mode, QDir::tempPath());
+    named(dialog.findChild<QTreeView *>(QStringLiteral("codexFileBrowser")),
+          QStringLiteral("Filesystem browser"), QAccessible::Tree);
+    if (mode == FileSelectionDialog::Mode::Attachments) {
+      auto *list = dialog.findChild<QListWidget *>(QStringLiteral("codexAttachmentList"));
+      named(list, QStringLiteral("Selected files"), QAccessible::List);
+      require(std::ranges::any_of(dialog.findChildren<QLabel *>(),
+                  [list](const QLabel *label) {
+                    return label->buddy() == list &&
+                           label->text() == list->accessibleName();
+                  }), "attachment list name comes from its visible caption");
+    }
+  }
+  for (auto purpose : {NewThreadDialog::Purpose::Create, NewThreadDialog::Purpose::Fork}) {
+    NewThreadDialog dialog(NewThreadDraft{QDir::tempPath(), {}, {}, {}, false}, purpose);
+    QLineEdit *workspace = nullptr;
+    for (auto *label : dialog.findChildren<QLabel *>())
+      if (label->text() == QStringLiteral("Workspace"))
+        workspace = qobject_cast<QLineEdit *>(label->buddy());
+    named(workspace, QStringLiteral("Workspace"), QAccessible::EditableText);
+    require(workspace && workspace->text() == QDir::tempPath(),
+            "Create and Fork label the actual workspace editor without changing its value");
+  }
+#endif
+}
+
+void structuredRequestCaretRemainsInsideTheForm() {
+  const auto request = dialogRequest(PendingRequestKind::McpElicitation,
+      {{"serverName", "test-server"}, {"threadId", "thread-a"},
+       {"mode", "form"}, {"message", "Enter structured data"},
+       {"requestedSchema", {{"type", "object"}}}});
+  bool inspected = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    auto *editor = dialog->findChild<QPlainTextEdit *>();
+    auto *scroll = dialog->findChild<QScrollArea *>();
+    require(editor && scroll, "structured request exposes its editor and outer form");
+    if (!editor || !scroll) {
+      dialog->reject();
+      return;
+    }
+    inspected = true;
+    editor->setFocus();
+    spin();
+    const QString content = QStringLiteral("Authored α🙂 line\n").repeated(80);
+    editor->setPlainText(content);
+    editor->moveCursor(QTextCursor::End);
+    editor->moveCursor(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+    const auto cursor = editor->textCursor();
+    auto *document = editor->document();
+    for (int pointSize : {20, 12, 16}) {
+      auto font = dialog->font();
+      font.setPointSize(pointSize);
+      dialog->setFont(font);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "font-only request reflow keeps the caret inside both viewports");
+      dialog->resize(pointSize == 20 ? 520 : 620, pointSize == 20 ? 380 : 560);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "request resizing preserves focused caret visibility");
+      require(editor->document() == document && editor->toPlainText() == content &&
+                  editor->textCursor().position() == cursor.position() &&
+                  editor->textCursor().anchor() == cursor.anchor(),
+              "outer form reflow does not replace content, document or selection");
+      scroll->verticalScrollBar()->setValue(0);
+      spin();
+      require(scroll->verticalScrollBar()->value() == 0,
+              "request form manual scrolling is not pulled back while idle");
+      auto *buttons = dialog->findChild<QDialogButtonBox *>();
+      buttons->button(QDialogButtonBox::Ok)->setFocus();
+      QKeyEvent backtab(QEvent::KeyPress, Qt::Key_Backtab, Qt::ShiftModifier);
+      QApplication::sendEvent(dialog->focusWidget(), &backtab);
+      require(editor->hasFocus() &&
+                  editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "backward traversal from the footer reveals the focused form field");
+      editor->moveCursor(QTextCursor::Start);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "request cursor navigation reveals the focused field again");
+      editor->setTextCursor(cursor);
+    }
+    dialog->reject();
+  });
+  require(!PendingRequestDialog::present(request, nullptr) && inspected,
+          "cancelling the exercised request submits no response");
+}
+
+void dialogEditorCaretFollowsGeometryOnlyWhileEditing() {
+  UiStyle::DialogTextEdit editor;
+  QPlainTextEdit reference;
+  const QString content = QStringLiteral("Long workspace path α🙂 / line\n").repeated(60);
+  for (const bool readOnly : {false, true}) {
+    for (const bool focused : {false, true}) {
+      for (auto *view : {static_cast<QPlainTextEdit *>(&editor), &reference}) {
+        view->setReadOnly(readOnly);
+        QFont font = view->font();
+        font.setPointSize(16);
+        view->setFont(font);
+        view->resize(350, 160);
+        view->setPlainText(content);
+        view->show();
+        view->moveCursor(QTextCursor::End);
+        view->moveCursor(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+      }
+      editor.activateWindow();
+      editor.setFocus();
+      spin();
+      if (!focused)
+        editor.clearFocus();
+      const auto cursor = editor.textCursor();
+      auto *document = editor.document();
+      for (int size : {20, 12, 16}) {
+        for (auto *view : {static_cast<QPlainTextEdit *>(&editor), &reference}) {
+          QFont font = view->font();
+          font.setPointSize(size);
+          view->setFont(font);
+          view->resize(size == 20 ? 310 : 350, size == 20 ? 100 : 160);
+        }
+        spin();
+        require(editor.toPlainText() == content && editor.document() == document &&
+                    editor.textCursor().position() == cursor.position() &&
+                    editor.textCursor().anchor() == cursor.anchor(),
+                "dialog editor reflow preserves text, document and selection");
+        if (focused && !readOnly)
+          require(editor.viewport()->rect().contains(editor.cursorRect()),
+                  "focused dialog caret remains visible after font and resize");
+        else
+          require(editor.verticalScrollBar()->value() == reference.verticalScrollBar()->value(),
+                  "inactive and read-only dialog reflow retains native scrolling");
+      }
+      editor.verticalScrollBar()->setValue(0);
+      spin();
+      require(editor.verticalScrollBar()->value() == 0,
+              "manual dialog editor scrolling is not pulled back to the caret");
+      editor.hide();
+      reference.hide();
+    }
+  }
+}
+
+void instructionCaretRemainsVisibleInShortDialogs() {
+  for (auto purpose : {NewThreadDialog::Purpose::Create, NewThreadDialog::Purpose::Fork}) {
+    NewThreadDialog dialog(NewThreadDraft{QDir::tempPath(), {}, {}, {}, false}, purpose);
+    dialog.resize(680, 360);
+    dialog.show();
+    spin();
+    auto *scroll = dialog.findChild<QScrollArea *>();
+    require(scroll != nullptr, "instruction form has its enclosing scroll area");
+    if (!scroll)
+      continue;
+    for (auto *editor : dialog.findChildren<QPlainTextEdit *>()) {
+      editor->setFocus();
+      spin();
+      editor->setPlainText(QStringLiteral("Instruction line\n").repeated(12));
+      editor->moveCursor(QTextCursor::End);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "edited instruction caret is visible through both viewports");
+      const QFont originalFont = dialog.font();
+      const auto originalCursor = editor->textCursor();
+      const auto originalText = editor->toPlainText();
+      QFont enlargedFont = originalFont;
+      enlargedFont.setPointSize(20);
+      dialog.setFont(enlargedFont);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "font-only reflow reveals the instruction caret through both viewports");
+      require(editor->hasFocus() && editor->toPlainText() == originalText &&
+                  editor->textCursor().position() == originalCursor.position(),
+              "font reflow preserves focus, authored text and cursor position");
+      scroll->verticalScrollBar()->setValue(0);
+      spin();
+      require(scroll->verticalScrollBar()->value() == 0,
+              "manual form scrolling is not undone by cursor visibility handling");
+      dialog.setFont(originalFont);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "restoring the font reveals the unchanged instruction caret");
+      const auto originalSize = dialog.size();
+      dialog.resize(originalSize.width() - 100, originalSize.height() - 30);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "resize-only reflow reveals the unchanged instruction caret");
+      dialog.resize(originalSize);
+      editor->moveCursor(QTextCursor::Start);
+      spin();
+      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+              "navigation reveals the instruction start through both viewports");
+      editor->clearFocus();
+      scroll->verticalScrollBar()->setValue(0);
+      editor->moveCursor(QTextCursor::End);
+      require(scroll->verticalScrollBar()->value() == 0,
+              "an unfocused instruction editor does not move the enclosing form");
+    }
+  }
+}
+
 void permissionRequestDisclosure() {
   const nlohmann::json permissions = {
       {"fileSystem",
@@ -5644,6 +5994,7 @@ int main(int argc, char **argv) {
   conversationPresentationBurstIsFrameBounded(*configuration);
   threadPresentationBurstYieldsBetweenRows(*configuration);
   graphBackedShellPreservesDraftsAndPrompts(*configuration);
+  conversationProjectionRetriesWithoutAnotherGraphNotification(*configuration);
   initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
   completedLiveAgentAppearsWithoutThreadReselection(*configuration);
   threadSwitchStagesTheCompleteReplacement(*configuration);
@@ -5671,9 +6022,14 @@ int main(int argc, char **argv) {
   hiddenInspectorRequestsRetireWithTheirExactInteraction(*configuration);
   requestAncestorMoveRetainsVisibleInteractionIdentity(*configuration);
   reverseInteractionCarriesOnlyAuthoredResponse(*configuration);
+  openRequestTracksAuthorityAndRetirement(*configuration);
   compactAttentionKeepsExactVisibleTarget(*configuration);
   pendingRequestTextBoundaries();
   pendingRequestValidationRetainsInput();
+  dialogControlsHaveSemanticLabels();
+  structuredRequestCaretRemainsInsideTheForm();
+  dialogEditorCaretFollowsGeometryOnlyWhileEditing();
+  instructionCaretRemainsVisibleInShortDialogs();
   permissionRequestDisclosure();
 
   if (failures != 0) {

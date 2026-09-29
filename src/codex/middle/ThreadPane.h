@@ -3,6 +3,7 @@
 #ifndef CODEXUI_CODEX_MIDDLE_THREADPANE_H
 #define CODEXUI_CODEX_MIDDLE_THREADPANE_H
 
+#include "codex/nodegraph/Messages.h"
 #include "codex/ui/UiViewState.h"
 
 #include <QFrame>
@@ -26,7 +27,7 @@ class ThreadTreeWidget;
 
 class ThreadPane final : public QFrame {
 public:
-  enum class SortCriterion { Alphanumeric, Created, Recency };
+  enum class SortCriterion { Alphanumeric, Created, Recency, SectionOrder };
 
   using ThreadAction = std::function<void(const nodegraph::NodeRef &)>;
 
@@ -48,6 +49,11 @@ public:
     ThreadAction toggleArchive;
     ThreadAction remove;
     ThreadAction timing;
+    std::function<void()> browserChanged;
+    std::function<void()> refreshGroups;
+    std::function<void(nlohmann::json)> browse;
+    std::function<void(nodegraph::RuntimeActionKind, nlohmann::json)> manage;
+    std::function<void(std::string, std::string, std::string)> newGroupedThread;
   };
 
   explicit ThreadPane(QWidget *parent = nullptr);
@@ -61,6 +67,10 @@ public:
   void discardOptimisticThread(const std::string &threadId);
   void setSortCriterion(SortCriterion criterion);
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
+  [[nodiscard]] const ui::ThreadBrowserOptions &
+  browserOptions() const noexcept {
+    return browser;
+  }
   [[nodiscard]] std::optional<VisibleThread> visiblySelectedThread() const;
   [[nodiscard]] bool
   retainsTarget(const nodegraph::NodeRef &target) const noexcept;
@@ -83,12 +93,18 @@ private:
   void requestMoreNearListEnd();
   void updateContextRow(const std::string &presentationKey);
   void showContextMenu(const QPoint &position);
+  void showGroupMenu(QMenu *menu, ThreadTreeItem *item);
+  void editGroup(bool project, const std::string &id = {},
+                 bool readOnly = false);
+  void changeBrowser();
+  void activateBrowserRow(ThreadTreeItem *item);
+  [[nodiscard]] QString settingsKey() const;
 
   friend class ThreadTreeWidget;
 
   Actions actions;
   SortCriterion sortCriterion = SortCriterion::Recency;
-  std::array<SortAction, 3> sortActions;
+  std::array<SortAction, 4> sortActions;
   QToolButton *sortButton = nullptr;
   ThreadTreeWidget *tree = nullptr;
   std::unordered_map<std::string, ThreadTreeItem *> rows;
@@ -101,6 +117,12 @@ private:
   QMenu *contextMenu = nullptr;
   QTimer *optimisticAnimation = nullptr;
   bool selectionDispatchPending = false;
+  ui::ThreadBrowserOptions browser;
+  std::vector<ui::ThreadGroup> projects;
+  std::vector<ui::ThreadGroup> sections;
+  std::string serverIdentity;
+  bool groupingAvailable = false;
+  QToolButton *groupButton = nullptr;
 };
 
 } // namespace middle

@@ -3,6 +3,8 @@
 #include "AccessibilityEventProbe.h"
 #include "TimingPolicy.h"
 #include "codex/ForkNaming.h"
+#include "codex/NodeGraphJson.h"
+#include "codex/ThreadBrowser.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
@@ -12,19 +14,27 @@
 #include <QAccessibleActionInterface>
 #include <QApplication>
 #include <QColor>
+#include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QImage>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPersistentModelIndex>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QProxyStyle>
+#include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QTextDocument>
 #include <QThread>
 #include <QTimer>
@@ -125,6 +135,475 @@ QAccessibleInterface *threadAccessible(QTreeWidget *tree,
   for (auto index = path.rbegin(); accessible && index != path.rend(); ++index)
     accessible = accessible->child(*index);
   return accessible;
+}
+
+bool groupedThreadsPreserveIdentityAndInteractions() {
+  using namespace nodegraph;
+  NodeGraph graph;
+  NodeRef root, child, sibling, firstProject, secondProject, section;
+  const auto fields = [](nlohmann::json value) {
+    return *valueFromJson(value).asObject();
+  };
+  {
+    auto write = graph.write();
+    NodeState connection;
+    connection.status = NodeStatus::Connected;
+    connection.fields =
+        fields({{"providerState", "ready"}, {"role", "controller"}});
+    static_cast<void>(write.upsert({NodeKind::Connection, "connection"},
+                                   std::move(connection)));
+    const auto entity = [&](NodeKind kind, std::string id,
+                            nlohmann::json data) {
+      NodeState state;
+      state.fields = fields(std::move(data));
+      return write.upsert({kind, std::move(id)}, std::move(state));
+    };
+    firstProject =
+        entity(NodeKind::Project, "project-a",
+               {{"name", "CodexUI — project"},
+                {"position", 0},
+                {"roots", nlohmann::json::array({{{"path", "/workspace/ui"}}})},
+                {"metadata",
+                 {{"codexui.description",
+                   "Project description\nNot model instructions"},
+                  {"other-client", "preserved"}}}});
+    secondProject = entity(
+        NodeKind::Project, "project-b",
+        {{"name", "AISuite — very long project name with Unicode 日本語"},
+         {"position", 1},
+         {"metadata", nlohmann::json::object()}});
+    section = entity(NodeKind::ThreadSection, "shared-section",
+                     {{"name", "In progress"}});
+    root = entity(
+        NodeKind::Thread, "group-parent",
+        {{"name", "Parent"}, {"cwd", "/workspace/ui"}, {"recencyAt", 10}});
+    child = entity(
+        NodeKind::Thread, "group-child",
+        {{"name", "Child"}, {"cwd", "/workspace/bridge"}, {"recencyAt", 20}});
+    sibling = entity(
+        NodeKind::Thread, "group-sibling",
+        {{"name", "Sibling"}, {"cwd", "/workspace/ui"}, {"recencyAt", 30}});
+    write.relate(root, RelationKind::AgentChildThread, child);
+    write.relate(root, RelationKind::ProjectMembership, firstProject);
+    write.relate(child, RelationKind::ProjectMembership, secondProject);
+    write.relate(sibling, RelationKind::ProjectMembership, firstProject);
+    for (const auto &thread : {root, child, sibling})
+      write.relate(thread, RelationKind::SectionMembership, section);
+    const auto standaloneSection =
+        entity(NodeKind::ThreadSection, "standalone-section",
+               {{"name", "Personal research"}});
+    const auto standaloneMember =
+        entity(NodeKind::Thread, "standalone-member",
+               {{"name", "Research outside projects"}});
+    write.relate(standaloneMember, RelationKind::SectionMembership,
+                 standaloneSection);
+    static_cast<void>(entity(NodeKind::Thread, "ungrouped-thread",
+                             {{"name", "Independent conversation"}}));
+    for (std::string method : {"project/list", "threadSection/list"})
+      entity(NodeKind::Catalog,
+             threadBrowserKey(method, nlohmann::json::object()),
+             {{"loaded", true},
+              {"pending", false},
+              {"unsupported", false},
+              {"hasMore", false}});
+    static_cast<void>(write.finish());
+  }
+  ui::NodeGraphUiAdapter adapter(graph);
+  middle::ThreadPane pane;
+  pane.resize(330, 680);
+  if (const int width = qEnvironmentVariableIntValue("CODEXUI_GROUP_WIDTH");
+      width > 0)
+    pane.resize(width, 680);
+  if (const int points = qEnvironmentVariableIntValue("CODEXUI_GROUP_FONT");
+      points > 0) {
+    auto font = pane.font();
+    font.setPointSize(points);
+    pane.setFont(font);
+  }
+  NodeRef selected;
+  int changes = 0;
+  std::vector<nlohmann::json> queries;
+  std::vector<std::pair<RuntimeActionKind, nlohmann::json>> mutations;
+  std::optional<std::array<std::string, 3>> newThreadContext;
+  middle::ThreadPane::Actions actions;
+  actions.select = [&](const auto &node) { selected = node; };
+  actions.browserChanged = [&] { ++changes; };
+  actions.browse = [&](nlohmann::json query) {
+    queries.push_back(std::move(query));
+  };
+  actions.manage = [&](auto kind, nlohmann::json parameters) {
+    mutations.emplace_back(kind, std::move(parameters));
+  };
+  actions.newGroupedThread = [&](std::string project, std::string section,
+                                 std::string cwd) {
+    newThreadContext =
+        std::array{std::move(project), std::move(section), std::move(cwd)};
+  };
+  pane.setActions(std::move(actions));
+  auto snapshot = adapter.threads(child, nullptr, &pane.browserOptions());
+  bool passed =
+      require(snapshot && snapshot->groupingAvailable,
+              "project and section catalogs enable grouped projection");
+  if (!snapshot)
+    return false;
+  pane.refresh(*snapshot);
+  pane.show();
+  QApplication::processEvents();
+  auto *tree = threadTree(pane);
+  auto *rootItem = threadItem(tree, "group-parent");
+  auto *childItem = threadItem(tree, "group-child");
+  auto *siblingItem = threadItem(tree, "group-sibling");
+  passed &= require(rootItem && childItem && siblingItem,
+                    "grouping preserves all three threads");
+  if (!rootItem || !childItem || !siblingItem)
+    return false;
+  const auto *standalone = threadItem(tree, "standalone-section");
+  const auto *ungrouped = threadItem(tree, "ungrouped-thread");
+  const auto projectsFirst = [&] {
+    const int first = tree->indexOfTopLevelItem(threadItem(tree, "project-a"));
+    const int second = tree->indexOfTopLevelItem(threadItem(tree, "project-b"));
+    return std::min(first, second) == 0 && std::max(first, second) == 1;
+  };
+  passed &= require(projectsFirst(),
+                    "projects precede standalone threads and sections");
+  for (auto criterion : {middle::ThreadPane::SortCriterion::Alphanumeric,
+                         middle::ThreadPane::SortCriterion::Created,
+                         middle::ThreadPane::SortCriterion::Recency}) {
+    pane.setSortCriterion(criterion);
+    passed &=
+        require(projectsFirst(), "changing thread sort keeps projects first");
+  }
+  pane.beginOptimisticThread("draft-order", "draft-order", "Draft",
+                             "/workspace");
+  passed &= require(projectsFirst(), "creating a draft keeps projects first");
+  pane.refresh(*snapshot);
+  passed &=
+      require(projectsFirst(), "refreshing with a draft keeps projects first");
+  pane.discardOptimisticThread("draft-order");
+  passed &=
+      require(standalone && !standalone->parent() && ungrouped &&
+                  !ungrouped->parent() &&
+                  threadItem(tree, "standalone-member")->parent() == standalone,
+              "standalone sections and ungrouped threads are outer cards "
+              "without a synthetic No project container");
+  passed &= require(childItem->parent() != rootItem &&
+                        childItem->parent()->parent() ==
+                            threadItem(tree, "project-b"),
+                    "a cross-project child is shown once in its own project");
+  passed &= require(tree->currentItem() == childItem,
+                    "selected thread survives grouped population");
+  const auto accessible = threadAccessible(tree, childItem);
+  const auto accessibleId = accessible ? QAccessible::uniqueId(accessible) : 0;
+  const auto before = pane.grab().toImage();
+  pane.refresh(*snapshot);
+  QApplication::processEvents();
+  passed &=
+      require(pane.grab().toImage() == before &&
+                  threadItem(tree, "group-child") == childItem,
+              "a grouped semantic no-op preserves pixels and row identity");
+  {
+    auto write = graph.write();
+    write.replaceRelated(child, RelationKind::ProjectMembership,
+                         std::array{firstProject});
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.threads(child, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  QApplication::processEvents();
+  passed &=
+      require(threadItem(tree, "group-child") == childItem &&
+                  childItem->parent() == rootItem,
+              "membership reconciliation reparents the existing child row");
+  passed &= require(
+      tree->currentItem() == childItem && threadAccessible(tree, childItem) &&
+          QAccessible::uniqueId(threadAccessible(tree, childItem)) ==
+              accessibleId,
+      "reparenting preserves selection and accessible identity");
+  auto *groupControl = pane.findChild<QToolButton *>("threadGroupingButton");
+  passed &= require(groupControl->property("codexChevron").toBool() &&
+                        groupControl->minimumHeight() == 28 &&
+                        !groupControl->toolTip().isEmpty(),
+                    "grouping uses the same styled single-chevron control as sorting");
+  for (auto *action : groupControl->menu()->actions())
+    if (action->text() == "Sections")
+      action->trigger();
+  QMetaObject::invokeMethod(groupControl->menu(), "aboutToShow", Qt::DirectConnection);
+  int checkedModes = 0;
+  for (auto *action : groupControl->menu()->actions()) {
+    if (!action->actionGroup())
+      continue;
+    checkedModes += action->isChecked();
+    passed &= require(action->isCheckable() &&
+                          action->isChecked() == (action->text() == "Sections"),
+                      "grouping menu reflects the authoritative selected mode");
+  }
+  passed &= require(checkedModes == 1, "exactly one grouping mode is checked");
+  snapshot = adapter.threads(child, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  QApplication::processEvents();
+  passed &=
+      require(changes > 0 && childItem->parent() == rootItem &&
+                  rootItem->parent() == threadItem(tree, "shared-section"),
+              "Sections view preserves same-group family nesting");
+
+  auto *search = pane.findChild<QLineEdit *>("threadTitleSearch");
+  search->setText("Sibling");
+  QMetaObject::invokeMethod(search, "returnPressed", Qt::DirectConnection);
+  snapshot = adapter.threads({}, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  QApplication::processEvents();
+  passed &= require(
+      !threadItem(tree, "group-parent") && threadItem(tree, "group-sibling"),
+      "title filtering changes discovery without deleting graph entities");
+  passed &= require(
+      !queries.empty() &&
+          queries.back().at("parameters").value("searchTerm", "") == "Sibling",
+      "title search submits a server-backed query");
+  search->clear();
+  auto *archive = pane.findChild<QComboBox *>("threadArchiveFilter");
+  archive->setCurrentIndex(1);
+  snapshot = adapter.threads({}, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  passed &= require(!threadItem(tree, "group-sibling"),
+                    "archive filtering excludes active threads");
+  archive->setCurrentIndex(0);
+  for (auto *action : groupControl->menu()->actions())
+    if (action->text() == "Projects → Sections")
+      action->trigger();
+  snapshot = adapter.threads(root, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  tree->expandAll();
+  QApplication::processEvents();
+  const auto titleImage = [&](const std::string &title) {
+    {
+      auto write = graph.write();
+      write.setField(root, "name", title);
+      static_cast<void>(write.finish());
+    }
+    pane.refresh(*adapter.threads(root, nullptr, &pane.browserOptions()));
+    QApplication::processEvents();
+    return pane.grab().toImage();
+  };
+  for (const auto &title :
+       {std::string("First\nSecond"), std::string("First\r\nSecond"),
+        std::string("First\xE2\x80\xA8Second"),
+        std::string(
+            "First\nSecond with a very long title 日本語 and more words")}) {
+    const auto multiline = titleImage(title);
+    auto *row = threadItem(tree, "group-parent");
+    const auto geometry = tree->visualItemRect(row);
+    passed &=
+        require(threadAccessible(tree, row)
+                    ->text(QAccessible::Name)
+                    .contains(QString::fromStdString(title)),
+                "single-line painting preserves the full accessible title");
+    const auto singleline =
+        titleImage(QString::fromStdString(title).simplified().toStdString());
+    passed &= require(multiline == singleline &&
+                          geometry == tree->visualItemRect(row),
+                      "multiline titles paint as one elided line without "
+                      "changing row geometry");
+  }
+  if (const QString path = qEnvironmentVariable("CODEXUI_GROUP_SCREENSHOT");
+      !path.isEmpty()) {
+    static_cast<void>(titleImage(
+        "First\nSecond with a very long title 日本語 and more words"));
+    passed &=
+        require(pane.grab().save(path), "grouped live-widget screenshot saved");
+  }
+
+  // Exercise the actual edit dialog and emit authored data, not a handcrafted
+  // projection of what the dialog ought to send.
+  auto *projectItem = threadItem(tree, "project-a");
+  const QPoint point = tree->visualItemRect(projectItem).center();
+  QMetaObject::invokeMethod(tree, "customContextMenuRequested",
+                            Qt::DirectConnection, Q_ARG(QPoint, point));
+  QApplication::processEvents();
+  QPointer<QMenu> context;
+  for (auto *candidate : tree->findChildren<QMenu *>())
+    if (candidate->isVisible())
+      context = candidate;
+  if (context) {
+    QAction *edit = nullptr;
+    for (auto *action : context->actions())
+      if (action->text() == "Edit…")
+        edit = action;
+    QTimer::singleShot(0, [&] {
+      auto *dialog = pane.findChild<QDialog *>("threadGroupDialog");
+      if (!dialog)
+        return;
+      auto *description =
+          dialog->findChild<QPlainTextEdit *>("projectDescription");
+      if (description)
+        description->setPlainText("Edited description 日本語");
+      if (const QString path =
+              qEnvironmentVariable("CODEXUI_GROUP_DIALOG_SCREENSHOT");
+          !path.isEmpty())
+        passed &= require(dialog->grab().save(path),
+                          "project edit dialog screenshot saved");
+      auto *buttons = dialog->findChild<QDialogButtonBox *>();
+      if (buttons)
+        buttons->button(QDialogButtonBox::Save)->click();
+    });
+    if (edit)
+      edit->trigger();
+    if (context)
+      context->close();
+  }
+  passed &=
+      require(!mutations.empty() &&
+                  mutations.back().first == RuntimeActionKind::UpdateProject &&
+                  mutations.back().second.value("description", "") ==
+                      "Edited description 日本語",
+              "the real project dialog submits only the authored description, "
+              "not foreign metadata");
+  for (const bool project : {true, false}) {
+    const QString label = project ? "New project…" : "New section…";
+    const std::string id = project ? "new-empty-project" : "new-empty-section";
+    const auto beforeCreate = mutations.size();
+    QTimer::singleShot(0, [&] {
+      auto *dialog = pane.findChild<QDialog *>("threadGroupDialog");
+      if (!dialog)
+        return;
+      auto *name = dialog->findChild<QLineEdit *>("groupName");
+      auto *save = dialog->findChild<QDialogButtonBox *>()->button(
+          QDialogButtonBox::Save);
+      save->click();
+      passed &= require(mutations.size() == beforeCreate && dialog->isVisible(),
+                        "empty group names do not dispatch a mutation");
+      name->setText(QString::fromStdString(id));
+      if (project) {
+        auto *roots = dialog->findChild<QPlainTextEdit *>("projectRoots");
+        roots->setPlainText("relative/path");
+        save->click();
+        passed &=
+            require(mutations.size() == beforeCreate && dialog->isVisible(),
+                    "relative project roots are rejected before dispatch");
+        roots->setPlainText("/workspace/new\n/workspace/second");
+        dialog->findChild<QPlainTextEdit *>("projectDescription")
+            ->setPlainText("Description 日本語");
+      }
+      if (const QString prefix =
+              qEnvironmentVariable("CODEXUI_GROUP_CREATE_SCREENSHOT");
+          !prefix.isEmpty())
+        passed &=
+            require(dialog->grab().save(
+                        prefix + (project ? "-project.png" : "-section.png")),
+                    "group creation dialog screenshot saved");
+      save->click();
+    });
+    for (auto *action : groupControl->menu()->actions())
+      if (action->text() == label)
+        action->trigger();
+    passed &=
+        require(mutations.size() == beforeCreate + 1 &&
+                    mutations.back().first ==
+                        (project ? RuntimeActionKind::CreateProject
+                                 : RuntimeActionKind::CreateSection) &&
+                    mutations.back().second.at("name") == id,
+                "creation menu submits exactly one authored group mutation");
+    if (mutations.size() == beforeCreate)
+      continue;
+    const auto &parameters = mutations.back().second;
+    if (project)
+      passed &= require(
+          parameters.at("roots").size() == 2 &&
+              parameters.at("metadata").at(ProjectDescriptionKey) ==
+                  "Description 日本語" &&
+              !parameters.value("idempotencyKey", "").empty(),
+          "project creation retains roots, description and idempotency key");
+    passed &= require(!threadItem(tree, id),
+                      "creation does not invent an optimistic group");
+    // Deliver the authoritative entity, as the separately tested runtime
+    // reducer does after the create response. No thread membership exists yet.
+    {
+      auto write = graph.write();
+      NodeState state;
+      state.fields = fields(parameters);
+      static_cast<void>(write.upsert(
+          {project ? NodeKind::Project : NodeKind::ThreadSection, id},
+          std::move(state)));
+      static_cast<void>(write.finish());
+    }
+    snapshot = adapter.threads(root, nullptr, &pane.browserOptions());
+    pane.refresh(*snapshot);
+    QApplication::processEvents();
+    auto *created = threadItem(tree, id);
+    passed &= require(created && !created->parent(),
+                      "new empty projects and sections are visible outer cards "
+                      "in Projects view");
+    if (!created)
+      continue;
+    tree->scrollToItem(created);
+    QApplication::processEvents();
+    QMetaObject::invokeMethod(
+        tree, "customContextMenuRequested", Qt::DirectConnection,
+        Q_ARG(QPoint, tree->visualItemRect(created).center()));
+    for (auto *menu : tree->findChildren<QMenu *>())
+      if (menu->isVisible()) {
+        for (auto *action : menu->actions())
+          if (action->text() == "New thread here…")
+            action->trigger();
+        menu->close();
+      }
+    passed &= require(
+        newThreadContext ==
+            std::optional(std::array{
+                project ? id : std::string{}, project ? std::string{} : id,
+                project ? std::string("/workspace/new") : std::string{}}),
+        "an empty group can start a thread with its authoritative group "
+        "context");
+    if (!project) {
+      for (const bool assign : {true, false}) {
+        {
+          auto write = graph.write();
+          const auto member =
+              write.find({NodeKind::Thread, "standalone-member"});
+          if (assign)
+            write.replaceRelated(
+                member, RelationKind::SectionMembership,
+                std::array{write.find({NodeKind::ThreadSection, id})});
+          else
+            write.replaceRelated(member, RelationKind::SectionMembership, {});
+          static_cast<void>(write.finish());
+        }
+        snapshot = adapter.threads(root, nullptr, &pane.browserOptions());
+        pane.refresh(*snapshot);
+        passed &=
+            require(threadItem(tree, id) == created &&
+                        (threadItem(tree, "standalone-member")->parent() ==
+                         created) == assign,
+                    "empty-to-populated-to-empty sections retain their "
+                    "existing row identity");
+      }
+    }
+  }
+  snapshot->canControl = false;
+  pane.refresh(*snapshot);
+  QMetaObject::invokeMethod(groupControl->menu(), "aboutToShow",
+                            Qt::DirectConnection);
+  for (auto *action : groupControl->menu()->actions())
+    if (action->text().startsWith("New "))
+      passed &= require(!action->isEnabled(),
+                        "observer group-creation controls are disabled");
+  {
+    auto write = graph.write();
+    write.setField(write.find({NodeKind::Catalog,
+                               threadBrowserKey("project/list",
+                                                nlohmann::json::object())}),
+                   "unsupported", true);
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.threads(root, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  passed &= require(!snapshot->groupingAvailable &&
+                        threadItem(tree, "group-parent") &&
+                        !threadItem(tree, "group-parent")->parent() &&
+                        !threadItem(tree, "project-a"),
+                    "older servers retain the existing thread hierarchy "
+                    "without invented projects");
+  pane.hide();
+  return passed;
 }
 
 bool forkNamesPreserveTheirLineage() {
@@ -923,8 +1402,9 @@ bool sortingAndPromptAnimationAreFixed() {
     sortLabels.push_back(action->text());
   if (!require(sortLabels == QStringList{QStringLiteral("Alphanumeric"),
                                          QStringLiteral("Created"),
-                                         QStringLiteral("Recent")},
-               "thread sort menu does not expose exactly the three contracts"))
+                                         QStringLiteral("Recent"),
+                                         QStringLiteral("Section order")},
+               "thread sort menu does not expose the four supported contracts"))
     return false;
 
   pane.setSortCriterion(middle::ThreadPane::SortCriterion::Alphanumeric);
@@ -1799,7 +2279,7 @@ constexpr bool InstrumentedBuild = false;
 #endif
 
 bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
-                              bool enforceGates) {
+                              bool enforceGates, bool grouped = false) {
   QStringList failures;
   const auto gate = [&failures](bool condition, QString message) {
     if (condition)
@@ -1811,10 +2291,29 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
 
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef selected;
+  nodegraph::NodeRef offscreenThread;
   {
     auto write = graph.write();
     const nodegraph::NodeRef runtime =
         write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+    std::vector<nodegraph::NodeRef> projects;
+    if (grouped) {
+      for (int i = 0; i != 10; ++i) {
+        nodegraph::NodeState state;
+        state.fields.emplace("name", "Project " + std::to_string(i));
+        projects.push_back(
+            write.upsert({nodegraph::NodeKind::Project, std::to_string(i)},
+                         std::move(state)));
+      }
+      for (const auto method : {"project/list", "threadSection/list"}) {
+        nodegraph::NodeState state;
+        state.fields.emplace("loaded", true);
+        static_cast<void>(
+            write.upsert({nodegraph::NodeKind::Catalog,
+                          threadBrowserKey(method, nlohmann::json::object())},
+                         std::move(state)));
+      }
+    }
     for (std::size_t index = 0; index < count; ++index) {
       nodegraph::NodeState state;
       const std::string id = benchmarkThreadId(index);
@@ -1825,6 +2324,10 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
       const nodegraph::NodeRef thread =
           write.upsert({nodegraph::NodeKind::Thread, id}, std::move(state));
       write.relate(runtime, nodegraph::RelationKind::RootThread, thread);
+      if (grouped)
+        write.relate(thread, nodegraph::RelationKind::ProjectMembership,
+                     projects[index % projects.size()]);
+      offscreenThread = thread;
       if (index == count / 2)
         selected = thread;
     }
@@ -1834,10 +2337,20 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   ui::NodeGraphUiAdapter adapter(graph);
   QElapsedTimer adapterTimer;
   adapterTimer.start();
+  const ui::ThreadBrowserOptions browser;
   const std::optional<ui::ThreadListSnapshot> snapshot =
-      adapter.threads(selected);
+      adapter.threads(selected, nullptr, grouped ? &browser : nullptr);
   const qint64 adapterMicros = adapterTimer.nsecsElapsed() / 1000;
-  gate(snapshot && snapshot->roots.size() == count,
+  const auto countThreads =
+      [&](const auto &self,
+          const std::vector<ui::ThreadListRow> &rows) -> std::size_t {
+    std::size_t total = 0;
+    for (const auto &row : rows)
+      total +=
+          (row.kind == ui::ThreadRowKind::Thread) + self(self, row.children);
+    return total;
+  };
+  gate(snapshot && countThreads(countThreads, snapshot->roots) == count,
        QStringLiteral("actual graph projection lost thread rows"));
   if (!snapshot)
     return false;
@@ -1859,6 +2372,8 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   QElapsedTimer populationTimer;
   populationTimer.start();
   pane.refresh(*snapshot);
+  if (grouped)
+    qobject_cast<QTreeWidget *>(view)->expandAll();
   pane.show();
   settleThreadPane();
   const qint64 populationMicros = populationTimer.nsecsElapsed() / 1000;
@@ -1931,7 +2446,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
        view->visualRect(anchorAfter).top() == anchorYBefore) &&
       imageChecksum(view->viewport()->grab().toImage()) == pixelsBefore;
 
-  ui::ThreadListRow offscreen = snapshot->roots.back();
+  ui::ThreadListRow offscreen = *adapter.threadRow(offscreenThread);
   offscreen.awaitingPromptConversation = true;
   offscreen.pendingPromptAdmittedAtMs =
       QDateTime::currentMSecsSinceEpoch() - 1500;
@@ -1949,13 +2464,10 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   static_cast<void>(pane.applyRowPresentation(offscreen));
   settleThreadPane();
 
-  const auto selectedRow = std::ranges::find(
-      snapshot->roots, snapshot->selectedThreadId, &ui::ThreadListRow::id);
-  gate(selectedRow != snapshot->roots.end(),
+  const auto selectedRow = adapter.threadRow(selected);
+  gate(selectedRow.has_value(),
        QStringLiteral("selected row is absent from the snapshot"));
-  ui::ThreadListRow visible = selectedRow != snapshot->roots.end()
-                                  ? *selectedRow
-                                  : snapshot->roots.front();
+  ui::ThreadListRow visible = selectedRow.value_or(ui::ThreadListRow{});
   visible.awaitingPromptConversation = true;
   visible.pendingPromptAdmittedAtMs =
       QDateTime::currentMSecsSinceEpoch() - 1500;
@@ -1973,7 +2485,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   static_cast<void>(pane.applyRowPresentation(visible));
   settleThreadPane();
 
-  std::cout << "THREAD_PROFILE rows=" << count
+  std::cout << "THREAD_PROFILE grouped=" << grouped << " rows=" << count
             << " expected_dpr=" << expectedDpr << " actual_dpr=" << actualDpr
             << " adapter_us=" << adapterMicros
             << " population_us=" << populationMicros
@@ -1989,7 +2501,7 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
 
   gate(std::abs(actualDpr - expectedDpr) < 0.02,
        QStringLiteral("actual DPR did not match the requested profile"));
-  gate(rootRows == static_cast<int>(count),
+  gate(rootRows == static_cast<int>(snapshot->roots.size()),
        QStringLiteral("thread model cardinality is not exact"));
   gate(offscreenApplied && visibleApplied,
        QStringLiteral("exact row update was rejected"));
@@ -2027,14 +2539,19 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+  QTemporaryDir settings;
+  QSettings::setDefaultFormat(QSettings::IniFormat);
+  QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                     settings.path());
   if (argc >= 3) {
     const std::size_t count =
         std::max<std::size_t>(1, std::strtoull(argv[1], nullptr, 10));
     const qreal expectedDpr = std::max(0.1, std::strtod(argv[2], nullptr));
     const bool enforceGates =
         argc < 4 || std::string_view(argv[3]) != "baseline";
-    return codexui::codex::threadPerformanceProfile(count, expectedDpr,
-                                                    enforceGates)
+    return codexui::codex::threadPerformanceProfile(
+               count, expectedDpr, enforceGates,
+               argc >= 5 && std::string_view(argv[4]) == "grouped")
                ? EXIT_SUCCESS
                : EXIT_FAILURE;
   }
@@ -2051,6 +2568,7 @@ int main(int argc, char **argv) {
         "ThreadPane visual test did not run at its requested DPR");
   }
   passed &= codexui::codex::forkNamesPreserveTheirLineage();
+  passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
   passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
   passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();
   passed &= codexui::codex::presentationLifetimeFollowsExactThreadIncarnation();

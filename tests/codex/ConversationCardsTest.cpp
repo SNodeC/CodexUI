@@ -550,14 +550,18 @@ bool testApplicationStyleSheetContract() {
       QStringLiteral("QFrame#pendingPromptCard { background: transparent; "
                      "border: 1px solid transparent; border-radius: 8px; }"),
   };
-  const bool oneEffectiveTooltipRule =
-      sheet.count(QRegularExpression(QStringLiteral("QToolTip\\s*\\{"))) == 1 &&
-      normalized.contains(
-          QStringLiteral("QToolTip { background: %1; color: %2; border: 1px "
-                         "solid %3; border-radius: 6px; padding: 5px; }")
-              .arg(token(codexui::UiStyle::panel),
-                   token(codexui::UiStyle::primary),
-                   token(codexui::UiStyle::dividerStrong)));
+  auto tooltipRules = QRegularExpression(
+      QStringLiteral("(?:^|})\\s*[^{}]*\\bQToolTip\\b[^{}]*\\{([^}]*)\\}"))
+                          .globalMatch(normalized);
+  const bool hasTooltipRule = tooltipRules.hasNext();
+  const QString tooltipBody = hasTooltipRule ? tooltipRules.next().captured(1).trimmed()
+                                            : QString{};
+  const bool oneEffectiveTooltipRule = hasTooltipRule && !tooltipRules.hasNext() &&
+      tooltipBody == QStringLiteral("background: %1; color: %2; border: 1px "
+                                     "solid %3; border-radius: 6px; padding: 5px;")
+                         .arg(token(codexui::UiStyle::panel),
+                              token(codexui::UiStyle::primary),
+                              token(codexui::UiStyle::dividerStrong));
   bool result =
       expect(resolved, "the generated application stylesheet has no unresolved "
                        "placeholders");

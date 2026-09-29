@@ -15,6 +15,20 @@
 
 namespace codexui::nodegraph {
 
+void removeThreadGroup(NodeGraph::WriteAccess &write, const NodeRef &group) {
+  const bool project = group->id().kind == NodeKind::Project;
+  const auto relation = project ? RelationKind::ProjectMembership
+                                : RelationKind::SectionMembership;
+  for (const auto &node : write.orderedNodes()) {
+    if (node->id().kind != NodeKind::Thread)
+      continue;
+    const auto membership = write.related(node, relation);
+    if (std::ranges::find(membership, group) != membership.end())
+      write.setField(node, project ? "projectId" : "section", Value(nullptr));
+  }
+  write.remove(group);
+}
+
 namespace {
 
 constexpr std::size_t MaximumRetainedStreamBytes = 256 * 1024;
@@ -2511,6 +2525,12 @@ void ProtocolUpdater::applyGraphUpdate(
   if (method == "project/changed") {
     const std::string id = addressedId(message.payload, NodeKind::Project);
     if (!id.empty()) {
+      if (scalarTextFromValue(valueMember(message.payload, "changeType")) ==
+          "deleted") {
+        if (const auto project = write.find({NodeKind::Project, id}))
+          removeThreadGroup(write, project);
+        return;
+      }
       NodeRef project = write.upsert({NodeKind::Project, id});
       mergeObject(write, project, message.payload);
       write.setField(project, "stale", Value(true));
@@ -2598,7 +2618,7 @@ void ProtocolUpdater::applyGraphUpdate(
       return;
     if (method == "project/delete") {
       if (NodeRef project = write.find({NodeKind::Project, id}))
-        write.remove(project);
+        removeThreadGroup(write, project);
       return;
     }
     NodeRef project = write.upsert({NodeKind::Project, id});
@@ -2635,7 +2655,7 @@ void ProtocolUpdater::applyGraphUpdate(
       return;
     if (method == "threadSection/delete") {
       if (NodeRef section = write.find({NodeKind::ThreadSection, id}))
-        write.remove(section);
+        removeThreadGroup(write, section);
       return;
     }
     NodeRef section = write.upsert({NodeKind::ThreadSection, id});
@@ -2652,7 +2672,9 @@ void ProtocolUpdater::applyGraphUpdate(
     if (!threads)
       threads = arrayMember(message.payload, "threads");
     if (threads)
-      replaceThreadList(write, *threads, preserveChangesAfter);
+      replaceThreadList(
+          write, *threads, preserveChangesAfter,
+          boolFromValue(valueMember(message.payload, "archived")));
     return;
   }
 
@@ -2989,8 +3011,9 @@ NodeRef ProtocolUpdater::ingestThread(
   if (id.empty())
     return {};
   NodeRef thread = write.upsert({NodeKind::Thread, id});
-  const std::optional<std::uint64_t> snapshotBoundary =
-      replaceTurns ? preserveChangesAfter : std::nullopt;
+  // Metadata pages, like full reads, must not undo notifications or mutation
+  // acknowledgements observed after their request was dispatched.
+  const std::optional<std::uint64_t> snapshotBoundary = preserveChangesAfter;
   const std::string previousForkSourceId = scalarTextFromValue(
       valueMember(write.state(thread)->fields, "forkedFromId"));
   const auto acceptsField = [&](std::string_view field) {
@@ -3212,7 +3235,7 @@ void ProtocolUpdater::admitRootThread(NodeGraph::WriteAccess &write,
 
 void ProtocolUpdater::replaceThreadList(
     NodeGraph::WriteAccess &write, const Value::Array &threads,
-    std::optional<std::uint64_t> preserveChangesAfter) {
+    std::optional<std::uint64_t> preserveChangesAfter, bool archived) {
   NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
   const std::vector<NodeRef> previous =
       write.related(runtime, RelationKind::RootThread);
@@ -3226,6 +3249,12 @@ void ProtocolUpdater::replaceThreadList(
       continue;
     NodeRef thread =
         ingestThread(write, *object, {}, false, preserveChangesAfter);
+    // Thread does not carry archive membership; the correlated list filter
+    // does. An older page must still yield to a newer archive notification.
+    if (thread && (!preserveChangesAfter ||
+                   write.fieldChangedRevision(thread, "archived") <=
+                       *preserveChangesAfter))
+      write.setField(thread, "archived", Value(archived));
     if (thread && listedSet.insert(thread.get()).second)
       listed.emplace_back(std::move(thread));
   }

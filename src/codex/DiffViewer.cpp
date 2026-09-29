@@ -14,9 +14,11 @@
 #include <QFileSystemWatcher>
 #include <QFontDatabase>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPainter>
 #include <QPlainTextEdit>
@@ -130,9 +132,30 @@ QLabel *label(QString value, const char *kind) {
   return result;
 }
 
-QPlainTextEdit *diffView(const QString &objectName) {
+QLineEdit *fileTitleView(const QString &objectName, const char *kind) {
+  auto *view = new QLineEdit;
+  view->setObjectName(objectName);
+  view->setProperty("kind", kind);
+  view->setReadOnly(true);
+  view->setAccessibleName(QStringLiteral("Selected file"));
+  view->setPlaceholderText(QStringLiteral("Select a changed file"));
+  view->setMinimumWidth(0);
+  view->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  return view;
+}
+
+void setFileTitle(QLineEdit &view, const QString &value) {
+  if (view.text() == value)
+    return;
+  view.setText(value);
+  view.setCursorPosition(0);
+}
+
+QPlainTextEdit *diffView(const QString &objectName,
+                         const QString &accessibleName) {
   auto *view = new QPlainTextEdit;
   view->setObjectName(objectName);
+  view->setAccessibleName(accessibleName);
   view->setProperty("kind", "infoViewer");
   view->setReadOnly(true);
   view->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -356,7 +379,7 @@ public:
     root->setContentsMargins(14, 14, 14, 14);
     root->setSpacing(10);
     auto *header = new QHBoxLayout;
-    title = label(QStringLiteral("Change Review"), "heading");
+    title = fileTitleView(QStringLiteral("codexReviewSelectedFile"), "heading");
     subtitle = label({}, "meta");
     auto *titles = new QVBoxLayout;
     titles->setSpacing(1);
@@ -385,15 +408,19 @@ public:
 
     auto *body = new QSplitter;
     reviewFiles = new QListWidget;
+    reviewFiles->setAccessibleName(QStringLiteral("Review files"));
     reviewFiles->setMinimumWidth(230);
     reviewFiles->setMaximumWidth(420);
     body->addWidget(reviewFiles);
     views = new QStackedWidget;
-    unifiedView = diffView(QStringLiteral("codexReviewUnified"));
+    unifiedView = diffView(QStringLiteral("codexReviewUnified"),
+                           QStringLiteral("Unified diff"));
     views->addWidget(unifiedView);
     auto *sides = new QSplitter;
-    leftView = diffView(QStringLiteral("codexReviewBefore"));
-    rightView = diffView(QStringLiteral("codexReviewAfter"));
+    leftView = diffView(QStringLiteral("codexReviewBefore"),
+                       QStringLiteral("Before changes"));
+    rightView = diffView(QStringLiteral("codexReviewAfter"),
+                        QStringLiteral("After changes"));
     sides->addWidget(leftView);
     sides->addWidget(rightView);
     sides->setSizes({600, 600});
@@ -504,6 +531,7 @@ private:
     if (!value.files.empty())
       reviewFiles->setCurrentRow(selected >= 0 ? selected : 0);
     else {
+      title->clear();
       unifiedView->setPlainText(value.error.isEmpty()
                                     ? QStringLiteral("No file changes")
                                     : value.error);
@@ -523,7 +551,7 @@ private:
     const TextViewportState leftState = textViewportState(*leftView);
     const TextViewportState rightState = textViewportState(*rightView);
     requestedPath = file.absolutePath;
-    title->setText(fileTitle(file, snapshot->repositoryRoots.size() > 1));
+    setFileTitle(*title, fileTitle(file, snapshot->repositoryRoots.size() > 1));
     const QString content =
         file.patch.isEmpty()
             ? QStringLiteral("No textual patch is available for this file.")
@@ -555,7 +583,7 @@ private:
   std::optional<GitDiffSnapshot> snapshot;
   QString requestedPath;
   GitDiffContext context = GitDiffContext::Compact;
-  QLabel *title = nullptr;
+  QLineEdit *title = nullptr;
   QLabel *subtitle = nullptr;
   QListWidget *reviewFiles = nullptr;
   QStackedWidget *views = nullptr;
@@ -585,7 +613,6 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   filters->setSpacing(8);
   repositories = new UiStyle::ChevronComboBox;
   repositories->setObjectName(QStringLiteral("codexDiffRepository"));
-  repositories->setProperty("codexChevron", true);
   repositories->addItem(QStringLiteral("Repository"), QString{});
   repositories->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
   filters->addWidget(repositories, 1);
@@ -604,7 +631,6 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   filters->addWidget(hiddenRepositories);
   scope = new UiStyle::ChevronComboBox;
   scope->setObjectName(QStringLiteral("codexDiffScope"));
-  scope->setProperty("codexChevron", true);
   scope->addItem(QStringLiteral("Unstaged"),
                  static_cast<int>(GitDiffScope::Unstaged));
   scope->addItem(QStringLiteral("Staged"),
@@ -619,6 +645,7 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   root->addLayout(filters);
 
   files = new QListWidget;
+  files->setAccessibleName(QStringLiteral("Changed files"));
   files->setObjectName(QStringLiteral("codexDiffFiles"));
   files->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   files->setMaximumHeight(170);
@@ -650,20 +677,22 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   previewDivider->setFixedHeight(1);
   root->addWidget(previewDivider);
 
-  auto *previewHeader = new QHBoxLayout;
+  auto *previewHeader = new QGridLayout;
   previewHeader->setContentsMargins(10, 0, 10, 0);
-  selectedFile = UiStyle::makeLabel(QStringLiteral("Select a changed file"), "title");
-  previewHeader->addWidget(selectedFile, 1);
+  previewHeader->setColumnStretch(0, 1);
+  selectedFile = fileTitleView(QStringLiteral("codexDiffSelectedFile"), "title");
+  previewHeader->addWidget(selectedFile, 0, 0, 1, 2);
   copyButton = new QPushButton(QStringLiteral("Copy"));
   copyButton->setProperty("kind", "subtle");
   copyButton->setFixedHeight(28);
   reviewButton = new QPushButton(QStringLiteral("Open review"));
   reviewButton->setProperty("comboPeer", true);
-  previewHeader->addWidget(copyButton);
-  previewHeader->addWidget(reviewButton);
+  previewHeader->addWidget(copyButton, 1, 0, Qt::AlignRight);
+  previewHeader->addWidget(reviewButton, 1, 1);
   root->addLayout(previewHeader);
 
-  diff = diffView(QStringLiteral("codexDiffText"));
+  diff = diffView(QStringLiteral("codexDiffText"),
+                  QStringLiteral("Changes diff"));
   diff->setPlaceholderText(QStringLiteral("Select a changed file."));
   auto *diffArea = new QVBoxLayout;
   diffArea->setContentsMargins(10, 0, 10, 10);
@@ -874,7 +903,7 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
     if (selected >= 0)
       restoreTextViewport(*diff, previousViewport);
   } else {
-    selectedFile->setText(QStringLiteral("Select a changed file"));
+    selectedFile->clear();
     diff->setPlainText(value.error);
   }
   copyButton->setEnabled(!value.files.empty());
@@ -925,15 +954,13 @@ void DiffViewer::showSelectedFile() {
   const int index = files->currentRow();
   if (!snapshot || index < 0 ||
       static_cast<std::size_t>(index) >= snapshot->files.size()) {
-    selectedFile->setText(QStringLiteral("Select a changed file"));
+    selectedFile->clear();
     diff->clear();
     return;
   }
   const GitDiffFile &file = snapshot->files[static_cast<std::size_t>(index)];
-  const QString title =
-      fileTitle(file, snapshot->repositoryRoots.size() > 1);
-  if (selectedFile->text() != title)
-    selectedFile->setText(title);
+  setFileTitle(*selectedFile,
+               fileTitle(file, snapshot->repositoryRoots.size() > 1));
   const QString content =
       file.patch.isEmpty()
           ? QStringLiteral("No textual patch is available for this file.")
@@ -950,8 +977,8 @@ void DiffViewer::openReview() {
   if (!reviewWindow) {
     reviewWindow = new GitDiffReviewWindow(
         [this] { refreshRepository(); }, window());
-    connect(reviewWindow, &QObject::destroyed, this,
-            [this] { refreshRepository(); });
+    connect(reviewWindow, &QObject::destroyed, refreshTimer,
+            qOverload<>(&QTimer::start));
   }
   if (snapshot)
     reviewWindow->setSnapshot(*snapshot, selectedPath());

@@ -538,6 +538,106 @@ bool turnSettingsCatalogProjectionScalesLinearly() {
       "settings catalog projection remains quantitatively linear");
 }
 
+bool attachmentLayoutFollowsFontAndWidth() {
+  const QFont original = qApp->font();
+  ComposerPane composer;
+  std::vector<AttachmentDraft> attachments;
+  for (int row = 0; row < 6; ++row)
+    attachments.push_back({"/workspace/file-" + std::to_string(row),
+                           "Long attachment filename with spaces α " +
+                               std::to_string(row), "text/plain", 1});
+  composer.setAttachments(attachments);
+  composer.show();
+  auto *scroll = composer.findChild<QScrollArea *>();
+  bool result = true;
+  for (int points : {10, 16, 10}) {
+    QFont font = original;
+    font.setPointSize(points);
+    qApp->setFont(font);
+    for (int width : {900, 440, 900}) {
+      composer.resize(width, composer.sizeHint().height());
+      for (int pass = 0; pass < 4; ++pass)
+        QCoreApplication::processEvents();
+      result &= expect(scroll->verticalScrollBar()->maximum() > 0,
+                       "attachments beyond four rows scroll without external sizing");
+      for (auto *box : composer.findChildren<QFrame *>("attachmentFileBox")) {
+        auto *label = box->findChild<QLabel *>();
+        result &= expect(label && label->height() >= label->heightForWidth(label->width()),
+                         "attachment text fits after font and width changes");
+      }
+      for (auto *button : scroll->findChildren<QPushButton *>())
+        result &= expect(button->height() >= button->sizeHint().height(),
+                         "attachment removal caption fits enlarged fonts");
+      auto *layout = scroll->widget()->layout();
+      const int fourthBottom = layout->itemAt(3)->geometry().bottom() + 1;
+      result &= expect(scroll->viewport()->height() == fourthBottom,
+                       "attachment viewport ends at the fourth natural row");
+    }
+  }
+  composer.setAttachments({attachments.front()});
+  for (int pass = 0; pass < 4; ++pass)
+    QCoreApplication::processEvents();
+  result &= expect(scroll->verticalScrollBar()->maximum() == 0,
+                   "one attachment shrinks the viewport without stale scroll range");
+  composer.clearDraft();
+  result &= expect(!scroll->isVisible(), "empty attachment panel disappears");
+  qApp->setFont(original);
+  return result;
+}
+
+bool controlsRetainUsableGeometryAndAuthority() {
+  const QFont originalFont = qApp->font();
+  const QString originalStyle = qApp->styleSheet();
+  bool result = true;
+  for (int points : {10, 16}) {
+    QFont font = originalFont;
+    font.setPointSize(points);
+    qApp->setFont(font);
+    qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+    TurnSettingsPolicy policy;
+    TurnSettingsWidget settings(policy);
+    settings.show();
+    auto *model = settings.findChild<QComboBox *>("codexModel");
+    auto *access = settings.findChild<QComboBox *>("codexSandbox");
+    const auto y = [&settings](QWidget *widget) {
+      return widget->mapTo(&settings, QPoint{}).y();
+    };
+    for (int width : {1800, 360, 1800}) {
+      settings.resize(width, settings.layout()->heightForWidth(width));
+      QCoreApplication::processEvents();
+      result &= expect((width == 1800) == (y(model) == y(access)),
+                       "settings reflow in place between four and two columns");
+      for (const char *name : {"codexModel", "codexEffort", "codexApproval",
+                               "codexSandbox", "codexNetwork", "codexPersonality"}) {
+        auto *control = settings.findChild<QComboBox *>(name);
+        result &= expect(control->width() >= control->minimumSizeHint().width() &&
+                             control->height() >= control->minimumSizeHint().height(),
+                         "settings respect font-dependent control geometry");
+      }
+    }
+    ComposerPane composer;
+    composer.resize(700, composer.sizeHint().height());
+    composer.setActiveTurn(true);
+    composer.setCanSubmit(false);
+    composer.show();
+    QCoreApplication::processEvents();
+    for (auto *button : composer.findChildren<QPushButton *>()) {
+      if (button->text() != "Stop" && button->text() != "Steer")
+        continue;
+      result &= expect(!button->isEnabled(), "observer cannot steer or stop");
+      result &= expect(button->width() >= button->sizeHint().width(),
+                       "composer action captions fit enlarged fonts");
+    }
+    composer.setCanSubmit(true);
+    for (auto *button : composer.findChildren<QPushButton *>())
+      if (button->text() == "Stop")
+        result &= expect(button->isEnabled(), "controller can stop without a draft");
+  }
+  qApp->setFont(originalFont);
+  qApp->setStyleSheet(originalStyle);
+  return result;
+}
+
 ui::ThreadListRow
 row(std::string id, std::string title,
     nodegraph::NodeStatus status = nodegraph::NodeStatus::Unknown) {
@@ -1047,11 +1147,7 @@ bool nestedWheelGestureHasOneRoutingOwner(bool measurePerformance) {
   QCoreApplication::processEvents();
   QScrollArea *const attachmentScroll =
       region.composer().findChild<QScrollArea *>();
-  if (attachmentScroll && attachmentScroll->widget()) {
-    attachmentScroll->widget()->setMinimumHeight(
-        attachmentScroll->widget()->sizeHint().height());
-    QCoreApplication::processEvents();
-  }
+  QCoreApplication::processEvents();
   QScrollBar *const attachmentBar =
       attachmentScroll ? attachmentScroll->verticalScrollBar() : nullptr;
   result &= expect(attachmentBar &&
@@ -1078,6 +1174,43 @@ bool nestedWheelGestureHasOneRoutingOwner(bool measurePerformance) {
                      "the attachment owner receives the complete gesture "
                      "lifecycle");
   }
+
+  struct NativeWheelBar : QScrollBar {
+    using QScrollBar::wheelEvent;
+  } native;
+  native.setRange(outer->minimum(), outer->maximum());
+  native.setSingleStep(outer->singleStep());
+  native.setPageStep(outer->pageStep());
+  const int savedLines = QApplication::wheelScrollLines();
+  for (int lines : {1, 3, 7}) {
+    QApplication::setWheelScrollLines(lines);
+    for (Qt::KeyboardModifiers modifiers :
+         {Qt::KeyboardModifiers{}, Qt::KeyboardModifiers{Qt::ControlModifier},
+          Qt::KeyboardModifiers{Qt::ShiftModifier}}) {
+      outer->setValue(outer->maximum() / 2);
+      native.setValue(outer->value());
+      static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollBegin, {}));
+      for (int delta : {-120, -1, -1, -1, -1, 4, 120}) {
+        QWheelEvent reference({}, {}, QPoint(0, -17), QPoint(0, delta),
+                              Qt::NoButton, modifiers, Qt::ScrollUpdate, false);
+        native.wheelEvent(&reference);
+        static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollUpdate,
+                                 QPoint(0, -17), QPoint(0, delta),
+                                 Qt::NoButton, modifiers));
+        result &= expect(outer->value() == native.value(),
+                         "conversation uses Qt native distance, fractional "
+                         "accumulation, direction and configured scroll lines");
+      }
+      static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollEnd, {}));
+    }
+  }
+  QApplication::setWheelScrollLines(savedLines);
+  outer->setValue(outer->maximum() / 2);
+  const int beforePixels = outer->value();
+  static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollUpdate, QPoint(0, 9)));
+  static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollEnd, {}));
+  result &= expect(outer->value() == beforePixels - 9,
+                   "pixel-only scrolling works without a Begin event");
 
   if (measurePerformance) {
     // Quantify the central route on the same native viewport against direct
@@ -1324,6 +1457,9 @@ int main(int argc, char **argv) {
       turnSettingsAreStableAccessibleProjections);
   run("turnSettingsCatalogProjectionScalesLinearly",
       turnSettingsCatalogProjectionScalesLinearly);
+  run("controlsRetainUsableGeometryAndAuthority",
+      controlsRetainUsableGeometryAndAuthority);
+  run("attachmentLayoutFollowsFontAndWidth", attachmentLayoutFollowsFontAndWidth);
   run("threadPaneSnapshotAndActionContract",
       threadPaneSnapshotAndActionContract);
   run("conversationOwnershipAndAtomicReconcileContract",

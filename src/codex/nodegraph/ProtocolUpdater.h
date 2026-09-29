@@ -13,6 +13,10 @@
 
 namespace codexui::nodegraph {
 
+// Removing an organisational entity also clears its protocol membership facts;
+// a subsequently arriving older page must not recreate the deleted grouping.
+void removeThreadGroup(NodeGraph::WriteAccess &write, const NodeRef &group);
+
 enum class DecodedMessageKind : std::uint8_t {
   ClientRequest,
   ClientResult,
@@ -147,7 +151,8 @@ private:
                        bool prepend);
   void replaceThreadList(NodeGraph::WriteAccess &write,
                          const Value::Array &threads,
-                         std::optional<std::uint64_t> preserveChangesAfter);
+                         std::optional<std::uint64_t> preserveChangesAfter,
+                         bool archived);
   void removeThread(NodeGraph::WriteAccess &write, const NodeRef &thread);
 
   NodeGraph *graph_;

@@ -58,6 +58,25 @@ inline std::string threadPresentationKey(std::string_view threadId,
 
 // Toolkit-neutral inputs for the concrete thread-list renderer. Expansion
 // and optimistic rows deliberately remain local to that renderer.
+enum class ThreadGrouping { Projects, Sections, Ungrouped };
+enum class ThreadRowKind { Project, Section, Thread, Page };
+struct ThreadBrowserOptions {
+  ThreadGrouping grouping = ThreadGrouping::Projects;
+  std::string title;
+  int archived = 0; // 0 active, 1 archived, 2 all
+  bool manualSections = false;
+  bool manualProjects = false;
+};
+
+struct ThreadGroup {
+  std::string id;
+  std::string name;
+  nodegraph::NodeRef target;
+  nlohmann::json fields;
+
+  bool operator==(const ThreadGroup &) const = default;
+};
+
 struct ThreadListRow {
   std::string id;
   std::string presentationKey;
@@ -75,6 +94,15 @@ struct ThreadListRow {
   bool archived = false;
   std::vector<ThreadListRow> children;
   ProtocolTimes timing{};
+  ThreadRowKind kind = ThreadRowKind::Thread;
+  std::string projectId;
+  std::string sectionId;
+  nodegraph::NodeRef parentThread;
+  std::string details;
+  std::int64_t order = 0;
+  nlohmann::json query;
+  bool pendingPage = false;
+  std::string appearanceColor;
 
   bool operator==(const ThreadListRow &) const = default;
 };
@@ -84,6 +112,10 @@ struct ThreadListSnapshot {
   bool providerReady = false;
   bool canControl = false;
   std::vector<ThreadListRow> roots;
+  std::vector<ThreadGroup> projects;
+  std::vector<ThreadGroup> sections;
+  std::string serverIdentity;
+  bool groupingAvailable = false;
 
   bool operator==(const ThreadListSnapshot &) const = default;
 };

@@ -3,6 +3,7 @@
 #include "codex/NewThreadDialog.h"
 
 #include "codex/FileSelectionDialog.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QCheckBox>
 #include <QDir>
@@ -30,13 +31,14 @@ QLabel *label(QString text, const char *kind = "body") {
   return value;
 }
 
-QWidget *field(QString caption, QWidget *control) {
+QWidget *field(QString caption, QWidget *control, QWidget *buddy = nullptr) {
   auto *widget = new QWidget;
   auto *layout = new QVBoxLayout(widget);
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(6);
   auto *captionLabel = label(std::move(caption), "title");
-  captionLabel->setBuddy(control);
+  captionLabel->setBuddy(buddy ? buddy : control);
+  captionLabel->buddy()->setAccessibleName(captionLabel->text());
   layout->addWidget(captionLabel);
   layout->addWidget(control);
   return widget;
@@ -51,7 +53,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
 
 NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
                                  QWidget *parent)
-    : QDialog(parent) {
+    : UiStyle::ScrollFormDialog(parent) {
   setModal(true);
   const bool forFork = purpose == Purpose::Fork;
   const QString heading = forFork ? QStringLiteral("Fork with options")
@@ -71,9 +73,7 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
                 "style remain in the upcoming-turn controls."),
       "muted"));
 
-  auto *scroll = new QScrollArea;
-  scroll->setWidgetResizable(true);
-  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  auto *scroll = formScrollArea();
   scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   auto *content = new QWidget;
   auto *form = new QVBoxLayout(content);
@@ -90,7 +90,7 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   browse->setMinimumHeight(34);
   workspaceLayout->addWidget(workspace, 1);
   workspaceLayout->addWidget(browse);
-  form->addWidget(field(QStringLiteral("Workspace"), workspaceRow));
+  form->addWidget(field(QStringLiteral("Workspace"), workspaceRow, workspace));
 
   name = new QLineEdit;
   name->setPlaceholderText(QStringLiteral("Optional thread name"));
@@ -99,7 +99,7 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   name->setEnabled(!initialDraft.ephemeral);
   form->addWidget(field(QStringLiteral("Name"), name));
 
-  baseInstructions = new QPlainTextEdit;
+  baseInstructions = new UiStyle::DialogTextEdit;
   baseInstructions->setPlaceholderText(
       QStringLiteral("Optional base instructions"));
   baseInstructions->setMaximumHeight(110);
@@ -107,7 +107,7 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   baseInstructions->setPlainText(std::move(initialDraft.baseInstructions));
   form->addWidget(field(QStringLiteral("Base instructions"), baseInstructions));
 
-  developerInstructions = new QPlainTextEdit;
+  developerInstructions = new UiStyle::DialogTextEdit;
   developerInstructions->setPlaceholderText(
       QStringLiteral("Optional developer instructions"));
   developerInstructions->setMaximumHeight(110);
@@ -132,6 +132,9 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
   form->addStretch();
   scroll->setWidget(content);
   root->addWidget(scroll, 1);
+  for (auto *editor : {baseInstructions, developerInstructions})
+    connect(editor, &QPlainTextEdit::cursorPositionChanged, this,
+            [this, editor] { revealFormFocus(editor); });
 
   errorLabel = label({}, "meta");
   errorLabel->setProperty("tone", "danger");

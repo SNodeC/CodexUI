@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ConnectionDialog.h"
+#include "codex/ui/UiStyle.h"
 
-#include <QComboBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -57,7 +57,7 @@ ConnectionDialog::ConnectionDialog(nlohmann::json settings, QWidget *parent)
   form->setHorizontalSpacing(14);
   form->setVerticalSpacing(12);
   form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-  transport = new QComboBox;
+  transport = new UiStyle::ChevronComboBox;
   const nlohmann::json available =
       this->settings.value("available", nlohmann::json::array());
   if (available.is_array()) {

@@ -36,6 +36,8 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPushButton>
+#include <QPointer>
+#include <QScopedValueRollback>
 #include <QSizePolicy>
 #include <QStringList>
 #include <QStyle>
@@ -137,6 +139,13 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
     return {};
   if (change.rescanRequired)
     return {true, true, {}, access.revision()};
+  if (containsKind(change, {nodegraph::NodeKind::Project,
+                            nodegraph::NodeKind::ThreadSection}) ||
+      std::ranges::any_of(change.affected, [](const auto &node) {
+        return node && node->id().kind == nodegraph::NodeKind::Catalog &&
+               node->id().canonical.starts_with("thread-browser:");
+      }))
+    return {true, true, {}, access.revision()};
   if (containsKind(change, {nodegraph::NodeKind::Connection,
                             nodegraph::NodeKind::Interaction}) ||
       std::ranges::any_of(change.removed, [](const auto &node) {
@@ -146,7 +155,10 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
       }))
     return {true, true, {}};
   const auto *read = &access;
-  constexpr std::array<std::string_view, 16> Fields{
+  constexpr std::array<std::string_view, 19> Fields{
+      "projectId",
+      "section",
+      "sectionEnteredAt",
       "name",
       "localNameOverlay",
       "title",
@@ -544,7 +556,8 @@ struct ShellWidget::Impl final {
   [[nodiscard]] bool submitPending(const PendingRequestDescriptor &request,
                                    PendingRequestSubmission submission);
   void hydrateSelectedThreadIfNeeded(nodegraph::NodeRef thread);
-  void beginNewThreadDialog();
+  void beginNewThreadDialog(std::string project = {}, std::string section = {},
+                            std::string workspace = {});
   [[nodiscard]] std::optional<NewThreadDraft>
   suggestedForkDraft(const nodegraph::NodeRef &thread) const;
   void forkThread(const nodegraph::NodeRef &thread, NewThreadDraft draft,
@@ -581,6 +594,8 @@ struct ShellWidget::Impl final {
   std::map<nodegraph::NodeRef, LocalPendingRequest,
            std::owner_less<nodegraph::NodeRef>>
       localPendingRequests;
+  nodegraph::NodeRef reviewedRequest;
+  QPointer<QPushButton> reviewSubmit;
   std::optional<nlohmann::json> retainedConnectionSelection;
   bool graphPanesBound = false;
   bool graphBindingScheduled = false;
@@ -781,8 +796,10 @@ void ShellWidget::Impl::buildUi() {
   statusLayout->addWidget(overallTokens);
   overallTokens->ensurePolished();
   statusLayout->setSpacing(overallTokens->fontMetrics().horizontalAdvance(QLatin1Char(' ')));
-  auto *statusCaption = makeStatusLabel(
-      QStringLiteral("| Status"), QStringLiteral("globalStatusCaption"), 60);
+  auto *statusCaption = makeLabel(QStringLiteral("| Status"), "meta");
+  statusCaption->setObjectName(QStringLiteral("globalStatusCaption"));
+  statusCaption->setWordWrap(false);
+  statusCaption->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
   statusLayout->addWidget(statusCaption);
   globalStatusDot = new QFrame;
   globalStatusDot->setFixedSize(10, 10);
@@ -799,6 +816,35 @@ void ShellWidget::Impl::buildUi() {
 void ShellWidget::Impl::connectUi() {
   middle::ThreadPane::Actions threadActions;
   threadActions.newThread = [this] { beginNewThreadDialog(); };
+  threadActions.newGroupedThread =
+      [this](std::string project, std::string section, std::string cwd) {
+        beginNewThreadDialog(std::move(project), std::move(section),
+                             std::move(cwd));
+      };
+  threadActions.browserChanged = [this] {
+    pendingThreadPane = true;
+    schedulePaneCommit();
+  };
+  threadActions.refreshGroups = [this] {
+    static_cast<void>(sendRuntimeAction(
+        {nodegraph::RuntimeActionKind::RefreshThreadGroups, {}, {}, {}, {}},
+        QStringLiteral("Groups could not be refreshed; try again.")));
+  };
+  threadActions.browse = [this](nlohmann::json parameters) {
+    static_cast<void>(sendRuntimeAction(
+        {nodegraph::RuntimeActionKind::LoadThreadGroup,
+         objectFromJson(parameters),
+         {},
+         {},
+         {}},
+        QStringLiteral("The thread page could not be requested; try again.")));
+  };
+  threadActions.manage = [this](nodegraph::RuntimeActionKind kind,
+                                nlohmann::json parameters) {
+    static_cast<void>(sendRuntimeAction(
+        {kind, objectFromJson(parameters), {}, {}, {}},
+        QStringLiteral("The group change was not admitted; try again.")));
+  };
   threadActions.loadMore = [this] {
     static_cast<void>(sendRuntimeAction(
         {nodegraph::RuntimeActionKind::LoadMoreThreads, {}, {}, {}, {}},
@@ -1066,7 +1112,9 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   pendingConversation = false;
   clearPendingConversationItems();
   std::uint64_t threadRevision = 0;
-  if (auto threads = uiAdapter.threads(boundGraphThread, &threadRevision)) {
+  if (auto threads =
+          uiAdapter.threads(boundGraphThread, &threadRevision,
+                            &middleRegion->threads().browserOptions())) {
     middleRegion->threads().refresh(*threads);
     routedThreadRevision = threadRevision;
   }
@@ -1169,7 +1217,8 @@ void ShellWidget::Impl::startConversationSnapshot() {
     if (info)
       middleRegion->conversation().setHistoryRequestPending(
           boundGraphThread->id().canonical, info->historyRequestPending);
-    conversationProjectionRequested = true;
+    // A failed tryRead has no completion event to wake the pending projection.
+    requestConversationProjection(false);
     return;
   }
   middleRegion->conversation().setHistoryRequestPending(
@@ -1211,18 +1260,15 @@ void ShellWidget::Impl::startConversationSnapshot() {
                   requestConversationSnapshot();
                 return;
               }
-              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta)) {
+              const auto currentInfo =
+                  uiAdapter.conversationInfo(requestedThread);
+              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta) ||
+                  !currentInfo || currentInfo->historyRequestPending) {
                 conversationProjectionRequested = true;
                 conversationFullProjectionRequested |= fullSnapshot;
                 QTimer::singleShot(
                     GraphRetryDelayMilliseconds, owner,
                     [this] { requestConversationProjection(false); });
-                return;
-              }
-              const auto currentInfo =
-                  uiAdapter.conversationInfo(requestedThread);
-              if (!currentInfo || currentInfo->historyRequestPending) {
-                conversationProjectionRequested = true;
                 return;
               }
               if (conversationProjectionRequested) {
@@ -1418,7 +1464,8 @@ bool ShellWidget::Impl::uiRetainsTarget(
     const nodegraph::NodeRef &target) const noexcept {
   if (!target)
     return false;
-  if (boundGraphThread == target || retainedRenames.contains(target.get()) ||
+  if (boundGraphThread == target || reviewedRequest == target ||
+      retainedRenames.contains(target.get()) ||
       localPendingRequests.contains(target))
     return true;
   if (std::ranges::find(pendingThreadRows, target) != pendingThreadRows.end() ||
@@ -1508,7 +1555,8 @@ void ShellWidget::Impl::commitPendingPanes() {
   if (hasFrameBudget() && pendingThreadPane) {
     std::uint64_t graphRevision = 0;
     if (auto threads =
-            uiAdapter.threads(boundGraphThread, &graphRevision)) {
+            uiAdapter.threads(boundGraphThread, &graphRevision,
+                              &middleRegion->threads().browserOptions())) {
       pendingThreadPane = false;
       pendingThreadRows.clear();
       routedThreadRevision = graphRevision;
@@ -2036,6 +2084,8 @@ ShellWidget::Impl::pendingRequestSummary(bool *busy) {
     static_cast<void>(local);
     localTargets.push_back(target);
   }
+  if (reviewedRequest)
+    localTargets.push_back(reviewedRequest);
   auto summary = uiAdapter.pendingRequestSummary(
       boundGraphThread ? std::string_view(boundGraphThread->id().canonical)
                        : std::string_view{},
@@ -2200,6 +2250,18 @@ void ShellWidget::Impl::render(
     projectedRequests = &*ownedRequests;
   }
   values.totalPending = projectedRequests->total;
+  if (reviewSubmit) {
+    const auto request = std::ranges::find(projectedRequests->candidates,
+                                         reviewedRequest,
+                                         &PendingRequestDescriptor::target);
+    const bool live = request != projectedRequests->candidates.end();
+    reviewSubmit->setEnabled(live && request->availability ==
+                                       PendingRequestAvailability::Actionable);
+    reviewSubmit->setToolTip(live ? text(PendingRequestPolicy::status(*request))
+                                  : QStringLiteral("This request has ended."));
+    reviewSubmit->setText(live ? QStringLiteral("Submit")
+                               : QStringLiteral("Resolved"));
+  }
   const std::optional<std::size_t> attention =
       PendingRequestPolicy::attentionIndex(
           projectedRequests->candidates,
@@ -2369,7 +2431,9 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
       (boundGraphThread || newThreadDraft) && !status.activeTurn);
 }
 
-void ShellWidget::Impl::beginNewThreadDialog() {
+void ShellWidget::Impl::beginNewThreadDialog(std::string project,
+                                             std::string section,
+                                             std::string workspace) {
   if (!creationDraftCorrelation.empty()) {
     showNotice(QStringLiteral("A new-thread draft is already active. Select "
                               "another thread to abandon it before starting "
@@ -2379,11 +2443,16 @@ void ShellWidget::Impl::beginNewThreadDialog() {
   }
   const QString fallback = QDir::currentPath();
   const QString initial =
-      text(middleRegion->composer().turnSettings().workspace(utf8(fallback)));
+      workspace.empty()
+          ? text(middleRegion->composer().turnSettings().workspace(
+                utf8(fallback)))
+          : text(workspace);
   NewThreadDialog dialog(initial, owner);
   if (dialog.exec() != QDialog::Accepted)
     return;
   NewThreadDraft draft = dialog.draft();
+  draft.projectId = std::move(project);
+  draft.sectionId = std::move(section);
   newThreadDraft = draft;
   creationDraftCorrelation =
       "qt-draft:" + std::to_string(nextCreationDraftSerial++);
@@ -2652,6 +2721,10 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
         objectFromJson(settings.startOptions(TurnSettingsScope::Thread));
     threadStart.insert_or_assign("cwd",
                                  settings.workspace(utf8(QDir::currentPath())));
+    if (!newThreadDraft->projectId.empty())
+      threadStart.insert_or_assign("projectId", newThreadDraft->projectId);
+    if (!newThreadDraft->sectionId.empty())
+      action.payload.insert_or_assign("sectionId", newThreadDraft->sectionId);
     if (!newThreadDraft->ephemeral && !newThreadDraft->name.trimmed().isEmpty())
       action.payload.insert_or_assign("requestedName",
                                       utf8(newThreadDraft->name));
@@ -2736,7 +2809,10 @@ void ShellWidget::Impl::recoverPrompt(const nodegraph::NodeRef &prompt) {
       exactStringFromValue(valueMember(*state, "requestedName"));
   draft.name = requestedName.empty() ? QStringLiteral("Recovered prompt")
                                      : text(requestedName);
+  draft.sectionId = exactStringFromValue(valueMember(*state, "sectionId"));
   if (threadStart) {
+    draft.projectId =
+        exactStringFromValue(valueMember(*threadStart, "projectId"));
     draft.baseInstructions = text(
         exactStringFromValue(valueMember(*threadStart, "baseInstructions")));
     draft.developerInstructions = text(exactStringFromValue(
@@ -2835,9 +2911,20 @@ void ShellWidget::Impl::presentPending(PendingRequestDescriptor request) {
         "Controller access is unavailable; no response was sent."));
     return;
   }
-  const auto submission = PendingRequestDialog::present(
-      request, owner,
-      request.retainedSubmission ? &*request.retainedSubmission : nullptr);
+  const auto submission = [&] {
+    // Reuse the shell's request projection while this exact dialog is alive.
+    const QScopedValueRollback targetScope(reviewedRequest, request.target);
+    const QScopedValueRollback submitScope(reviewSubmit);
+    return PendingRequestDialog::present(
+        request, owner,
+        request.retainedSubmission ? &*request.retainedSubmission : nullptr,
+        [this](QPushButton *button) {
+          reviewSubmit = button;
+          pendingChrome = true;
+          schedulePaneCommit();
+        });
+  }();
+  acknowledgeDetachedTargets();
   if (!submission)
     return;
   const auto current = pendingRequest(request.target);

@@ -83,6 +83,13 @@ standalone `web/CMakeLists.txt` provides the same verified packaging path.
 same listener. Node is not part of the installed runtime. Deployment details
 are in [`web/README.md`](web/README.md).
 
+## Native interactive qualification
+
+The [canonical interactive Xvfb test suite](docs/native-ui-ux-qualification-inventory.md)
+defines the complete native UI checklist, execution matrix and evidence limits.
+Use Xvfb with Qt offscreen as specified there. The inventory is a specification,
+not a record of passed checks; keep execution results separate.
+
 ## Architecture
 
 The implemented native thread model, node/state authority rules, typed
