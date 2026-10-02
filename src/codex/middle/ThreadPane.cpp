@@ -28,6 +28,7 @@
 #include <QLineEdit>
 #include <QLinearGradient>
 #include <QMenu>
+#include <QMargins>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMouseEvent>
@@ -60,6 +61,7 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int ThreadRowHeight = 40;
+constexpr int ProjectRowVerticalPadding = 4;
 constexpr int ThreadIndent = 16;
 constexpr int ContentOffset = 2;
 constexpr int DisclosureStatusSpacing = 2;
@@ -70,29 +72,13 @@ constexpr int DisclosureIndicatorOffset =
 constexpr int DisclosureHitLeadingInset = 5;
 constexpr int DisclosureHitTrailingExtension = 13;
 constexpr int DisclosureHitExtent = 24;
-constexpr int DisclosureHitVerticalInset =
-    (ThreadRowHeight - DisclosureHitExtent) / 2;
 constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 
 class ThreadTreeStyle final : public QProxyStyle {
 public:
   QRect subElementRect(SubElement element, const QStyleOption *option,
-                       const QWidget *widget) const override {
-    const QRect native = QProxyStyle::subElementRect(element, option, widget);
-    if (element != SE_TreeViewDisclosureItem || !option)
-      return native;
-    // Preserve the former control's target while Qt owns the interaction.
-    return option->direction == Qt::RightToLeft
-               ? native.adjusted(-DisclosureHitTrailingExtension,
-                                 DisclosureHitVerticalInset,
-                                 -DisclosureHitLeadingInset,
-                                 -DisclosureHitVerticalInset)
-               : native.adjusted(DisclosureHitLeadingInset,
-                                 DisclosureHitVerticalInset,
-                                 DisclosureHitTrailingExtension,
-                                 -DisclosureHitVerticalInset);
-  }
+                       const QWidget *widget) const override;
 };
 
 QString text(std::string_view value) {
@@ -179,8 +165,7 @@ public:
   ~ThreadTreeWidget() override {
     blockSignals(true);
     verticalScrollBar()->blockSignals(true);
-    while (topLevelItemCount() != 0)
-      deleteItem(threadItem(topLevelItem(0)));
+    clear();
   }
 
   [[nodiscard]] ThreadTreeItem *threadItem(QTreeWidgetItem *item) const {
@@ -194,6 +179,22 @@ public:
     result.setLeft(viewport()->rect().left());
     result.setRight(viewport()->rect().right());
     return result;
+  }
+  [[nodiscard]] QMargins projectCardInsets(const QModelIndex &index) const {
+    const auto *item = threadItem(index);
+    if (!item)
+      return {};
+    const auto *outer = item;
+    while (outer->parent())
+      outer = threadItem(outer->parent());
+    if (outer->kind != ui::ThreadRowKind::Project ||
+        !outer->isExpanded() || outer->childCount() == 0)
+      return {};
+    const auto *last = outer;
+    while (last->isExpanded() && last->childCount())
+      last = threadItem(last->child(last->childCount() - 1));
+    return {0, item == outer ? UiStyle::projectCardEdgePadding : 0,
+            0, item == last ? UiStyle::projectCardEdgePadding : 0};
   }
   void deleteItem(ThreadTreeItem *item) {
     if (QTreeWidgetItem *parent = item->parent())
@@ -331,6 +332,35 @@ private:
   QCollator collator_;
 };
 
+namespace {
+
+QRect ThreadTreeStyle::subElementRect(SubElement element,
+                                      const QStyleOption *option,
+                                      const QWidget *widget) const {
+    QRect native = QProxyStyle::subElementRect(element, option, widget);
+    if (element != SE_TreeViewDisclosureItem || !option)
+      return native;
+    if (const auto *tree = dynamic_cast<const ThreadTreeWidget *>(widget)) {
+      const QModelIndex index = tree->indexAt(
+          QPoint(tree->viewport()->width() / 2, option->rect.center().y()));
+      native = native.marginsRemoved(tree->projectCardInsets(index));
+    }
+    const int verticalInset =
+        std::max(0, (native.height() - DisclosureHitExtent) / 2);
+    // Keep the disclosure target centered in the actual row.
+    return option->direction == Qt::RightToLeft
+               ? native.adjusted(-DisclosureHitTrailingExtension,
+                                 verticalInset,
+                                 -DisclosureHitLeadingInset,
+                                 -verticalInset)
+               : native.adjusted(DisclosureHitLeadingInset,
+                                 verticalInset,
+                                 DisclosureHitTrailingExtension,
+                                 -verticalInset);
+  }
+
+} // namespace
+
 ThreadTreeItem::ThreadTreeItem(ThreadTreeWidget *tree, std::string key)
     : owner(tree), presentationKey(std::move(key)) {
   setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
@@ -419,9 +449,22 @@ public:
   explicit ThreadItemDelegate(ThreadTreeWidget *tree)
       : QStyledItemDelegate(tree), tree_(tree) {}
 
-  QSize sizeHint(const QStyleOptionViewItem &,
-                 const QModelIndex &) const override {
-    return {0, ThreadRowHeight};
+  QSize sizeHint(const QStyleOptionViewItem &option,
+                 const QModelIndex &index) const override {
+    const auto *item = tree_->threadItem(index);
+    if (!item)
+      return {0, ThreadRowHeight};
+    const auto *outer = item;
+    while (outer->parent())
+      outer = tree_->threadItem(outer->parent());
+    if (outer->kind != ui::ThreadRowKind::Project ||
+        !outer->isExpanded() || outer->childCount() == 0)
+      return {0, ThreadRowHeight};
+    const QMargins insets = tree_->projectCardInsets(index);
+    return {0, std::max(DisclosureHitExtent,
+                        QFontMetrics(titleFont(option.font, *item)).height() +
+                            2 * ProjectRowVerticalPadding) +
+                   insets.top() + insets.bottom()};
   }
 
   void paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -528,10 +571,11 @@ public:
       painter->restore();
     }
 
+    const QRect contentRow = row.marginsRemoved(tree_->projectCardInsets(index));
     const QRect itemRect = tree_->visualRect(index);
     const int contentLeft = itemRect.left() + ContentOffset;
     const QPointF dotCenter(contentLeft + StatusCenterOffset,
-                            QRectF(row).center().y());
+                            QRectF(contentRow).center().y());
     painter->setPen(Qt::NoPen);
     painter->setBrush(statusColor(item->status, item->pending, item->draft));
     if (item->kind == ui::ThreadRowKind::Thread)
@@ -544,15 +588,12 @@ public:
       }
     }
 
-    QFont titleFont = option.font;
-    titleFont.setWeight(item->kind == ui::ThreadRowKind::Thread
-                            ? QFont::Medium
-                            : QFont::DemiBold);
-    painter->setFont(titleFont);
+    const QFont font = titleFont(option.font, *item);
+    painter->setFont(font);
     painter->setPen(QColor(QString::fromLatin1(UiStyle::primary)));
-    const QRect titleRect(contentLeft + 24, row.top(),
-                          row.right() - contentLeft - 31, row.height());
-    const QString title = QFontMetrics(titleFont).elidedText(
+    const QRect titleRect(contentLeft + 24, contentRow.top(),
+                          row.right() - contentLeft - 31, contentRow.height());
+    const QString title = QFontMetrics(font).elidedText(
         displayTitle(*item).simplified(), Qt::ElideRight, titleRect.width());
     painter->drawText(titleRect,
                       Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
@@ -560,7 +601,7 @@ public:
     if (item->childCount() != 0) {
       const QRect indicator(itemRect.left() - ThreadIndent +
                                 DisclosureIndicatorOffset,
-                            row.top(), ThreadIndent, row.height());
+                            contentRow.top(), ThreadIndent, contentRow.height());
       UiStyle::drawChevron(*painter, indicator.adjusted(3, 3, -3, -3),
                            option.state.testFlag(QStyle::State_Enabled), false,
                            item->isExpanded()
@@ -579,6 +620,12 @@ public:
   }
 
 private:
+  static QFont titleFont(QFont font, const ThreadTreeItem &item) {
+    font.setWeight(item.kind == ui::ThreadRowKind::Thread
+                       ? QFont::Medium : QFont::DemiBold);
+    return font;
+  }
+
   ThreadTreeWidget *tree_ = nullptr;
 };
 
@@ -1216,7 +1263,6 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   tree->setItemsExpandable(true);
   tree->setExpandsOnDoubleClick(true);
   tree->setIndentation(ThreadIndent);
-  tree->setUniformRowHeights(true);
   tree->setAnimated(false);
   tree->setSelectionMode(QAbstractItemView::SingleSelection);
   tree->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -1224,6 +1270,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   tree->setContextMenuPolicy(Qt::CustomContextMenu);
   tree->setItemDelegate(new ThreadItemDelegate(tree));
+  connect(tree, &QTreeView::expanded, tree, &QTreeView::doItemsLayout);
+  connect(tree, &QTreeView::collapsed, tree, &QTreeView::doItemsLayout);
   optimisticAnimation = new QTimer(tree);
   optimisticAnimation->setObjectName(
       QStringLiteral("optimisticThreadAnimation"));
