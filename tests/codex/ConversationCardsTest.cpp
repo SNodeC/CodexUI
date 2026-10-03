@@ -168,36 +168,53 @@ bool perceptuallyMatched(std::initializer_list<const char *> colors,
 
 bool testPerceptuallyUniformPalette() {
   using namespace codexui::UiStyle;
-  bool result = perceptuallyMatched(
-      {blue, green, yellow, orange, red, purple, teal},
+  bool result = true;
+  result &= perceptuallyMatched(
+      {blue, green, amber, orange, red, purple, teal, lime, yellow},
       "palette base colors share perceptual lightness and chroma");
   result &= perceptuallyMatched(
-      {blueHover, greenHover, yellowHover, orangeHover, redHover, purpleHover,
-       tealHover},
-      "palette hover colors share perceptual lightness and chroma");
+      {blueHover, greenHover, amberHover, orangeHover, redHover, purpleHover,
+       tealHover, limeHover, yellowHover},
+      "palette Hover colors share perceptual lightness and chroma");
   result &= perceptuallyMatched(
-      {bluePressed, greenPressed, yellowPressed, orangePressed, redPressed,
-       purplePressed, tealPressed},
-      "palette pressed colors share perceptual lightness and chroma");
+      {bluePressed, greenPressed, amberPressed, orangePressed, redPressed,
+       purplePressed, tealPressed, limePressed, yellowPressed},
+      "palette Pressed colors share perceptual lightness and chroma");
   result &= perceptuallyMatched(
-      {blueSurface, greenSurface, yellowSurface, orangeSurface, redSurface,
-       purpleSurface, tealSurface},
-      "palette surfaces share perceptual lightness and chroma");
+      {blueSurface, greenSurface, amberSurface, orangeSurface, redSurface,
+       purpleSurface, tealSurface, limeSurface, yellowSurface},
+      "palette Surface colors share perceptual lightness and chroma");
   result &= perceptuallyMatched(
-      {blueBorder, greenBorder, yellowBorder, orangeBorder, redBorder,
-       purpleBorder, tealBorder},
-      "palette borders share perceptual lightness and chroma");
+      {blueSurfaceHover, greenSurfaceHover, amberSurfaceHover,
+       orangeSurfaceHover, redSurfaceHover, purpleSurfaceHover, tealSurfaceHover,
+       limeSurfaceHover, yellowSurfaceHover},
+      "palette SurfaceHover colors share perceptual lightness and chroma");
   result &= perceptuallyMatched(
-      {blueText, greenText, yellowText, orangeText, redText, purpleText,
-       tealText},
-      "palette text colors share perceptual lightness and chroma");
+      {blueSelected, greenSelected, amberSelected, orangeSelected, redSelected,
+       purpleSelected, tealSelected, limeSelected},
+      "palette Selected colors except the bright yellow tint share lightness and chroma");
   result &= perceptuallyMatched(
-      {blueSelected, yellowSurfaceHover, orangeSurfaceHover},
-      "palette hover surfaces share perceptual lightness and chroma");
+      {blueSelectedHover, greenSelectedHover, amberSelectedHover,
+       orangeSelectedHover, redSelectedHover, purpleSelectedHover,
+       tealSelectedHover, limeSelectedHover, yellowSelectedHover},
+      "palette SelectedHover colors share perceptual lightness and chroma");
   result &= perceptuallyMatched(
-      {blueBorderStrong, yellowBorderStrong, orangeBorderStrong,
-       tealBorderStrong},
-      "palette strong borders share perceptual lightness and chroma");
+      {blueBorder, greenBorder, amberBorder, orangeBorder, redBorder,
+       purpleBorder, tealBorder, limeBorder, yellowBorder},
+      "palette Border colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueBorderHover, greenBorderHover, amberBorderHover, orangeBorderHover,
+       redBorderHover, purpleBorderHover, tealBorderHover, limeBorderHover, yellowBorderHover},
+      "palette BorderHover colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueBorderStrong, greenBorderStrong, amberBorderStrong,
+       orangeBorderStrong, redBorderStrong, purpleBorderStrong, tealBorderStrong,
+       limeBorderStrong, yellowBorderStrong},
+      "palette BorderStrong colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueText, greenText, amberText, orangeText, redText, purpleText, tealText,
+       limeText, yellowText},
+      "palette Text colors share perceptual lightness and chroma");
   return result;
 }
 
@@ -619,14 +636,14 @@ bool testMessageIdentityPalette() {
           surfaceColor(user) ==
               QColor(QString::fromLatin1(codexui::UiStyle::blueSurface)) &&
           titleColor(update) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::yellowText)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::amberText)) &&
           surfaceColor(update) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::yellowSurface)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::amberSurface)) &&
           titleColor(final) ==
               QColor(QString::fromLatin1(codexui::UiStyle::purpleText)) &&
           surfaceColor(final) ==
               QColor(QString::fromLatin1(codexui::UiStyle::purpleSurface)),
-      "You is blue, interim Codex is yellow, and final Codex is violet");
+      "You is blue, interim Codex is amber, and final Codex is violet");
   qApp->setStyleSheet(originalStyleSheet);
   return result;
 }

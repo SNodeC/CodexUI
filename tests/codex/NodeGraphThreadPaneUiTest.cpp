@@ -1554,6 +1554,64 @@ QColor logicalPixel(const QImage &image, QPoint point) {
   return image.rect().contains(point) ? image.pixelColor(point) : QColor{};
 }
 
+bool selectedThreadUsesSemanticSurface() {
+  bool passed = require(QColor(UiStyle::threadSelected) == QColor("#ffffb3"),
+                        "selected thread must use the bright pure-yellow tint");
+  for (const bool grouped : {false, true}) {
+    middle::ThreadPane pane;
+    pane.resize(360, 360);
+    ui::ThreadListSnapshot snapshot;
+    ui::ThreadListRow row;
+    row.id = "color-selected";
+    row.presentationKey = row.id;
+    row.title = "Selected";
+    ui::ThreadListRow other;
+    other.id = "color-other";
+    other.presentationKey = other.id;
+    other.title = "Other";
+    if (grouped) {
+      ui::ThreadListRow project;
+      project.kind = ui::ThreadRowKind::Project;
+      project.id = "color-project";
+      project.presentationKey = project.id;
+      project.title = "Project";
+      project.children = {row, other};
+      snapshot.roots = {project};
+    } else {
+      snapshot.roots = {row, other};
+    }
+    snapshot.selectedThreadId = row.id;
+    pane.refresh(snapshot);
+    pane.show();
+    QTreeWidget *tree = threadTree(pane);
+    if (!require(tree != nullptr, "color fixture has no thread tree")) {
+      passed = false;
+      continue;
+    }
+    QApplication::processEvents();
+    auto *selected = threadItem(tree, row.id);
+    auto *unselected = threadItem(tree, other.id);
+    if (!require(selected && unselected, "color fixture has missing rows")) {
+      passed = false;
+      continue;
+    }
+    const QRect selectedRect = tree->visualItemRect(selected);
+    const QRect otherRect = tree->visualItemRect(unselected);
+    const QImage rendered = tree->viewport()->grab().toImage();
+    const int sampleX = tree->viewport()->width() - 16;
+    passed &= require(
+        colorDistance(logicalPixel(rendered, {sampleX, selectedRect.center().y()}),
+                      QColor(UiStyle::threadSelected)) == 0,
+        "thread selection must use its semantic surface in grouped and ungrouped views");
+    passed &= require(
+        colorDistance(logicalPixel(rendered, {sampleX, otherRect.center().y()}),
+                      QColor(grouped ? UiStyle::activeGroupSurface
+                                     : UiStyle::panel)) == 0,
+        "unselected threads must inherit their enclosing surface");
+  }
+  return passed;
+}
+
 bool threadRowsConsumeCanonicalStatusTone() {
   middle::ThreadPane pane;
   pane.resize(300, 300);
@@ -2575,6 +2633,7 @@ int main(int argc, char **argv) {
   passed &= codexui::codex::sortingAndPromptAnimationAreFixed();
   passed &=
       codexui::codex::reducedMotionStopsThreadFeedbackAtTheStyleBoundary();
+  passed &= codexui::codex::selectedThreadUsesSemanticSurface();
   passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
   passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
   passed &=

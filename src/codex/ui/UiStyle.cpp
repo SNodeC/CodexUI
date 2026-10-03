@@ -418,8 +418,8 @@ QString applicationStyleSheet() {
         QFrame[virtualTurnRoot="true"] { background: transparent; border: none; }
         QFrame[messageRole="agent"][messagePhase="final"] { background: %{purpleSurface}; border: 1px solid %{purpleBorder}; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: %{purpleText}; }
-        QFrame[messageRole="agent"][messagePhase="update"] { background: %{yellowSurface}; border: 1px solid %{yellowBorder}; border-radius: 8px; }
-        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"] { color: %{yellowText}; }
+        QFrame[messageRole="agent"][messagePhase="update"] { background: %{amberSurface}; border: 1px solid %{amberBorder}; border-radius: 8px; }
+        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"] { color: %{amberText}; }
         QFrame[kind="summary"] { background: %{raised}; border: 1px solid %{divider}; border-radius: 7px; }
         QFrame[kind="standardDivider"] { background: %{divider}; border: none; }
         QFrame[kind="greenBadge"] { background: %{greenSurface}; border: 1px solid %{greenBorder}; border-radius: 6px; }
@@ -718,15 +718,32 @@ QString applicationStyleSheet() {
   X(tealPressed) X(tealText) X(tealHover) X(teal) X(primary) \
   X(greenPressed) X(greenText) X(greenHover) X(green) X(bluePressed) \
   X(blueText) X(secondaryStrong) X(blueHover) X(blue) X(purpleText) \
-  X(secondary) X(yellowText) X(redPressed) X(orangeText) X(redText) \
+  X(secondary) X(amberText) X(redPressed) X(orangeText) X(redText) \
   X(redHover) X(orange) X(placeholder) X(tealBorder) X(neutralBorderPressed) \
   X(blueBorderHover) X(red) X(greenBorder) X(neutralBorderHover) X(blueBorder) \
   X(dividerStrong) X(neutralBorder) X(purpleBorder) X(divider) X(blueSelectedHover) \
-  X(yellowBorder) X(neutralSurfaceHover) X(blueSelected) X(orangeBorderStrong) \
+  X(amberBorder) X(neutralSurfaceHover) X(blueSelected) X(orangeBorderStrong) \
   X(tealSurface) X(greenSurface) X(neutralSurface) X(orangeBorder) X(blueSurface) \
   X(hover) X(purpleSurface) X(redBorder) X(appBackground) X(raised) \
-  X(yellowSurface) X(orangeSurfaceHover) X(inspector) X(orangeSurface) \
-  X(redSurface) X(panel) X(onAccent) X(codeSurface) X(codeText)
+  X(amberSurface) X(orangeSurfaceHover) X(inspector) X(orangeSurface) \
+  X(redSurface) X(panel) X(onAccent) X(codeSurface) X(codeText) \
+  X(blueSurfaceHover) X(blueBorderStrong) X(greenSurfaceHover) X(greenSelected) \
+  X(greenSelectedHover) X(greenBorderHover) X(greenBorderStrong) X(amber) \
+  X(amberHover) X(amberPressed) X(amberSurfaceHover) X(amberSelected) \
+  X(amberSelectedHover) X(amberBorderHover) X(amberBorderStrong) X(orangeHover) \
+  X(orangePressed) X(orangeSelected) X(orangeSelectedHover) X(orangeBorderHover) \
+  X(redSurfaceHover) X(redSelected) X(redSelectedHover) X(redBorderHover) \
+  X(redBorderStrong) X(purple) X(purpleHover) X(purplePressed) \
+  X(purpleSurfaceHover) X(purpleSelected) X(purpleSelectedHover) X(purpleBorderHover) \
+  X(purpleBorderStrong) X(tealSurfaceHover) X(tealSelected) X(tealSelectedHover) \
+  X(tealBorderHover) X(tealBorderStrong) X(lime) X(limeHover) \
+  X(limePressed) X(limeSurface) X(limeSurfaceHover) X(limeSelected) \
+  X(limeSelectedHover) X(limeBorder) X(limeBorderHover) X(limeBorderStrong) \
+  X(limeText) X(activeGroupSurface) X(activeGroupBorder) \
+  X(threadSelected) X(threadSelectedBorder) X(activeThreadBorder) \
+  X(yellow) X(yellowHover) X(yellowPressed) X(yellowSurface) \
+  X(yellowSurfaceHover) X(yellowSelected) X(yellowSelectedHover) X(yellowBorder) \
+  X(yellowBorderHover) X(yellowBorderStrong) X(yellowText)
   // clang-format on
 #define REPLACE_APPLICATION_COLOR(name)                                        \
   style.replace(QLatin1StringView("%{" #name "}"), QLatin1StringView(name));

@@ -36,6 +36,7 @@
 #include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -196,6 +197,20 @@ public:
     return {0, item == outer ? UiStyle::projectCardEdgePadding : 0,
             0, item == last ? UiStyle::projectCardEdgePadding : 0};
   }
+  void setActiveThread(ThreadTreeItem *item) {
+    activeThreadIndex_ = item ? indexFromItem(item) : QModelIndex{};
+    // Refresh both the old and new enclosing cards, including reparenting.
+    viewport()->update();
+  }
+  [[nodiscard]] QModelIndex activeCardIndex() const {
+    QModelIndex index = activeThreadIndex_;
+    while (index.parent().isValid())
+      index = index.parent();
+    const auto *root = threadItem(index);
+    return root && (root->kind == ui::ThreadRowKind::Project ||
+                    root->kind == ui::ThreadRowKind::Section)
+               ? index : QModelIndex(activeThreadIndex_);
+  }
   void deleteItem(ThreadTreeItem *item) {
     if (QTreeWidgetItem *parent = item->parent())
       static_cast<void>(parent->takeChild(parent->indexOfChild(item)));
@@ -328,6 +343,8 @@ private:
     return leftId < rightId;
   }
 
+  // A lifetime-safe projection of the active conversation, not keyboard focus.
+  QPersistentModelIndex activeThreadIndex_;
   ThreadPane *owner_ = nullptr;
   QCollator collator_;
 };
@@ -482,19 +499,22 @@ public:
       outer = tree_->threadItem(outer->parent());
     const bool grouped = outer->kind == ui::ThreadRowKind::Project ||
                          outer->kind == ui::ThreadRowKind::Section;
+    const bool activeCard = tree_->activeCardIndex() ==
+                            (grouped ? tree_->indexFromItem(outer) : index);
+    const bool selected = effective.state.testFlag(QStyle::State_Selected);
+    const bool hovered = effective.state.testFlag(QStyle::State_MouseOver);
+    const QColor rowBackground(QString::fromLatin1(
+        selected ? UiStyle::threadSelected : hovered ? UiStyle::hover : UiStyle::panel));
+    const QRect contentRow = row.marginsRemoved(tree_->projectCardInsets(index));
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     if (!grouped && item->kind != ui::ThreadRowKind::Page) {
-      const bool selected = effective.state.testFlag(QStyle::State_Selected);
-      const bool hovered = effective.state.testFlag(QStyle::State_MouseOver);
       painter->setPen(
-          QColor(QString::fromLatin1(selected  ? UiStyle::blueBorder
+          QColor(QString::fromLatin1(activeCard ? UiStyle::activeThreadBorder
+                                     : selected ? UiStyle::threadSelectedBorder
                                      : hovered ? UiStyle::dividerStrong
                                                : UiStyle::divider)));
-      painter->setBrush(
-          QColor(QString::fromLatin1(selected  ? UiStyle::blueSelected
-                                     : hovered ? UiStyle::hover
-                                               : UiStyle::panel)));
+      painter->setBrush(rowBackground);
       painter->drawRoundedRect(QRectF(row).adjusted(0.5, 3.5, -0.5, -3.5), 8,
                                8);
     }
@@ -511,16 +531,19 @@ public:
       surface.setBottom(tree_->rowRect(tree_->indexFromItem(last)).bottom());
       surface.adjust(0.5, 3.5, -0.5, -3.5);
       painter->setClipRect(row, Qt::IntersectClip);
-      painter->setPen(QColor(QString::fromLatin1(UiStyle::blueBorder)));
-      painter->setBrush(QColor(QString::fromLatin1(UiStyle::panel)));
+      painter->setPen(QColor(QString::fromLatin1(
+          activeCard ? UiStyle::activeGroupBorder : UiStyle::blueBorder)));
+      painter->setBrush(QColor(QString::fromLatin1(
+          activeCard ? UiStyle::activeGroupSurface : UiStyle::panel)));
       painter->drawRoundedRect(surface, 8.0, 8.0);
       QPainterPath clip;
       clip.addRoundedRect(surface.adjusted(1, 1, -1, -1), 7, 7);
       painter->setClipPath(clip, Qt::IntersectClip);
-      if (effective.state.testFlag(QStyle::State_Selected) ||
-          effective.state.testFlag(QStyle::State_MouseOver))
+      if (activeCard && item == outer)
         painter->fillRect(row.adjusted(2, 0, -2, 0),
-                          QColor(QString::fromLatin1(UiStyle::blueSurface)));
+                          QColor(QString::fromLatin1(UiStyle::limeSurfaceHover)));
+      else if (selected || hovered)
+        painter->fillRect(contentRow.adjusted(2, 0, -2, 0), rowBackground);
     }
 
     const bool feedback = item->draft || item->awaitingPrompt;
@@ -571,7 +594,6 @@ public:
       painter->restore();
     }
 
-    const QRect contentRow = row.marginsRemoved(tree_->projectCardInsets(index));
     const QRect itemRect = tree_->visualRect(index);
     const int contentLeft = itemRect.left() + ContentOffset;
     const QPointF dotCenter(contentLeft + StatusCenterOffset,
@@ -1744,6 +1766,7 @@ void ThreadPane::beginOptimisticThread(std::string id,
                                           QDateTime::currentMSecsSinceEpoch()));
   static_cast<void>(repositionRootItem(draftItem));
   tree->setCurrentItem(draftItem);
+  tree->setActiveThread(draftItem);
   updateAnimationTimer();
 }
 
@@ -2074,6 +2097,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   }
   for (ThreadTreeItem *item : staleRoots)
     eraseSubtree(item);
+
+  // Capture the snapshot's active thread before the keyboard-focus fallback.
+  // A local draft remains the active conversation until it is materialized.
+  tree->setActiveThread(selected ? selected : draftItem);
 
   if (!selected && !currentKey.empty()) {
     const auto retained = rows.find(currentKey);

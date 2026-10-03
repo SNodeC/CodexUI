@@ -329,7 +329,7 @@ links in Conversation and Inspector content are reachable by keyboard.
 
 User messages use the canonical soft-blue identity surface. Final Codex
 messages use the canonical soft-violet identity surface, while interim Codex
-updates use the canonical soft-yellow identity surface and identify their
+updates use the canonical soft-amber identity surface and identify their
 phase in the header. Process cards
 also remain neutral so they support rather than dominate the primary exchange.
 Their lifecycle status is a normal-weight lowercase value at the right of the
@@ -408,7 +408,7 @@ preference never refolds an existing card.
 Semantic color families preserve their established hues but derive equivalent
 roles from shared OKLCH lightness and chroma targets. Surfaces, hover surfaces,
 borders, strong borders, text, and interactive base/hover/pressed colors are
-therefore perceptually balanced across blue, green, yellow, orange, red,
+therefore perceptually balanced across blue, green, amber, yellow, lime, orange, red,
 violet, and teal. The fixed hexadecimal Qt tokens are precomputed from those
 targets; runtime color conversion is not part of painting.
 
@@ -418,7 +418,7 @@ This ordered register is the authoritative completion sequence for the current
 native card-polish pass. Each behavior is implemented and committed as a narrow,
 independently reviewable change.
 
-1. **Complete:** interim Codex update cards use a clearly perceptible yellow
+1. **Complete:** interim Codex update cards use a clearly perceptible amber
    surface, border, title, and phase identity; final answers remain violet.
 2. **Complete:** expose and persist a Files Changed “new cards start expanded”
    control, applying it only when a new card is materialized.
