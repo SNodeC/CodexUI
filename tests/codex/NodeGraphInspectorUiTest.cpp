@@ -1524,7 +1524,7 @@ bool establishedAgentsWidgetContractIsRetained() {
             disclosure->toolTip() == disclosure->accessibleName() &&
             copy->accessibleName() == QStringLiteral("Copy agent content") &&
             status->text() == QStringLiteral("running") &&
-            labelUsesColor(status, UiStyle::blueText) &&
+            labelUsesColor(status, UiStyle::statusActiveText) &&
             resultView->markdownSource().contains(QStringLiteral("this link")),
         "the collapsed Agent row uses the shared accessible controls and "
         "native Markdown view");
@@ -1578,7 +1578,7 @@ bool establishedAgentsWidgetContractIsRetained() {
         stableFrame->findChild<QLabel *>(QStringLiteral("agentStatus")) ==
             status &&
         status->text() == QStringLiteral("completed") &&
-        labelUsesColor(status, UiStyle::greenText);
+        labelUsesColor(status, UiStyle::statusSuccessText);
     result &= expect(objectsRetained,
                      "an Agent status change retains the exact expanded "
                      "control and Markdown document objects");

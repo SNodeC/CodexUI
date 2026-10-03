@@ -3495,7 +3495,7 @@ void ConversationView::paintEvent(QPaintEvent *event) {
       const int last = static_cast<int>(heights_.rowAt(lastY));
       std::unordered_set<std::string> paintedSections;
       painter.setRenderHint(QPainter::Antialiasing);
-      painter.setBrush(QColor(QString::fromLatin1(UiStyle::blueSurface)));
+      painter.setBrush(QColor(QString::fromLatin1(UiStyle::turnSurface)));
       for (std::size_t rowIndex = heights_.nextRowWithExtent(first);
            rowIndex < heights_.size() &&
            rowIndex <= static_cast<std::size_t>(last);
@@ -3529,7 +3529,7 @@ void ConversationView::paintEvent(QPaintEvent *event) {
                              std::max<qreal>(1.0, bottom - top - 1.0));
         painter.setPen(
             QPen(QColor(QString::fromLatin1(active ? UiStyle::activeTurnBorder
-                                                   : UiStyle::blueBorder)),
+                                                   : UiStyle::turnBorder)),
                  active ? 2.0 : 1.0));
         painter.drawRoundedRect(surface, 8.0, 8.0);
       }

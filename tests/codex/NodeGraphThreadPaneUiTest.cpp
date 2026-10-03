@@ -888,7 +888,7 @@ bool accessibilityFollowsTheNativeHierarchy() {
                     "accessible unselect did not notify its semantic item");
   const QRect focusedRow = tree->visualItemRect(childItem);
   const auto closestFocusColor = [&focusedRow](const QImage &image) {
-    const QColor expected(QString::fromLatin1(UiStyle::blueBorder));
+    const QColor expected(QString::fromLatin1(UiStyle::threadFocusBorder));
     int result = 3 * 255;
     for (int x = 0; x <= 2; ++x)
       for (int y = focusedRow.top() + 12; y <= focusedRow.bottom() - 12; ++y) {
@@ -1631,12 +1631,12 @@ bool threadRowsConsumeCanonicalStatusTone() {
   row.children.push_back(child);
   snapshot.roots.push_back(row);
   const std::array cases{
-      std::pair{nodegraph::NodeStatus::Running, UiStyle::blue},
-      std::pair{nodegraph::NodeStatus::Completed, UiStyle::green},
-      std::pair{nodegraph::NodeStatus::Connected, UiStyle::green},
-      std::pair{nodegraph::NodeStatus::Interrupted, UiStyle::orange},
-      std::pair{nodegraph::NodeStatus::Failed, UiStyle::red},
-      std::pair{nodegraph::NodeStatus::Disconnected, UiStyle::red}};
+      std::pair{nodegraph::NodeStatus::Running, UiStyle::statusActive},
+      std::pair{nodegraph::NodeStatus::Completed, UiStyle::statusSuccess},
+      std::pair{nodegraph::NodeStatus::Connected, UiStyle::statusSuccess},
+      std::pair{nodegraph::NodeStatus::Interrupted, UiStyle::statusWarning},
+      std::pair{nodegraph::NodeStatus::Failed, UiStyle::statusDanger},
+      std::pair{nodegraph::NodeStatus::Disconnected, UiStyle::statusDanger}};
   bool passed = true;
   for (const auto &[status, color] : cases) {
     snapshot.roots.front().status = status;
@@ -1769,7 +1769,7 @@ bool optimisticCreationHandsOneRowToGraphAuthority() {
       draftAccessible ? QAccessible::uniqueId(draftAccessible) : 0;
   tests::AccessibilityEventProbe events;
 #endif
-  const QColor orange(QString::fromLatin1(UiStyle::orange));
+  const QColor orange(QString::fromLatin1(UiStyle::statusWarning));
   if (!require(draft && animation && animation->isActive(),
                "dialog Continue did not immediately animate its draft row") ||
       !require(rowDotUsesColor(tree, draft, orange),
@@ -1794,7 +1794,7 @@ bool optimisticCreationHandsOneRowToGraphAuthority() {
   pane.refresh(admitted);
   QApplication::processEvents();
   QTreeWidgetItem *promoted = tree->topLevelItem(0);
-  const QColor blue(QString::fromLatin1(UiStyle::blue));
+  const QColor blue(QString::fromLatin1(UiStyle::statusActive));
   if (!require(promoted == draft && animation->isActive(),
                "graph admission replaced or stopped the draft row") ||
       !require(promoted->data(0, Qt::UserRole).toString() ==

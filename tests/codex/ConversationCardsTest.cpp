@@ -167,7 +167,7 @@ bool perceptuallyMatched(std::initializer_list<const char *> colors,
 }
 
 bool testPerceptuallyUniformPalette() {
-  using namespace codexui::UiStyle;
+  using namespace codexui::UiStyle::Palette;
   bool result = true;
   result &= perceptuallyMatched(
       {blue, green, amber, orange, red, purple, teal, lime, yellow},
@@ -525,16 +525,16 @@ bool testApplicationStyleSheetContract() {
           .arg(token(codexui::UiStyle::placeholder)),
       QStringLiteral("QFrame[kind=\"statusDot\"][tone=\"active\"] { "
                      "background: %1; }")
-          .arg(token(codexui::UiStyle::blue)),
+          .arg(token(codexui::UiStyle::statusActive)),
       QStringLiteral("QFrame[kind=\"statusDot\"][tone=\"success\"] { "
                      "background: %1; }")
-          .arg(token(codexui::UiStyle::green)),
+          .arg(token(codexui::UiStyle::statusSuccess)),
       QStringLiteral("QFrame[kind=\"statusDot\"][tone=\"warning\"] { "
                      "background: %1; }")
-          .arg(token(codexui::UiStyle::orange)),
+          .arg(token(codexui::UiStyle::statusWarning)),
       QStringLiteral("QFrame[kind=\"statusDot\"][tone=\"danger\"] { "
                      "background: %1; }")
-          .arg(token(codexui::UiStyle::red)),
+          .arg(token(codexui::UiStyle::statusDanger)),
       QStringLiteral("QPlainTextEdit#upcomingPromptEditor { background: "
                      "transparent; color: %1; border: 0; padding: 3px 2px; }")
           .arg(token(codexui::UiStyle::primary)),
@@ -632,17 +632,17 @@ bool testMessageIdentityPalette() {
   };
   const bool result = expect(
       titleColor(user) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::blueText)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::userMessageText)) &&
           surfaceColor(user) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::blueSurface)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::userMessageSurface)) &&
           titleColor(update) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::amberText)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::updateMessageText)) &&
           surfaceColor(update) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::amberSurface)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::updateMessageSurface)) &&
           titleColor(final) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::purpleText)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::finalAnswerText)) &&
           surfaceColor(final) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::purpleSurface)),
+              QColor(QString::fromLatin1(codexui::UiStyle::finalAnswerSurface)),
       "You is blue, interim Codex is amber, and final Codex is violet");
   qApp->setStyleSheet(originalStyleSheet);
   return result;
@@ -672,7 +672,7 @@ bool testActiveWorkBordersFollowStatus() {
   bool result = expect(
       commandCard.data().status.semantic == nodegraph::NodeStatus::Running &&
           commandStatus && emphasizedAtMidpoint(commandCard) &&
-          labelUsesColor(commandStatus, codexui::UiStyle::blueText),
+          labelUsesColor(commandStatus, codexui::UiStyle::statusActiveText),
       "a running command uses the emphasized card border and active header "
       "status");
   command.status = nodegraph::NodeStatus::Completed;
@@ -698,7 +698,7 @@ bool testActiveWorkBordersFollowStatus() {
           imageStatus &&
           imageStatus->font().capitalization() == QFont::MixedCase &&
           imageStatus->text() == QStringLiteral("running") &&
-          labelUsesColor(imageStatus, codexui::UiStyle::blueText),
+          labelUsesColor(imageStatus, codexui::UiStyle::statusActiveText),
       "a loading figure uses the emphasized card border and active header "
       "status");
   image.status = nodegraph::NodeStatus::Completed;
@@ -707,7 +707,7 @@ bool testActiveWorkBordersFollowStatus() {
           imageCard.data().status.semantic ==
               nodegraph::NodeStatus::Completed &&
           imageStatus->text() == QStringLiteral("completed") &&
-          labelUsesColor(imageStatus, codexui::UiStyle::greenText),
+          labelUsesColor(imageStatus, codexui::UiStyle::statusSuccessText),
       "a loaded figure returns to the normal card border and success header "
       "status");
   qApp->setStyleSheet(originalStyleSheet);
@@ -879,7 +879,7 @@ bool testAgentActivityLifecycleLabelRetention() {
   status = card.findChild<QLabel *>(QStringLiteral("agentActivityStatus"));
   result &= expect(status && !status->isHidden() &&
                        status->text() == QStringLiteral("completed") &&
-                       labelUsesColor(status, UiStyle::greenText),
+                       labelUsesColor(status, UiStyle::statusSuccessText),
                    "completed agent lifecycle remains visible in a QWidget");
   const QSize retainedSize = card.size();
   result &= expect(
@@ -2506,7 +2506,7 @@ bool testMutableCardsAndCommandOutput() {
   result &= expect(
       output && output->isHidden() && commandStatus && commandMeta &&
           commandMeta->isHidden() &&
-          labelUsesColor(commandStatus, UiStyle::blueText) &&
+          labelUsesColor(commandStatus, UiStyle::statusActiveText) &&
           commandStatus->font().capitalization() == QFont::MixedCase &&
           commandStatus->text() == QStringLiteral("running") &&
           commandStatus->parentWidget()->layout()->indexOf(commandStatus) <
@@ -2538,7 +2538,7 @@ bool testMutableCardsAndCommandOutput() {
   result &=
       expect(titleText(agentCardWidget) == QStringLiteral("Codex") &&
                  agentPhase && agentPhase->text() == QStringLiteral("update") &&
-                 labelUsesColor(agentPhase, UiStyle::blueText) &&
+                 labelUsesColor(agentPhase, UiStyle::statusActiveText) &&
                  agentPhase->font().weight() == QFont::Normal &&
                  usesReferencePhaseCopySpacing(agentCardWidget, agentPhase) &&
                  agentPhase->parentWidget()->layout()->indexOf(agentPhase) <
@@ -2550,7 +2550,7 @@ bool testMutableCardsAndCommandOutput() {
       activityStatus &&
           activityStatus->font().capitalization() == QFont::MixedCase &&
           activityStatus->text() == QStringLiteral("running") &&
-          labelUsesColor(activityStatus, UiStyle::blueText),
+          labelUsesColor(activityStatus, UiStyle::statusActiveText),
       "agent activity exposes its canonical lowercase status in the header");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
@@ -2595,12 +2595,12 @@ bool testMutableCardsAndCommandOutput() {
             return cursor.charFormat().anchorHref() ==
                        QStringLiteral("codexui-file:0") &&
                    cursor.charFormat().foreground().color() ==
-                       QColor(QString::fromLatin1(UiStyle::blue));
+                       QColor(QString::fromLatin1(UiStyle::statusActive));
           }() &&
           filesStatus &&
           filesStatus->font().capitalization() == QFont::MixedCase &&
           filesStatus->text() == QStringLiteral("running") &&
-          labelUsesColor(filesStatus, UiStyle::blueText),
+          labelUsesColor(filesStatus, UiStyle::statusActiveText),
       "file-change cards keep counts below and expose status in the "
       "header");
   const qulonglong fileBodyRebuilds =
@@ -2732,12 +2732,12 @@ bool testMutableCardsAndCommandOutput() {
   result &= expect(
       titleText(agentCardWidget) == QStringLiteral("Codex") && agentPhase &&
           agentPhase->text() == QStringLiteral("final answer") &&
-          labelUsesColor(agentPhase, UiStyle::greenText) &&
+          labelUsesColor(agentPhase, UiStyle::statusSuccessText) &&
           agentPhase->font().weight() == QFont::Normal,
       "final agent messages show a normal-weight success answer phase");
   result &= expect(
       commandStatus->text() == QStringLiteral("completed") &&
-          labelUsesColor(commandStatus, UiStyle::greenText) &&
+          labelUsesColor(commandStatus, UiStyle::statusSuccessText) &&
           commandMeta->text() ==
               QStringLiteral("exit 0  |  /workspace  |  1.5 s") &&
           !commandMeta->text().contains(QStringLiteral("completed")),
@@ -3099,7 +3099,7 @@ bool testCardFoldingGeometryAndRetention() {
               steeringPhase->parentWidget()->layout()->indexOf(
                   copyButton(steeringCard)) &&
           cardTitleColor(steeringCard) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::tealText)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::pendingSteeringText)) &&
           steeringAnimation && steeringAnimation->isActive(),
       "a pending steering You card is nested and keeps its animation");
 
@@ -3118,7 +3118,7 @@ bool testCardFoldingGeometryAndRetention() {
           cardTitle(authoritativeSteering) == QStringLiteral("You") &&
           steeringPhase->text() == QStringLiteral("steering") &&
           authoritativeSteering->palette().color(QPalette::Window) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::tealSurface)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::pendingSteeringSurface)) &&
           steeringAnimation && !steeringAnimation->isActive(),
       "steering acknowledgement morphs the same nested card");
 
@@ -4053,7 +4053,7 @@ bool testBottomAnchoredCommandOutputGrowth() {
                              : nullptr;
   result &= expect(commandCard && metadata && metadata->isHidden() && status &&
                        output && output->isHidden() && view.isAtBottom() &&
-                       labelUsesColor(status, UiStyle::blueText),
+                       labelUsesColor(status, UiStyle::statusActiveText),
                    "live command starts with a hidden zero-line output");
   if (!commandCard || !metadata || !status || !output)
     return false;

@@ -146,7 +146,7 @@ void MarkdownTextView::configureDocument() {
   document()->setDefaultFont(font());
   document()->setDefaultStyleSheet(
       QStringLiteral("a{color:%1;text-decoration:none;}")
-          .arg(QString::fromLatin1(UiStyle::blue)));
+          .arg(QString::fromLatin1(UiStyle::linkText)));
   QTextOption option = document()->defaultTextOption();
   option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
   document()->setDefaultTextOption(option);
@@ -450,7 +450,7 @@ void CopyButton::paintEvent(QPaintEvent *event) {
   else if (underMouse() || keyboardFocusVisible_)
     color = QColor(QString::fromLatin1(UiStyle::primary));
   if (feedbackActive_)
-    color = QColor(QString::fromLatin1(UiStyle::greenText));
+    color = QColor(QString::fromLatin1(UiStyle::copySuccessText));
 
   QPainter painter(this);
   painter.setRenderHint(QPainter::Antialiasing, true);
@@ -527,15 +527,15 @@ QString statusLabel(const UiStatus &status) {
 void setLabelTone(QLabel &label, std::string_view tone) {
   const char *color = nullptr;
   if (tone == "active")
-    color = UiStyle::blueText;
+    color = UiStyle::statusActiveText;
   else if (tone == "success")
-    color = UiStyle::greenText;
+    color = UiStyle::statusSuccessText;
   else if (tone == "warning")
-    color = UiStyle::orangeText;
+    color = UiStyle::statusWarningText;
   else if (tone == "danger")
-    color = UiStyle::redText;
+    color = UiStyle::statusDangerText;
   else if (tone == "steering")
-    color = UiStyle::tealText;
+    color = UiStyle::statusSteeringText;
   const QString style =
       color ? QStringLiteral("color:%1;").arg(QString::fromLatin1(color))
             : QString{};

@@ -79,7 +79,7 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   root->addWidget(surfaces);
 
   attention_ = new QFrame(surfaces);
-  attention_->setProperty("kind", "orangeBadge");
+  attention_->setProperty("kind", "attentionBadge");
   auto *attentionLayout = new QHBoxLayout(attention_);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
   attentionLayout->setSpacing(8);

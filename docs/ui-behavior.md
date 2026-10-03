@@ -412,6 +412,8 @@ therefore perceptually balanced across blue, green, amber, yellow, lime, orange,
 violet, and teal. The fixed hexadecimal Qt tokens are precomputed from those
 targets; runtime color conversion is not part of painting.
 
+Color primitives live in `UiStyle::Palette`; native renderers and stylesheets use semantic `UiStyle` roles such as `threadSelected`, `finalAnswerSurface`, and `focusBorder`. Change their palette assignments in `UiStyle.h` to recolor a role without coupling unrelated components. The bright yellow selection is an intentional exception to the shared chroma targets. Browser colors are defined by semantic CSS variables in `web/src/colors.css`; these retain the browser’s existing values. Component CSS consumes those variables. Source-policy checks reject direct native palette access and browser color literals outside their token definitions.
+
 ### Native conversation-card polish register
 
 This ordered register is the authoritative completion sequence for the current

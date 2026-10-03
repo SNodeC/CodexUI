@@ -99,16 +99,16 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
 
 QColor statusColor(const UiStatus &status, std::size_t pending, bool draft) {
   if (draft || pending != 0)
-    return QColor(QString::fromLatin1(UiStyle::orange));
+    return QColor(QString::fromLatin1(UiStyle::statusWarning));
   const std::string_view tone = statusTone(status);
   if (tone == "active")
-    return QColor(QString::fromLatin1(UiStyle::blue));
+    return QColor(QString::fromLatin1(UiStyle::statusActive));
   if (tone == "success")
-    return QColor(QString::fromLatin1(UiStyle::green));
+    return QColor(QString::fromLatin1(UiStyle::statusSuccess));
   if (tone == "warning")
-    return QColor(QString::fromLatin1(UiStyle::orange));
+    return QColor(QString::fromLatin1(UiStyle::statusWarning));
   if (tone == "danger")
-    return QColor(QString::fromLatin1(UiStyle::red));
+    return QColor(QString::fromLatin1(UiStyle::statusDanger));
   return QColor(QString::fromLatin1(UiStyle::threadInactive));
 }
 
@@ -532,7 +532,7 @@ public:
       surface.adjust(0.5, 3.5, -0.5, -3.5);
       painter->setClipRect(row, Qt::IntersectClip);
       painter->setPen(QColor(QString::fromLatin1(
-          activeCard ? UiStyle::activeGroupBorder : UiStyle::blueBorder)));
+          activeCard ? UiStyle::activeGroupBorder : UiStyle::groupBorder)));
       painter->setBrush(QColor(QString::fromLatin1(
           activeCard ? UiStyle::activeGroupSurface : UiStyle::panel)));
       painter->drawRoundedRect(surface, 8.0, 8.0);
@@ -541,7 +541,7 @@ public:
       painter->setClipPath(clip, Qt::IntersectClip);
       if (activeCard && item == outer)
         painter->fillRect(row.adjusted(2, 0, -2, 0),
-                          QColor(QString::fromLatin1(UiStyle::limeSurfaceHover)));
+                          QColor(QString::fromLatin1(UiStyle::activeGroupHeaderSurface)));
       else if (selected || hovered)
         painter->fillRect(contentRow.adjusted(2, 0, -2, 0), rowBackground);
     }
@@ -550,11 +550,11 @@ public:
     const QRectF feedbackSurface = QRectF(row).adjusted(1.0, 4.0, -1.0, -4.0);
     if (feedback) {
       painter->setPen(QPen(
-          QColor(QString::fromLatin1(item->draft ? UiStyle::orangeBorderStrong
-                                                 : UiStyle::blueBorderStrong)),
+          QColor(QString::fromLatin1(item->draft ? UiStyle::draftThreadBorder
+                                                 : UiStyle::pendingPromptBorderStrong)),
           item->draft ? 1.0 : 1.5));
       painter->setBrush(QColor(QString::fromLatin1(
-          item->draft ? UiStyle::orangeSurface : UiStyle::blueSurface)));
+          item->draft ? UiStyle::draftThreadSurface : UiStyle::pendingPromptSurface)));
       if (grouped)
         painter->fillRect(row.adjusted(2, 0, -2, 0), painter->brush());
       else
@@ -577,10 +577,10 @@ public:
           feedbackSurface.left() + position * feedbackSurface.width();
       const qreal radius = std::max(24.0, feedbackSurface.width() * 0.22);
       QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
-      QColor edge(QString::fromLatin1(item->draft ? UiStyle::orangeBorderStrong
-                                                  : UiStyle::blueBorderStrong));
+      QColor edge(QString::fromLatin1(item->draft ? UiStyle::draftThreadBorder
+                                                  : UiStyle::pendingPromptBorderStrong));
       QColor middle(QString::fromLatin1(
-          item->draft ? UiStyle::orange : UiStyle::blueBorderStrong));
+          item->draft ? UiStyle::draftThreadSweep : UiStyle::pendingPromptBorderStrong));
       edge.setAlpha(0);
       middle.setAlpha(105);
       sweep.setColorAt(0.0, edge);
@@ -634,7 +634,7 @@ public:
         !effective.state.testFlag(QStyle::State_Selected)) {
       painter->setBrush(Qt::NoBrush);
       painter->setPen(
-          QPen(QColor(QString::fromLatin1(UiStyle::blueBorder)), 1.0));
+          QPen(QColor(QString::fromLatin1(UiStyle::threadFocusBorder)), 1.0));
       painter->drawRoundedRect(QRectF(row).adjusted(0.5, 3.5, -0.5, -3.5), 8.0,
                                8.0);
     }
@@ -1126,10 +1126,10 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
           "QPushButton:hover{background:%4;border-color:%5;}"
           "QPushButton:disabled{background:%6;color:%7;border-color:%8;}")
           .arg(QString::fromLatin1(UiStyle::panel),
-               QString::fromLatin1(UiStyle::blue),
-               QString::fromLatin1(UiStyle::blueBorder),
-               QString::fromLatin1(UiStyle::blueSelected),
-               QString::fromLatin1(UiStyle::blue),
+               QString::fromLatin1(UiStyle::newThreadText),
+               QString::fromLatin1(UiStyle::newThreadBorder),
+               QString::fromLatin1(UiStyle::newThreadHoverSurface),
+               QString::fromLatin1(UiStyle::newThreadHoverBorder),
                QString::fromLatin1(UiStyle::appBackground),
                QString::fromLatin1(UiStyle::placeholder),
                QString::fromLatin1(UiStyle::divider)));

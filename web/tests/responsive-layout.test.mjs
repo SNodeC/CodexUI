@@ -85,7 +85,10 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
 });
 
 test("responsive CSS keeps the desktop grid and removes the old document-width floor", async () => {
-    const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+    const source = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+    const colors = await readFile(new URL("../src/colors.css", import.meta.url), "utf8");
+    const tokens = new Map([...colors.matchAll(/--([\w-]+):\s*([^;]+);/gu)].map(match => [match[1], match[2]]));
+    const css = source.replace(/var\(--([\w-]+)\)/gu, (reference, name) => tokens.get(name) ?? reference);
     assert.match(css, /grid-template-columns:\s*260px minmax\(420px, 1fr\) 300px/u);
     assert.match(css, /pre\.command-output\s*\{[^}]*max-height:\s*212px;[^}]*padding:\s*4px 12px;[^}]*line-height:\s*17px;/u,
         "command output uses complete text rows and symmetric vertical padding");
@@ -145,4 +148,22 @@ test("composer wheel and hidden-scroll ownership stay local to WebUI chrome", as
     assert.match(source, /if \(!scrollable\) element\.scrollTop = 0/u);
     assert.match(source, /onWheel=\{event => event\.stopPropagation\(\)\}/u);
     assert.match(source, /event\.repeat && !event\.shiftKey && !composing\) event\.preventDefault\(\)/u);
+});
+
+
+test("browser colors are defined once as semantic roles and every role resolves", async () => {
+    const source = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+    const colors = await readFile(new URL("../src/colors.css", import.meta.url), "utf8");
+    assert.match(source, /^@import "\.\/colors\.css";/u);
+    assert.doesNotMatch(source, /#[0-9a-f]{3,8}\b|(?:rgba?|hsla?)\(/iu);
+    const definitions = [...colors.matchAll(/--([\w-]+):\s*(#[0-9a-f]{3,8});/gu)];
+    const names = new Set(definitions.map(match => match[1]));
+    assert.equal(names.size, definitions.length, "each color role has one definition");
+    const local = new Set([...source.matchAll(/--([\w-]+):/gu)].map(match => match[1]));
+    const used = new Set([...source.matchAll(/var\(--([\w-]+)\)/gu)].map(match => match[1]));
+    for (const name of used) assert.ok(names.has(name) || local.has(name), `undefined token: ${name}`);
+    for (const name of names) {
+        assert.ok(used.has(name), `unused token: ${name}`);
+        assert.doesNotMatch(name, /(?:^|-)(?:blue|green|amber|yellow|orange|red|purple|teal|lime)(?:-|$)/u);
+    }
 });

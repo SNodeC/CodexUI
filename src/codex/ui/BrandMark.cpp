@@ -29,7 +29,7 @@ void paintMark(QPainter &painter, const QRectF &bounds) {
 
   const QRectF surface(1.0, 1.0, 34.0, 34.0);
   painter.setPen(Qt::NoPen);
-  painter.setBrush(QColor(QString::fromLatin1(UiStyle::blue)));
+  painter.setBrush(QColor(QString::fromLatin1(UiStyle::brandPrimary)));
   painter.drawRoundedRect(surface, 9.0, 9.0);
 
   painter.setPen(QPen(QColor(QString::fromLatin1(UiStyle::onAccent)), 2.7,

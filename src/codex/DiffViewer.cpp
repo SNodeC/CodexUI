@@ -98,18 +98,18 @@ protected:
   void highlightBlock(const QString &text) override {
     QTextCharFormat format;
     if (text.startsWith(QStringLiteral("@@"))) {
-      format.setForeground(QColor(QString::fromLatin1(UiStyle::blue)));
+      format.setForeground(QColor(QString::fromLatin1(UiStyle::diffHunkAccent)));
       format.setBackground(
           QColor(QString::fromLatin1(UiStyle::diffHunkSurface)));
       format.setFontWeight(QFont::DemiBold);
     } else if (text.startsWith(QLatin1Char('+')) &&
                !text.startsWith(QStringLiteral("+++"))) {
-      format.setForeground(QColor(QString::fromLatin1(UiStyle::greenText)));
-      format.setBackground(QColor(QString::fromLatin1(UiStyle::greenSurface)));
+      format.setForeground(QColor(QString::fromLatin1(UiStyle::diffAdditionText)));
+      format.setBackground(QColor(QString::fromLatin1(UiStyle::diffAdditionSurface)));
     } else if (text.startsWith(QLatin1Char('-')) &&
                !text.startsWith(QStringLiteral("---"))) {
-      format.setForeground(QColor(QString::fromLatin1(UiStyle::redText)));
-      format.setBackground(QColor(QString::fromLatin1(UiStyle::redSurface)));
+      format.setForeground(QColor(QString::fromLatin1(UiStyle::diffDeletionText)));
+      format.setBackground(QColor(QString::fromLatin1(UiStyle::diffDeletionSurface)));
     } else if (text.startsWith(QStringLiteral("diff --git")) ||
                text.startsWith(QStringLiteral("---")) ||
                text.startsWith(QStringLiteral("+++")) ||
@@ -171,13 +171,13 @@ QPlainTextEdit *diffView(const QString &objectName,
       const QString text = block.text();
       QColor color;
       if (text.startsWith(QStringLiteral("@@")))
-        color = QColor(QString::fromLatin1(UiStyle::blue));
+        color = QColor(QString::fromLatin1(UiStyle::diffHunkAccent));
       else if (text.startsWith(QLatin1Char('+')) &&
                !text.startsWith(QStringLiteral("+++")))
-        color = QColor(QString::fromLatin1(UiStyle::green));
+        color = QColor(QString::fromLatin1(UiStyle::diffAdditionMarker));
       else if (text.startsWith(QLatin1Char('-')) &&
                !text.startsWith(QStringLiteral("---")))
-        color = QColor(QString::fromLatin1(UiStyle::red));
+        color = QColor(QString::fromLatin1(UiStyle::diffDeletionMarker));
       if (!color.isValid())
         continue;
       const qreal position = blockCount > 1

@@ -253,10 +253,10 @@ QString applicationStyleSheet() {
         QLabel#workspaceBreadcrumb { color: %{secondary}; font-weight: 500; }
         QFrame#customStatusBar { background: %{raised}; border-top: 1px solid %{divider}; }
         QFrame[kind="statusDot"] { background: %{placeholder}; border-radius: 5px; }
-        QFrame[kind="statusDot"][tone="active"] { background: %{blue}; }
-        QFrame[kind="statusDot"][tone="success"] { background: %{green}; }
-        QFrame[kind="statusDot"][tone="warning"] { background: %{orange}; }
-        QFrame[kind="statusDot"][tone="danger"] { background: %{red}; }
+        QFrame[kind="statusDot"][tone="active"] { background: %{statusActive}; }
+        QFrame[kind="statusDot"][tone="success"] { background: %{statusSuccess}; }
+        QFrame[kind="statusDot"][tone="warning"] { background: %{statusWarning}; }
+        QFrame[kind="statusDot"][tone="danger"] { background: %{statusDanger}; }
         QWidget#codexTurnSettings { background: %{panel}; border-top: 1px solid %{divider}; }
         QFrame#inspector { background: %{inspector}; }
         QFrame#inspector QScrollBar:vertical {
@@ -284,7 +284,7 @@ QString applicationStyleSheet() {
             font-weight: 700;
         }
         QLabel[kind="attentionSection"] {
-            color: %{orange};
+            color: %{attentionHeading};
             font-size: %{compact}pt;
             font-weight: 600;
         }
@@ -293,25 +293,25 @@ QString applicationStyleSheet() {
         QLabel[kind="brand"] { font-size: %{section}pt; font-weight: 600; }
         QLabel[kind="title"], QLineEdit[kind="title"] { font-size: %{standard}pt; font-weight: 600; }
         QLabel[kind="messagePhase"] { font-size: %{standard}pt; font-weight: 400; }
-        QLabel[kind="messagePhase"][tone="steering"] { color: %{tealText}; }
+        QLabel[kind="messagePhase"][tone="steering"] { color: %{statusSteeringText}; }
         QLabel[kind="body"] { font-size: %{standard}pt; }
         QLabel[kind="code"], QLineEdit[kind="code"] { font-family: monospace; font-size: %{standard}pt; font-weight: 400; }
         QLabel[kind="meta"] { color: %{secondary}; font-size: %{compact}pt; }
         QLabel[kind="meta"][tone="strong"] { color: %{primary}; }
         QLabel[kind="small"] { color: %{secondary}; font-size: %{compact}pt; }
         QLabel[kind="settingLabel"] { color: %{secondary}; font-weight: 600; }
-        QLabel[tone="active"] { color: %{blueText}; }
-        QLabel[tone="success"] { color: %{greenText}; }
-        QLabel[tone="warning"] { color: %{orangeText}; }
-        QLabel[tone="danger"] { color: %{redText}; }
+        QLabel[tone="active"] { color: %{statusActiveText}; }
+        QLabel[tone="success"] { color: %{statusSuccessText}; }
+        QLabel[tone="warning"] { color: %{statusWarningText}; }
+        QLabel[tone="danger"] { color: %{statusDangerText}; }
         QLabel[kind="imageThumbnail"] {
           background: %{raised};
           border: 1px solid %{divider};
           border-radius: 6px;
           padding: 3px;
         }
-        QLabel[kind="diffAdditionMeta"] { color: %{greenText}; font-size: %{compact}pt; font-weight: 600; }
-        QLabel[kind="diffDeletionMeta"] { color: %{redText}; font-size: %{compact}pt; font-weight: 600; }
+        QLabel[kind="diffAdditionMeta"] { color: %{diffAdditionText}; font-size: %{compact}pt; font-weight: 600; }
+        QLabel[kind="diffDeletionMeta"] { color: %{diffDeletionText}; font-size: %{compact}pt; font-weight: 600; }
         QPushButton, QToolButton {
             background: %{panel};
             border: 1px solid %{divider};
@@ -323,20 +323,20 @@ QString applicationStyleSheet() {
         QPushButton[comboPeer="true"] { min-height: 30px; max-height: 30px; }
         QDialogButtonBox QPushButton { min-height: 30px; padding: 3px 12px; }
         QPushButton:hover, QToolButton:hover { background: %{hover}; border-color: %{dividerStrong}; }
-        QPushButton:pressed, QToolButton:pressed { background: %{blueSelected}; border-color: %{blueBorder}; }
-        QPushButton:focus, QToolButton:focus { border-color: %{blue}; }
-        QPushButton[kind="primary"] { background: %{blue}; border-color: %{blue}; color: %{onAccent}; }
-        QPushButton[kind="primary"]:hover { background: %{blueHover}; border-color: %{blueHover}; }
-        QPushButton[kind="primary"]:pressed { background: %{bluePressed}; border-color: %{bluePressed}; }
-        QPushButton[kind="history"] { background: %{blueSelected}; border-color: %{blueBorder}; color: %{blueText}; }
-        QPushButton[kind="history"]:hover { background: %{blueSelectedHover}; border-color: %{blueBorderHover}; }
-        QPushButton[kind="request"] { background: %{orangeSurface}; border-color: %{orangeBorder}; color: %{orangeText}; }
-        QPushButton[kind="request"]:hover { background: %{orangeSurfaceHover}; border-color: %{orangeBorderStrong}; }
-        QPushButton[kind="steer"] { background: %{teal}; border-color: %{teal}; color: %{onAccent}; }
-        QPushButton[kind="steer"]:hover { background: %{tealHover}; border-color: %{tealHover}; color: %{onAccent}; }
-        QPushButton[kind="steer"]:pressed { background: %{tealPressed}; border-color: %{tealPressed}; color: %{onAccent}; }
-        QPushButton[kind="cancel"] { background: %{neutralSurface}; border-color: %{neutralBorder}; color: %{secondaryStrong}; }
-        QPushButton[kind="cancel"]:hover { background: %{neutralSurfaceHover}; border-color: %{neutralBorderHover}; }
+        QPushButton:pressed, QToolButton:pressed { background: %{controlPressedSurface}; border-color: %{controlPressedBorder}; }
+        QPushButton:focus, QToolButton:focus { border-color: %{focusBorder}; }
+        QPushButton[kind="primary"] { background: %{primaryAction}; border-color: %{primaryAction}; color: %{onAccent}; }
+        QPushButton[kind="primary"]:hover { background: %{primaryActionHover}; border-color: %{primaryActionHover}; }
+        QPushButton[kind="primary"]:pressed { background: %{primaryActionPressed}; border-color: %{primaryActionPressed}; }
+        QPushButton[kind="history"] { background: %{historyActionSurface}; border-color: %{historyActionBorder}; color: %{historyActionText}; }
+        QPushButton[kind="history"]:hover { background: %{historyActionHoverSurface}; border-color: %{historyActionHoverBorder}; }
+        QPushButton[kind="request"] { background: %{requestActionSurface}; border-color: %{requestActionBorder}; color: %{requestActionText}; }
+        QPushButton[kind="request"]:hover { background: %{requestActionHoverSurface}; border-color: %{requestActionHoverBorder}; }
+        QPushButton[kind="steer"] { background: %{steerAction}; border-color: %{steerAction}; color: %{onAccent}; }
+        QPushButton[kind="steer"]:hover { background: %{steerActionHover}; border-color: %{steerActionHover}; color: %{onAccent}; }
+        QPushButton[kind="steer"]:pressed { background: %{steerActionPressed}; border-color: %{steerActionPressed}; color: %{onAccent}; }
+        QPushButton[kind="cancel"] { background: %{cancelActionSurface}; border-color: %{cancelActionBorder}; color: %{secondaryStrong}; }
+        QPushButton[kind="cancel"]:hover { background: %{cancelActionHoverSurface}; border-color: %{cancelActionHoverBorder}; }
         QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
             color: %{secondary};
             background: transparent;
@@ -347,7 +347,7 @@ QString applicationStyleSheet() {
           border-color: transparent; padding: 0; font-weight: 400;
         }
         QToolButton#cardTimingButton:hover, QToolButton#cardTimingButton:focus {
-          border-color: %{blue};
+          border-color: %{focusBorder};
         }
         QPushButton[kind="infoChoice"] {
           background: %{panel};
@@ -357,7 +357,7 @@ QString applicationStyleSheet() {
           text-align: left;
         }
         QPushButton[kind="infoChoice"]:hover { background: %{raised}; border-color: %{dividerStrong}; }
-        QPushButton[kind="infoChoice"]:pressed { background: %{hover}; border-color: %{neutralBorderPressed}; }
+        QPushButton[kind="infoChoice"]:pressed { background: %{hover}; border-color: %{infoChoicePressedBorder}; }
         QPushButton[kind="segment"] {
           background: %{panel};
           border-color: %{divider};
@@ -365,8 +365,8 @@ QString applicationStyleSheet() {
           padding: 0 10px;
         }
         QPushButton[kind="segment"]:checked {
-          background: %{blueSelected};
-          border-color: %{blueBorder};
+          background: %{segmentSelectedSurface};
+          border-color: %{segmentSelectedBorder};
           color: %{primary};
         }
         QPushButton[kind="segment"]:hover:!checked { background: %{hover}; }
@@ -377,8 +377,8 @@ QString applicationStyleSheet() {
           padding: 0;
         }
         QToolButton[kind="presentationToggle"]:checked {
-          background: %{blueSelected};
-          border-color: %{blueBorder};
+          background: %{presentationSelectedSurface};
+          border-color: %{presentationSelectedBorder};
         }
         QToolButton[kind="presentationToggle"]:hover:!checked {
           background: %{hover};
@@ -391,16 +391,16 @@ QString applicationStyleSheet() {
             padding: 0;
         }
         QToolButton[kind="composerAction"]:hover { background: %{hover}; border-color: %{dividerStrong}; }
-        QPushButton[kind="agentLink"] { background: %{blueSelected}; border-color: %{blueBorder}; color: %{blue}; text-align: left; }
-        QPushButton[kind="success"] { background: %{green}; border-color: %{green}; color: %{onAccent}; }
-        QPushButton[kind="success"]:hover { background: %{greenHover}; border-color: %{greenHover}; }
-        QPushButton[kind="success"]:pressed { background: %{greenPressed}; border-color: %{greenPressed}; }
-        QPushButton[kind="destructive"], QPushButton[kind="stop"] { background: %{red}; border-color: %{red}; color: %{onAccent}; }
-        QPushButton[kind="destructive"]:hover, QPushButton[kind="stop"]:hover { background: %{redHover}; border-color: %{redHover}; }
-        QPushButton[kind="destructive"]:pressed, QPushButton[kind="stop"]:pressed { background: %{redPressed}; border-color: %{redPressed}; }
-        QPushButton[kind="destructiveCompact"] { background: %{red}; border: 0; color: %{onAccent}; border-radius: 4px; padding: 0; font-weight: 700; }
-        QPushButton[kind="destructiveCompact"]:hover { background: %{redHover}; }
-        QPushButton[kind="destructiveCompact"]:pressed { background: %{redPressed}; }
+        QPushButton[kind="agentLink"] { background: %{agentLinkSurface}; border-color: %{agentLinkBorder}; color: %{agentLinkText}; text-align: left; }
+        QPushButton[kind="success"] { background: %{successAction}; border-color: %{successAction}; color: %{onAccent}; }
+        QPushButton[kind="success"]:hover { background: %{successActionHover}; border-color: %{successActionHover}; }
+        QPushButton[kind="success"]:pressed { background: %{successActionPressed}; border-color: %{successActionPressed}; }
+        QPushButton[kind="destructive"], QPushButton[kind="stop"] { background: %{destructiveAction}; border-color: %{destructiveAction}; color: %{onAccent}; }
+        QPushButton[kind="destructive"]:hover, QPushButton[kind="stop"]:hover { background: %{destructiveActionHover}; border-color: %{destructiveActionHover}; }
+        QPushButton[kind="destructive"]:pressed, QPushButton[kind="stop"]:pressed { background: %{destructiveActionPressed}; border-color: %{destructiveActionPressed}; }
+        QPushButton[kind="destructiveCompact"] { background: %{destructiveAction}; border: 0; color: %{onAccent}; border-radius: 4px; padding: 0; font-weight: 700; }
+        QPushButton[kind="destructiveCompact"]:hover { background: %{destructiveActionHover}; }
+        QPushButton[kind="destructiveCompact"]:pressed { background: %{destructiveActionPressed}; }
         QPushButton:disabled, QToolButton:disabled, QPushButton[kind]:disabled, QToolButton[kind]:disabled { color: %{placeholder}; background: %{appBackground}; border-color: %{divider}; }
         QPushButton[codexChevron="true"] { padding-right: 20px; }
         QPushButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
@@ -410,33 +410,31 @@ QString applicationStyleSheet() {
         QFrame#conversation { background: %{appBackground}; }
         QFrame#attachmentFileBox { background: %{panel}; border: 1px solid %{divider}; border-radius: 6px; }
         QFrame[kind="raised"] { background: %{panel}; border: 1px solid %{divider}; border-radius: 10px; }
-        QFrame[kind="raised"][tone="warning"] { background: %{orangeSurface}; border-color: %{orangeBorder}; }
-        QFrame[messageRole="user"] { background: %{blueSurface}; border: 1px solid %{blueBorder}; border-radius: 8px; }
-        QFrame[messageRole="user"] QLabel[kind="title"] { color: %{blueText}; }
-        QFrame[messageRole="user"][nestedConversationCard="true"] { background: %{tealSurface}; border-color: %{tealBorder}; }
-        QFrame[messageRole="user"][nestedConversationCard="true"] QLabel[kind="title"] { color: %{tealText}; }
+        QFrame[kind="raised"][tone="warning"] { background: %{warningNoticeSurface}; border-color: %{warningNoticeBorder}; }
+        QFrame[messageRole="user"] { background: %{userMessageSurface}; border: 1px solid %{userMessageBorder}; border-radius: 8px; }
+        QFrame[messageRole="user"] QLabel[kind="title"] { color: %{userMessageText}; }
+        QFrame[messageRole="user"][nestedConversationCard="true"] { background: %{steeringMessageSurface}; border-color: %{steeringMessageBorder}; }
+        QFrame[messageRole="user"][nestedConversationCard="true"] QLabel[kind="title"] { color: %{steeringMessageText}; }
         QFrame[virtualTurnRoot="true"] { background: transparent; border: none; }
-        QFrame[messageRole="agent"][messagePhase="final"] { background: %{purpleSurface}; border: 1px solid %{purpleBorder}; border-radius: 8px; }
-        QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: %{purpleText}; }
-        QFrame[messageRole="agent"][messagePhase="update"] { background: %{amberSurface}; border: 1px solid %{amberBorder}; border-radius: 8px; }
-        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"] { color: %{amberText}; }
+        QFrame[messageRole="agent"][messagePhase="final"] { background: %{finalAnswerSurface}; border: 1px solid %{finalAnswerBorder}; border-radius: 8px; }
+        QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: %{finalAnswerText}; }
+        QFrame[messageRole="agent"][messagePhase="update"] { background: %{updateMessageSurface}; border: 1px solid %{updateMessageBorder}; border-radius: 8px; }
+        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"] { color: %{updateMessageText}; }
         QFrame[kind="summary"] { background: %{raised}; border: 1px solid %{divider}; border-radius: 7px; }
         QFrame[kind="standardDivider"] { background: %{divider}; border: none; }
-        QFrame[kind="greenBadge"] { background: %{greenSurface}; border: 1px solid %{greenBorder}; border-radius: 6px; }
-        QFrame[kind="blueBadge"] { background: %{blueSelected}; border-radius: 5px; }
-        QFrame[kind="orangeBadge"] { background: %{orangeSurface}; border: 1px solid %{orangeBorder}; border-radius: 7px; }
-        QFrame#conversationNoticeBar[tone="warning"] { background: %{orangeSurface}; border: 1px solid %{orangeBorder}; border-radius: 7px; }
-        QFrame#conversationNoticeBar[tone="danger"] { background: %{redSurface}; border: 1px solid %{redBorder}; border-radius: 7px; }
+        QFrame[kind="attentionBadge"] { background: %{attentionSurface}; border: 1px solid %{attentionBorder}; border-radius: 7px; }
+        QFrame#conversationNoticeBar[tone="warning"] { background: %{warningNoticeSurface}; border: 1px solid %{warningNoticeBorder}; border-radius: 7px; }
+        QFrame#conversationNoticeBar[tone="danger"] { background: %{dangerNoticeSurface}; border: 1px solid %{dangerNoticeBorder}; border-radius: 7px; }
         QWidget#composerOverlay { background: %{appBackground}; }
         QFrame[kind="composer"] { background: %{panel}; border: 1px solid %{divider}; border-radius: 10px; }
-        QFrame[kind="composer"][focused="true"] { border-color: %{blue}; }
+        QFrame[kind="composer"][focused="true"] { border-color: %{focusBorder}; }
         QPlainTextEdit, QTextEdit {
             background: transparent;
             border: 0;
             color: %{primary};
             font-size: %{standard}pt;
             padding: 0;
-            selection-background-color: %{blueSelected};
+            selection-background-color: %{textSelectionSurface};
             selection-color: %{primary};
         }
         QPlainTextEdit[empty="true"] { color: %{placeholder}; }
@@ -494,17 +492,17 @@ QString applicationStyleSheet() {
             border-radius: 7px;
             padding: 8px;
         }
-        QPlainTextEdit[kind="dialogEditor"]:focus { border-color: %{blue}; }
+        QPlainTextEdit[kind="dialogEditor"]:focus { border-color: %{focusBorder}; }
         QLineEdit {
             background: %{panel};
             border: 1px solid %{divider};
             border-radius: 7px;
             min-height: 32px;
             padding: 0 9px;
-            selection-background-color: %{blueSelected};
+            selection-background-color: %{textSelectionSurface};
             selection-color: %{primary};
         }
-        QLineEdit:focus { border-color: %{blue}; }
+        QLineEdit:focus { border-color: %{focusBorder}; }
         QLineEdit:disabled { color: %{placeholder}; background: %{appBackground}; }
         QComboBox {
             background: %{panel};
@@ -514,7 +512,7 @@ QString applicationStyleSheet() {
             padding: 0 24px 0 9px;
         }
         QComboBox:hover { border-color: %{dividerStrong}; }
-        QComboBox:focus { border-color: %{blue}; }
+        QComboBox:focus { border-color: %{focusBorder}; }
         QComboBox:disabled { color: %{placeholder}; background: %{appBackground}; }
         QComboBox QLineEdit {
             background: transparent;
@@ -529,7 +527,7 @@ QString applicationStyleSheet() {
             background: %{panel};
             color: %{primary};
             border: 1px solid %{divider};
-            selection-background-color: %{blueSelected};
+            selection-background-color: %{listSelectedSurface};
             selection-color: %{primary};
         }
         QTreeView#codexFileBrowser, QListWidget#codexAttachmentList {
@@ -551,7 +549,7 @@ QString applicationStyleSheet() {
         }
         QListWidget#codexDiffFiles::item:hover { background: %{hover}; }
         QListWidget#codexDiffFiles::item:selected {
-            background: %{blueSelected};
+            background: %{fileSelectedSurface};
             color: %{primary};
         }
         QPlainTextEdit#codexDiffText {
@@ -569,7 +567,7 @@ QString applicationStyleSheet() {
         QListWidget#codexAttachmentList::item:hover { background: %{hover}; }
         QTreeView#codexFileBrowser::item:selected,
         QListWidget#codexAttachmentList::item:selected {
-            background: %{blueSelected};
+            background: %{fileSelectedSurface};
             color: %{primary};
         }
         QHeaderView::section {
@@ -678,9 +676,9 @@ QString applicationStyleSheet() {
             border-radius: 7px;
             font-size: %{compact}pt;
         }
-        QTabBar::tab:selected { background: %{blueSelected}; color: %{primary}; font-weight: 600; }
+        QTabBar::tab:selected { background: %{tabSelectedSurface}; color: %{primary}; font-weight: 600; }
         QTabBar::tab:hover:!selected { background: %{hover}; color: %{primary}; }
-        QTabBar::tab:focus { border: 1px solid %{blue}; }
+        QTabBar::tab:focus { border: 1px solid %{focusBorder}; }
         QMenu {
             background: %{panel};
             color: %{primary};
@@ -699,10 +697,10 @@ QString applicationStyleSheet() {
             color: %{primary};
         }
         QMenu::item:checked {
-            background: %{blueSelected};
-            color: %{blueText};
+            background: %{menuCheckedSurface};
+            color: %{menuCheckedText};
         }
-        QMenu::item:checked:selected { background: %{blueSelectedHover}; }
+        QMenu::item:checked:selected { background: %{menuCheckedHoverSurface}; }
         QMenu::item:disabled { color: %{placeholder}; }
         QMenu::item:disabled:selected { background: transparent; }
         QMenu::separator {
@@ -715,35 +713,39 @@ QString applicationStyleSheet() {
   // Stringization keeps QSS placeholders named and order-independent.
   // clang-format off
 #define CODEXUI_APPLICATION_COLORS(X) \
-  X(tealPressed) X(tealText) X(tealHover) X(teal) X(primary) \
-  X(greenPressed) X(greenText) X(greenHover) X(green) X(bluePressed) \
-  X(blueText) X(secondaryStrong) X(blueHover) X(blue) X(purpleText) \
-  X(secondary) X(amberText) X(redPressed) X(orangeText) X(redText) \
-  X(redHover) X(orange) X(placeholder) X(tealBorder) X(neutralBorderPressed) \
-  X(blueBorderHover) X(red) X(greenBorder) X(neutralBorderHover) X(blueBorder) \
-  X(dividerStrong) X(neutralBorder) X(purpleBorder) X(divider) X(blueSelectedHover) \
-  X(amberBorder) X(neutralSurfaceHover) X(blueSelected) X(orangeBorderStrong) \
-  X(tealSurface) X(greenSurface) X(neutralSurface) X(orangeBorder) X(blueSurface) \
-  X(hover) X(purpleSurface) X(redBorder) X(appBackground) X(raised) \
-  X(amberSurface) X(orangeSurfaceHover) X(inspector) X(orangeSurface) \
-  X(redSurface) X(panel) X(onAccent) X(codeSurface) X(codeText) \
-  X(blueSurfaceHover) X(blueBorderStrong) X(greenSurfaceHover) X(greenSelected) \
-  X(greenSelectedHover) X(greenBorderHover) X(greenBorderStrong) X(amber) \
-  X(amberHover) X(amberPressed) X(amberSurfaceHover) X(amberSelected) \
-  X(amberSelectedHover) X(amberBorderHover) X(amberBorderStrong) X(orangeHover) \
-  X(orangePressed) X(orangeSelected) X(orangeSelectedHover) X(orangeBorderHover) \
-  X(redSurfaceHover) X(redSelected) X(redSelectedHover) X(redBorderHover) \
-  X(redBorderStrong) X(purple) X(purpleHover) X(purplePressed) \
-  X(purpleSurfaceHover) X(purpleSelected) X(purpleSelectedHover) X(purpleBorderHover) \
-  X(purpleBorderStrong) X(tealSurfaceHover) X(tealSelected) X(tealSelectedHover) \
-  X(tealBorderHover) X(tealBorderStrong) X(lime) X(limeHover) \
-  X(limePressed) X(limeSurface) X(limeSurfaceHover) X(limeSelected) \
-  X(limeSelectedHover) X(limeBorder) X(limeBorderHover) X(limeBorderStrong) \
-  X(limeText) X(activeGroupSurface) X(activeGroupBorder) \
-  X(threadSelected) X(threadSelectedBorder) X(activeThreadBorder) \
-  X(yellow) X(yellowHover) X(yellowPressed) X(yellowSurface) \
-  X(yellowSurfaceHover) X(yellowSelected) X(yellowSelectedHover) X(yellowBorder) \
-  X(yellowBorderHover) X(yellowBorderStrong) X(yellowText)
+  X(appBackground) X(panel) X(raised) X(sidebar) \
+  X(inspector) X(divider) X(dividerStrong) X(primary) \
+  X(strongText) X(secondary) X(secondaryStrong) X(placeholder) \
+  X(threadInactive) X(onAccent) X(codeSurface) X(codeText) \
+  X(diffHunkSurface) X(activeTurnBorder) X(brandAccent) X(hover) \
+  X(activeGroupSurface) X(activeGroupBorder) X(threadSelected) X(threadSelectedBorder) \
+  X(activeThreadBorder) X(diffHunkAccent) X(diffAdditionText) X(diffAdditionSurface) \
+  X(diffDeletionText) X(diffDeletionSurface) X(diffAdditionMarker) X(diffDeletionMarker) \
+  X(brandPrimary) X(turnSurface) X(turnBorder) X(copySuccessText) \
+  X(linkText) X(statusActiveText) X(statusSuccessText) X(statusWarningText) \
+  X(statusDangerText) X(statusSteeringText) X(pendingSteeringText) X(pendingPromptText) \
+  X(failedPromptText) X(failedPromptSurface) X(pendingSteeringSurface) X(pendingPromptSurface) \
+  X(failedPromptBorder) X(pendingSteeringBorderStrong) X(pendingPromptBorderStrong) X(pendingSteeringBorder) \
+  X(pendingPromptBorder) X(newThreadText) X(newThreadBorder) X(newThreadHoverSurface) \
+  X(newThreadHoverBorder) X(groupBorder) X(threadFocusBorder) X(draftThreadSweep) \
+  X(statusWarning) X(statusActive) X(statusSuccess) X(statusDanger) \
+  X(activeGroupHeaderSurface) X(draftThreadBorder) X(draftThreadSurface) X(attentionHeading) \
+  X(controlPressedSurface) X(controlPressedBorder) X(focusBorder) X(primaryAction) \
+  X(primaryActionHover) X(primaryActionPressed) X(historyActionSurface) X(historyActionBorder) \
+  X(historyActionText) X(historyActionHoverSurface) X(historyActionHoverBorder) X(requestActionSurface) \
+  X(requestActionBorder) X(requestActionText) X(requestActionHoverSurface) X(requestActionHoverBorder) \
+  X(steerAction) X(steerActionHover) X(steerActionPressed) X(cancelActionSurface) \
+  X(cancelActionBorder) X(cancelActionHoverSurface) X(cancelActionHoverBorder) X(infoChoicePressedBorder) \
+  X(segmentSelectedSurface) X(segmentSelectedBorder) X(presentationSelectedSurface) X(presentationSelectedBorder) \
+  X(agentLinkSurface) X(agentLinkBorder) X(agentLinkText) X(successAction) \
+  X(successActionHover) X(successActionPressed) X(destructiveAction) X(destructiveActionHover) \
+  X(destructiveActionPressed) X(warningNoticeSurface) X(warningNoticeBorder) X(userMessageSurface) \
+  X(userMessageBorder) X(userMessageText) X(steeringMessageSurface) X(steeringMessageBorder) \
+  X(steeringMessageText) X(finalAnswerSurface) X(finalAnswerBorder) X(finalAnswerText) \
+  X(updateMessageSurface) X(updateMessageBorder) X(updateMessageText) X(attentionSurface) \
+  X(attentionBorder) X(dangerNoticeSurface) X(dangerNoticeBorder) X(textSelectionSurface) \
+  X(listSelectedSurface) X(fileSelectedSurface) X(tabSelectedSurface) X(menuCheckedSurface) \
+  X(menuCheckedText) X(menuCheckedHoverSurface)
   // clang-format on
 #define REPLACE_APPLICATION_COLOR(name)                                        \
   style.replace(QLatin1StringView("%{" #name "}"), QLatin1StringView(name));

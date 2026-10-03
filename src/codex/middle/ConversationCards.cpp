@@ -715,7 +715,7 @@ public:
       setPlainText(rendering.text);
     openPaths_ = std::move(rendering.openPaths);
     QTextCharFormat linkFormat;
-    linkFormat.setForeground(QColor(QString::fromLatin1(UiStyle::blue)));
+    linkFormat.setForeground(QColor(QString::fromLatin1(UiStyle::linkText)));
     linkFormat.setFontUnderline(false);
     linkFormat.setAnchor(true);
     for (std::size_t index = 0; index < rendering.links.size(); ++index) {
@@ -2190,9 +2190,9 @@ public:
     const bool failed = prompt->state == PromptState::Failed;
     const bool steering = nestedConversationCard;
     const QString foreground =
-        waiting  ? steering ? QString::fromLatin1(UiStyle::tealText)
-                            : QString::fromLatin1(UiStyle::blueText)
-         : failed ? QString::fromLatin1(UiStyle::redText)
+        waiting  ? steering ? QString::fromLatin1(UiStyle::pendingSteeringText)
+                            : QString::fromLatin1(UiStyle::pendingPromptText)
+         : failed ? QString::fromLatin1(UiStyle::failedPromptText)
                  : QString::fromLatin1(UiStyle::primary);
     const QString style = QStringLiteral("color:%1;").arg(foreground);
     const QString lifecycle = localPromptPhase(*prompt, steering);
@@ -2480,16 +2480,16 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   const bool steering = impl_->nestedConversationCard;
   const bool animated = waiting && impl_->pendingFeedbackVisible;
   const QColor background =
-      failed ? QColor(QString::fromLatin1(UiStyle::redSurface))
-             : QColor(steering ? QString::fromLatin1(UiStyle::tealSurface)
-                               : QString::fromLatin1(UiStyle::blueSurface));
+      failed ? QColor(QString::fromLatin1(UiStyle::failedPromptSurface))
+             : QColor(steering ? QString::fromLatin1(UiStyle::pendingSteeringSurface)
+                               : QString::fromLatin1(UiStyle::pendingPromptSurface));
   const QColor border =
-      failed ? QColor(QString::fromLatin1(UiStyle::redBorder))
+      failed ? QColor(QString::fromLatin1(UiStyle::failedPromptBorder))
       : waiting
-          ? QColor(steering ? QString::fromLatin1(UiStyle::tealBorderStrong)
-                            : QString::fromLatin1(UiStyle::blueBorderStrong))
-          : QColor(steering ? QString::fromLatin1(UiStyle::tealBorder)
-                            : QString::fromLatin1(UiStyle::blueBorder));
+          ? QColor(steering ? QString::fromLatin1(UiStyle::pendingSteeringBorderStrong)
+                            : QString::fromLatin1(UiStyle::pendingPromptBorderStrong))
+          : QColor(steering ? QString::fromLatin1(UiStyle::pendingSteeringBorder)
+                            : QString::fromLatin1(UiStyle::pendingPromptBorder));
   painter.setBrush(background);
   painter.setPen(QPen(border, waiting ? 1.5 : 1.0));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
