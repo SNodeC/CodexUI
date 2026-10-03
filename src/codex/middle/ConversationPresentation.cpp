@@ -127,6 +127,20 @@ MarkdownTextView::MarkdownTextView(const QString &markdown, int initialWidth,
   setContent(markdown);
 }
 
+QMimeData *MarkdownTextView::createMimeDataFromSelection() const {
+  QMimeData *mime = QTextBrowser::createMimeDataFromSelection();
+  const QTextCursor selection = textCursor();
+  if (!selection.hasComplexSelection()) {
+    // Materialize Qt's lazy MIME payload before replacing plain text.
+    (void)mime->text();
+    // Export the selected characters, excluding Qt's synthetic list paragraph.
+    // Keep Qt's whitespace normalization without trimming selected whitespace.
+    mime->setText(QTextDocumentFragment::fromPlainText(selection.selectedText())
+                      .toPlainText());
+  }
+  return mime;
+}
+
 void MarkdownTextView::configureDocument() {
   document()->setDocumentMargin(0);
   document()->setDefaultFont(font());

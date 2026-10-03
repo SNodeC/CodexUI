@@ -57,6 +57,9 @@ public:
   [[nodiscard]] QSize sizeHint() const override;
   [[nodiscard]] QSize minimumSizeHint() const override;
 
+protected:
+  QMimeData *createMimeDataFromSelection() const override;
+
 private:
   void configureDocument();
   void refreshPreferredHeight(int documentWidth) const;

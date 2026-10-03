@@ -2160,6 +2160,87 @@ bool testUserMessageLineBreakPresentation() {
 
 bool testMarkdownSelectionPreservesAuthoredCharacters() {
   bool result = true;
+  for (const auto &[source, selected] :
+       std::vector<std::pair<QString, QString>>{
+           {QStringLiteral("- first\n- second"), QStringLiteral("first")},
+           {QStringLiteral("- first\n- second"), QStringLiteral("irs")},
+           {QStringLiteral("- first\n- second"), QStringLiteral("second")},
+           {QStringLiteral("Intro\n\n- first\n- second"), QStringLiteral("first")},
+           {QStringLiteral("1. first\n2. second"), QStringLiteral("second")},
+           {QStringLiteral("- first\n  - nested"), QStringLiteral("nested")},
+           {QStringLiteral("- first\n- second"), QStringLiteral("irs") + "t\nsec"},
+           {QStringLiteral("- first\n- second"), QStringLiteral("\nsecond")},
+           {QStringLiteral("- first\n- second"), QStringLiteral("first\n")},
+           {QStringLiteral("- left\u200Bright space end"), QStringLiteral(" space ")},
+           {QStringLiteral("- left\u200Bright"), QStringLiteral("left\u200Bright")},
+           {QStringLiteral("- left\u00a0right"), QStringLiteral("left right")},
+           {QStringLiteral("First\nsecond\n\nThird"), QStringLiteral("First\nsecond")}}) {
+    for (bool prompt : {false, true}) {
+      for (bool prepared : {false, true}) {
+        MarkdownTextView view(prepared ? QString{} : source, 500, nullptr, prompt);
+        if (prepared)
+          view.setPreparedContent(source, presentation::prepareMarkdownHtml(source));
+        const int start = view.toPlainText().indexOf(selected);
+        // Assistant prose joins soft line breaks; prompts preserve them.
+        if (!prompt && source.startsWith(QStringLiteral("First\n")))
+          continue;
+        if (!expect(start >= 0, "selection fixture exists in rendered Markdown")) {
+          result = false;
+          continue;
+        }
+        QTextBrowser reference;
+        reference.setDocument(view.document()->clone(&reference));
+        QTextCursor cursor(reference.document());
+        cursor.setPosition(start);
+        cursor.setPosition(start + selected.size(), QTextCursor::KeepAnchor);
+        reference.setTextCursor(cursor);
+        reference.copy();
+        const auto *native = QApplication::clipboard()->mimeData();
+        const QString html = native->html();
+        const QByteArray markdown = native->data("text/markdown");
+        const QByteArray odf = normalizedZipMetadata(
+            native->data("application/vnd.oasis.opendocument.text"));
+        for (bool reverse : {false, true}) {
+          cursor = QTextCursor(view.document());
+          cursor.setPosition(reverse ? start + selected.size() : start);
+          cursor.setPosition(reverse ? start : start + selected.size(),
+                             QTextCursor::KeepAnchor);
+          view.setTextCursor(cursor);
+          const int revision = view.document()->revision();
+          QKeyEvent copyEvent(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+          QApplication::sendEvent(&view, &copyEvent);
+          const auto *actual = QApplication::clipboard()->mimeData();
+          result &= expect(actual->text() == selected,
+                           "selected Copy preserves exact text without a synthetic newline");
+          result &= expect(actual->html() == html &&
+                               actual->data("text/markdown") == markdown &&
+                               normalizedZipMetadata(actual->data(
+                                   "application/vnd.oasis.opendocument.text")) == odf,
+                           "selected Copy retains native rich clipboard formats");
+          QPlainTextEdit destination;
+          destination.paste();
+          result &= expect(destination.toPlainText() == selected &&
+                               view.document()->revision() == revision &&
+                               view.textCursor().anchor() == cursor.anchor() &&
+                               view.textCursor().position() == cursor.position(),
+                           "plain paste preserves selected whitespace and Copy leaves selection intact");
+        }
+      }
+    }
+  }
+  {
+    MarkdownTextView table(QStringLiteral("| A | B |\n|---|---|\n| a | b |"), 500);
+    QTextCursor cells = table.document()->find(QStringLiteral("A"));
+    cells.setPosition(table.document()->find(QStringLiteral("B")).position(),
+                      QTextCursor::KeepAnchor);
+    table.setTextCursor(cells);
+    result &= expect(cells.hasComplexSelection(), "table fixture selects multiple cells");
+    const QString expected = QTextDocumentFragment(cells).toPlainText();
+    table.copy();
+    result &= expect(QApplication::clipboard()->text() == expected,
+                     "multi-cell table Copy retains Qt's structured plain-text export");
+  }
+
   const auto copy = [](QTextBrowser &view, int start = 0, int end = -1) {
     QTextCursor selection(view.document());
     selection.setPosition(start);
