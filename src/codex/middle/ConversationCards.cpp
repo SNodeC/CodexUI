@@ -47,6 +47,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
+#include <QGridLayout>
 #include <QVBoxLayout>
 #include <QVariant>
 #include <QWheelEvent>
@@ -1244,13 +1245,13 @@ public:
     owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     owner->setProperty("conversationCardKind", static_cast<int>(initial.kind));
     layout = new QVBoxLayout(owner);
-    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setContentsMargins(12 - UiStyle::markdownSelectionGutter, 10, 12, 10);
     layout->setSpacing(6);
 
     header = new QWidget(owner);
     header->setObjectName(QStringLiteral("conversationCardHeader"));
     headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setContentsMargins(UiStyle::markdownSelectionGutter, 0, 0, 0);
     headerLayout->setSpacing(CardHeaderActionSpacing);
     title = makeLabel({}, "title", header);
     title->setWordWrap(false);
@@ -1280,9 +1281,12 @@ public:
 
     content = new QWidget(owner);
     content->setObjectName(QStringLiteral("conversationCardContent"));
-    contentLayout = new QVBoxLayout(content);
+    contentLayout = new QGridLayout(content);
     contentLayout->setContentsMargins(0, 0, 0, 0);
-    contentLayout->setSpacing(6);
+    contentLayout->setVerticalSpacing(6);
+    contentLayout->setHorizontalSpacing(0);
+    contentLayout->setColumnMinimumWidth(0, UiStyle::markdownSelectionGutter);
+    contentLayout->setColumnStretch(1, 1);
     const QMargins cardMargins = layout->contentsMargins();
     content->resize(std::max(1, owner->contentsRect().width() -
                                     cardMargins.left() - cardMargins.right()),
@@ -1581,12 +1585,13 @@ public:
       const QMargins margins = layout->contentsMargins();
       const int contentWidth = std::max(
           1, owner->contentsRect().width() - margins.left() - margins.right());
+      const int textWidth = std::max(1, contentWidth - UiStyle::markdownSelectionGutter);
       if (command && !command->isHidden())
-        command->settleWidth(contentWidth);
+        command->settleWidth(textWidth);
       if (output && !output->isHidden())
-        output->settleWidth(contentWidth);
+        output->settleWidth(textWidth);
       if (fileChanges && !fileChanges->isHidden())
-        fileChanges->settleWidth(contentWidth);
+        fileChanges->settleWidth(textWidth);
       contentLayout->invalidate();
       const int contentHeight =
           contentLayout->hasHeightForWidth()
@@ -1849,7 +1854,7 @@ public:
   void createImageContainer() {
     images = new ImageRibbon(
         [this] { emit owner->intrinsicGeometryChanged(); }, content);
-    contentLayout->addWidget(images);
+    contentLayout->addWidget(images, contentLayout->rowCount(), 1);
   }
 
   void markBodyProjectionDeferred() {
@@ -1883,7 +1888,7 @@ public:
     markdownBody =
         new MarkdownTextView(collapsed ? QString{} : text(message.text),
                              markdownContentWidth(), content, true);
-    contentLayout->addWidget(markdownBody);
+    contentLayout->addWidget(markdownBody, contentLayout->rowCount(), 0, 1, 2);
     createImageContainer();
     updateComposition(message);
   }
@@ -1907,7 +1912,7 @@ public:
     markdownBody =
         new MarkdownTextView(collapsed ? QString{} : text(message.text),
                              markdownContentWidth(), content);
-    contentLayout->addWidget(markdownBody);
+    contentLayout->addWidget(markdownBody, contentLayout->rowCount(), 0, 1, 2);
     updateComposition(message);
   }
 
@@ -1924,7 +1929,8 @@ public:
               QStringLiteral("agentMessagePhase"));
     presentation::setLabelTone(*phase,
                                message.finalAnswer ? "success" : "active");
-    layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
+    layout->setContentsMargins(12 - UiStyle::markdownSelectionGutter,
+                               message.finalAnswer ? 10 : 8, 12,
                                message.finalAnswer ? 10 : 8);
     if (collapsed) {
       markdownBody->setVisible(!message.text.empty());
@@ -1944,9 +1950,9 @@ public:
     output->hide();
     metadata = makeLabel({}, "meta", content);
     metadata->setObjectName(QStringLiteral("commandMetadata"));
-    contentLayout->addWidget(command);
-    contentLayout->addWidget(output);
-    contentLayout->addWidget(metadata);
+    contentLayout->addWidget(command, contentLayout->rowCount(), 1);
+    contentLayout->addWidget(output, contentLayout->rowCount(), 1);
+    contentLayout->addWidget(metadata, contentLayout->rowCount(), 1);
     updateComposition(execution);
   }
 
@@ -1986,9 +1992,9 @@ public:
     detail =
         new MarkdownTextView(collapsed ? QString{} : text(activity.resultText),
                              markdownContentWidth(), content);
-    contentLayout->addWidget(metadata);
-    contentLayout->addWidget(body);
-    contentLayout->addWidget(detail);
+    contentLayout->addWidget(metadata, contentLayout->rowCount(), 1);
+    contentLayout->addWidget(body, contentLayout->rowCount(), 1);
+    contentLayout->addWidget(detail, contentLayout->rowCount(), 0, 1, 2);
     updateComposition(activity);
   }
 
@@ -2018,7 +2024,7 @@ public:
     markdownBody =
         new MarkdownTextView(collapsed ? QString{} : text(reasoning.summary),
                              markdownContentWidth(), content);
-    contentLayout->addWidget(markdownBody);
+    contentLayout->addWidget(markdownBody, contentLayout->rowCount(), 0, 1, 2);
     updateComposition(reasoning);
   }
 
@@ -2040,8 +2046,8 @@ public:
           emit owner->noticeRequested(std::move(message), true);
         },
         content);
-    contentLayout->addWidget(fileChanges);
-    contentLayout->addWidget(metadata);
+    contentLayout->addWidget(fileChanges, contentLayout->rowCount(), 1);
+    contentLayout->addWidget(metadata, contentLayout->rowCount(), 1);
     updateComposition(changes, true, !collapsed);
   }
 
@@ -2074,7 +2080,7 @@ public:
     markdownBody = new MarkdownTextView(
         collapsed ? QString{} : presentation::planMarkdown(plan),
         markdownContentWidth(), content);
-    contentLayout->addWidget(markdownBody);
+    contentLayout->addWidget(markdownBody, contentLayout->rowCount(), 0, 1, 2);
     updateComposition(plan);
   }
 
@@ -2092,7 +2098,7 @@ public:
   void createComposition(const ImageGenerationData &image) {
     title->setText(QStringLiteral("Generated image"));
     body = makeLabel({}, "body", content);
-    contentLayout->addWidget(body);
+    contentLayout->addWidget(body, contentLayout->rowCount(), 1);
     createImageContainer();
     updateComposition(image);
   }
@@ -2118,7 +2124,7 @@ public:
   void createComposition(const GenericActivityData &activity) {
     metadata = makeLabel({}, "meta", content);
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
-    contentLayout->addWidget(metadata);
+    contentLayout->addWidget(metadata, contentLayout->rowCount(), 1);
     updateComposition(activity);
   }
 
@@ -2142,14 +2148,14 @@ public:
         new MarkdownTextView(collapsed ? QString{} : text(prompt.prompt),
                              markdownContentWidth(), content, true);
     metadata = makeLabel({}, "meta", content);
-    contentLayout->addWidget(markdownBody);
-    contentLayout->addWidget(metadata);
+    contentLayout->addWidget(markdownBody, contentLayout->rowCount(), 0, 1, 2);
+    contentLayout->addWidget(metadata, contentLayout->rowCount(), 1);
     recovery = new QPushButton(QStringLiteral("Restore to composer"), content);
     recovery->setObjectName(QStringLiteral("promptRecoveryButton"));
     recovery->setProperty("kind", "secondary");
     recovery->setAccessibleName(QStringLiteral("Restore prompt to composer"));
     recovery->hide();
-    contentLayout->addWidget(recovery, 0, Qt::AlignLeft);
+    contentLayout->addWidget(recovery, contentLayout->rowCount(), 1, Qt::AlignLeft);
     QObject::connect(recovery, &QPushButton::clicked, owner,
                      [this] { emit owner->recoveryRequested(); });
     createImageContainer();
@@ -2268,7 +2274,7 @@ public:
   presentation::CopyButton *copy = nullptr;
   presentation::DisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
-  QVBoxLayout *contentLayout = nullptr;
+  QGridLayout *contentLayout = nullptr;
   QLabel *body = nullptr;
   MarkdownTextView *markdownBody = nullptr;
   QLabel *metadata = nullptr;

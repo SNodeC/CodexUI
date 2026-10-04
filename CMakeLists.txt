@@ -556,6 +556,14 @@ if(BUILD_TESTING)
         codexui-conversation-cards
         PROPERTIES TIMEOUT 35 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+    foreach(markdown_dpr IN ITEMS 1 1.25 1.5 2)
+        string(REPLACE "." "_" markdown_dpr_name "${markdown_dpr}")
+        set(markdown_test "codexui-markdown-selection-dpr-${markdown_dpr_name}")
+        add_test(NAME ${markdown_test} COMMAND codexui-conversation-cards-test)
+        set_tests_properties(${markdown_test} PROPERTIES
+            TIMEOUT 15 LABELS "conversation;dpr;geometry;qt"
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${markdown_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough;CODEXUI_MARKDOWN_SELECTION_TESTS=1")
+    endforeach()
     foreach(command_output_style IN ITEMS Fusion Breeze)
         string(TOLOWER "${command_output_style}" command_output_style_name)
         foreach(command_output_dpr IN ITEMS 1 1.25 1.5 2)

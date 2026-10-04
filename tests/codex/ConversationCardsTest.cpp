@@ -2158,6 +2158,109 @@ bool testUserMessageLineBreakPresentation() {
   return result;
 }
 
+bool testMarkdownSelectionGutter() {
+  const QString source = QStringLiteral(
+      "First paragraph with enough words to wrap onto several visual lines "
+      "at narrow widths while preserving the original text layout.\n\n"
+      "Second paragraph\n\n- list entry\n\n```\ncode line\n```");
+  bool result = true;
+  for (bool prompt : {false, true}) {
+    for (bool nested : {false, true}) {
+      VisibleCardData data{AuthoritativeItemKey{"gutter", "turn", "item"},
+                           CardKind::AgentMessage, "gutter", "turn", "item",
+                           AgentMessageData{source.toStdString(), true}};
+      if (prompt) {
+        data.kind = CardKind::UserMessage;
+        data.payload = UserMessageData{source.toStdString(), {}};
+      }
+      ConversationCard card(data, false);
+      card.setNestedPresentation(nested);
+      card.show();
+      auto *view = card.findChild<MarkdownTextView *>();
+      if (!expect(view != nullptr, "gutter fixture has its shared Markdown view")) {
+        result = false;
+        continue;
+      }
+      for (int width : {320, 700}) {
+        for (bool prepared : {false, true}) {
+          view->setContent(QStringLiteral("temporary"));
+          if (prepared)
+            view->setPreparedContent(source, presentation::prepareMarkdownHtml(source));
+          else
+            view->setContent(source);
+          for (bool appended : {false, true}) {
+            const QString current = source + (appended ? QStringLiteral("\n\nAppended paragraph") : QString{});
+            if (appended)
+              view->setContent(current);
+            static_cast<void>(card.settleHeightForWidth(width));
+            spin();
+            QTextCursor start(view->document());
+            const QPoint origin = view->viewport()->mapTo(&card, view->cursorRect(start).topLeft());
+            const int textWidth = card.contentsRect().width() - 24;
+            result &= expect(origin.x() == card.contentsRect().left() + 12 &&
+                                 view->viewport()->width() == textWidth + UiStyle::markdownSelectionGutter,
+                             "gutter borrows card padding without moving text or narrowing its width");
+            QTextDocument reference;
+            reference.setDocumentMargin(0);
+            reference.setDefaultFont(view->document()->defaultFont());
+            reference.setDefaultStyleSheet(view->document()->defaultStyleSheet());
+            presentation::MarkdownTailState tail;
+            if (prepared && !appended && !prompt)
+              reference.setHtml(presentation::prepareMarkdownHtml(current));
+            else
+              presentation::replaceMarkdownDocument(reference,
+                  prompt ? presentation::userMessageMarkdown(current, true) : current, tail);
+            reference.setTextWidth(textWidth);
+            if (qAbs(reference.size().height() - view->document()->size().height()) >= 0.1)
+              std::cerr << "Gutter geometry: prompt=" << prompt << " nested=" << nested
+                        << " width=" << width << " prepared=" << prepared << " appended=" << appended
+                        << " actual=" << view->document()->size().height()
+                        << " expected=" << reference.size().height() << " textWidth=" << textWidth
+                        << " docWidth=" << view->document()->textWidth() << '\n';
+            result &= expect(qAbs(reference.size().height() - view->document()->size().height()) < 0.1,
+                             "gutter preserves reference Markdown height through preparation and updates");
+            QTextBlock expected = reference.firstBlock();
+            for (QTextBlock block = view->document()->firstBlock(); block.isValid(); block = block.next(), expected = expected.next()) {
+              const auto *layout = block.layout();
+              if (expected.isValid() && layout->lineCount() != expected.layout()->lineCount())
+                std::cerr << "Gutter block: " << block.text().toStdString() << " lines=" << layout->lineCount()
+                          << '/' << expected.layout()->lineCount() << '\n';
+              result &= expect(expected.isValid() && layout->lineCount() == expected.layout()->lineCount(),
+                               "gutter preserves every block's wrapping");
+              if (block != view->document()->firstBlock())
+                continue;
+              for (int lineIndex = 0; lineIndex < layout->lineCount(); ++lineIndex) {
+                const QTextLine line = layout->lineAt(lineIndex);
+                const int first = block.position() + line.textStart();
+                start.setPosition(first);
+                QTextCursor end = start;
+                end.setPosition(first + std::min(3, line.textLength()));
+                const QPoint press = view->cursorRect(start).center() - QPoint(UiStyle::markdownSelectionGutter, 0);
+                const QPoint finish = view->cursorRect(end).center();
+                QWidget *viewport = view->viewport();
+                result &= expect(card.childAt(viewport->mapTo(&card, press)) == viewport,
+                                 "space before each visual line belongs to the real text viewport");
+                view->setTextCursor(start);
+                for (auto type : {QEvent::MouseButtonPress, QEvent::MouseMove, QEvent::MouseButtonRelease}) {
+                  const QPoint point = type == QEvent::MouseButtonPress ? press : finish;
+                  QMouseEvent event(type, QPointF(point), QPointF(viewport->mapToGlobal(point)),
+                      type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                      type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, Qt::NoModifier);
+                  QApplication::sendEvent(viewport, &event);
+                }
+                result &= expect(view->textCursor().selectionStart() == first &&
+                                     view->textCursor().selectionEnd() == end.position(),
+                                 "dragging from the gutter includes the line's first character");
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return result;
+}
+
 bool testMarkdownSelectionPreservesAuthoredCharacters() {
   bool result = true;
   for (const auto &[source, selected] :
@@ -5195,11 +5298,13 @@ int main(int argc, char **argv) {
     bool focused = testSharedPresentationContract();
     focused &= testUserMessageLineBreakPresentation();
     focused &= testMarkdownSelectionPreservesAuthoredCharacters();
+    focused &= testMarkdownSelectionGutter();
     return focused ? 0 : 1;
   }
   if (qEnvironmentVariableIsSet("CODEXUI_MARKDOWN_SELECTION_TESTS")) {
     bool focused = testUserMessageLineBreakPresentation();
     focused &= testMarkdownSelectionPreservesAuthoredCharacters();
+    focused &= testMarkdownSelectionGutter();
     return focused ? 0 : 1;
   }
   if (qEnvironmentVariableIsSet("CODEXUI_MUTABLE_CARD_TESTS"))
@@ -5245,6 +5350,7 @@ int main(int argc, char **argv) {
   result &= testMarkdownLongLinesWrapInsideMaterializedCards();
   result &= testUserMessageLineBreakPresentation();
   result &= testMarkdownSelectionPreservesAuthoredCharacters();
+  result &= testMarkdownSelectionGutter();
   result &= testMutableCardsAndCommandOutput();
   result &= testCardFoldingGeometryAndRetention();
   result &= testPresentationOptionsRetainCardsAndInitialFolding();

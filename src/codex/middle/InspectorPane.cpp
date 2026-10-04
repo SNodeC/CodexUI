@@ -32,6 +32,7 @@
 #include <QTextBlock>
 #include <QTimer>
 #include <QToolButton>
+#include <QGridLayout>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -363,11 +364,11 @@ public:
     setObjectName(QStringLiteral("inspectorAgentFrame"));
     setProperty("kind", "raised");
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setContentsMargins(12 - UiStyle::markdownSelectionGutter, 10, 12, 10);
     layout->setSpacing(6);
 
     auto *heading = new QHBoxLayout;
-    heading->setContentsMargins(0, 0, 0, 0);
+    heading->setContentsMargins(UiStyle::markdownSelectionGutter, 0, 0, 0);
     heading->setSpacing(4);
     auto *title = makeLabel(QStringLiteral("Agent"), "title");
     title->setObjectName(QStringLiteral("agentTitle"));
@@ -384,7 +385,7 @@ public:
     heading->addWidget(name_, 1);
     layout->addLayout(heading);
     auto *actions = new QHBoxLayout;
-    actions->setContentsMargins(0, 0, 0, 0);
+    actions->setContentsMargins(UiStyle::markdownSelectionGutter, 0, 0, 0);
     actions->setSpacing(4);
     status_ = makeLabel({}, "meta");
     status_->setObjectName(QStringLiteral("agentStatus"));
@@ -403,18 +404,21 @@ public:
 
     content_ = new QWidget(this);
     content_->setObjectName(QStringLiteral("agentCardContent"));
-    contentLayout_ = new QVBoxLayout(content_);
+    contentLayout_ = new QGridLayout(content_);
     contentLayout_->setContentsMargins(0, 0, 0, 0);
-    contentLayout_->setSpacing(6);
+    contentLayout_->setVerticalSpacing(6);
+    contentLayout_->setHorizontalSpacing(0);
+    contentLayout_->setColumnMinimumWidth(0, UiStyle::markdownSelectionGutter);
+    contentLayout_->setColumnStretch(1, 1);
     metadata_ = makeLabel({}, "meta");
     metadata_->setObjectName(QStringLiteral("agentMetadata"));
     prompt_ = makeLabel({});
     prompt_->setObjectName(QStringLiteral("agentPrompt"));
     identities_ = makeLabel({}, "meta");
     identities_->setObjectName(QStringLiteral("agentIdentities"));
-    contentLayout_->addWidget(metadata_);
-    contentLayout_->addWidget(prompt_);
-    contentLayout_->addWidget(identities_);
+    contentLayout_->addWidget(metadata_, 0, 1);
+    contentLayout_->addWidget(prompt_, 1, 1);
+    contentLayout_->addWidget(identities_, 3, 1);
     layout->addWidget(content_);
 
     QObject::connect(copy_, &QToolButton::clicked, this, [this] {
@@ -460,8 +464,7 @@ public:
     if (!resultText.isEmpty() && !result_) {
       result_ = new MarkdownTextView({}, 0, content_);
       result_->setAccessibleName(QStringLiteral("Agent result"));
-      contentLayout_->insertWidget(contentLayout_->indexOf(identities_),
-                                   result_);
+      contentLayout_->addWidget(result_, 2, 0, 1, 2);
     }
     if (result_) {
       result_->setContent(resultText);
@@ -503,7 +506,7 @@ private:
   presentation::CopyButton *copy_ = nullptr;
   presentation::DisclosureButton *disclosure_ = nullptr;
   QWidget *content_ = nullptr;
-  QVBoxLayout *contentLayout_ = nullptr;
+  QGridLayout *contentLayout_ = nullptr;
   QLabel *metadata_ = nullptr;
   QLabel *prompt_ = nullptr;
   MarkdownTextView *result_ = nullptr;
@@ -1270,7 +1273,8 @@ private:
 
   bool measure(const Resident &resident) {
     QWidget *widget = resident.widget;
-    const int width = rowWidth();
+    const int width = rowWidth() +
+        (qobject_cast<MarkdownTextView *>(widget) ? UiStyle::markdownSelectionGutter : 0);
     widget->setFixedWidth(width);
     int height = 0;
     if (auto *markdown = qobject_cast<MarkdownTextView *>(widget)) {
@@ -1326,7 +1330,9 @@ private:
                            static_cast<qint64>(scroll);
       const int top =
           static_cast<int>(std::clamp<qint64>(top64, INT_MIN, INT_MAX));
-      const QRect geometry(InspectorRowMargin, top, width, height);
+      const int gutter = qobject_cast<MarkdownTextView *>(resident.widget)
+                             ? UiStyle::markdownSelectionGutter : 0;
+      const QRect geometry(InspectorRowMargin - gutter, top, width + gutter, height);
       resident.widget->setGeometry(geometry);
       resident.widget->setVisible(
           resident.measured &&

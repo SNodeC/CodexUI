@@ -42,6 +42,7 @@ inline constexpr QRgb pendingSteeringSweepEdge = qRgba(22, 123, 128, 0);
 inline constexpr QRgb pendingSteeringSweepCenter = qRgba(92, 180, 184, 105);
 inline constexpr QRgb pendingPromptSweepEdge = qRgba(47, 111, 235, 0);
 inline constexpr QRgb pendingPromptSweepCenter = qRgba(117, 160, 239, 105);
+inline constexpr int markdownSelectionGutter = 6;
 inline constexpr int commandOutputHorizontalPadding = 7;
 inline constexpr int commandOutputVerticalPadding = 4;
 inline constexpr int projectCardEdgePadding = 8;

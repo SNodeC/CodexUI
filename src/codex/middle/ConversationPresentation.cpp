@@ -24,6 +24,7 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
+#include <QTextFrame>
 #include <QTextOption>
 #include <QTimer>
 #include <QToolTip>
@@ -226,11 +227,20 @@ void MarkdownTextView::refreshPreferredHeight(int documentWidth) const {
   }
   if (preferredDocumentWidth_ == documentWidth && preferredHeight_ > 0)
     return;
+  // Reapply after Markdown or prepared HTML replaces the root-frame format.
+  QTextFrame *root = document()->rootFrame();
+  QTextFrameFormat format = root->frameFormat();
+  if (format.leftMargin() != UiStyle::markdownSelectionGutter) {
+    format.setLeftMargin(UiStyle::markdownSelectionGutter);
+    root->setFrameFormat(format);
+  }
   document()->setTextWidth(documentWidth);
   preferredDocumentWidth_ = documentWidth;
   preferredHeight_ =
       std::max(1, static_cast<int>(std::ceil(document()->size().height())) +
                       MarkdownBottomPaintGuard);
+  // A layout's speculative width must not become the viewport's painted width.
+  document()->setTextWidth(viewport()->width());
 }
 
 namespace presentation {
