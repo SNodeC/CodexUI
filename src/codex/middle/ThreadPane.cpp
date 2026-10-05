@@ -1457,6 +1457,12 @@ void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
   name->setObjectName(QStringLiteral("groupName"));
   name->setReadOnly(readOnly);
   form->addRow(QStringLiteral("Name"), name);
+  if (readOnly && !id.empty()) {
+    auto *identifier = new QLineEdit(text(id));
+    identifier->setReadOnly(true);
+    identifier->setObjectName(QStringLiteral("groupId"));
+    form->addRow(QStringLiteral("ID"), identifier);
+  }
   QPlainTextEdit *roots = nullptr;
   QPlainTextEdit *description = nullptr;
   QLineEdit *icon = nullptr;
@@ -1633,7 +1639,8 @@ void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
       for (const auto &entry : projects)
         if (entry.id != id)
           before->addAction(
-              text(entry.name), this, [this, id, destination = entry.id] {
+              text(entry.label).replace("&", "&&"), this,
+              [this, id, destination = entry.id] {
                 if (canControl && actions.manage)
                   actions.manage(
                       MoveProject,
@@ -1656,7 +1663,7 @@ void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
     assign->setEnabled(canControl && groupingAvailable);
     for (const auto &destination : isProject ? projects : sections)
       assign->addAction(
-          text(destination.name) + " · " + text(destination.id), this,
+          text(destination.label).replace("&", "&&"), this,
           [this, isProject, id, destinationId = destination.id] {
             if (canControl && actions.manage)
               actions.manage(

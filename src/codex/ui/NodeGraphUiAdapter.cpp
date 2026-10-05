@@ -9,6 +9,7 @@
 #include "codex/nodegraph/ProtocolUpdater.h"
 
 #include <QLocale>
+#include <QStringList>
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,85 @@ using nodegraph::exactStringFromValue;
 using nodegraph::scalarTextFromValue;
 using nodegraph::signedIntegerFromValue;
 using nodegraph::valueMember;
+
+// Labels are a projection of the complete loaded catalog, never stored names.
+// Compare paths only within colliding names, not across every project pair.
+void labelThreadGroups(std::vector<ThreadGroup> &groups) {
+  std::map<std::string, std::vector<ThreadGroup *>> names;
+  for (auto &group : groups)
+    names[group.label].push_back(&group);
+  for (auto &[name, matches] : names) {
+    if (matches.size() < 2)
+      continue;
+    std::vector<std::vector<QStringList>> paths(matches.size());
+    qsizetype maxDepth = 1;
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+      const auto roots = matches[i]->fields.find("roots");
+      if (roots == matches[i]->fields.end() || !roots->is_array())
+        continue;
+      for (const auto &root : *roots) {
+        const auto path = root.find("path");
+        if (path == root.end() || !path->is_string())
+          continue;
+        auto parts = QString::fromStdString(path->get<std::string>())
+                         .replace('\\', '/')
+                         .split('/', Qt::SkipEmptyParts);
+        if (parts.isEmpty())
+          parts.push_back(QStringLiteral("/"));
+        maxDepth = std::max(maxDepth, parts.size());
+        paths[i].push_back(std::move(parts));
+      }
+    }
+    const auto suffix = [&](std::size_t index, qsizetype depth) {
+      QStringList roots;
+      for (const auto &parts : paths[index])
+        roots.push_back(
+            parts.mid(std::max(qsizetype{0}, parts.size() - depth)).join('/'));
+      return roots.join(QStringLiteral(", ")).toStdString();
+    };
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+      qsizetype depth = 1;
+      for (; depth < maxDepth; ++depth) {
+        bool ambiguous = false;
+        for (std::size_t j = 0; j < matches.size(); ++j)
+          ambiguous |= i != j && suffix(i, depth) == suffix(j, depth) &&
+                       suffix(i, maxDepth) != suffix(j, maxDepth);
+        if (!ambiguous)
+          break;
+      }
+      const auto context = suffix(i, depth);
+      if (!context.empty())
+        matches[i]->label = name + " — " + context;
+    }
+  }
+  // A literal name can also equal a generated path label. Resolve collisions
+  // across the final catalog, extending ID suffixes only as far as necessary.
+  for (;;) {
+    std::map<std::string, std::vector<ThreadGroup *>> labels;
+    for (auto &group : groups)
+      labels[group.label].push_back(&group);
+    bool ambiguous = false;
+    for (const auto &[label, matches] : labels) {
+      if (matches.size() < 2)
+        continue;
+      ambiguous = true;
+      for (auto *group : matches) {
+        std::size_t length = std::min(std::size_t{6}, group->id.size());
+        for (; length < group->id.size(); ++length) {
+          const auto suffix = group->id.substr(group->id.size() - length);
+          if (std::ranges::none_of(matches, [&](const auto *other) {
+                return other != group && other->id.ends_with(suffix);
+              }))
+            break;
+        }
+        group->label =
+            label + " · " + group->id.substr(group->id.size() - length);
+      }
+    }
+    if (!ambiguous)
+      break;
+  }
+}
 
 UiStatus uiStatus(nodegraph::NodeStatusView status) {
   return statusFromNode(status.semantic, status.unknownText);
@@ -1802,19 +1882,23 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
                             std::vector<ThreadGroup> &destination) {
       for (const auto &node : read->orderedNodes(kind)) {
         const auto state = read->state(node);
-        const std::string name =
-            exactStringFromValue(valueMember(*state, "name"));
+        const auto name = QString::fromStdString(
+                              exactStringFromValue(valueMember(*state, "name")))
+                              .simplified()
+                              .toStdString();
         destination.push_back({node->id().canonical,
-                               name.empty() ? node->id().canonical : name, node,
+                               name.empty() ? "Unnamed" : name, node,
                                jsonFromValue(nodegraph::Value(state->fields))});
       }
+      labelThreadGroups(destination);
     };
     groups(nodegraph::NodeKind::Project, result.projects);
     groups(nodegraph::NodeKind::ThreadSection, result.sections);
     const auto groupName = [](const auto &groups, const std::string &id,
                               std::string fallback) {
       const auto found = std::ranges::find(groups, id, &ThreadGroup::id);
-      return found == groups.end() ? (id.empty() ? fallback : id) : found->name;
+      return found == groups.end() ? (id.empty() ? fallback : id)
+                                   : found->label;
     };
     const auto sectionAppearance = [&](ThreadListRow &row) {
       const auto found =
@@ -1963,7 +2047,12 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
               fields["recencyAt"].is_number_integer())
             row.recencyAt = fields["recencyAt"].get<std::int64_t>();
           row.order = fields.value("position", std::int64_t{0});
-          row.details = fields.dump(2);
+          for (const auto &root :
+               fields.value("roots", nlohmann::json::array())) {
+            if (!row.details.empty())
+              row.details += '\n';
+            row.details += root.value("path", std::string{});
+          }
         }
         if (!project)
           sectionAppearance(row);

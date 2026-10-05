@@ -49,6 +49,7 @@
 #include <iostream>
 #include <ranges>
 #include <sstream>
+#include <unordered_set>
 
 namespace codexui::codex {
 namespace {
@@ -135,6 +136,250 @@ QAccessibleInterface *threadAccessible(QTreeWidget *tree,
   for (auto index = path.rbegin(); accessible && index != path.rend(); ++index)
     accessible = accessible->child(*index);
   return accessible;
+}
+
+bool groupLabelsIdentifyDestinationsWithoutRoutineIds() {
+  using namespace nodegraph;
+  NodeGraph graph;
+  NodeRef thread;
+  {
+    auto write = graph.write();
+    const auto entity = [&](NodeKind kind, std::string id,
+                            nlohmann::json fields) {
+      NodeState state;
+      state.fields = *valueFromJson(fields).asObject();
+      return write.upsert({kind, std::move(id)}, std::move(state));
+    };
+    const auto connection =
+        entity(NodeKind::Connection, "connection",
+               {{"providerState", "ready"}, {"role", "controller"}});
+    write.setStatus(connection, NodeStatus::Connected);
+    for (const auto method : {"project/list", "threadSection/list"})
+      entity(NodeKind::Catalog,
+             threadBrowserKey(method, nlohmann::json::object()),
+             {{"loaded", true}});
+    const auto project = [&](const char *id, const char *name,
+                             std::initializer_list<const char *> paths) {
+      nlohmann::json roots = nlohmann::json::array();
+      for (const auto path : paths)
+        roots.push_back({{"path", path}});
+      return entity(NodeKind::Project, id,
+                    {{"id", id}, {"name", name}, {"roots", roots}});
+    };
+    project("unique-project-id", "Research & Design", {"/workspace/design"});
+    project("book-first-id", "Book", {"/home/work/book"});
+    project("book-second-id", "Book", {"/home/private/book"});
+    project("multi-first-id", "Multi", {"/work/shared", "/work/frontend"});
+    project("multi-second-id", "Multi", {"/work/shared", "/work/backend"});
+    project("shared-root-1111111", "Same", {"/same/root"});
+    project("shared-root-2111111", "Same", {"/same/root"});
+    project("rootless-aaaaaa", "Rootless", {});
+    project("rootless-bbbbbb", "Rootless", {});
+    project("windows-first-id", "Windows", {"C:\\work\\book"});
+    project("windows-second-id", "Windows", {"D:\\work\\book"});
+    project("literal-name-id", "Book — work/book", {});
+    entity(NodeKind::ThreadSection, "section-one-1111111",
+           {{"name", "Review"}});
+    entity(NodeKind::ThreadSection, "section-two-2111111",
+           {{"name", "Review"}});
+    entity(NodeKind::ThreadSection, "unique-section-id", {{"name", "Ready"}});
+    thread =
+        entity(NodeKind::Thread, "label-thread", {{"name", "Label selection"}});
+    static_cast<void>(write.finish());
+  }
+  ui::NodeGraphUiAdapter adapter(graph);
+  middle::ThreadPane pane;
+  pane.resize(620, 900);
+  std::vector<std::pair<RuntimeActionKind, nlohmann::json>> mutations;
+  middle::ThreadPane::Actions actions;
+  actions.manage = [&](auto kind, nlohmann::json params) {
+    mutations.emplace_back(kind, std::move(params));
+  };
+  pane.setActions(std::move(actions));
+  auto snapshot = adapter.threads(thread, nullptr, &pane.browserOptions());
+  if (!require(snapshot.has_value(), "label fixture projects successfully"))
+    return false;
+  bool passed = true;
+  const auto label = [&](const auto &groups, const char *id) {
+    const auto found = std::ranges::find(groups, id, &ui::ThreadGroup::id);
+    return found == groups.end() ? std::string{} : found->label;
+  };
+  passed &= require(
+      label(snapshot->projects, "unique-project-id") == "Research & Design" &&
+          label(snapshot->sections, "unique-section-id") == "Ready",
+      "unique names carry no routine IDs");
+  passed &= require(label(snapshot->projects, "book-second-id") ==
+                            "Book — private/book" &&
+                        label(snapshot->projects, "multi-first-id") ==
+                            "Multi — shared, frontend" &&
+                        label(snapshot->projects, "multi-second-id") ==
+                            "Multi — shared, backend",
+                    "duplicate project names use distinguishing folder "
+                    "suffixes across all roots");
+  passed &= require(
+      label(snapshot->projects, "windows-first-id").find("C:/work/book") !=
+              std::string::npos &&
+          label(snapshot->projects, "windows-second-id").find("D:/work/book") !=
+              std::string::npos,
+      "remote Windows paths retain their distinguishing drive");
+  passed &= require(
+      label(snapshot->sections, "section-one-1111111") == "Review · 1111111" &&
+          label(snapshot->sections, "section-two-2111111") ==
+              "Review · 2111111",
+      "short ID suffixes expand until colliding sections are distinguishable");
+  for (const auto *groups : {&snapshot->projects, &snapshot->sections}) {
+    std::unordered_set<std::string> labels;
+    for (const auto &group : *groups) {
+      passed &= require(labels.insert(group.label).second,
+                        "all displayed choices are distinct, including "
+                        "literal-label and short-ID collisions");
+      passed &= require(group.label.find(group.id) == std::string::npos,
+                        "full IDs are absent from routine labels");
+    }
+  }
+  pane.refresh(*snapshot);
+  pane.show();
+  QApplication::processEvents();
+  auto *tree = threadTree(pane);
+  const auto openMenu = [&](QTreeWidgetItem *item) -> QMenu * {
+    tree->scrollToItem(item);
+    QApplication::processEvents();
+    QMetaObject::invokeMethod(
+        tree, "customContextMenuRequested", Qt::DirectConnection,
+        Q_ARG(QPoint, tree->visualItemRect(item).center()));
+    QApplication::processEvents();
+    for (auto *menu : tree->findChildren<QMenu *>())
+      if (menu->isVisible())
+        return menu;
+    return nullptr;
+  };
+  QPointer<QMenu> menu = openMenu(threadItem(tree, "label-thread"));
+  passed &= require(menu != nullptr, "actual thread context menu opens");
+  if (menu) {
+    for (auto *action : menu->actions()) {
+      const bool project = action->text() == "Assign project";
+      if (!project && action->text() != "Assign section")
+        continue;
+      const auto &groups = project ? snapshot->projects : snapshot->sections;
+      auto *submenu = action->menu();
+      passed &= require(submenu && submenu->actions().size() == groups.size(),
+                        "assignment menus retain every destination");
+      if (!submenu || submenu->actions().size() != groups.size())
+        continue;
+      for (std::size_t i = 0; i < groups.size(); ++i) {
+        auto *entry = submenu->actions().at(i);
+        const auto &group = groups[i];
+        passed &=
+            require(entry->text() ==
+                        QString::fromStdString(group.label).replace("&", "&&"),
+                    "menu uses the same label as the sidebar and preserves "
+                    "literal ampersands");
+        entry->trigger();
+        passed &= require(
+            !mutations.empty() &&
+                mutations.back().first ==
+                    (project ? RuntimeActionKind::AssignProject
+                             : RuntimeActionKind::AssignSection) &&
+                mutations.back().second.value(
+                    project ? "projectId" : "sectionId", "") == group.id,
+            "disambiguated actions still target the full canonical ID");
+      }
+    }
+    if (menu)
+      menu->close();
+  }
+  for (const auto *groups : {&snapshot->projects, &snapshot->sections})
+    for (const auto &group : *groups) {
+      auto *item = threadItem(tree, group.id);
+      const auto *accessible = item ? threadAccessible(tree, item) : nullptr;
+      passed &= require(
+          accessible && accessible->text(QAccessible::Name)
+                            .endsWith(QString::fromStdString(group.label)),
+          "accessible sidebar names share the canonical menu labels");
+    }
+  menu = openMenu(threadItem(tree, "unique-project-id"));
+  passed &= require(menu != nullptr, "project ordering menu opens");
+  if (menu) {
+    for (auto *action : menu->actions()) {
+      if (action->text() != "Move project before")
+        continue;
+      for (auto *entry : action->menu()->actions()) {
+        const auto found =
+            std::ranges::find_if(snapshot->projects, [&](const auto &group) {
+              return entry->text() ==
+                     QString::fromStdString(group.label).replace("&", "&&");
+            });
+        passed &= require(found != snapshot->projects.end(),
+                          "ordering menu shares catalog labels");
+        if (found != snapshot->projects.end()) {
+          entry->trigger();
+          passed &= require(
+              mutations.back().first == RuntimeActionKind::MoveProject &&
+                  mutations.back().second.value("beforeProjectId", "") ==
+                      found->id,
+              "ordering label selects its canonical destination");
+        }
+      }
+    }
+    if (menu)
+      menu->close();
+  }
+  for (const auto &[id, name] :
+       std::array{std::pair{"book-first-id", "Book"},
+                  std::pair{"section-one-1111111", "Review"}}) {
+    menu = openMenu(threadItem(tree, id));
+    passed &= require(menu != nullptr, "group Details menu opens");
+    if (!menu)
+      continue;
+    for (auto *action : menu->actions()) {
+      if (action->text() != "Details…")
+        continue;
+      bool inspected = false;
+      QTimer::singleShot(0, [&] {
+        auto *dialog = pane.findChild<QDialog *>("threadGroupDialog");
+        if (!dialog)
+          return;
+        const auto *identifier = dialog->findChild<QLineEdit *>("groupId");
+        const auto *authoredName = dialog->findChild<QLineEdit *>("groupName");
+        inspected = identifier && identifier->text() == id &&
+                    identifier->isReadOnly() && authoredName &&
+                    authoredName->text() == name;
+        dialog->reject();
+      });
+      action->trigger();
+      passed &= require(
+          inspected,
+          "Details retains the full copyable ID and original authored name");
+      break;
+    }
+    if (menu)
+      menu->close();
+  }
+  {
+    auto read = graph.tryRead();
+    const auto state =
+        read->state(read->find({NodeKind::Project, "book-first-id"}));
+    passed &= require(
+        exactStringFromValue(valueMember(state->fields, "name")) == "Book",
+        "display disambiguation does not alter authoritative names");
+  }
+  if (const auto path = qEnvironmentVariable("CODEXUI_GROUP_LABEL_SCREENSHOT");
+      !path.isEmpty()) {
+    tree->scrollToTop();
+    QApplication::processEvents();
+    passed &= require(pane.grab().save(path), "group label screenshot saved");
+  }
+  {
+    auto write = graph.write();
+    write.setField(write.find({NodeKind::Project, "book-first-id"}), "name",
+                   "Other book");
+    static_cast<void>(write.finish());
+  }
+  auto changed = adapter.threads(thread, nullptr, &pane.browserOptions());
+  passed &=
+      require(changed && label(changed->projects, "book-second-id") == "Book",
+              "renaming a duplicate removes obsolete disambiguation");
+  return passed;
 }
 
 bool groupedThreadsPreserveIdentityAndInteractions() {
@@ -2626,6 +2871,7 @@ int main(int argc, char **argv) {
         "ThreadPane visual test did not run at its requested DPR");
   }
   passed &= codexui::codex::forkNamesPreserveTheirLineage();
+  passed &= codexui::codex::groupLabelsIdentifyDestinationsWithoutRoutineIds();
   passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
   passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
   passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();

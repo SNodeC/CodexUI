@@ -70,7 +70,7 @@ struct ThreadBrowserOptions {
 
 struct ThreadGroup {
   std::string id;
-  std::string name;
+  std::string label; // Display only; fields["name"] retains the authored name.
   nodegraph::NodeRef target;
   nlohmann::json fields;
 
