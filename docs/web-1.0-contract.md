@@ -2,16 +2,9 @@
 
 ## Purpose
 
-CodexWebUI is the browser presentation of the existing CodexUI product. It is
-not another backend and does not replace or reimplement `codex-bridge`.
-Version 1.0 requires a production-built browser application that can perform
-the complete web parity scope below against the canonical bridge. A web
-feature is complete only after it independently proves behavioral equality
-with the corresponding current C++ feature.
+CodexWebUI is the browser presentation of the existing CodexUI product. It is not another backend and does not replace or reimplement `codex-bridge`. Version 1.0 requires a production-built browser application that can perform the complete web parity scope below against the canonical bridge. A web feature is complete only after it independently proves behavioral equality with the corresponding current C++ feature.
 
-The native Qt application remains supported. Native and browser frontends may
-be connected to the same bridge at the same time and follow the same
-controller/observer rules.
+The native Qt application remains supported. Native and browser frontends may be connected to the same bridge at the same time and follow the same controller/observer rules.
 
 ## Fixed architecture
 
@@ -24,17 +17,11 @@ CodexWebUI (React presentation)
     -> Codex app-server
 ```
 
-There is no web-specific application server, proxy controller, repository,
-cache, event bus, or retained Codex-domain store.
+There is no web-specific application server, proxy controller, repository, cache, event bus, or retained Codex-domain store.
 
-`codex-bridge` remains the only multi-frontend router. Its C++ implementation
-continues to own controller policy, observer restrictions, upstream request-ID
-translation, response ownership, server-request routing, provider lifecycle,
-and notification fanout. None of that server-side routing is copied into
-TypeScript.
+`codex-bridge` remains the only multi-frontend router. Its C++ implementation continues to own controller policy, observer restrictions, upstream request-ID translation, response ownership, server-request routing, provider lifecycle, and notification fanout. None of that server-side routing is copied into TypeScript.
 
-The TypeScript SDK implements only frontend responsibilities already present
-in `ai::openai::codex::frontend::CodexBridge` and `ClientConnection`:
+The TypeScript SDK implements only frontend responsibilities already present in `ai::openai::codex::frontend::CodexBridge` and `ClientConnection`:
 
 - bridge-envelope classification and connection telemetry;
 - frontend request/response correlation;
@@ -57,9 +44,7 @@ packages/codex-frontend/
     src/index.ts
 ```
 
-Its working package name is `@snodec/codex-frontend`. The existing pinned
-Codex schema and generator are the only source for generated C++ and
-TypeScript protocol declarations.
+Its working package name is `@snodec/codex-frontend`. The existing pinned Codex schema and generator are the only source for generated C++ and TypeScript protocol declarations.
 
 CodexUI owns the browser application:
 
@@ -71,47 +56,27 @@ web/
     src/app/
 ```
 
-The web presentation normalizer and reducer live here because they express
-CodexUI behavior, not bridge semantics. During development and CI CodexUI pins
-the AISuite package to an exact revision, as the native build already does for
-the C++ package.
+The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite `master` for both native and browser builds, and SNode.C `master` for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](../web/README.md).
 
 ## Frontend technology
 
-CodexWebUI is a client-rendered TypeScript application using React and Vite.
-It does not require server rendering: the product is an interactive remote
-client, has no public content routes, and acquires its state after connecting
-to a bridge.
+CodexWebUI is a client-rendered TypeScript application using React and Vite. It does not require server rendering: the product is an interactive remote client, has no public content routes, and acquires its state after connecting to a bridge.
 
-The initial application has one shell and no URL-routing dependency. Thread,
-Inspector, disclosure, selection, draft, and scroll state are application
-state, not pages. A router is added only if a later user-facing navigation
-requirement proves one necessary.
+The initial application has one shell and no URL-routing dependency. Thread, Inspector, disclosure, selection, draft, and scroll state are application state, not pages. A router is added only if a later user-facing navigation requirement proves one necessary.
 
 The application uses:
 
 - React components for compositional presentation and keyed card identity;
 - ordinary CSS with CodexUI-owned tokens for visual styling;
 - the Node.js test runner for SDK, reducer, projection, and lifecycle tests;
-- React server rendering plus production-bundle qualification for shell and
-  accessibility/deployment boundaries;
+- React server rendering plus production-bundle qualification for shell and accessibility/deployment boundaries;
 - npm lockfiles and reproducible production builds.
 
-No general-purpose state framework is introduced. A typed presentation model
-is the sole retained normalized store. React subscribes to snapshots from that
-model; components retain only interaction state they own.
-The session snapshot does not retain a second conversation projection. The
-Conversation component requests one typed projection for its current history
-window, and prompt reconciliation scans authoritative history only when a
-thread read or user-message event can materialize a local prompt alias.
-Inspector diagnostics likewise project full retained item state only while
-the State tab is selected.
+No general-purpose state framework is introduced. A typed presentation model is the sole retained normalized store. React subscribes to snapshots from that model; components retain only interaction state they own. The session snapshot does not retain a second conversation projection. The Conversation component requests one typed projection for its current history window, and prompt reconciliation scans authoritative history only when a thread read or user-message event can materialize a local prompt alias. Inspector diagnostics likewise project full retained item state only while the State tab is selected.
 
 ## Browser presentation boundary
 
-`codexui.presentation` version 1 remains an internal TypeScript boundary in
-the browser implementation. It is not a network hop, native runtime contract,
-or data structure shared with the native application:
+`codexui.presentation` version 1 remains an internal TypeScript boundary in the browser implementation. It is not a network hop, native runtime contract, or data structure shared with the native application:
 
 ```text
 bridge/app-server input
@@ -122,31 +87,17 @@ bridge/app-server input
     -> React
 ```
 
-The TypeScript implementation must preserve the browser's existing rules for
-stable IDs, merge/replace/remove authority, generation retirement, unknown
-events, incomplete reconstruction, child-thread ownership, and ordered items.
-Browser tests exercise that pipeline. Native tests independently exercise the
-native application's single shared `NodeGraph`. Independent tests establish
-frontend-local behavior; cross-frontend agreement requires a shared fixture or
-differential output executed by both implementations.
+The TypeScript implementation must preserve the browser's existing rules for stable IDs, merge/replace/remove authority, generation retirement, unknown events, incomplete reconstruction, child-thread ownership, and ordered items. Browser tests exercise that pipeline. Native tests independently exercise the native application's single shared `NodeGraph`. Independent tests establish frontend-local behavior; cross-frontend agreement requires a shared fixture or differential output executed by both implementations.
 
-Equality is judged by observable behavior and state transitions, not source
-structure or pixel identity. For the same ordered inputs, native and web must
-produce equivalent commands, authority decisions, retained identities,
-ordering, lifecycle outcomes, visible projections, and user-action
-eligibility. Platform-native geometry may differ only where the behavioral
-contract explicitly permits it.
+Equality is judged by observable behavior and state transitions, not source structure or pixel identity. For the same ordered inputs, native and web must produce equivalent commands, authority decisions, retained identities, ordering, lifecycle outcomes, visible projections, and user-action eligibility. Platform-native geometry may differ only where the behavioral contract explicitly permits it.
 
-The presentation model is an in-memory view of app-server publications. It is
-not persistence or semantic authority and is rebuilt by discovery and
-hydration after a new connection generation.
+The presentation model is an in-memory view of app-server publications. It is not persistence or semantic authority and is rebuilt by discovery and hydration after a new connection generation.
 
 ## Version 1.0 parity
 
 ### Required
 
-The following behavior is required before the combined product is called
-version 1.0.
+The following behavior is required before the combined product is called version 1.0.
 
 | Area | Required web behavior |
 | --- | --- |
@@ -164,72 +115,37 @@ version 1.0.
 | Diagnostics | Bounded notices and human-readable event labels without changing protocol values |
 | Usability | Responsive desktop layout, keyboard operation, accessible names, contrast, and reduced-motion behavior |
 
-Prompt admission, stable first-response placement, per-thread scroll ownership,
-card folding, safe Markdown, bounded command output, controller eligibility,
-and reconnect hydration follow the native behavior documents. Visual geometry
-may be browser-native; the behavioral invariant may not silently change.
-Conversation paging pins each represented turn's complete-history root prompt
-as structural context outside the activity budget; steering prompts never
-become turn roots.
+Prompt admission, stable first-response placement, per-thread scroll ownership, card folding, safe Markdown, bounded command output, controller eligibility, and reconnect hydration follow the native behavior documents. Visual geometry may be browser-native; the behavioral invariant may not silently change. Conversation paging pins each represented turn's complete-history root prompt as structural context outside the activity budget; steering prompts never become turn roots.
 
-Controller selection refreshes metadata and live subscription with
-`thread/resume(excludeTurns:true)` before requesting one bounded
-`thread/turns/list` page. Observer selection starts directly with that read-only
-page. Selection becomes ready only after the first page; older turn pages are
-loaded one at a time by explicit demand, while item pages and active retained
-agent children use the same global bounded hydration policy as the native
-frontend. Neither frontend automatically requests complete retained history.
+Controller selection refreshes metadata and live subscription with `thread/resume(excludeTurns:true)` before requesting one bounded `thread/turns/list` page. Observer selection starts directly with that read-only page. Selection becomes ready only after the first page; older turn pages are loaded one at a time by explicit demand, while item pages and active retained agent children use the same global bounded hydration policy as the native frontend. Neither frontend automatically requests complete retained history.
 
-Thread selection clears only the conversation message surface immediately.
-Hydration and React preparation remain identified by the latest selected
-thread; superseded results cannot reveal content. Loads finishing within 500 ms
-show no spinner. Longer loads show the same centered 30 px neutral-gray ring
-and 3 px stroke as the native UI, and remove both the ring and its CSS animation
-when the complete selected-thread frame is revealed.
+Thread selection clears only the conversation message surface immediately. Hydration and React preparation remain identified by the latest selected thread; superseded results cannot reveal content. Loads finishing within 500 ms show no spinner. Longer loads show the same centered 30 px neutral-gray ring and 3 px stroke as the native UI, and remove both the ring and its CSS animation when the complete selected-thread frame is revealed.
 
-The responsive shell keeps Threads, Conversation, and Inspector visible above
-1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes
-Inspector as an accessible overlay drawer; at 760 px and below Conversation is
-the single in-flow column and both side panes use accessible overlay drawers.
-The page itself must not overflow horizontally; narrow controls wrap or compact
-while intentionally scrollable card content retains its local overflow.
+The responsive shell keeps Threads, Conversation, and Inspector visible above 1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes Inspector as an accessible overlay drawer; at 760 px and below Conversation is the single in-flow column and both side panes use accessible overlay drawers. The page itself must not overflow horizontally; narrow controls wrap or compact while intentionally scrollable card content retains its local overflow.
 
-Pending-request cards disclose literal structured fields rather than exposing
-the retained raw request object. Their controls are generated per request
-family: declared approval decisions, multi-answer user input, MCP
-accept/decline/cancel, permission turn/session scope, legacy decisions, and
-explicit unavailable/unsupported results. Responses require a ready provider,
-current controller ownership, and the current request generation and identity;
-one sent response disables that request until authoritative removal.
+Pending-request cards disclose literal structured fields rather than exposing the retained raw request object. Their controls are generated per request family: declared approval decisions, multi-answer user input, MCP accept/decline/cancel, permission turn/session scope, legacy decisions, and explicit unavailable/unsupported results. Responses require a ready provider, current controller ownership, and the current request generation and identity; one sent response disables that request until authoritative removal.
 
 ### Browser-specific representation
 
 These capabilities remain required but use an honest browser representation:
 
-- Workspace is an app-server path entered or selected from provider-supplied
-  data; it is not inferred from the browser machine.
+- Workspace is an app-server path entered or selected from provider-supplied data; it is not inferred from the browser machine.
 - File-change conversation cards show the app-server publication.
-- Image items show status and saved-path metadata when the saved file is not
-  available through a browser URL.
+- Image items show status and saved-path metadata when the saved file is not available through a browser URL.
 - Connection configuration exposes WebSocket/WSS only.
 
 ### Native-only in 1.0
 
-The following Qt capabilities depend on direct access to the native machine
-and are explicitly outside browser parity:
+The following Qt capabilities depend on direct access to the native machine and are explicitly outside browser parity:
 
 - Unix, raw TCP/TLS, IPv6, and RFCOMM frontend transports;
 - the native filesystem picker and local-path attachment admission;
-- libgit2 worktree discovery, filesystem watching, local Changes snapshots,
-  and the modeless native diff window;
+- libgit2 worktree discovery, filesystem watching, local Changes snapshots, and the modeless native diff window;
 - opening provider-side files with a desktop application;
 - desktop entry, window manager, taskbar, and native icon integration;
 - direct display of provider-local generated-image files.
 
-These exclusions must not be represented by controls that appear functional.
-Adding remote file transfer, an asset endpoint, or provider-side Git service
-would require a separately designed protocol capability and is not part of the
-web implementation.
+These exclusions must not be represented by controls that appear functional. Adding remote file transfer, an asset endpoint, or provider-side Git service would require a separately designed protocol capability and is not part of the web implementation.
 
 ## State ownership
 
@@ -242,46 +158,28 @@ web implementation.
 | Exact thread-presentation identity, selected thread, settings drafts, card/tree folding, scroll anchors | Browser frontend session |
 | Inspector tab, focus, transient menus, and authored Composer form state | React application |
 
-State never appears in two owners in the same layer. Components receive typed
-projections and commands; they do not parse app-server methods or retain a
-second copy of normalized domain collections.
+State never appears in two owners in the same layer. Components receive typed projections and commands; they do not parse app-server methods or retain a second copy of normalized domain collections.
 
 ## Delivery commits and verification gates
 
-1. **Contract and parity**: this document fixes scope, ownership, repository
-   boundaries, and frontend structure.
-2. **Generated TypeScript protocol**: deterministic TypeScript output from the
-   existing pinned schema, with generator drift tests.
-3. **TypeScript frontend SDK**: frontend proxy and browser WebSocket transport,
-   with the C++ SDK lifecycle/routing invariants ported as tests.
-4. **Web presentation model**: normalizer, reducer, command facade, and shared
-   native/web fixture corpus.
-5. **Core web shell**: connection, thread navigation, conversation, composer,
-   streaming, and controller state.
-6. **Advanced conversation behavior**: prompt admission, scrolling, folding,
-   tools, reasoning, agents, plans, Markdown, and interruption.
-7. **Required supporting surfaces**: settings, pending requests, complete
-   thread actions, and the required Inspector tabs.
-8. **Qualification**: browser workflows, resilience, accessibility,
-   responsive behavior, and measured large-thread/streaming performance.
-9. **Release**: production packaging, documentation, complete native and web
-   suites, and the version 1.0 checklist.
+1. **Contract and parity**: this document fixes scope, ownership, repository boundaries, and frontend structure.
+2. **Generated TypeScript protocol**: deterministic TypeScript output from the existing pinned schema, with generator drift tests.
+3. **TypeScript frontend SDK**: frontend proxy and browser WebSocket transport, with the C++ SDK lifecycle/routing invariants ported as tests.
+4. **Web presentation model**: normalizer, reducer, command facade, and shared native/web fixture corpus.
+5. **Core web shell**: connection, thread navigation, conversation, composer, streaming, and controller state.
+6. **Advanced conversation behavior**: prompt admission, scrolling, folding, tools, reasoning, agents, plans, Markdown, and interruption.
+7. **Required supporting surfaces**: settings, pending requests, complete thread actions, and the required Inspector tabs.
+8. **Qualification**: browser workflows, resilience, accessibility, responsive behavior, and measured large-thread/streaming performance.
+9. **Release**: production packaging, documentation, complete native and web suites, and the version 1.0 checklist.
 
-Every implementation commit must be independently reviewable and must add
-focused verification for the behavior it introduces. Depending on the layer,
-that evidence is one or more of:
+Every implementation commit must be independently reviewable and must add focused verification for the behavior it introduces. Depending on the layer, that evidence is one or more of:
 
 - the same JSON fixture corpus executed by C++ and TypeScript;
-- frontend-local C++ and TypeScript request/lifecycle scenario tests, which do
-  not by themselves prove cross-frontend equality;
+- frontend-local C++ and TypeScript request/lifecycle scenario tests, which do not by themselves prove cross-frontend equality;
 - visible-projection snapshots derived from the same normalized state;
-- browser interaction tests that assert the browser contract rather than only
-  DOM structure; these remain frontend-local evidence.
+- browser interaction tests that assert the browser contract rather than only DOM structure; these remain frontend-local evidence.
 
-A commit is not complete while its focused verification, the accumulated web
-suite, or the repository's complete native suite fails. Cross-repository
-contract changes pin compatible revisions and test both sides before either
-dependency is advanced.
+A commit is not complete while its focused verification, the accumulated web suite, or the repository's complete native suite fails. Cross-repository contract changes pin compatible revisions and test both sides before either dependency is advanced.
 
 ## Explicit exclusions
 

@@ -28,10 +28,9 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 ## The workspace
 
-| Organize the work | Follow the execution | Inspect the result |
-| --- | --- | --- |
-| Browse threads, search titles, archive work and return to retained history. | Read streamed responses, reasoning summaries and command output in one conversation. | Keep plans, agent activity, requests, changes and timing details beside the conversation. |
-| In the native app, group threads by projects and shared sections. | Send prompts, steer an active turn, stop work and respond to approval requests. | Review repository diffs, copy output and inspect the protocol when diagnosing a problem. |
+- **Organize the work:** browse threads, search titles, archive work and return to retained history. In the native app, group threads by projects and shared sections.
+- **Follow execution:** read streamed responses, reasoning summaries and command output in one conversation. Send prompts, steer an active turn, stop work and respond to approval requests.
+- **Inspect results:** keep plans, agent activity, requests, changes and timing details beside the conversation. Review repository diffs, copy output and inspect the protocol when diagnosing a problem.
 
 ### A conversation you can work with
 
@@ -50,18 +49,21 @@ To create a project or section, click the current grouping label—**Projects**,
 
 ## Choose your frontend
 
-| | Native · CodexUI | Browser · CodexWUI |
+| | CodexUI | CodexWUI |
 | --- | --- | --- |
-| Presentation | Qt 6 Widgets; Linux desktop integration | TypeScript / React; static browser application |
-| Connection | SNode.C transports exposed by the build | WebSocket through AISuite's frontend SDK |
-| Best fit | Local workspace, project/section organization, desktop file interaction | Browser access to the bridge without installing the Qt application |
-| Deployment | `codex-ui` executable, desktop entry and icon | Built assets served by `codex-bridge`; no Node runtime required |
+| Interface | Qt 6 Widgets | React / TypeScript |
+| Connection | SNode.C transports | WebSocket |
+| Install | Desktop executable | Static web assets |
+
+**CodexUI** integrates with the Linux desktop for local workspaces, project/section organization and desktop file interaction. Installation provides `codex-ui`, a desktop entry and an icon. Available transports depend on the build.
+
+**CodexWUI** connects through AISuite's frontend SDK without installing the Qt application. `codex-bridge` serves the built web assets; no Node runtime is required.
 
 The frontends share protocol and lifecycle meaning, **not an identical feature inventory**. Native project/section management is not yet a browser feature. See the [browser scope and limitations](docs/web-1.0-contract.md) before choosing a deployment.
 
 ## How it fits together
 
-**CodexUI / CodexWUI ↔ AISuite bridge ↔ Codex app-server**
+**CodexUI / CodexWUI** ↔ **AISuite bridge** ↔ **Codex app-server**
 
 The bridge allows multiple frontends to follow the same app-server session, with one controller at a time and policy-limited observers. Controller status is distinct from the agent's approval and sandbox settings.
 
@@ -71,7 +73,7 @@ On the native side, a SNode.C worker owns protocol processing and writes one sha
 
 ### 1. Prepare the dependencies
 
-The native build requires a C++20 toolchain, CMake 3.20+, Qt 6.6+ Widgets, pkg-config, libgit2 development files, and installed **SNode.C** and **AISuite** packages. On Debian/Ubuntu, the libgit2 development package is `libgit2-dev`.
+The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets, pkg-config, libgit2 development files, and installed **SNode.C** and **AISuite** packages. On Debian/Ubuntu, the libgit2 development package is `libgit2-dev`.
 
 Build [SNode.C](https://github.com/SNodeC/snode.c#project-overview) and [AISuite](https://github.com/SNodeC/AISuite#build-from-source) from their `master` branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
@@ -82,6 +84,7 @@ From this repository's root, replace the two installation prefixes below:
 ```sh
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr/local \
   -DCODEXUI_INSTALL_WEB=OFF \
   -DCMAKE_PREFIX_PATH="/path/to/aisuite;/path/to/snodec"
 cmake --build build --parallel 14
@@ -99,15 +102,15 @@ Start your configured `codex-bridge`, then run:
 
 Use **Connection** to select its endpoint. Acquire control if necessary, choose or create a thread, and send a prompt. App-server configuration determines available models, permissions and approval behavior.
 
-Optional installation adds the executable, desktop entry and application icon:
+Optional installation into `/usr/local` adds the executable, desktop entry and application icon. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
 
 ```sh
-cmake --install build
+sudo cmake --install build
 ```
 
 ## Browser edition
 
-The browser build needs **Node.js 22+** and AISuite's frontend SDK source. Its local package dependency currently expects this checkout layout:
+The browser release build needs **Node.js 22+**, **Chrome or Chromium** for browser qualification, and AISuite's frontend SDK source. Set `CHROME_BIN` if the browser is not installed at one of the usual system paths. Its local package dependency currently expects this checkout layout:
 
 ```text
 workspace/
@@ -128,7 +131,7 @@ The output is `web/app-dist/`. A combined install places it in `share/codexui/we
 
 ## Quality and development
 
-Run native checks in the documented isolated environment:
+Install Xvfb and `xauth`, then run native checks in the documented isolated environment:
 
 ```sh
 xvfb-run -a env QT_QPA_PLATFORM=offscreen \
