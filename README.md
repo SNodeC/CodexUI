@@ -18,7 +18,7 @@
 
 **Follow the work, not just the final answer.** Codex(W)UI offers two frontends: **CodexUI**, a native Qt desktop application, and **CodexWUI**, a browser application connecting over WebSocket. They bring conversations, commands, plans, approvals and file changes into a visual coding workspace.
 
-Both frontends connect through [AISuite's `codex-bridge`](https://github.com/SNodeC/AISuite). Codex app-server remains responsible for agent execution and persistent history; Both applications give you the controls and visibility around it.
+Built on [AISuite](https://github.com/SNodeC/AISuite) and [SNode.C](https://github.com/SNodeC/snode.c), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
 
 [![Native CodexUI showing a conversation, completed command output, turn settings and the Inspector.](docs/media/native-workspace.png)](docs/media/native-workspace.png)
 
