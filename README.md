@@ -9,7 +9,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20OR%20LGPL--3.0--or--later-526da3" alt="License: MIT or LGPL 3.0 or later"></a>
 </p>
 
-<p align="center">
+<p>
   <a href="#the-workspace" title="Explore the workspace"><img src="docs/media/menu/explore-the-workspace-166.svg" alt="Explore the workspace" width="166" height="24"></a>
   <a href="#get-started" title="Get started"><img src="docs/media/menu/get-started-166.svg" alt="Get started" width="166" height="24"></a>
   <a href="#browser-edition" title="Browser edition"><img src="docs/media/menu/browser-edition-166.svg" alt="Browser edition" width="166" height="24"></a>
