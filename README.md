@@ -1,3 +1,5 @@
+<a name="project-overview"></a>
+
 <p align="center">
   <img src="docs/media/readme-hero.svg" alt="Codex(W)UI — A workspace for the whole coding conversation." width="100%">
 </p>
@@ -18,7 +20,7 @@
 
 **Follow the work, not just the final answer.** Codex(W)UI offers two frontends: **CodexUI**, a native Qt desktop application, and **CodexWUI**, a browser application connecting over WebSocket. They bring conversations, commands, plans, approvals and file changes into a visual coding workspace.
 
-Built on [AISuite](https://github.com/SNodeC/AISuite#readme) and [SNode.C](https://github.com/SNodeC/snode.c#readme), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
+Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
 
 [![Native CodexUI showing a conversation, completed command output, turn settings and the Inspector.](docs/media/native-workspace.png)](docs/media/native-workspace.png)
 
@@ -71,7 +73,7 @@ On the native side, a SNode.C worker owns protocol processing and writes one sha
 
 The native build requires a C++20 toolchain, CMake 3.20+, Qt 6.6+ Widgets, pkg-config, libgit2 development files, and installed **SNode.C** and **AISuite** packages. On Debian/Ubuntu, the libgit2 development package is `libgit2-dev`.
 
-Build [SNode.C](https://github.com/SNodeC/snode.c#readme) and [AISuite](https://github.com/SNodeC/AISuite#build-from-source) from their `master` branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
+Build [SNode.C](https://github.com/SNodeC/snode.c#project-overview) and [AISuite](https://github.com/SNodeC/AISuite#build-from-source) from their `master` branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
 ### 2. Build the native application
 
@@ -152,4 +154,4 @@ For bug reports, include the revision, Qt version, connection type and the small
 
 Choose either [MIT](LICENSE-MIT) or [LGPL-3.0-or-later](LICENSE-LGPL-3.0-or-later).
 
-Built with [Qt](https://www.qt.io/), [AISuite](https://github.com/SNodeC/AISuite#readme) and [SNode.C](https://github.com/SNodeC/snode.c#readme). Codex(W)UI is an independent project; neither frontend is an official OpenAI application.
+Built with [Qt](https://www.qt.io/), [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview). Codex(W)UI is an independent project; neither frontend is an official OpenAI application.
