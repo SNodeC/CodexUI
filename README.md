@@ -10,10 +10,10 @@
 </p>
 
 <p align="center">
-  <a href="#the-workspace">Explore the workspace</a> ·
-  <a href="#get-started">Get started</a> ·
-  <a href="#browser-edition">Browser edition</a> ·
-  <a href="#documentation">Documentation</a>
+  <a href="#the-workspace" title="Explore the workspace"><img src="docs/media/menu/explore-the-workspace-166.svg" alt="Explore the workspace" width="166" height="24"></a>
+  <a href="#get-started" title="Get started"><img src="docs/media/menu/get-started-166.svg" alt="Get started" width="166" height="24"></a>
+  <a href="#browser-edition" title="Browser edition"><img src="docs/media/menu/browser-edition-166.svg" alt="Browser edition" width="166" height="24"></a>
+  <a href="#documentation" title="Documentation"><img src="docs/media/menu/documentation-166.svg" alt="Documentation" width="166" height="24"></a>
 </p>
 
 # Codex(W)UI
