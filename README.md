@@ -85,10 +85,9 @@ The frontends share protocol and lifecycle meaning, **not an identical feature i
 
 Choose your route.
 
-| Route | How to install |
-| --- | --- |
-| **Native desktop** | Prepare the prerequisites below, [build CodexUI](#build-from-source), then optionally install the build. |
-| **Browser frontend** | Follow [Browser edition](#browser-edition) to build static assets served by `codex-bridge`. No Qt installation or Node runtime is needed to run them. |
+**Native desktop** — Prepare the prerequisites below, [build CodexUI](#build-from-source), then optionally install the build.
+
+**Browser frontend** — Follow [Browser edition](#browser-edition) to build static assets served by `codex-bridge`. No Qt installation or Node runtime is needed to run them.
 
 These are source-installation routes, not a binary-package release promise.
 
