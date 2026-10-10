@@ -85,11 +85,12 @@ The frontends share protocol and lifecycle meaning, **not an identical feature i
 
 Choose your route.
 
-**Native desktop:** Follow the [build and installation guide](docs/build.md#native-desktop) for prerequisites, compilation and the optional desktop install.
+<p>
+  <a href="docs/build.md#native-desktop" title="Native desktop"><img src="docs/media/menu/route-native.svg" alt="Native desktop" width="152" height="24"></a>
+  <a href="docs/build.md#browser-frontend" title="Browser frontend"><img src="docs/media/menu/route-browser.svg" alt="Browser frontend" width="152" height="24"></a>
+</p>
 
-**Browser frontend:** Follow the [browser build guide](docs/build.md#browser-frontend) for static assets served by `codex-bridge`. No Qt installation or Node runtime is needed to run them.
-
-These are source-installation routes, not a binary-package release promise.
+Build the native Qt desktop or browser assets served by `codex-bridge`. Both are source-installation routes, not binary releases; running the browser assets requires neither Qt nor a Node runtime.
 
 ## First run
 
