@@ -7,8 +7,8 @@ ci:
   - xvfb
   - xauth
   deps:
-  - snode.c@dev
-  - AISuite@dev
+  - snode.c@source
+  - AISuite@source
   cmake_options:
   - -DCMAKE_BUILD_TYPE=Debug
   - -DBUILD_TESTING=ON
