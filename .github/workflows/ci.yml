@@ -1,13 +1,6 @@
 name: CI
-
-on:
-  push:
-    branches: [master]
-  pull_request:
-
-permissions:
-  contents: read
-
+on: [push, pull_request, workflow_dispatch]
+permissions: { contents: read }
 concurrency:
   group: codexui-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -18,129 +11,10 @@ env:
   CODEXUI_TIMING_POLICY: report
 
 jobs:
-  gcc-15-debug:
-    runs-on: ubuntu-24.04
-    container:
-      image: gcc:15.3.0-trixie
-      options: --cap-add=NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0
-    timeout-minutes: 45
-
-    steps:
-      - name: Check out exact CodexUI head
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          ref: >-
-            ${{ github.event_name == 'pull_request' &&
-                github.event.pull_request.head.sha || github.sha }}
-
-      - name: Check out SNode.C head
-        uses: actions/checkout@v5
-        with:
-          repository: SNodeC/snode.c
-          ref: master
-          path: _deps/snodec
-
-      - name: Check out AISuite master
-        uses: actions/checkout@v5
-        with:
-          repository: SNodeC/AISuite
-          ref: master
-          path: _deps/aisuite
-
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y \
-            cmake \
-            iproute2 \
-            libbluetooth-dev \
-            libgit2-dev \
-            libmagic-dev \
-            libssl-dev \
-            ninja-build \
-            nlohmann-json3-dev \
-            pkg-config \
-            qt6-base-dev
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/snodec"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/aisuite"
-          getent group snodec >/dev/null || groupadd --system snodec
-
-      - name: Enable IPv6 transport coverage
-        run: |
-          ip link add codexui-ci-v6 type dummy
-          ip link set codexui-ci-v6 up
-          ip -6 address add fd00::1/128 dev codexui-ci-v6
-          ip -6 address show dev codexui-ci-v6
-          getent ahostsv6 ::1
-
-      - name: Verify CodexUI source revision
-        shell: bash
-        env:
-          CODEXUI_EXPECTED_HEAD: >-
-            ${{ github.event_name == 'pull_request' &&
-                github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CODEXUI_EXPECTED_HEAD"
-
-      - name: Build and install SNode.C
-        run: |
-          cmake -S _deps/snodec -B _build/snodec -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/snodec" \
-            -DSNODEC_BUILD_TESTS=OFF \
-            -DSNODEC_BUILD_APPS=OFF
-          cmake --build _build/snodec --target all
-          cmake --install _build/snodec
-
-      - name: Build, test, and install AISuite Codex
-        run: |
-          cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/aisuite" \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
-            -DAISUITE_BUILD_CODEX_TESTS=ON \
-            -DAISUITE_BUILD_APPS=ON
-          cmake --build _build/aisuite --target all --parallel 2
-          install -d -m 0770 -g snodec \
-            /etc/snode.c \
-            /var/log/snode.c \
-            /var/run/snode.c
-          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/snodec/lib" \
-            ctest --test-dir _build/aisuite --output-on-failure
-          cmake --install _build/aisuite
-
-      - name: Configure CodexUI
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/aisuite;$GITHUB_WORKSPACE/_stage/snodec" \
-            -DCODEXUI_INSTALL_WEB=OFF
-
-      - name: Build CodexUI
-        run: cmake --build build --target all
-
-      - name: Test CodexUI
-        run: |
-          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/aisuite/lib:$GITHUB_WORKSPACE/_stage/snodec/lib" \
-            ctest --test-dir build --output-on-failure --verbose
-
-      - name: Check changed lines
-        shell: bash
-        env:
-          CODEXUI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "${{ github.event_name }}" == "pull_request" ]]
-          then
-            git diff --check "$CODEXUI_BASE_SHA...HEAD"
-          else
-            git diff --check HEAD^ HEAD
-          fi
-
-  web:
+  snodec:
+    uses: SNodeC/.github/.github/workflows/verify.yml@v1.0
+    secrets: inherit
+  x-web:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -154,11 +28,10 @@ jobs:
                 github.event.pull_request.head.sha || github.sha }}
           path: CodexUI/codexui
 
-      - name: Check out AISuite master frontend SDK
+      - name: Check out AISuite default-branch frontend SDK
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: master
           path: AISuite-extraction/AISuite-final
 
       - name: Set up Node.js
