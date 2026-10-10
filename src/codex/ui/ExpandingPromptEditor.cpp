@@ -5,6 +5,7 @@
 
 #include <QAbstractTextDocumentLayout>
 #include <QDropEvent>
+#include <QDragLeaveEvent>
 #include <QEvent>
 #include <QFocusEvent>
 #include <QInputMethodEvent>
@@ -66,16 +67,14 @@ void ExpandingPromptEditor::changeEvent(QEvent *event) {
 }
 
 void ExpandingPromptEditor::dropEvent(QDropEvent *event) {
-  if (!codex::isAttachmentInput(*event->mimeData())) {
-    QPlainTextEdit::dropEvent(event);
-    return;
-  }
-  // Attaching references a source file; never ask its drag owner to move/delete
-  // it.
-  if (isReadOnly() || !event->possibleActions().testFlag(Qt::CopyAction)) {
-    event->ignore();
-    return;
-  }
+  if (!codex::isAttachmentInput(*event->mimeData()))
+    return QPlainTextEdit::dropEvent(event);
+  // End Qt's drag marker and autoscroll before consuming or rejecting the drop.
+  QDragLeaveEvent leave;
+  QPlainTextEdit::dragLeaveEvent(&leave);
+  // Attachments reference the source file; never let the drag owner move it.
+  if (isReadOnly() || !event->possibleActions().testFlag(Qt::CopyAction))
+    return event->ignore();
   insertFromMimeData(event->mimeData());
   event->setDropAction(Qt::CopyAction);
   event->accept();

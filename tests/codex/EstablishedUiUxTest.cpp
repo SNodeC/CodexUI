@@ -16,6 +16,8 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
@@ -29,6 +31,7 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -99,6 +102,97 @@ bool promptKeyboardAndFocusContract() {
                    "Shift+Return inserts a newline without submission");
   result &= expect(editor.accessibleName() == QStringLiteral("Message Codex"),
                    "the prompt retains its accessible identity");
+  return result;
+}
+
+bool promptDropCursorContract() {
+  codexui::ExpandingPromptEditor editor;
+  editor.resize(480, 80);
+  editor.show();
+  editor.activateWindow();
+  editor.setFocus();
+  const int originalFlashTime = QApplication::cursorFlashTime();
+  QApplication::setCursorFlashTime(0);
+  editor.setPlainText(QStringLiteral("cursor probe"));
+  QCoreApplication::processEvents();
+  const auto capture = [&](int key) {
+    sendKey(editor, key);
+    QCoreApplication::processEvents();
+    return editor.viewport()->grab().toImage();
+  };
+  const QImage start = capture(Qt::Key_Home);
+  const QPoint startPosition = editor.cursorRect().center();
+  const QImage end = capture(Qt::Key_End);
+  bool result = expect(start != end, "cursor movement changes visible pixels");
+  int attachments = 0;
+  QObject::connect(&editor, &codexui::ExpandingPromptEditor::attachmentInput,
+                   [&](const QMimeData *) { ++attachments; });
+  QMimeData files;
+  files.setUrls({QUrl::fromLocalFile(QStringLiteral("/tmp/cursor-probe.txt"))});
+  for (int scenario = 0; scenario < 4; ++scenario) {
+    const auto actions = scenario == 1 ? Qt::MoveAction
+                                     : Qt::CopyAction | Qt::MoveAction;
+    const QPoint position = editor.cursorRect().center();
+    QDragEnterEvent enter(position, actions, &files, Qt::LeftButton,
+                          Qt::NoModifier);
+    QCoreApplication::sendEvent(editor.viewport(), &enter);
+    QDragMoveEvent move(position, actions, &files, Qt::LeftButton,
+                        Qt::NoModifier);
+    QCoreApplication::sendEvent(editor.viewport(), &move);
+    result &= expect(enter.isAccepted() && move.isAccepted(),
+                     "attachment drag reaches the editor before completion");
+    const int before = attachments;
+    if (scenario == 3) {
+      QDragLeaveEvent leave;
+      QCoreApplication::sendEvent(editor.viewport(), &leave);
+    } else {
+      editor.setReadOnly(scenario == 2);
+      QDropEvent drop(position, actions, &files, Qt::LeftButton,
+                      Qt::NoModifier);
+      drop.setDropAction(Qt::MoveAction);
+      QCoreApplication::sendEvent(editor.viewport(), &drop);
+      result &= expect(scenario == 0
+                           ? drop.isAccepted() && drop.dropAction() == Qt::CopyAction
+                           : !drop.isAccepted(),
+                       "attachments are copied or rejected, never moved");
+      editor.setReadOnly(false);
+    }
+    result &= expect(attachments == before + (scenario == 0 ? 1 : 0) &&
+                         editor.toPlainText() == QStringLiteral("cursor probe"),
+                     "only accepted drops emit attachments and retain draft text");
+    const QImage movedStart = capture(Qt::Key_Home);
+    const QImage movedEnd = capture(Qt::Key_End);
+    result &= expect(movedStart == start && movedEnd == end,
+                     "completed, rejected and cancelled drops restore the visible cursor");
+    for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+      QMouseEvent mouse(type, startPosition,
+                        editor.viewport()->mapToGlobal(startPosition),
+                        Qt::LeftButton,
+                        type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                        Qt::NoModifier);
+      QCoreApplication::sendEvent(editor.viewport(), &mouse);
+    }
+    QCoreApplication::processEvents();
+    result &= expect(editor.textCursor().position() == 0 &&
+                         editor.viewport()->grab().toImage() == start,
+                     "mouse placement moves the visible cursor after a drop");
+    QApplication::setCursorFlashTime(100);
+    editor.clearFocus();
+    editor.setFocus();
+    const QImage initial = editor.viewport()->grab().toImage();
+    bool blinked = false;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 500 && !blinked) {
+      QCoreApplication::processEvents();
+      blinked = editor.viewport()->grab().toImage() != initial;
+      QThread::msleep(5);
+    }
+    result &= expect(blinked, "cursor visibly blinks after attachment drag completion");
+    QApplication::setCursorFlashTime(0);
+    capture(Qt::Key_End);
+  }
+  QApplication::setCursorFlashTime(originalFlashTime);
   return result;
 }
 
@@ -1449,6 +1543,7 @@ int main(int argc, char **argv) {
     passed &= casePassed;
   };
   run("promptKeyboardAndFocusContract", promptKeyboardAndFocusContract);
+  run("promptDropCursorContract", promptDropCursorContract);
   run("promptAttachmentAdmission", promptAttachmentAdmission);
   run("promptClipboardAndDropContract", promptClipboardAndDropContract);
   if (argc == 2 && std::string(argv[1]) == "--attachment-input")
