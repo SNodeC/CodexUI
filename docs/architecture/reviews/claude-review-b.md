@@ -1,4 +1,13 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # External architecture review — Claude B
+
+> Historical external review transcript. Findings reflect that captured revision, not verified current product behavior; use the user guides and current qualification records for today's scope.
 
 # CodexUI — Architectural and Code Review
 
@@ -406,4 +415,3 @@ A caution on 7: it is the highest-risk item here. The passive renderer exists fo
 **Not reviewed in depth:** `ProtocolUpdater.cpp` (3 513), `ClientRuntime.cpp` body (2 828), `NodeGraphUiAdapter.cpp` body (2 250), `WorkerLogic.cpp` (1 548), `ShellWidget.cpp` body (3 548), `ComposerPane`, `MiddleRegionWidget`, `GitDiffProvider`, `PendingRequestPolicy`, the four dialogs, `SpscQueue`/`EventFd`/`ThreadChannels` correctness, the React application (`web/src/app/*`), and the `ui-review/` screenshot inventory.
 
 **Not possible from source:** anything about runtime performance, actual rendered pixels, platform behaviour differences, or memory use. Every figure in this document is a static count or a source-level derivation.
-

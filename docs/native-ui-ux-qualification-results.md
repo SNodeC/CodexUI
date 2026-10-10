@@ -1,12 +1,13 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # Native qualification execution record — 2026-09-27
 
-<!-- snodec:begin back -->
-<p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
-</p>
-<!-- snodec:end back -->
-
-Specification: [canonical interactive inventory and visual approval matrix](native-ui-ux-qualification-inventory.md).
+Specification: [canonical interactive inventory and visual approval matrix](native-ui-ux-qualification-inventory.md#page-overview).
 This records execution, not a replacement plan or reduced acceptance scope.
 
 **Overall verdict: incomplete, not approved.** The recorded repairs are verified
@@ -17,7 +18,7 @@ within the stated checks. They do not complete every canonical combination.
 - Baseline HEAD: `b9ff6e5d0d4115922174c1a5fdd4310537c7975b`, master, with
   preserved pre-existing project/section and qualification changes.
 - GCC Debug, installed Qt 6.10.2; build directory
-  `/home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug`.
+  `/path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug`.
 - Builds and suitable CTest execution used `--parallel 14`; serial benchmark
   properties remained respected. Timing policy was the accepted `report` mode.
 - Every Qt launch used `xvfb-run -a env QT_QPA_PLATFORM=offscreen`.
@@ -71,9 +72,9 @@ changes are not included in those counts. `git diff --check` passed.
 ## Verification results
 
 ```
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
 xvfb-run -a env QT_QPA_PLATFORM=offscreen CODEXUI_TIMING_POLICY=report \
-  ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+  ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure
 ```
 
@@ -226,9 +227,9 @@ Incremental accounting against the pre-repair dirty tree:
 Commands for the production verification:
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
 xvfb-run -a env QT_QPA_PLATFORM=offscreen CODEXUI_TIMING_POLICY=report \
-  ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+  ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure
 ```
 
@@ -465,9 +466,9 @@ dialog and additional keyboard/burst cases remain open.
 ### Commands, evidence and runner corrections
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
 xvfb-run -a env QT_QPA_PLATFORM=offscreen CODEXUI_TIMING_POLICY=report \
-  ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+  ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure
 python3 /tmp/codexui-info-refresh-bOhqTi/run-live.py
 ```
@@ -616,10 +617,10 @@ the separate visual failure below demonstrates that limitation.
 Verification commands:
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
-xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14 --output-on-failure -R 'git-changes-live|inspector|application-layout'
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14 --output-on-failure -R 'git-changes-live|inspector|application-layout'
 for dpr in 1.25 1.5 2; do
-  xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR="$dpr" QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug/codexui-git-changes-live-test
+  xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR="$dpr" QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug/codexui-git-changes-live-test
 done
 ```
 
@@ -739,10 +740,10 @@ new field; the other uncommitted UiStyle changes were preserved.
 Verification on the final implementation:
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
-xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14 --output-on-failure -R 'git-changes-live|inspector|application-layout|ui-style'
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+xvfb-run -a env QT_QPA_PLATFORM=offscreen ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14 --output-on-failure -R 'git-changes-live|inspector|application-layout|ui-style'
 for dpr in 1.25 1.5 2; do
-  xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR="$dpr" QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug/codexui-git-changes-live-test
+  xvfb-run -a env QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR="$dpr" QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug/codexui-git-changes-live-test
 done
 ```
 
@@ -911,7 +912,7 @@ This removes redundant PNG decoding at its metrics-only source; no CodexUI
 renderer, cache, timer, font substitution or layout workaround was added.
 
 Source, patch, scripts and logs are retained at
-`/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz`.
+`/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz`.
 `qt-bitmap-metrics.patch` is an applicable upstream-source patch, not an installed
 library. The official Qt 6.10.2 archive SHA-256 is
 `aeb78d29291a2b5fd53cb55950f8f5065b4978c25fb1d77f627d695ab9adf21e`.
@@ -1071,7 +1072,7 @@ required regenerating the isolated Gui automoc cache. No Qt source change was
 needed beyond the approved two-line glyph correction.
 
 Commands and logs are retained under
-`/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz`:
+`/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz`:
 
 - Configure: `PKG_CONFIG_PATH=<isolated>/dependencies/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig
   cmake -S qtbase-everywhere-src-6.10.2 -B build
@@ -1304,11 +1305,11 @@ No new performance claim is made; the change only assigns names at construction.
 Commands (paths refer to this machine's disposable evidence):
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --target codex-ui codexui-inspector-graph-test codexui-git-changes-live-test
 dbus-run-session -- env \
-  LD_LIBRARY_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
-  QT_PLUGIN_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
+  LD_LIBRARY_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
+  QT_PLUGIN_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
   QUAL_RUN=a11y-review-v63 QUAL_BINARY=codex-ui-interactive-v63 QUAL_SCRIPT=a11y-shell.py \
   python3 /tmp/codexui-timing-surfaces-JBfjvO/run.py
 ```
@@ -1327,7 +1328,7 @@ the same library/plugin environment under `dbus-run-session -- xvfb-run -a env
 QT_QPA_PLATFORM=offscreen`, then:
 
 ```sh
-ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure \
   -R 'codexui-(inspector-(graph|geometry)|git-changes-live)' \
   --output-log /tmp/codexui-timing-surfaces-JBfjvO/a11y-v63-ctest.log
@@ -1405,9 +1406,9 @@ Commands use the same full library/plugin paths and private-D-Bus/Xvfb/offscreen
 environment documented for v63:
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
 # Under the isolated Qt/Xvfb environment:
-ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure \
   --output-log /tmp/codexui-timing-surfaces-JBfjvO/review-lifetime-v64-full-ctest.log
 # Private-D-Bus runner; it launches every client through Xvfb/offscreen:
@@ -1484,7 +1485,7 @@ Two local helpers replace the previous preview-only setup/update blocks.
 
 Verification:
 
-- Complete `cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug
+- Complete `cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug
   --parallel 14` passed.
 - Focused CTest regex `codexui-(inspector-(graph|geometry)|git-changes-live|
   ui-style-source-policy|application-layout)` (without the displayed line break)
@@ -1676,11 +1677,11 @@ captions and Qt's item-view interface. No production caption-update path exists.
 Commands and results (private D-Bus, isolated Qt library/plugin paths as in v65):
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
 dbus-run-session -- xvfb-run -a env QT_QPA_PLATFORM=offscreen \
-  LD_LIBRARY_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
-  QT_PLUGIN_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
-  ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+  LD_LIBRARY_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
+  QT_PLUGIN_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
+  ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure \
   -R 'codexui-(shell-integration|application-layout|git-changes-live|ui-style-source-policy)$'
 ```
@@ -2051,12 +2052,12 @@ or personal-process changes were made.
 Commands and evidence (all paths are disposable qualification artifacts):
 
 ```sh
-cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
+cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14
 python3 /tmp/codexui-interactive-uCYB7o/build-driver.py codex-ui-interactive-v75-r3
 dbus-run-session -- xvfb-run -a env QT_QPA_PLATFORM=offscreen \
-  LD_LIBRARY_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
-  QT_PLUGIN_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
-  ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+  LD_LIBRARY_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
+  QT_PLUGIN_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
+  ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
   --parallel 14 --output-on-failure \
   -R 'codexui-(shell-integration|application-layout|git-changes-live|ui-style-source-policy)$' \
   --output-log /tmp/codexui-timing-surfaces-JBfjvO/dialog-font-v75-r3-ctest.log
@@ -2333,7 +2334,7 @@ manual scrolling. The only added connection per editor replaces the prior
 inner-scroll responsibility in the parent callback; font/resize use normal
 synchronous Qt event overrides. No additional functional state is retained.
 
-Build: `cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug
+Build: `cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug
 --parallel 14`; logs `build-v80.log` and `build-v80-r2.log` under
 `/tmp/codexui-timing-surfaces-JBfjvO/`. Diagnostic binaries link the rebuilt
 production libraries through `/tmp/codexui-interactive-uCYB7o/build-driver.py`.
@@ -2458,7 +2459,7 @@ state or replacement renderer; ordinary manual scrolling remains undisturbed
 between geometry/navigation events. The existing QObject ownership retains the
 form and the signal receiver bounds the editor callback lifetime.
 
-Build: `cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug
+Build: `cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug
 --parallel 14` succeeded. Focused CTest invocation used private D-Bus,
 Xvfb/offscreen, isolated Qt library/plugin paths, `CODEXUI_TIMING_POLICY=report`,
 `--parallel 14 --output-on-failure -R
@@ -2518,7 +2519,7 @@ Commands use the previously documented `run.py` with
 The complete rebuilt suite passed **80/80, no skips, 151.27 seconds**. Command:
 `dbus-run-session -- xvfb-run -a env QT_QPA_PLATFORM=offscreen
 CODEXUI_TIMING_POLICY=report` with the isolated Qt library/plugin paths, then
-`ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug
+`ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug
 --parallel 14 --output-on-failure --output-log
 /tmp/codexui-timing-surfaces-JBfjvO/full-v82-ctest.log`.
 No build or other qualification client overlapped the run; CTest retained the
@@ -2881,7 +2882,7 @@ correlated request identity. No application policy was changed for these setup
 errors. An earlier runner invocation used unavailable `python`; final runs used
 `python3` and successfully started Xvfb.
 
-Build: `cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug
+Build: `cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug
 --parallel 14`, successful. Evidence under
 `/tmp/codexui-timing-surfaces-JBfjvO`: `build-v89.log`,
 `stop-disabled-v89-{baseline,final}-*`, `request-disabled-v89-final2-*`,
@@ -3020,15 +3021,15 @@ Final rebuilt full suite: **80/80 passed, no skips, 150.87 seconds**
 (`full-v91-final-{run,ctest}.log`). The existing accepted elapsed-time warning
 at `NodeGraphUiAdapterTest.cpp:196` remains; no timing policy was changed.
 Build command: `cmake --build
-/home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14`.
+/path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14`.
 Test invocation, with the isolated Qt libraries/plugins recorded above:
 
 ```sh
 dbus-run-session -- xvfb-run -a env QT_QPA_PLATFORM=offscreen \
-  LD_LIBRARY_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
-  QT_PLUGIN_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
+  LD_LIBRARY_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
+  QT_PLUGIN_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
   CODEXUI_TIMING_POLICY=report \
-  ctest --test-dir /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug \
+  ctest --test-dir /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug \
     --parallel 14 --output-on-failure \
     --output-log /tmp/codexui-timing-surfaces-JBfjvO/full-v91-final-ctest.log
 ```
@@ -3157,7 +3158,7 @@ text/container containment, and unchanged-font geometry/identity.
 
 Verification:
 
-- `cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14` succeeded.
+- `cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14` succeeded.
 - Focused `ctest ... --parallel 14 --output-on-failure -R shell-integration`
   passed in 13.72 seconds under private D-Bus + Xvfb/offscreen.
 - Full `ctest ... --parallel 14 --output-on-failure --output-log
@@ -3340,7 +3341,7 @@ after deferred retirement; it is not an assertion of leaked documents. The new
 regression and settled live object counts separately verify actual reclamation.
 
 Commands/evidence under `/tmp/codexui-timing-surfaces-JBfjvO`:
-`cmake --build /home/voc/projects/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14`;
+`cmake --build /path/to/workspace/drafts/CodexUI/build/Desktop_GCC-Debug --parallel 14`;
 focused Xvfb/offscreen CTest `--parallel 14 -R 'codexui-inspector-(geometry|graph)'`
 passed **5/5**; baseline/final `codexui-inspector-graph-test --performance 10000 DPR`
 logs are `v93-perf-{before,after}-DPR.log`. Timing policy remains the previously
@@ -3708,8 +3709,8 @@ env XDG_RUNTIME_DIR=/tmp/codexui-v101-runtime-5WHwn0 \
  -s '-screen 0 1280x1024x24 -extension GLX' \
  -e /tmp/codexui-timing-surfaces-JBfjvO/v101-r3-ctest-xvfb.log \
  env QT_QPA_PLATFORM=offscreen \
- LD_LIBRARY_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
- QT_PLUGIN_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
+ LD_LIBRARY_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
+ QT_PLUGIN_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
  CODEXUI_TIMING_POLICY=report \
  ctest --test-dir build-qualification --parallel 14 --output-on-failure
 ```
@@ -4011,8 +4012,8 @@ Final complete suite: **80/80 passed, no skips, 154.53 seconds**, command:
 env XDG_RUNTIME_DIR=/tmp/codexui-v101-runtime-5WHwn0 \
  XDG_CONFIG_HOME=/tmp/codexui-v106-full-config \
  XDG_DATA_HOME=/tmp/codexui-v106-full-data \
- LD_LIBRARY_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
- QT_PLUGIN_PATH=/home/voc/projects/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
+ LD_LIBRARY_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/lib \
+ QT_PLUGIN_PATH=/path/to/workspace/drafts/CodexUI/qt-metrics-validation-YOhjyz/build/plugins:/usr/lib/x86_64-linux-gnu/qt6/plugins \
  dbus-run-session -- xvfb-run -a \
  -s '-screen 0 1280x1024x24 -extension GLX' \
  -e /tmp/codexui-timing-surfaces-JBfjvO/v106-full-xvfb.log \

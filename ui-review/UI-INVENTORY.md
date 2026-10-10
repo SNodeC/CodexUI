@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="../docs/media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # CodexUI Current UI Inventory
 
 ## Top bar

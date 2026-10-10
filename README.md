@@ -14,7 +14,7 @@
 <!-- snodec:end header -->
 
 <!-- snodec:begin status -->
-[![CI](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml/badge.svg)](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml) · [![License: MIT or LGPL 3.0 or later](https://img.shields.io/badge/License-MIT%20OR%20LGPL--3.0--or--later-334155?style=flat)](LICENSE)
+[![CI](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml/badge.svg)](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml) [![License: MIT or LGPL 3.0 or later](https://img.shields.io/badge/License-MIT%20OR%20LGPL--3.0--or--later-334155?style=flat)](LICENSE)
 <!-- snodec:end status -->
 
 **Follow the work, not just the final answer.** Codex(W)UI offers two frontends: **CodexUI**, a native Qt desktop application, and **CodexWUI**, a browser application connecting over WebSocket. They bring conversations, commands, plans, approvals and file changes into a visual coding workspace.
@@ -25,7 +25,7 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 <p>
   <a href="#quick-start" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="108" height="24"></a>
   <a href="#install" title="Install"><img src="docs/media/menu/snodec-install-108.svg" alt="Install" width="108" height="24"></a>
-  <a href="docs/build.md" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="108" height="24"></a>
+  <a href="docs/build.md#page-overview" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="108" height="24"></a>
   <a href="#first-run" title="Use"><img src="docs/media/menu/snodec-use-108.svg" alt="Use" width="108" height="24"></a>
   <a href="#configuration" title="Configure"><img src="docs/media/menu/snodec-configure-108.svg" alt="Configure" width="108" height="24"></a>
   <a href="#architecture" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="108" height="24"></a>
@@ -46,7 +46,7 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 [![Native CodexUI showing a conversation, completed command output, turn settings and the Inspector.](docs/media/native-workspace.png)](docs/media/native-workspace.png)
 
-*Actual native application, captured during an isolated qualification session with a disposable demonstration thread. Click the image to inspect it at full resolution. [Image provenance](docs/media/README.md).*
+*Actual native application, captured during an isolated qualification session with a disposable demonstration thread. Click the image to inspect it at full resolution. [Image provenance](docs/media/README.md#page-overview).*
 
 - **Organize the work:** browse threads, search titles, archive work and return to retained history. In the native app, group threads by projects and shared sections.
 - **Follow execution:** read streamed responses, reasoning summaries and command output in one conversation. Send prompts, steer an active turn, stop work and respond to approval requests.
@@ -56,7 +56,7 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 - **Rich, distinct activity cards.** Markdown, commands, file changes, plans, images and agent activity keep their own controls and presentation.
 - **History without loading every widget.** Paginated history and virtualized native rendering keep offscreen content as data rather than another renderer.
-- **Input beyond plain text.** The native composer accepts image paste and local file drag/drop, alongside the attachment picker and multiline editing.
+- **Input beyond plain text.** The native composer accepts image paste and local file drag/drop, alongside the attachment picker and multiline editing. Pasted images are stored as durable local PNG files with no automatic expiry; review retained files when handling sensitive material.
 - **Context when you need it.** Supplied timestamps, durations, token information and detailed Inspector views make execution easier to understand.
 
 ### Projects and sections, without duplicating threads
@@ -65,7 +65,7 @@ In the native threads panel, **projects contain the visual grouping; sections or
 
 To create a project or section, click the current grouping label—**Projects**, **Sections** or **Ungrouped**—above the thread list. Use a thread's context menu to assign its project and section. Creation and assignment require controller access and server support.
 
-[![Read the grouping and lifecycle guide](docs/media/menu/further-grouping-lifecycle.svg)](docs/thread-projects-sections.md)
+[![Read the grouping and lifecycle guide](docs/media/menu/further-grouping-lifecycle.svg)](docs/thread-projects-sections.md#page-overview)
 
 ### Choose your frontend
 
@@ -79,17 +79,18 @@ To create a project or section, click the current grouping label—**Projects**,
 
 **CodexWUI** connects through AISuite's frontend SDK without installing the Qt application. `codex-bridge` serves the built web assets; no Node runtime is required.
 
-The frontends share protocol and lifecycle meaning, **not an identical feature inventory**. Native project/section management is not yet a browser feature. See the [browser scope and limitations](docs/web-1.0-contract.md) before choosing a deployment.
+The frontends share protocol and lifecycle meaning, **not an identical feature inventory**. Native project/section management is not yet a browser feature. See the [browser scope and limitations](docs/web-1.0-contract.md#page-overview) before choosing a deployment.
 
 ## Install
 
 Choose your route.
 
-**Native desktop:** Follow the [build and installation guide](docs/build.md#native-desktop) for prerequisites, compilation and the optional desktop install.
+<p>
+  <a href="docs/build.md#native-desktop" title="Native desktop"><img src="docs/media/menu/route-native.svg" alt="Native desktop" width="152" height="24"></a>
+  <a href="docs/build.md#browser-frontend" title="Browser frontend"><img src="docs/media/menu/route-browser.svg" alt="Browser frontend" width="152" height="24"></a>
+</p>
 
-**Browser frontend:** Follow the [browser build guide](docs/build.md#browser-frontend) for static assets served by `codex-bridge`. No Qt installation or Node runtime is needed to run them.
-
-These are source-installation routes, not a binary-package release promise.
+Build the native Qt desktop or browser assets served by `codex-bridge`. Both are source-installation routes, not binary releases; running the browser assets requires neither Qt nor a Node runtime.
 
 ## First run
 
@@ -129,7 +130,7 @@ For native endpoints, use **Connection** as described in [First run](#first-run)
 
 Controller/observer roles are routing permissions, **not authentication or tenant isolation**. Observers can receive session broadcasts and read approved workspace data, including files. Keep the Unix socket private and browser/network listeners on loopback unless an external authenticated TLS boundary protects them. App-server configuration remains authoritative for model selection, approvals and sandbox permissions.
 
-See [UI behavior](docs/ui-behavior.md) for interaction details and [Architecture](#architecture) for component ownership.
+See [UI behavior](docs/ui-behavior.md#page-overview) for interaction details and [Architecture](#architecture) for component ownership.
 
 <a id="how-it-fits-together"></a>
 
@@ -141,26 +142,26 @@ The bridge allows multiple frontends to follow the same app-server session, with
 
 On the native side, a SNode.C worker owns protocol processing and writes one shared `NodeGraph`; Qt projects that state into widgets. The browser uses AISuite's TypeScript SDK and its own presentation state. Neither frontend replaces app-server's persistent history or tool execution.
 
-For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/codex-architecture.md).
+For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/codex-architecture.md#page-overview).
 
 ## Documentation
 
 | Start here | Go deeper |
 | --- | --- |
-| [UI behavior](docs/ui-behavior.md) | [Native state and threading](docs/two-thread-shared-node-graph.md) |
-| [Projects and sections](docs/thread-projects-sections.md) | [Architecture overview](docs/codex-architecture.md) |
-| [Timestamps and durations](docs/architecture/timestamp-presentation.md) | [Browser contract](docs/web-1.0-contract.md) |
-| [Browser build and deployment](web/README.md) | [Web qualification](docs/web-qualification.md) · [Release process](docs/web-release.md) |
+| [UI behavior](docs/ui-behavior.md#page-overview) | [Native state and threading](docs/two-thread-shared-node-graph.md#page-overview) |
+| [Projects and sections](docs/thread-projects-sections.md#page-overview) | [Architecture overview](docs/codex-architecture.md#page-overview) |
+| [Timestamps and durations](docs/architecture/timestamp-presentation.md#page-overview) | [Browser contract](docs/web-1.0-contract.md#page-overview) |
+| [Browser build and deployment](web/README.md#page-overview) | [Web qualification](docs/web-qualification.md#page-overview) · [Release process](docs/web-release.md#page-overview) |
 
 For bug reports, include the revision, Qt version, connection type and the smallest reproducible sequence. Remove credentials and private conversation content from logs and screenshots.
 
 ## Platforms
 
-The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web-1.0-contract.md); they are not a promise of native/browser feature parity.
+The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web-1.0-contract.md#page-overview); they are not a promise of native/browser feature parity.
 
 ## Releases
 
-No GitHub release or shared binary-package distribution is published yet; the documented installation routes build from source. Future release notes belong on the [releases page](https://github.com/SNodeC/CodexUI/releases). The [web release process](docs/web-release.md) describes development qualification, not a downloadable product release.
+No GitHub release or shared binary-package distribution is published yet; the documented installation routes build from source. Future release notes belong on the [releases page](https://github.com/SNodeC/CodexUI/releases). The [web release process](docs/web-release.md#page-overview) describes development qualification, not a downloadable product release.
 
 ## Contributing
 

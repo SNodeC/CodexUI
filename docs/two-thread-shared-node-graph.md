@@ -1,10 +1,11 @@
-# Shared node graph: writer, UI and projection readers
-
-<!-- snodec:begin back -->
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
-<!-- snodec:end back -->
+<!-- snodec:end page-header -->
+
+# Shared node graph: writer, UI and projection readers
 
 ## Scope and baseline
 
@@ -288,7 +289,7 @@ is removed after cutover and is not retained as a fallback.
 ## Widget and UX compatibility contract
 
 The complete class, method, DTO, ordering, failure, and thread-affinity
-contract is [`ui-ux-internal-api.md`](ui-ux-internal-api.md). The adapter and
+contract is [`ui-ux-internal-api.md`](ui-ux-internal-api.md#page-overview). The adapter and
 Shell integration are accepted only when they satisfy that contract as well as
 the visible behavior in `ui-behavior.md`.
 

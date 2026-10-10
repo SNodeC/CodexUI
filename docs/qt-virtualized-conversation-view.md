@@ -1,10 +1,11 @@
-# Qt virtualized conversation view
-
-<!-- snodec:begin back -->
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
-<!-- snodec:end back -->
+<!-- snodec:end page-header -->
+
+# Qt virtualized conversation view
 
 ## Purpose and status
 

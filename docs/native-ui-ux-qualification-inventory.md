@@ -1,10 +1,11 @@
-# CodexUI canonical interactive Xvfb test suite
-
-<!-- snodec:begin back -->
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
-<!-- snodec:end back -->
+<!-- snodec:end page-header -->
+
+# CodexUI canonical interactive Xvfb test suite
 
 Last updated: 2026-09-26.
 
@@ -522,7 +523,7 @@ The behavior inventory in sections 1–21 still applies in full.
 ### 22.9 Complete timestamp appearance inventory
 
 The schema inventory and formatter are authoritative:
-[Timestamp presentation](architecture/timestamp-presentation.md),
+[Timestamp presentation](architecture/timestamp-presentation.md#page-overview),
 [protocol timing paths](../src/codex/ProtocolTimingPaths.inc) and
 [TimingPresentation](../src/codex/ui/TimingPresentation.cpp).
 These are supplied facts, not permission to fetch new APIs or invent times.

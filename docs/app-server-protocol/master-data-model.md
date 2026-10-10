@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # Historical Codex app-server protocol and proposed master data model
 
 > **Historical, non-normative design research.** The pinned wire-method
@@ -5,7 +12,7 @@
 > references. Its proposed journal, ledger, reducer, outbox, snapshot/cursor,
 > persistence, replay, and adapter runtime are rejected and are not CodexUI's
 > implemented architecture. The current native contract is
-> [`../two-thread-shared-node-graph.md`](../two-thread-shared-node-graph.md): one
+> [`../two-thread-shared-node-graph.md`](../two-thread-shared-node-graph.md#page-overview): one
 > current shared `NodeGraph`, exactly two relevant threads, two typed SPSC
 > queues, and two Linux eventfds.
 

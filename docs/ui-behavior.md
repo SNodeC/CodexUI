@@ -1,13 +1,14 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # CodexUI Interaction and Presentation Decisions
 
-<!-- snodec:begin back -->
-<p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
-</p>
-<!-- snodec:end back -->
-
 The method-level contract used to supply these behaviors is
-[`ui-ux-internal-api.md`](ui-ux-internal-api.md). That document is the
+[`ui-ux-internal-api.md`](ui-ux-internal-api.md#page-overview). That document is the
 canonical logic/UI boundary for the native shared-node-graph integration;
 this file remains the visible-product behavior oracle.
 

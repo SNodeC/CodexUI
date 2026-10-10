@@ -1,22 +1,28 @@
-# Build and install Codex(W)UI from source
-
-<!-- snodec:begin back -->
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
-<!-- snodec:end back -->
+<!-- snodec:end page-header -->
+
+# Build and install Codex(W)UI from source
 
 ## Native desktop
 
 ### Prerequisites
 
-The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets (the installed Qt version must satisfy that minimum), pkg-config, libgit2 development files, and compatible **SNode.C** and **AISuite** CMake installations. On Debian/Ubuntu, the libgit2 development package is `libgit2-dev`.
+The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets (the installed Qt version must satisfy that minimum), pkg-config, libgit2 development files, and compatible **SNode.C** and **AISuite** CMake installations. On Debian/Ubuntu, development packages include `libgit2-dev` and `qt6-base-dev` (plus your toolchain/build tools). Check the installed Qt version with `pkg-config --modversion Qt6Widgets`: the package name alone does not guarantee Qt 6.6+. Use a distribution/toolchain providing that minimum rather than bypassing CMake's check.
 
 Build [SNode.C](https://github.com/SNodeC/snode.c#project-overview) and [AISuite](https://github.com/SNodeC/AISuite#project-overview) from their default branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
 ### Configure and build
 
-From this repository's root, replace the two installation prefixes below:
+Clone the native checkout (Git selects the default branch), then replace the two installation prefixes below:
+
+```sh
+git clone https://github.com/SNodeC/CodexUI.git
+cd CodexUI
+```
 
 ```sh
 cmake -S . -B build -G Ninja \
@@ -54,7 +60,7 @@ xvfb-run -a env QT_QPA_PLATFORM=offscreen \
 
 The repository includes shared native/browser presentation fixtures, native interaction and geometry checks, and workload benchmarks. Selected native suites exercise DPR **1.0, 1.25, 1.5 and 2.0**. CI's accepted elapsed-time policy reports timing overruns; correctness and work-count checks remain enforced.
 
-The [interactive qualification inventory](native-ui-ux-qualification-inventory.md) defines the wider visual and UX acceptance scope. Its [execution record](native-ui-ux-qualification-results.md) remains incomplete: a green CI run is not a claim of complete desktop, accessibility or hardware touchpad qualification.
+The [interactive qualification inventory](native-ui-ux-qualification-inventory.md#page-overview) defines the wider visual and UX acceptance scope. Its [execution record](native-ui-ux-qualification-results.md#page-overview) remains incomplete: a green CI run is not a claim of complete desktop, accessibility or hardware touchpad qualification.
 
 ## Browser frontend
 
@@ -85,6 +91,10 @@ npm ci --prefix web
 npm run release --prefix web
 ```
 
-The output is `web/app-dist/`. A combined install places it in `share/codexui/web`; the bridge can serve the application and `/codex` WebSocket from one listener. See [browser packaging and deployment](../web/README.md) for standalone installation and endpoint configuration.
+The output is `web/app-dist/`. A combined install places it in `share/codexui/web`; the bridge can serve the application and `/codex` WebSocket from one listener. See [browser packaging and deployment](../web/README.md#page-overview) for standalone installation and endpoint configuration.
 
 For native execution, return to [First run](../README.md#first-run); qualification commands and coverage boundaries are in [Quality and development](#quality-and-development).
+
+### Dependency version scope
+
+The documented development build uses dependency default-branch source and records the resolved revisions. `find_package(snodec 2.0)` is a CMake version floor, not a claim that every released 2.0 binary exposes all APIs required by the current AISuite/CodexUI source. Use the source-build route for this guide; compatibility with a particular signed release requires qualification of that exact dependency/application pair.
