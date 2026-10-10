@@ -1,13 +1,13 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="../docs/media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="../docs/media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # CodexUI UI/UX Decisions
 
-This document records the implemented CodexUI visual and interaction contract.
+This engineering decision record predates some current presentation changes. For current user-facing status/color behavior, use [UI behavior](../docs/ui-behavior.md#page-overview); historical wording such as neutral interim updates does not override that guide.
 
 ## Visual system
 

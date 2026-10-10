@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -871,13 +871,13 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   11.35 seconds. Native production is unchanged.
 - Diagnostic command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen node
   /tmp/codexui-step4-review.SnCC1C/clone-proof.mjs
-  /home/voc/projects/drafts/CodexUI/codexui/web`. Item copies fall from
+  /path/to/workspace/drafts/CodexUI/codexui/web`. Item copies fall from
   **20,000 to 10,000** for 10,000 retained items; discarded history copies
   fall from **10,000 to zero**. Nested metadata/input isolation and subsequent
   streaming checks pass. This diagnostic is separate from timing runs.
 - Matched timing command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen node
   /tmp/codexui-step4-fix.mqeMY4/repeat.mjs
-  /home/voc/projects/drafts/CodexUI/codexui/web/tools/profile-presentation.mjs
+  /path/to/workspace/drafts/CodexUI/codexui/web/tools/profile-presentation.mjs
   30`. Thirty serial processes per version, with the strengthened benchmark
   in both versions and no concurrent build/test workload. Before: **11/30
   pass**; after: **29/30 pass**. Median milliseconds before -> after:
@@ -992,7 +992,7 @@ guards, useful diagnostics, incremental update paths and visual behavior.
   retained byte counts and stable item/raw identity for both append consumers.
   Serial timing command: `xvfb-run -a env QT_QPA_PLATFORM=offscreen node
   /tmp/codexui-step4-fix.mqeMY4/repeat.mjs
-  /home/voc/projects/drafts/CodexUI/codexui/web/tools/profile-presentation.mjs
+  /path/to/workspace/drafts/CodexUI/codexui/web/tools/profile-presentation.mjs
   50`. This correction is **−2 production CLOC / −2 physical lines** and
   **+22 test CLOC / +23 physical lines**, relative to the previous checkpoint.
 - **Browser test-contract correction proposed, not yet applied:** the mock
@@ -1362,7 +1362,7 @@ guards, useful diagnostics, incremental update paths and visual behavior.
 ## Historical remediation record
 
 Date: 2026-09-12  
-Repository: `/home/voc/projects/drafts/CodexUI/codexui`  
+Repository: `/path/to/workspace/drafts/CodexUI/codexui`
 Branch/HEAD: `master` at `629660e8882bddc7473ee5f1aab90c755ee6edd4`  
 Upstream: `origin/master`, ahead/behind `0/0`
 
@@ -4421,7 +4421,7 @@ M-45C exact-current results:
   repositories. AISuite had unrelated pre-existing whole-file formatting
   drift in `CodexBridge.cpp`, outside the two inserted allowlist lines.
 - The built bridge is
-  `/home/voc/projects/drafts/AISuite-extraction/build/Desktop_GCC-Release/src/apps/codex-bridge/codex-bridge`,
+  `/path/to/workspace/drafts/AISuite-extraction/build/Desktop_GCC-Release/src/apps/codex-bridge/codex-bridge`,
   SHA-256 `39eb7d2437908b5d80d39373c16023bee4b362fedb3cfce7ababc4be6aae8beb`.
   `/usr/local/bin/codex-bridge` remains the older binary, SHA-256
   `ba533a105f1d2745887bc2a67857c366834abae00ae31f79e6df1bb73e92b1ed`.

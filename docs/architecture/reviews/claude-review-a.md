@@ -1,11 +1,13 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # External architecture review — Claude A
+
+> Historical external review transcript. Findings reflect that captured revision, not verified current product behavior; use the user guides and current qualification records for today's scope.
 
 I ran the audit directly against a fresh clone rather than delegating it. I hit my tool budget for this turn partway through the file-by-file sweep, so below is a **partial audit** — everything stated is source-verified at the exact commit, and I've marked precisely where coverage stops.
 
@@ -97,4 +99,3 @@ I stopped mid-sweep. Not audited: `ShellWidget.cpp` (3548), `ClientRuntime.cpp` 
 If you want, I can continue in a follow-up turn and produce the remaining sections as a proper markdown deliverable. The natural split is: (a) finish the file ledger + shell/adapter/protocol tracing, (b) the target architecture and deletion estimate, which needs (a) first.
 
 One thing worth saying plainly about the remediation requirement: a clean target here is a single `CardPresentation` value type — one function `VisibleCardData → {header, blocks, palette, metrics}` — consumed by *both* a painter and a widget builder, with every metric coming from one struct and every colour from `UiStyle`. That deletes `passivePresentation()`, the delegate's parallel document cache, `takeMarkdownDocument`/`adoptMarkdownDocument`, the triple hit-test geometry, and the chevron/copy parity tests that exist only to keep two implementations aligned. My rough read is a net production reduction in the low four figures of lines, concentrated in `ConversationView.cpp`. I'd want to finish the sweep before committing to a number.
-

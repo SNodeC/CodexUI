@@ -14,7 +14,7 @@
 <!-- snodec:end header -->
 
 <!-- snodec:begin status -->
-[![CI](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml/badge.svg)](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml) · [![License: MIT or LGPL 3.0 or later](https://img.shields.io/badge/License-MIT%20OR%20LGPL--3.0--or--later-334155?style=flat)](LICENSE)
+[![CI](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml/badge.svg)](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml) [![License: MIT or LGPL 3.0 or later](https://img.shields.io/badge/License-MIT%20OR%20LGPL--3.0--or--later-334155?style=flat)](LICENSE)
 <!-- snodec:end status -->
 
 **Follow the work, not just the final answer.** Codex(W)UI offers two frontends: **CodexUI**, a native Qt desktop application, and **CodexWUI**, a browser application connecting over WebSocket. They bring conversations, commands, plans, approvals and file changes into a visual coding workspace.
@@ -56,7 +56,7 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 - **Rich, distinct activity cards.** Markdown, commands, file changes, plans, images and agent activity keep their own controls and presentation.
 - **History without loading every widget.** Paginated history and virtualized native rendering keep offscreen content as data rather than another renderer.
-- **Input beyond plain text.** The native composer accepts image paste and local file drag/drop, alongside the attachment picker and multiline editing.
+- **Input beyond plain text.** The native composer accepts image paste and local file drag/drop, alongside the attachment picker and multiline editing. Pasted images are stored as durable local PNG files with no automatic expiry; review retained files when handling sensitive material.
 - **Context when you need it.** Supplied timestamps, durations, token information and detailed Inspector views make execution easier to understand.
 
 ### Projects and sections, without duplicating threads

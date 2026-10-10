@@ -1,18 +1,20 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # CodexUI Qt architecture remediation thread prompt
 
-Use `/home/voc/projects/drafts/CodexUI/codexui` as the thread workspace and use
+> Engineering task prompt retained for provenance, not user setup instructions or commands to execute when reading this documentation.
+
+Use `/path/to/workspace/drafts/CodexUI/codexui` as the thread workspace and use
 maximum available reasoning effort.
 
 Read and obey the complete instruction chain before doing anything else:
 
-1. `/home/voc/.codex/AGENTS.md`
+1. `/path/to/engineering/AGENTS.md`
 2. repository-root `AGENTS.md`
 
 Then read these four mandatory audit inputs completely:

@@ -1,21 +1,15 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # CodexUI Qt UI architecture and usability audit
 
-<!-- snodec:begin back -->
-<p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
-</p>
-<!-- snodec:end back -->
-
 **Status:** complete read-only architectural audit; no remediation is implemented or approved here.
 **Audit date:** 2026-09-12 (Europe/Vienna)
-**Repository:** `/home/voc/projects/drafts/CodexUI/codexui`
+**Repository:** `/path/to/workspace/drafts/CodexUI/codexui`
 **Revision reviewed:** `629660e8882bddc7473ee5f1aab90c755ee6edd4` (`master`) plus the pre-existing uncommitted worktree recorded below.
 **Completion rule:** implementation belongs in a separate thread and may begin only after this audit is approved.
 

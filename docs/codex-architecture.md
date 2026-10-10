@@ -1,17 +1,11 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # CodexUI architecture
-
-<!-- snodec:begin back -->
-<p>
-  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
-</p>
-<!-- snodec:end back -->
 
 CodexUI presents the Codex app-server through the existing `codex-bridge`.
 The app-server remains authoritative for provider data and persistence; CodexUI

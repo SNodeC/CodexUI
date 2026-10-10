@@ -1,11 +1,13 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # External architecture review — ChatGPT
+
+> Historical external review transcript. Findings reflect that captured revision, not verified current product behavior; use the user guides and current qualification records for today's scope.
 
 # 1. Executive summary
 
@@ -1374,4 +1376,3 @@ largely intact, while substantially simplifying `ConversationView` and `Conversa
 The target should be measurable not only by correctness but by subtraction: **one renderer, fewer state-transfer paths, fewer geometry authorities, fewer tests dedicated to parity, and roughly 1.3–2.4 K fewer production Qt lines.**
 
 Within the stated **GitHub-only limitations**, I consider the source/history/test architecture audit complete.
-
