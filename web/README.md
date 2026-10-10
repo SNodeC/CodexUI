@@ -4,24 +4,9 @@ CodexWebUI is the static browser application for CodexUI 1.0. It connects direct
 
 ## Source layout
 
-The application consumes AISuite's `master` branch. Check out the repositories as:
+Follow the [browser build guide](../docs/build.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
 
-```text
-workspace/
-├── AISuite-extraction/AISuite-final/
-└── CodexUI/codexui/
-```
-
-From `CodexUI/codexui/web/`, build both sides:
-
-```sh
-npm ci --prefix ../../../AISuite-extraction/AISuite-final/packages/codex-frontend
-npm test --prefix ../../../AISuite-extraction/AISuite-final/packages/codex-frontend
-npm ci
-npm run release
-```
-
-`npm run profile` repeats the large-thread presentation measurement. There is no standalone Node development or production server.
+`npm run profile` from this directory repeats the large-thread presentation measurement. There is no standalone Node development or production server.
 
 ## Deployment
 
