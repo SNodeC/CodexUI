@@ -65,7 +65,7 @@ In the native threads panel, **projects contain the visual grouping; sections or
 
 To create a project or section, click the current grouping label—**Projects**, **Sections** or **Ungrouped**—above the thread list. Use a thread's context menu to assign its project and section. Creation and assignment require controller access and server support.
 
-[Read the grouping and lifecycle guide →](docs/thread-projects-sections.md)
+[![Read the grouping and lifecycle guide →](docs/media/menu/further-grouping-lifecycle.svg)](docs/thread-projects-sections.md)
 
 ### Choose your frontend
 
