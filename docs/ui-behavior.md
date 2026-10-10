@@ -1,5 +1,11 @@
 # CodexUI Interaction and Presentation Decisions
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 The method-level contract used to supply these behaviors is
 [`ui-ux-internal-api.md`](ui-ux-internal-api.md). That document is the
 canonical logic/UI boundary for the native shared-node-graph integration;
@@ -697,3 +703,13 @@ delayed highlight sweep. Any additional progress indicator must preserve input
 and navigation that can safely remain interactive, identify the operation it
 represents, and avoid suggesting that unrelated threads are blocked. No general
 spinner contract is defined yet.
+
+## Connection and controller ownership
+
+**Connection** opens **Bridge connection**. Choose a compiled transport, then enter **Socket path** for Unix or the host/port for a network transport (plus **WebSocket path** when applicable). **Apply and connect** updates the current UI session; command-line/SNode.C settings supply startup defaults. Cancelling the dialog does not apply changes. TLS certificate/verification settings remain part of the effective SNode.C configuration.
+
+The default Unix endpoint matches the bridge's private runtime socket: valid private `XDG_RUNTIME_DIR` plus `/codex-bridge.sock`, or `/tmp/codex-bridge-<uid>/codex-bridge.sock`. Run bridge and UI as the same user. A missing socket or unavailable provider is not controller denial: check transport connection and provider readiness separately.
+
+**Claim control** asks the bridge to assign this frontend the controller role; **Release control** relinquishes it. Only one frontend controls a shared session. Observers cannot create threads or submit prompts, and cannot take an already-owned controller role merely by clicking Claim. This is routing policy, not authentication or agent approval/sandbox policy.
+
+If the connection opens but prompts remain unavailable, wait for provider readiness, check controller status, and select a loaded thread or create a disposable one. Keep unsent text when diagnosing failures; sanitize logs and conversation data before reporting the sequence. The [first-run instructions](../README.md#first-run) give the native and browser journeys.

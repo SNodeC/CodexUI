@@ -1,5 +1,11 @@
 # CodexWebUI 1.0 Contract
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 ## Purpose
 
 CodexWebUI is the browser presentation of the existing CodexUI product. It is not another backend and does not replace or reimplement `codex-bridge`. Version 1.0 requires a production-built browser application that can perform the complete web parity scope below against the canonical bridge. A web feature is complete only after it independently proves behavioral equality with the corresponding current C++ feature.

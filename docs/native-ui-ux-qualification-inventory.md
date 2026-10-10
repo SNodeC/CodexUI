@@ -1,5 +1,11 @@
 # CodexUI canonical interactive Xvfb test suite
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 Last updated: 2026-09-26.
 
 This is the canonical interactive qualification specification for native CodexUI,

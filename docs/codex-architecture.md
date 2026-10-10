@@ -1,5 +1,11 @@
 # CodexUI architecture
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 CodexUI presents the Codex app-server through the existing `codex-bridge`.
 The app-server remains authoritative for provider data and persistence; CodexUI
 keeps only current in-memory state and genuinely local interaction state.

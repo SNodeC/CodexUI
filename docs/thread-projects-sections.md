@@ -1,5 +1,11 @@
 # Native thread projects and sections
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 Implementation baseline: `b9ff6e5` on `master`, initially clean.
 This feature is native-only; browser protocol/presentation compatibility is
 retained. No AISuite, SNode.C, app-server, installation or running-service changes

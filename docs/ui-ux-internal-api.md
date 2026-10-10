@@ -1,5 +1,11 @@
 # Native UI/UX internal API contract
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 This document is the canonical contract for the boundary between CodexUI's
 application logic and the established native Qt UI/UX. It describes behavior,
 call ordering, identity, ownership, and failure semantics in addition to C++

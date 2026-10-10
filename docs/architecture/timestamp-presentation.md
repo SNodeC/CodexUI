@@ -1,5 +1,11 @@
 # App-server timestamp presentation
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../../README.md#project-overview" title="CodexUI"><img src="../media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 ## Authority and inventory
 
 The protocol remains the time authority. `ProtocolTimingPaths.inc` records the

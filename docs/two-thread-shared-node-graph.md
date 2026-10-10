@@ -1,5 +1,11 @@
 # Shared node graph: writer, UI and projection readers
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 ## Scope and baseline
 
 This document is the implementation contract for CodexUI's deliberately narrow

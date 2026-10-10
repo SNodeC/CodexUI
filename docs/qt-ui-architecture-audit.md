@@ -1,5 +1,11 @@
 # CodexUI Qt UI architecture and usability audit
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 **Status:** complete read-only architectural audit; no remediation is implemented or approved here.
 **Audit date:** 2026-09-12 (Europe/Vienna)
 **Repository:** `/home/voc/projects/drafts/CodexUI/codexui`
