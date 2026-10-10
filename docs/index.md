@@ -13,7 +13,7 @@
 
 <!-- snodec:end menu -->
 
-This index routes to the existing guides; the complete first-use examples and commands remain in the [repository README](../README.md). Source-build instructions are collected in the build guide below.
+Start with the [repository README](../README.md#quick-start) for a first working result. These guides own deeper build, configuration, deployment and development instructions.
 
 ## Guides and references
 

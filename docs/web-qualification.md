@@ -1,5 +1,11 @@
 # CodexWebUI qualification
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 This record qualifies the browser frontend against
 [the web 1.0 contract](web-1.0-contract.md). Cross-frontend agreement is
 evidence-backed only where the same fixture corpus is executed by native C++

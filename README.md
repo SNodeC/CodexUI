@@ -14,7 +14,7 @@
 <!-- snodec:end header -->
 
 <!-- snodec:begin status -->
-[![CI](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml/badge.svg)](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml) · [![Licence: MIT or LGPL 3.0 or later](https://img.shields.io/badge/Licence-MIT%20OR%20LGPL--3.0--or--later-334155?style=flat)](LICENSE)
+[![CI](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml/badge.svg)](https://github.com/SNodeC/CodexUI/actions/workflows/ci.yml) · [![License: MIT or LGPL 3.0 or later](https://img.shields.io/badge/License-MIT%20OR%20LGPL--3.0--or--later-334155?style=flat)](LICENSE)
 <!-- snodec:end status -->
 
 **Follow the work, not just the final answer.** Codex(W)UI offers two frontends: **CodexUI**, a native Qt desktop application, and **CodexWUI**, a browser application connecting over WebSocket. They bring conversations, commands, plans, approvals and file changes into a visual coding workspace.
@@ -34,13 +34,13 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 <!-- snodec:end menu -->
 
-## What you see
-
-### Quick start
+## Quick start
 
 1. [Install](#install): prepare the native or browser frontend.
-2. [Use](#first-run): connect the native frontend and send a prompt; the browser route has its own launch guide.
+2. [Use](#first-run): connect your chosen frontend and send a prompt.
 3. [Configure](#configuration): review runtime settings and access controls before deployment.
+
+## What you see
 
 ### The workspace
 
@@ -52,20 +52,20 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 - **Follow execution:** read streamed responses, reasoning summaries and command output in one conversation. Send prompts, steer an active turn, stop work and respond to approval requests.
 - **Inspect results:** keep plans, agent activity, requests, changes and timing details beside the conversation. Review repository diffs, copy output and inspect the protocol when diagnosing a problem.
 
-#### A conversation you can work with
+### A conversation you can work with
 
 - **Rich, distinct activity cards.** Markdown, commands, file changes, plans, images and agent activity keep their own controls and presentation.
 - **History without loading every widget.** Paginated history and virtualized native rendering keep offscreen content as data rather than another renderer.
 - **Input beyond plain text.** The native composer accepts image paste and local file drag/drop, alongside the attachment picker and multiline editing.
 - **Context when you need it.** Supplied timestamps, durations, token information and detailed Inspector views make execution easier to understand.
 
-#### Projects and sections, without duplicating threads
+### Projects and sections, without duplicating threads
 
 In the native threads panel, **projects contain the visual grouping; sections organize the threads within it**. A section can appear in multiple projects because project and section memberships are independent. Standalone sections and ungrouped threads remain visible too.
 
 To create a project or section, click the current grouping label—**Projects**, **Sections** or **Ungrouped**—above the thread list. Use a thread's context menu to assign its project and section. Creation and assignment require controller access and server support.
 
-[![Read the grouping and lifecycle guide →](docs/media/menu/further-grouping-lifecycle.svg)](docs/thread-projects-sections.md)
+[![Read the grouping and lifecycle guide](docs/media/menu/further-grouping-lifecycle.svg)](docs/thread-projects-sections.md)
 
 ### Choose your frontend
 
@@ -95,25 +95,41 @@ These are source-installation routes, not a binary-package release promise.
 
 <a id="3-connect-and-work"></a>
 
-### Connect and work
+### Native desktop
 
-Start your configured `codex-bridge`, then run:
+**You need:** the native build, a configured Codex executable available to the bridge user, and AISuite's `codex-bridge`. The bridge's generated protocol targets Codex 0.154.0; use the [AISuite entry page](https://github.com/SNodeC/AISuite#project-overview) to check compatibility before changing Codex versions.
+
+Start `codex-bridge --config-file /dev/null` as your own user in one terminal. In a second terminal, run from this checkout:
 
 ```sh
 ./build/codex-ui
 ```
 
-Use **Connection** to select its endpoint. Acquire control if necessary, choose or create a thread, and send a prompt. App-server configuration determines available models, permissions and approval behavior.
+The default native transport is Unix JSONL, using the same private socket as the bridge: a valid private `XDG_RUNTIME_DIR` plus `/codex-bridge.sock`, otherwise `/tmp/codex-bridge-<uid>/codex-bridge.sock`. In **Connection**, select the built transport, verify its **Socket path** (or host/port for a network transport), and choose **Apply and connect**. Dialog changes apply to this UI session; command-line/SNode.C configuration supplies startup defaults.
 
-For the browser frontend, continue with [Browser edition](#browser-edition) and its [browser deployment guide](web/README.md); the native command above is not a browser launch command.
+Wait for the provider to become ready. If you are an observer and no controller owns the session, choose **Claim control**. Controller ownership authorizes mutations on this bridge connection; it is not a login or a replacement for Codex approval/sandbox settings. Choose or create a thread and send a prompt in a disposable workspace.
+
+**Expected result:** the thread list loads, the UI identifies your controller role, and a submitted prompt receives streamed activity and a response. A connection without provider readiness is not a successful agent run. Model requests may incur provider charges; avoid private workspaces while trying the example.
+
+### Browser edition
+
+After [building the browser assets](docs/build.md#browser-frontend), run this from the checkout root with AISuite's WebSocket support enabled and port **8080** free:
+
+```sh
+codex-bridge --config-file /dev/null codex --bridge-web-root "$PWD/web/app-dist" \
+  codex-bridge-websocket-ipv4 --disabled=false \
+  local --host 127.0.0.1 --port 8080
+```
+
+Open **http://127.0.0.1:8080/**. The page and `/codex` WebSocket share that loopback listener. Connect, claim control if it is vacant, and use a disposable thread for a first prompt. Expect the thread list and streamed response, as with the native route. For installed assets, endpoint overrides and remote deployment, use the [browser deployment guide](web/README.md#deployment); no Node server is required.
 
 ## Configuration
 
-Use the **Connection** controls described in [First run](#first-run), and configure the bridge endpoint for the selected frontend. [UI behavior](docs/ui-behavior.md), [browser endpoint configuration](web/README.md) and [controller/observer boundaries](#how-it-fits-together) describe the existing controls. App-server configuration remains authoritative for models, permissions and approvals.
+For native endpoints, use **Connection** as described in [First run](#first-run); startup defaults come from command-line/SNode.C settings, while the dialog applies to the current session. Browser endpoints and retained URL settings are documented in [browser deployment](web/README.md#deployment).
 
-## Platforms
+Controller/observer roles are routing permissions, **not authentication or tenant isolation**. Observers can receive session broadcasts and read approved workspace data, including files. Keep the Unix socket private and browser/network listeners on loopback unless an external authenticated TLS boundary protects them. App-server configuration remains authoritative for model selection, approvals and sandbox permissions.
 
-The native application integrates with the Linux desktop using Qt 6 Widgets. The browser frontend is a static web application served by `codex-bridge`; it does not need a Node runtime after installation. The [frontend comparison](#choose-your-frontend) and [browser contract](docs/web-1.0-contract.md) retain the feature and deployment boundaries.
+See [UI behavior](docs/ui-behavior.md) for interaction details and [Architecture](#architecture) for component ownership.
 
 <a id="how-it-fits-together"></a>
 
@@ -127,23 +143,6 @@ On the native side, a SNode.C worker owns protocol processing and writes one sha
 
 For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/codex-architecture.md).
 
-## Browser edition
-
-The browser frontend builds into `web/app-dist/`; a combined install places it in `share/codexui/web`. The bridge can serve the application and `/codex` WebSocket from one listener. Follow the [browser build guide](docs/build.md#browser-frontend) and [deployment guide](web/README.md) for checkout layout, qualification, standalone installation and endpoint configuration.
-
-## Quality and development
-
-Install Xvfb and `xauth`, then run native checks in the documented isolated environment:
-
-```sh
-xvfb-run -a env QT_QPA_PLATFORM=offscreen \
-  ctest --test-dir build --output-on-failure --parallel 14
-```
-
-The repository includes shared native/browser presentation fixtures, native interaction and geometry checks, and workload benchmarks. Selected native suites exercise DPR **1.0, 1.25, 1.5 and 2.0**. CI's accepted elapsed-time policy reports timing overruns; correctness and work-count checks remain enforced.
-
-The [interactive qualification inventory](docs/native-ui-ux-qualification-inventory.md) defines the wider visual and UX acceptance scope. Its [execution record](docs/native-ui-ux-qualification-results.md) remains incomplete: a green CI run is not a claim of complete desktop, accessibility or hardware touchpad qualification.
-
 ## Documentation
 
 | Start here | Go deeper |
@@ -153,11 +152,19 @@ The [interactive qualification inventory](docs/native-ui-ux-qualification-invent
 | [Timestamps and durations](docs/architecture/timestamp-presentation.md) | [Browser contract](docs/web-1.0-contract.md) |
 | [Browser build and deployment](web/README.md) | [Web qualification](docs/web-qualification.md) · [Release process](docs/web-release.md) |
 
-For bug reports, include the revision, Qt version, connection type and the smallest reproducible sequence. Remove credentials and private conversation content from logs and screenshots. See [engineering guidelines](AGENTS.md) before contributing architectural changes.
+For bug reports, include the revision, Qt version, connection type and the smallest reproducible sequence. Remove credentials and private conversation content from logs and screenshots.
+
+## Platforms
+
+The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web-1.0-contract.md); they are not a promise of native/browser feature parity.
+
+## Releases
+
+No GitHub release or shared binary-package distribution is published yet; the documented installation routes build from source. Future release notes belong on the [releases page](https://github.com/SNodeC/CodexUI/releases). The [web release process](docs/web-release.md) describes development qualification, not a downloadable product release.
 
 ## Contributing
 
-[Report an issue](https://github.com/SNodeC/CodexUI/issues) using the sanitized information in [Documentation](#documentation); read the existing [engineering guidelines](AGENTS.md).
+[Report an issue](https://github.com/SNodeC/CodexUI/issues) using the sanitized information in [Documentation](#documentation); read the existing [engineering guidelines](AGENTS.md) and [build/qualification guide](docs/build.md#quality-and-development).
 
 <!-- snodec:begin ecosystem -->
 ## Ecosystem
@@ -166,11 +173,9 @@ For bug reports, include the revision, Qt version, connection type and the small
 <!-- snodec:end ecosystem -->
 
 <!-- snodec:begin footer -->
-## License and ecosystem
-
 Choose either [MIT](LICENSE-MIT) or [LGPL-3.0-or-later](LICENSE-LGPL-3.0-or-later).
 
-Built with [Qt](https://www.qt.io/), [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview). Codex(W)UI is an independent project; neither frontend is an official OpenAI application.
+Built with [Qt](https://www.qt.io/). Codex(W)UI is an independent project; neither frontend is an official OpenAI application.
 
-Maintainer: [Volker Christian](https://github.com/VolkerChristian). [Organization](https://github.com/SNodeC) · [Contributing](https://github.com/SNodeC/.github/blob/main/CONTRIBUTING.md) · [Security](https://github.com/SNodeC/.github/blob/main/SECURITY.md)
+Maintainer: [Volker Christian](https://github.com/VolkerChristian). [Organization](https://github.com/SNodeC) · [Contributing](#contributing) · [Security](https://github.com/SNodeC/.github/blob/main/SECURITY.md)
 <!-- snodec:end footer -->

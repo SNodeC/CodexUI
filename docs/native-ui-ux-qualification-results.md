@@ -1,5 +1,11 @@
 # Native qualification execution record — 2026-09-27
 
+<!-- snodec:begin back -->
+<p>
+  <a href="../README.md#project-overview" title="CodexUI"><img src="media/menu/back-codexui.svg" alt="CodexUI" width="96" height="24"></a>
+</p>
+<!-- snodec:end back -->
+
 Specification: [canonical interactive inventory and visual approval matrix](native-ui-ux-qualification-inventory.md).
 This records execution, not a replacement plan or reduced acceptance scope.
 
