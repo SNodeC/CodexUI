@@ -11,12 +11,6 @@
   <a href="../README.md#contributing" title="Contribute"><img src="media/menu/snodec-contribute-108.svg" alt="Contribute" width="108" height="24"></a>
 </p>
 
-<details>
-<summary>Text navigation</summary>
-
-[Start](../README.md#quick-start) · [Install](../README.md#install) · [Build](../README.md#build-from-source) · [Use](../README.md#first-run) · [Configure](../README.md#configuration) · [Architecture](../README.md#architecture) · [Contribute](../README.md#contributing)
-
-</details>
 <!-- snodec:end menu -->
 
 This index routes to the existing guides; the complete first-use examples and commands remain in the [repository README](../README.md). No guide has been moved or replaced.

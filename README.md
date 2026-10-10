@@ -32,27 +32,21 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
   <a href="#contributing" title="Contribute"><img src="docs/media/menu/snodec-contribute-108.svg" alt="Contribute" width="108" height="24"></a>
 </p>
 
-<details>
-<summary>Text navigation</summary>
-
-[Start](#quick-start) · [Install](#install) · [Build](#build-from-source) · [Use](#first-run) · [Configure](#configuration) · [Architecture](#architecture) · [Contribute](#contributing)
-
-</details>
 <!-- snodec:end menu -->
 
 ## What you see
 
 ### Quick start
 
-1. [Install](#install) — choose the available installation route and prepare its requirements.
-2. [Use](#first-run) — connect the native frontend and send a prompt.
-3. [Configure](#configuration) — review runtime settings and access boundaries before deployment.
+1. [Install](#install) — prepare the native or browser frontend.
+2. [Use](#first-run) — connect the native frontend and send a prompt; the browser route has its own launch guide.
+3. [Configure](#configuration) — review runtime settings and access controls before deployment.
+
+### The workspace
 
 [![Native CodexUI showing a conversation, completed command output, turn settings and the Inspector.](docs/media/native-workspace.png)](docs/media/native-workspace.png)
 
 *Actual native application, captured during an isolated qualification session with a disposable demonstration thread. Click the image to inspect it at full resolution. [Image provenance](docs/media/README.md).*
-
-### The workspace
 
 - **Organize the work:** browse threads, search titles, archive work and return to retained history. In the native app, group threads by projects and shared sections.
 - **Follow execution:** read streamed responses, reasoning summaries and command output in one conversation. Send prompts, steer an active turn, stop work and respond to approval requests.
@@ -89,21 +83,26 @@ The frontends share protocol and lifecycle meaning, **not an identical feature i
 
 ## Install
 
-### Get started
+Choose your route.
 
-<a id="1-prepare-the-dependencies"></a>
+| Route | How to install |
+| --- | --- |
+| **Native desktop** | Prepare the prerequisites below, [build CodexUI](#build-from-source), then optionally install the build. |
+| **Browser frontend** | Follow [Browser edition](#browser-edition) to build static assets served by `codex-bridge`. No Qt installation or Node runtime is needed to run them. |
 
-#### Prepare the dependencies
+These are source-installation routes, not a binary-package release promise.
+
+<a id="get-started"></a><a id="1-prepare-the-dependencies"></a><a id="prepare-the-dependencies"></a>
+
+### Prerequisites
 
 The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets, pkg-config, libgit2 development files, and installed **SNode.C** and **AISuite** packages. On Debian/Ubuntu, the libgit2 development package is `libgit2-dev`.
 
 Build [SNode.C](https://github.com/SNodeC/snode.c#project-overview) and [AISuite](https://github.com/SNodeC/AISuite#build-from-source) from their `master` branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
-Choose your route: [build the native application](#build-from-source) or follow the complete [browser edition](#browser-edition) source-build route. There is no new binary-package promise.
+### Install the build
 
-After completing the native [Build from source](#build-from-source), install from the same checkout and build directory:
-
-Optional installation into `/usr/local` adds the executable, desktop entry and application icon. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
+From the same checkout and build directory used for the native build, optionally install into `/usr/local` to add the executable, desktop entry and application icon. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
 
 ```sh
 sudo cmake --install build
