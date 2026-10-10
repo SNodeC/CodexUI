@@ -23,24 +23,30 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 <!-- snodec:begin menu -->
 <p>
-  <a href="#what-you-see" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="108" height="24"></a>
+  <a href="#quick-start" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="108" height="24"></a>
   <a href="#install" title="Install"><img src="docs/media/menu/snodec-install-108.svg" alt="Install" width="108" height="24"></a>
   <a href="#build-from-source" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="108" height="24"></a>
   <a href="#first-run" title="Use"><img src="docs/media/menu/snodec-use-108.svg" alt="Use" width="108" height="24"></a>
   <a href="#configuration" title="Configure"><img src="docs/media/menu/snodec-configure-108.svg" alt="Configure" width="108" height="24"></a>
-  <a href="docs/codex-architecture.md" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="108" height="24"></a>
+  <a href="#architecture" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="108" height="24"></a>
   <a href="#contributing" title="Contribute"><img src="docs/media/menu/snodec-contribute-108.svg" alt="Contribute" width="108" height="24"></a>
 </p>
 
 <details>
 <summary>Text navigation</summary>
 
-[Start](#what-you-see) · [Install](#install) · [Build](#build-from-source) · [Use](#first-run) · [Configure](#configuration) · [Architecture](docs/codex-architecture.md) · [Contribute](#contributing)
+[Start](#quick-start) · [Install](#install) · [Build](#build-from-source) · [Use](#first-run) · [Configure](#configuration) · [Architecture](#architecture) · [Contribute](#contributing)
 
 </details>
 <!-- snodec:end menu -->
 
 ## What you see
+
+### Quick start
+
+1. [Install](#install) — choose the available installation route and prepare its requirements.
+2. [Use](#first-run) — connect the native frontend and send a prompt.
+3. [Configure](#configuration) — review runtime settings and access boundaries before deployment.
 
 [![Native CodexUI showing a conversation, completed command output, turn settings and the Inspector.](docs/media/native-workspace.png)](docs/media/native-workspace.png)
 
@@ -93,7 +99,15 @@ The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets
 
 Build [SNode.C](https://github.com/SNodeC/snode.c#project-overview) and [AISuite](https://github.com/SNodeC/AISuite#build-from-source) from their `master` branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
-[Build the native application](#build-from-source) or follow the complete [browser edition](#browser-edition) source-build route. Installation commands remain below; there is no new binary-package promise.
+Choose your route: [build the native application](#build-from-source) or follow the complete [browser edition](#browser-edition) source-build route. There is no new binary-package promise.
+
+After completing the native [Build from source](#build-from-source), install from the same checkout and build directory:
+
+Optional installation into `/usr/local` adds the executable, desktop entry and application icon. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
+
+```sh
+sudo cmake --install build
+```
 
 ## First run
 
@@ -109,6 +123,8 @@ Start your configured `codex-bridge`, then run:
 
 Use **Connection** to select its endpoint. Acquire control if necessary, choose or create a thread, and send a prompt. App-server configuration determines available models, permissions and approval behavior.
 
+For the browser frontend, continue with [Browser edition](#browser-edition) and its [browser deployment guide](web/README.md); the native command above is not a browser launch command.
+
 ## Configuration
 
 Use the **Connection** controls described in [First run](#first-run), and configure the bridge endpoint for the selected frontend. [UI behavior](docs/ui-behavior.md), [browser endpoint configuration](web/README.md) and [controller/observer boundaries](#how-it-fits-together) describe the existing controls. App-server configuration remains authoritative for models, permissions and approvals.
@@ -118,6 +134,8 @@ Use the **Connection** controls described in [First run](#first-run), and config
 <a id="2-build-the-native-application"></a>
 
 ### Build the native application
+
+Prepare the [dependencies](#1-prepare-the-dependencies) listed under Install before configuring this source build.
 
 From this repository's root, replace the two installation prefixes below:
 
@@ -132,25 +150,23 @@ cmake --build build --parallel 14
 
 This is an explicit **native-only** build. For a combined install, build the web artifact first as described below, then configure with `CODEXUI_INSTALL_WEB=ON`.
 
-Optional installation into `/usr/local` adds the executable, desktop entry and application icon. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
-
-```sh
-sudo cmake --install build
-```
-
 For the browser build and its required checkout layout, see [Browser edition](#browser-edition).
 
 ## Platforms
 
 The native application integrates with the Linux desktop using Qt 6 Widgets. The browser frontend is a static web application served by `codex-bridge`; it does not need a Node runtime after installation. The [frontend comparison](#choose-your-frontend) and [browser contract](docs/web-1.0-contract.md) retain the feature and deployment boundaries.
 
-## How it fits together
+<a id="how-it-fits-together"></a>
+
+## Architecture
 
 **CodexUI / CodexWUI** ↔ **AISuite bridge** ↔ **Codex app-server**
 
 The bridge allows multiple frontends to follow the same app-server session, with one controller at a time and policy-limited observers. Controller status is distinct from the agent's approval and sandbox settings.
 
 On the native side, a SNode.C worker owns protocol processing and writes one shared `NodeGraph`; Qt projects that state into widgets. The browser uses AISuite's TypeScript SDK and its own presentation state. Neither frontend replaces app-server's persistent history or tool execution.
+
+For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/codex-architecture.md).
 
 ## Browser edition
 
