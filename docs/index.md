@@ -1,7 +1,22 @@
 # Codex(W)UI documentation
 
 <!-- snodec:begin menu -->
+<p>
+  <a href="../README.md#what-you-see" title="Start"><img src="media/menu/snodec-start-108.svg" alt="Start" width="108" height="24"></a>
+  <a href="../README.md#install" title="Install"><img src="media/menu/snodec-install-108.svg" alt="Install" width="108" height="24"></a>
+  <a href="../README.md#build-from-source" title="Build"><img src="media/menu/snodec-build-108.svg" alt="Build" width="108" height="24"></a>
+  <a href="../README.md#first-run" title="Use"><img src="media/menu/snodec-use-108.svg" alt="Use" width="108" height="24"></a>
+  <a href="../README.md#configuration" title="Configure"><img src="media/menu/snodec-configure-108.svg" alt="Configure" width="108" height="24"></a>
+  <a href="codex-architecture.md" title="Architecture"><img src="media/menu/snodec-architecture-108.svg" alt="Architecture" width="108" height="24"></a>
+  <a href="../README.md#contributing" title="Contribute"><img src="media/menu/snodec-contribute-108.svg" alt="Contribute" width="108" height="24"></a>
+</p>
+
+<details>
+<summary>Text navigation</summary>
+
 [Start](../README.md#what-you-see) · [Install](../README.md#install) · [Build](../README.md#build-from-source) · [Use](../README.md#first-run) · [Configure](../README.md#configuration) · [Architecture](codex-architecture.md) · [Contribute](../README.md#contributing)
+
+</details>
 <!-- snodec:end menu -->
 
 This index routes to the existing guides; the complete first-use examples and commands remain in the [repository README](../README.md). No guide has been moved or replaced.

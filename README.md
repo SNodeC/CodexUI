@@ -22,7 +22,22 @@
 Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
 
 <!-- snodec:begin menu -->
+<p>
+  <a href="#what-you-see" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="108" height="24"></a>
+  <a href="#install" title="Install"><img src="docs/media/menu/snodec-install-108.svg" alt="Install" width="108" height="24"></a>
+  <a href="#build-from-source" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="108" height="24"></a>
+  <a href="#first-run" title="Use"><img src="docs/media/menu/snodec-use-108.svg" alt="Use" width="108" height="24"></a>
+  <a href="#configuration" title="Configure"><img src="docs/media/menu/snodec-configure-108.svg" alt="Configure" width="108" height="24"></a>
+  <a href="docs/codex-architecture.md" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="108" height="24"></a>
+  <a href="#contributing" title="Contribute"><img src="docs/media/menu/snodec-contribute-108.svg" alt="Contribute" width="108" height="24"></a>
+</p>
+
+<details>
+<summary>Text navigation</summary>
+
 [Start](#what-you-see) · [Install](#install) · [Build](#build-from-source) · [Use](#first-run) · [Configure](#configuration) · [Architecture](docs/codex-architecture.md) · [Contribute](#contributing)
+
+</details>
 <!-- snodec:end menu -->
 
 ## What you see
