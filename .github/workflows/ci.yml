@@ -12,7 +12,7 @@ env:
 
 jobs:
   snodec:
-    uses: SNodeC/.github/.github/workflows/verify.yml@v1
+    uses: SNodeC/.github/.github/workflows/verify.yml@v1.0
     secrets: inherit
   x-web:
     runs-on: ubuntu-24.04
