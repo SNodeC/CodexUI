@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="32" viewBox="0 0 240 32" role="img" aria-labelledby="title" color="#fcd34d">
+  <title id="title">Applications · App</title>
+  <rect width="240" height="32" rx="6" fill="#451a03"/>
+  <g transform="translate(8 4)" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/>
+  </g>
+  <text x="42" y="21" fill="currentColor" font-family="system-ui, sans-serif" font-size="13">Applications · App</text>
+</svg>
