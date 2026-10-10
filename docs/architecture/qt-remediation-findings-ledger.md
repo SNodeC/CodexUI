@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # Qt architecture remediation findings ledger
 
 ## Current verified repair plan — 2026-09-20

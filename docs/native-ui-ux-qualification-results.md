@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # Native qualification execution record — 2026-09-27
 
 <!-- snodec:begin back -->
@@ -6,7 +13,7 @@
 </p>
 <!-- snodec:end back -->
 
-Specification: [canonical interactive inventory and visual approval matrix](native-ui-ux-qualification-inventory.md).
+Specification: [canonical interactive inventory and visual approval matrix](native-ui-ux-qualification-inventory.md#page-overview).
 This records execution, not a replacement plan or reduced acceptance scope.
 
 **Overall verdict: incomplete, not approved.** The recorded repairs are verified

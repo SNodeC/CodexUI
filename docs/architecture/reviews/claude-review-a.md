@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # External architecture review — Claude A
 
 I ran the audit directly against a fresh clone rather than delegating it. I hit my tool budget for this turn partway through the file-by-file sweep, so below is a **partial audit** — everything stated is source-verified at the exact commit, and I've marked precisely where coverage stops.

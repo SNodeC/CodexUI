@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # Landing-page assets
 
 - `readme-hero.svg`: original, editable vector artwork for this README. The small three-pane motif is a schematic illustration, not a screenshot. The application mark follows `resources/icons/codex-ui.svg`.

@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # CodexWebUI qualification
 
 <!-- snodec:begin back -->
@@ -7,7 +14,7 @@
 <!-- snodec:end back -->
 
 This record qualifies the browser frontend against
-[the web 1.0 contract](web-1.0-contract.md). Cross-frontend agreement is
+[the web 1.0 contract](web-1.0-contract.md#page-overview). Cross-frontend agreement is
 evidence-backed only where the same fixture corpus is executed by native C++
 and browser TypeScript. The other suites are browser-local regression evidence;
 they neither execute Qt nor claim pixel identity with it.
@@ -160,7 +167,7 @@ Timing runs were serial and separate from builds/tests; all execution checks
 used `xvfb-run -a env QT_QPA_PLATFORM=offscreen`. The production artifact was
 rebuilt and its relocatability verified. Intermediate failures, source/LOC
 accounting, exact commands and qualification limitations are retained in the
-[remediation ledger](architecture/qt-remediation-findings-ledger.md).
+[remediation ledger](architecture/qt-remediation-findings-ledger.md#page-overview).
 This is local-worktree evidence, not a claim of universally lag-free operation;
 the AISuite source change must accompany CodexUI in subsequent releases.
 

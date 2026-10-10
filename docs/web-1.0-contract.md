@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # CodexWebUI 1.0 Contract
 
 <!-- snodec:begin back -->
@@ -62,7 +69,7 @@ web/
     src/app/
 ```
 
-The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite `master` for both native and browser builds, and SNode.C `master` for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](../web/README.md).
+The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite `master` for both native and browser builds, and SNode.C `master` for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](../web/README.md#page-overview).
 
 ## Frontend technology
 

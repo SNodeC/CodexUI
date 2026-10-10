@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="../docs/media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # CodexWUI
 
 <!-- snodec:begin back -->
@@ -38,4 +45,4 @@ The configured bridge URL is retained in browser local storage. Controller/obser
 - `npm run verify:artifact` proves that the output is non-empty and relocatable below an arbitrary static base path.
 - The web qualification job checks the SDK from AISuite's default branch independently, runs the web suite, records the performance profile, installs the artifact through CMake, and uploads the verified staged tree as `codexui-web`.
 
-The authoritative scope and exceptions are in [`../docs/web-1.0-contract.md`](../docs/web-1.0-contract.md).
+The authoritative scope and exceptions are in [`../docs/web-1.0-contract.md`](../docs/web-1.0-contract.md#page-overview).

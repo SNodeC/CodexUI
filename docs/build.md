@@ -1,3 +1,10 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p>
+  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI documentation" width="100%"></a>
+</p>
+<!-- snodec:end page-header -->
+
 # Build and install Codex(W)UI from source
 
 <!-- snodec:begin back -->
@@ -54,7 +61,7 @@ xvfb-run -a env QT_QPA_PLATFORM=offscreen \
 
 The repository includes shared native/browser presentation fixtures, native interaction and geometry checks, and workload benchmarks. Selected native suites exercise DPR **1.0, 1.25, 1.5 and 2.0**. CI's accepted elapsed-time policy reports timing overruns; correctness and work-count checks remain enforced.
 
-The [interactive qualification inventory](native-ui-ux-qualification-inventory.md) defines the wider visual and UX acceptance scope. Its [execution record](native-ui-ux-qualification-results.md) remains incomplete: a green CI run is not a claim of complete desktop, accessibility or hardware touchpad qualification.
+The [interactive qualification inventory](native-ui-ux-qualification-inventory.md#page-overview) defines the wider visual and UX acceptance scope. Its [execution record](native-ui-ux-qualification-results.md#page-overview) remains incomplete: a green CI run is not a claim of complete desktop, accessibility or hardware touchpad qualification.
 
 ## Browser frontend
 
@@ -85,6 +92,6 @@ npm ci --prefix web
 npm run release --prefix web
 ```
 
-The output is `web/app-dist/`. A combined install places it in `share/codexui/web`; the bridge can serve the application and `/codex` WebSocket from one listener. See [browser packaging and deployment](../web/README.md) for standalone installation and endpoint configuration.
+The output is `web/app-dist/`. A combined install places it in `share/codexui/web`; the bridge can serve the application and `/codex` WebSocket from one listener. See [browser packaging and deployment](../web/README.md#page-overview) for standalone installation and endpoint configuration.
 
 For native execution, return to [First run](../README.md#first-run); qualification commands and coverage boundaries are in [Quality and development](#quality-and-development).
