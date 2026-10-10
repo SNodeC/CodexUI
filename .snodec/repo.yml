@@ -1,0 +1,25 @@
+# Build specifics only; identity lives in SNodeC/.github/catalog.yml.
+ci:
+  profile: cpp
+  apt:
+  - libgit2-dev
+  - qt6-base-dev
+  - xvfb
+  - xauth
+  deps:
+  - snode.c@dev
+  - AISuite@dev
+  cmake_options:
+  - -DCMAKE_BUILD_TYPE=Debug
+  - -DBUILD_TESTING=ON
+  - -DCODEXUI_INSTALL_WEB=OFF
+  ctest_args:
+  - --output-on-failure
+  - --verbose
+  - --parallel
+  - '14'
+  ipv6: true
+  runtime_dirs: true
+  parallel: 14
+  env: {CODEXUI_TIMING_POLICY: report}
+  ctest_launcher: [xvfb-run, -a, env, QT_QPA_PLATFORM=offscreen]
