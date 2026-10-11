@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="72" viewBox="0 0 480 72" role="img" aria-label="CodexUI — Web UI"><title>CodexUI — Web UI</title><defs><linearGradient id="background" x2="1" y2="1"><stop stop-color="#101f35"/><stop offset="1" stop-color="#172f47"/></linearGradient><clipPath id="rounded"><rect width="480" height="72" rx="10"/></clipPath></defs><g clip-path="url(#rounded)"><rect width="480" height="72" fill="url(#background)"/><rect width="8" height="72" fill="#fcd34d"/></g><g transform="translate(46 36) scale(0.21782178) translate(-151 -99)"><g xmlns="http://www.w3.org/2000/svg">
+    <rect width="302" height="198" rx="15" fill="#142640" stroke="#435f88" />
+    <path d="M0 40h302M69 40v158M229 40v158" stroke="#435f88" />
+    <circle cx="20" cy="20" r="4" fill="#63d5a5" />
+    <path d="M35 20h102" stroke="#769bd0" stroke-width="5" stroke-linecap="round" />
+    <rect x="12" y="57" width="45" height="21" rx="5" fill="#2f6feb" />
+    <path d="M18 97h31m-31 18h24m-24 18h31" stroke="#769bd0" stroke-width="4" stroke-linecap="round" />
+    <rect x="83" y="57" width="132" height="48" rx="7" fill="#263f64" />
+    <path d="M96 73h83m-83 15h62" stroke="#9bbce9" stroke-width="4" stroke-linecap="round" />
+    <rect x="83" y="117" width="132" height="63" rx="7" fill="#1b3347" stroke="#63d5a5" stroke-opacity=".45" />
+    <path d="m97 137 5 5 10-11m-15 28 5 5 10-11M124 139h75m-75 22h50" fill="none" stroke="#63d5a5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M244 63h42m-42 18h29m-29 28h42m-42 18h35m-35 28h42" stroke="#769bd0" stroke-width="4" stroke-linecap="round" />
+  </g>
+  </g><text x="84" y="32" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="25" font-weight="700" fill="#ffffff">CodexUI</text><text x="84" y="58" text-anchor="start" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="23" font-weight="600" fill="#fcd34d">Web UI</text></svg>

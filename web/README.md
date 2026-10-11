@@ -1,8 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
-<p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="../docs/media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
-</p>
+<p><picture><source media="(max-width: 640px)" srcset="../docs/media/nav/banner-web-ui-compact.svg"><img src="../docs/media/nav/banner-web-ui.svg" alt="CodexUI — Web UI" width="100%"></picture></p>
+<p><a href="../README.md#project-overview" title="Up to CodexUI"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/media/nav/up-codexui-dark.svg"><img src="../docs/media/nav/up-codexui-light.svg" alt="Up to CodexUI" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNodeC organization"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/media/nav/organization-dark.svg"><img align="right" src="../docs/media/nav/organization-light.svg" alt="SNodeC organization" width="160" height="28"></picture></a><a href="../README.md#project-overview" title="CodexUI repository"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/media/nav/repository-dark.svg"><img align="right" src="../docs/media/nav/repository-light.svg" alt="CodexUI repository" width="160" height="28"></picture></a><br clear="all"></p>
 <!-- snodec:end page-header -->
 
 # CodexWUI
@@ -11,7 +10,7 @@ CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to a
 
 ## Source layout
 
-Follow the [browser build guide](../docs/build.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
+Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
 
 `npm run profile` from this directory repeats the large-thread presentation measurement. There is no standalone Node development or production server.
 
@@ -56,4 +55,4 @@ Verify page/assets delivery, the WSS handshake, controller/observer behavior and
 - `npm run verify:artifact` proves that the output is non-empty and relocatable below an arbitrary static base path.
 - The web qualification job checks the SDK from AISuite's default branch independently, runs the web suite, records the performance profile, installs the artifact through CMake, and uploads the verified staged tree as `codexui-web`.
 
-The authoritative scope and exceptions are in [`../docs/web-1.0-contract.md`](../docs/web-1.0-contract.md#page-overview).
+The authoritative scope and exceptions are in [`../docs/web/contract-1.0.md`](../docs/web/contract-1.0.md#page-overview).
