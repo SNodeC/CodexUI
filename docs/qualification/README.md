@@ -8,6 +8,8 @@
 
 The native interactive test suite and its recorded execution results.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [Native qualification execution record — 2026-09-27](native-results-2026-09-27.md#page-overview)
 - [CodexUI canonical interactive Xvfb test suite](native-test-suite.md#page-overview)

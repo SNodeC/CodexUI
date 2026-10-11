@@ -1,8 +1,14 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p><picture><source media="(max-width: 640px)" srcset="../media/nav/banner-records-compact.svg"><img src="../media/nav/banner-records.svg" alt="CodexUI — Records" width="100%"></picture></p>
+<p><a href="README.md#page-overview" title="Up to Records"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-records-dark.svg"><img src="../media/nav/up-records-light.svg" alt="Up to Records" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNodeC organization"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNodeC organization" width="160" height="28"></picture></a><a href="../../README.md#project-overview" title="CodexUI repository"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" width="160" height="28"></picture></a><br clear="all"></p>
+<!-- snodec:end page-header -->
+
 # Codex 0.162.1 local migration results
 
 Date: 2026-10-11. The migration is implemented locally in CodexUI and AISuite. This report records the local implementation and verification before publication. Experimental API access remains enabled. No system-wide Codex installation, personal-service restart, production Codex-home access, credential copy or production database migration was performed. Runtime qualification used the complete localized release package, disposable homes/configuration/workspaces and loopback mock model providers.
 
-The [migration inventory](codex-0.162.1-migration-inventory.md) records the decisions, complete schema delta, experimental usage, persistence/package requirements and answers to the preceding questions. This report records the resulting implementation and its verification. It does not claim production deployment or complete acceptance of the canonical [22-section native interactive and visual suite](qualification/native-test-suite.md).
+The [migration inventory](codex-0.162.1-migration-inventory.md) records the decisions, complete schema delta, experimental usage, persistence/package requirements and answers to the preceding questions. This report records the resulting implementation and its verification. It does not claim production deployment or complete acceptance of the canonical [22-section native interactive and visual suite](../qualification/native-test-suite.md).
 
 AISuite dependency: commit [`a913b80228e5a8320517cd989043ad3d6e6ad73b`](https://github.com/SNodeC/AISuite/commit/a913b80228e5a8320517cd989043ad3d6e6ad73b). Build and stage that SDK before rebuilding either CodexUI frontend.
 

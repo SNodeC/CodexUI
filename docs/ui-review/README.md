@@ -8,6 +8,8 @@
 
 UI review material: inventory, state matrix, UX decisions and the code-polish roadmap.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [CodexUI code-polish roadmap](code-polish-roadmap.md#page-overview)
 - [CodexUI Current Interaction State Matrix](state-matrix.md#page-overview)

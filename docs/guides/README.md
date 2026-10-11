@@ -8,6 +8,8 @@
 
 Building CodexUI and using its native interface.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [Build and install Codex(W)UI from source](build-from-source.md#page-overview)
 - [Interaction guide](interaction-guide.md#page-overview)

@@ -18,7 +18,7 @@ Start with the [native or browser first run](../../README.md#first-run). This pa
 
 ## Known limitations
 
-- Approval dialogs check bounded transport shape and reject unsafe context, but do not provide full standard-MCP schema/content validation or file-change stale-revision gating. Agent approval/sandbox policy remains separate. Review untrusted tool requests and edits accordingly; see the [approval boundary record](../architecture/remediation/findings-ledger.md#unresolved-evidence-questions-and-approval-gates).
+- Approval dialogs check bounded transport shape and reject unsafe context, but do not provide full standard-MCP schema/content validation or file-change stale-revision gating. Agent approval/sandbox policy remains separate. Review untrusted tool requests and edits accordingly; see the [approval boundary record](../architecture/remediation/findings-ledger/findings-and-crosswalk.md#unresolved-evidence-questions-and-approval-gates).
 - Native interactive qualification remains incomplete, not an approval of every UI path. The [qualification record](../qualification/native-results-2026-09-27.md#page-overview) records its environment and outstanding work.
 - Dense emoji-heavy diffs were slow with the recorded stock Qt 6.10.2 build. An isolated patched-Qt experiment is not an installed fix or a promise for other Qt versions; the [performance record](../qualification/native-results-2026-09-27.md#page-overview) owns those measurements.
 - Browser scope differs from native scope. Consult the [native-only 1.0 features](../web/contract-1.0.md#native-only-in-10) rather than assuming parity.

@@ -160,7 +160,7 @@ Timing runs were serial and separate from builds/tests; all execution checks
 used `xvfb-run -a env QT_QPA_PLATFORM=offscreen`. The production artifact was
 rebuilt and its relocatability verified. Intermediate failures, source/LOC
 accounting, exact commands and qualification limitations are retained in the
-[remediation ledger](../architecture/remediation/findings-ledger.md#page-overview).
+[remediation ledger](../architecture/remediation/findings-ledger/README.md#page-overview).
 This is local-worktree evidence, not a claim of universally lag-free operation;
 the AISuite source change must accompany CodexUI in subsequent releases.
 

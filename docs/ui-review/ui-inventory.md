@@ -6,7 +6,7 @@
 
 # CodexUI Current UI Inventory
 
-This is a historical UI inventory. Its measured-placeholder and request-acknowledgment descriptions are superseded by [current user behavior](../guides/interaction-guide.md#using-codexui) and the [remediation record](../architecture/remediation/findings-ledger.md#page-overview), not a current acceptance claim.
+This is a historical UI inventory. Its measured-placeholder and request-acknowledgment descriptions are superseded by [current user behavior](../guides/interaction-guide.md#using-codexui) and the [remediation record](../architecture/remediation/findings-ledger/README.md#page-overview), not a current acceptance claim.
 
 ## Top bar
 
