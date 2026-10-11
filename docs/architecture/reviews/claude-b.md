@@ -159,7 +159,7 @@ Meanwhile `NodeGraphUiAdapter.cpp` (2 250 lines, the other major graph reader) h
 
 ### A-8 — The entire presentation stack exists twice, and has already drifted — **High**
 
-`docs/web-1.0-contract.md` states the browser frontend must "independently prove behavioral equality with the corresponding current C++ feature". That is a deliberate architectural choice and I am not arguing against having a web frontend. The problem is that the duplication is *unmanaged*: comparing `src/codex/middle/MiddleTypes.h` with `web/src/conversation/MiddleTypes.ts` at this commit shows the contract is already violated in the type definitions themselves:
+`docs/web/contract-1.0.md` states the browser frontend must "independently prove behavioral equality with the corresponding current C++ feature". That is a deliberate architectural choice and I am not arguing against having a web frontend. The problem is that the duplication is *unmanaged*: comparing `src/codex/middle/MiddleTypes.h` with `web/src/conversation/MiddleTypes.ts` at this commit shows the contract is already violated in the type definitions themselves:
 
 | Type | C++ | TypeScript |
 |---|---|---|
@@ -377,7 +377,7 @@ A passing test is evidence only for what it observes; this one observes one inte
 
 ### T-6 — The benchmark is built but never run — **Medium**
 
-`codexui-conversation-view-benchmark` is defined at `CMakeLists.txt:445` and never passed to `add_test`. There is no performance gate of any kind in CI, despite virtualization being the subsystem's entire justification and `docs/qt-virtualized-conversation-view.md` citing benchmark numbers as the baseline.
+`codexui-conversation-view-benchmark` is defined at `CMakeLists.txt:445` and never passed to `add_test`. There is no performance gate of any kind in CI, despite virtualization being the subsystem's entire justification and `docs/architecture/qt-virtualized-conversation-view.md` citing benchmark numbers as the baseline.
 
 ### T-7 — Timeouts as flakiness management — **Low/Medium**
 
@@ -410,7 +410,7 @@ A caution on 7: it is the highest-risk item here. The passive renderer exists fo
 
 ## 10. Coverage and limits
 
-**Read in full or substantially:** `main.cpp`, `MainWindow`, `ShellWidget.h` + structural survey of `ShellWidget.cpp`, `FrontendSession.h`, `ClientRuntime.h` + macro survey, `UiStatus.h`, `nodegraph/NodeGraph.h`, `nodegraph/Value.h`, `nodegraph/ProtocolCatalog.cpp` (asserts), `middle/MiddleTypes.h/.cpp`, `middle/ConversationPresentation.h/.cpp`, `middle/ConversationCards.h` + key regions of `.cpp`, `middle/ConversationView.h` + key regions of `.cpp`, `middle/ConversationItemModel.h`, `middle/InspectorPane.cpp` (controls), `middle/ThreadPane.cpp` (delegate/list), `ui/UiStyle.h/.cpp`, `TurnSettingsWidget.cpp` (controls), `DiffViewer.cpp` (controls), `web/src/conversation/MiddleTypes.ts`, `web/src/presentation/PresentationStatus.ts`, `CMakeLists.txt`, `nodegraph/CMakeLists.txt`, `.github/workflows/ci.yml`, `docs/qt-virtualized-conversation-view.md`, `docs/web-1.0-contract.md`, test harness structure across all 20 test files.
+**Read in full or substantially:** `main.cpp`, `MainWindow`, `ShellWidget.h` + structural survey of `ShellWidget.cpp`, `FrontendSession.h`, `ClientRuntime.h` + macro survey, `UiStatus.h`, `nodegraph/NodeGraph.h`, `nodegraph/Value.h`, `nodegraph/ProtocolCatalog.cpp` (asserts), `middle/MiddleTypes.h/.cpp`, `middle/ConversationPresentation.h/.cpp`, `middle/ConversationCards.h` + key regions of `.cpp`, `middle/ConversationView.h` + key regions of `.cpp`, `middle/ConversationItemModel.h`, `middle/InspectorPane.cpp` (controls), `middle/ThreadPane.cpp` (delegate/list), `ui/UiStyle.h/.cpp`, `TurnSettingsWidget.cpp` (controls), `DiffViewer.cpp` (controls), `web/src/conversation/MiddleTypes.ts`, `web/src/presentation/PresentationStatus.ts`, `CMakeLists.txt`, `nodegraph/CMakeLists.txt`, `.github/workflows/ci.yml`, `docs/architecture/qt-virtualized-conversation-view.md`, `docs/web/contract-1.0.md`, test harness structure across all 20 test files.
 
 **Not reviewed in depth:** `ProtocolUpdater.cpp` (3 513), `ClientRuntime.cpp` body (2 828), `NodeGraphUiAdapter.cpp` body (2 250), `WorkerLogic.cpp` (1 548), `ShellWidget.cpp` body (3 548), `ComposerPane`, `MiddleRegionWidget`, `GitDiffProvider`, `PendingRequestPolicy`, the four dialogs, `SpscQueue`/`EventFd`/`ThreadChannels` correctness, the React application (`web/src/app/*`), and the `ui-review/` screenshot inventory.
 

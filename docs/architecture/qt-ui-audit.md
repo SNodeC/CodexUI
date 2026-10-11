@@ -1,13 +1,13 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # CodexUI Qt UI architecture and usability audit
 
-**Historical status:** read-only audit of the revision below, not a claim about current implementation. Subsequent S1/MR remediation is recorded in the [findings ledger](architecture/qt-remediation-findings-ledger.md#page-overview); current user behavior is described in [Using CodexUI](ui-behavior.md#using-codexui).
+**Historical status:** read-only audit of the revision below, not a claim about current implementation. Subsequent S1/MR remediation is recorded in the [findings ledger](remediation/findings-ledger.md#page-overview); current user behavior is described in [Using CodexUI](../guides/interaction-guide.md#using-codexui).
 **Audit date:** 2026-09-12 (Europe/Vienna)
 **Repository:** `/path/to/workspace/drafts/CodexUI/codexui`
 **Revision reviewed:** `629660e8882bddc7473ee5f1aab90c755ee6edd4` (`master`) plus the pre-existing uncommitted worktree recorded below.
@@ -228,11 +228,11 @@ The phase touches all ten card kinds, Turn decoration, Markdown links/selection/
 
 **H-08 — Opaque Qt node-attachment lifecycle is production residue and 3,248 test lines are disabled (source-proven).** `QtNodeAttachment.h`, attachment messages, retirement scans, and CMake inclusion remain, but no production caller sets the attachment. `ConversationCardsTest.cpp:4128-7375` puts 25 tests behind undefined `CODEXUI_DIRECT_GRAPH_WIDGET_TESTS`, including discarded APIs.
 
-**H-09 — Documented Inspector bounded virtualization was removed (source/history-proven).** `docs/ui-behavior.md:619-627` promises 48 rows plus two overscan. Adapter `inspector` (`NodeGraphUiAdapter.cpp:1127-1605`) scans/copies all rows and `InspectorPane.cpp:852-1070` creates every widget. `ded5055` removed prior bounds; tests use one/two rows and assert no bound.
+**H-09 — Documented Inspector bounded virtualization was removed (source/history-proven).** `docs/guides/interaction-guide.md:619-627` promises 48 rows plus two overscan. Adapter `inspector` (`NodeGraphUiAdapter.cpp:1127-1605`) scans/copies all rows and `InspectorPane.cpp:852-1070` creates every widget. `ded5055` removed prior bounds; tests use one/two rows and assert no bound.
 
 **H-10 — Inspector contains a third Markdown/card-shell and destroys descendant identity on updates (source-proven).** Its Markdown/copy/disclosure/status controls (`InspectorPane.cpp:147-258`) duplicate conversation components. Agent patching deletes/rebuilds child trees (`:286-297,409-523,946-1013`), losing selection/focus/control identity; expanded-agent identity is not pruned.
 
-**H-11 — Documented thread-row virtualization was removed (source/history-proven).** `docs/native-ui-ux-qualification-inventory.md:68-72` promises visible rows plus overscan. `ThreadPane.cpp:807-1072` creates an item and QWidget subtree for every loaded row. `6c1ed14` deleted visibility/overscan/work-budget code. Tests cover paging, not widget counts.
+**H-11 — Documented thread-row virtualization was removed (source/history-proven).** `docs/qualification/native-test-suite.md:68-72` promises visible rows plus overscan. `ThreadPane.cpp:807-1072` creates an item and QWidget subtree for every loaded row. `6c1ed14` deleted visibility/overscan/work-budget code. Tests cover paging, not widget counts.
 
 **H-12 — Embedded/review diffs duplicate provider/polling/presentation and lack in-flight backpressure (source-proven).** Each owns a provider and two-second poll (`DiffViewer.cpp:328-425,551-675`). Each refresh starts a global-pool task; generation checks discard results but do not cancel work (`GitDiffProvider.cpp:386-419`). Review eagerly builds unified, left, and right documents/highlighters (`DiffViewer.cpp:507-525`).
 
@@ -601,17 +601,17 @@ Largest credible deletion opportunities, ordered: (1) passive conversation rende
 | `LICENSE-LGPL-3.0-or-later` | License text | legal metadata | none | None | repository | N/A | Outside Qt behavior | **Reviewed** |
 | `LICENSE-MIT` | License text | legal metadata | none | None | repository | N/A | Outside Qt behavior | **Reviewed** |
 | `README.md` | Repository/build/app overview | architecture/build entry | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Claims cross-checked | **Reviewed** |
-| `design/ux-decisions/thread-turn-model.md` | Thread/turn/prompt decisions | routing/admission/scroll invariants | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Useful invariant source; deviations noted | **Reviewed** |
-| `docs/app-server-protocol/master-data-model.md` | Historical protocol research | protocol concepts | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Explicitly historical, not runtime authority | **Reviewed** |
-| `docs/codex-architecture.md` | High-level native/browser architecture | single graph/two threads/local state | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Owner invariant confirmed | **Reviewed** |
-| `docs/native-ui-ux-qualification-inventory.md` | Native qualification checklist | UI/test claims | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | H-11/H-15/M-23 stale claims | **Reviewed** |
-| `docs/qt-virtualized-conversation-view.md` | Conversation virtualization contract | model/view/delegate/performance | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | C-01 institutionalized; benchmark incomplete | **Reviewed** |
-| `docs/two-thread-shared-node-graph.md` | Graph/thread/protocol/lifecycle contract | graph/channels/attachments | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | H-08 stale attachment; core sound | **Reviewed** |
-| `docs/ui-behavior.md` | Interaction/presentation contract | threads/conversation/composer/Inspector | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | H-09/M-23 contradictions | **Reviewed** |
-| `docs/ui-ux-internal-api.md` | Native class/data/time API contract | adapter/panes/view/cards/Shell | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Documents complexity; claims need update | **Reviewed** |
-| `docs/web-1.0-contract.md` | Browser/native process/parity boundary | browser architecture | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | M-24 separate renderer valid; semantics copied | **Reviewed** |
-| `docs/web-qualification.md` | Browser parity/performance evidence | web tests/profile | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Reproduced; not native proof | **Reviewed** |
-| `docs/web-release.md` | Browser release/operator gates | artifact/equality | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Packaging only | **Reviewed** |
+| `docs/ui-review/thread-turn-model.md` | Thread/turn/prompt decisions | routing/admission/scroll invariants | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Useful invariant source; deviations noted | **Reviewed** |
+| `docs/architecture/app-server-data-model.md` | Historical protocol research | protocol concepts | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Explicitly historical, not runtime authority | **Reviewed** |
+| `docs/architecture/overview.md` | High-level native/browser architecture | single graph/two threads/local state | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Owner invariant confirmed | **Reviewed** |
+| `docs/qualification/native-test-suite.md` | Native qualification checklist | UI/test claims | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | H-11/H-15/M-23 stale claims | **Reviewed** |
+| `docs/architecture/qt-virtualized-conversation-view.md` | Conversation virtualization contract | model/view/delegate/performance | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | C-01 institutionalized; benchmark incomplete | **Reviewed** |
+| `docs/architecture/shared-node-graph.md` | Graph/thread/protocol/lifecycle contract | graph/channels/attachments | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | H-08 stale attachment; core sound | **Reviewed** |
+| `docs/guides/interaction-guide.md` | Interaction/presentation contract | threads/conversation/composer/Inspector | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | H-09/M-23 contradictions | **Reviewed** |
+| `docs/architecture/ui-internal-api.md` | Native class/data/time API contract | adapter/panes/view/cards/Shell | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Documents complexity; claims need update | **Reviewed** |
+| `docs/web/contract-1.0.md` | Browser/native process/parity boundary | browser architecture | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | M-24 separate renderer valid; semantics copied | **Reviewed** |
+| `docs/web/qualification.md` | Browser parity/performance evidence | web tests/profile | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Reproduced; not native proof | **Reviewed** |
+| `docs/web/release-process.md` | Browser release/operator gates | artifact/equality | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Packaging only | **Reviewed** |
 | `resources/applications/codex-ui.desktop` | Desktop launcher metadata | name/executable/icon | desktop shell | Desktop launcher activation | installation | manual packaging | No install performed | **Reviewed** |
 | `resources/icons/codex-ui.svg` | Application vector icon | brand geometry/colors | SVG | Visual inspection only | resource | manual packaging | Vector scaling reviewed | **Reviewed** |
 
@@ -734,24 +734,24 @@ Largest credible deletion opportunities, ordered: (1) passive conversation rende
 
 | Path | Purpose / owned UI concepts | Models/state consumed | Rendering mechanism | Interaction mechanisms | Ownership/lifetime | Related tests | Duplication/architecture concern | Audit status |
 |---|---|---|---|---|---|---|---|---|
-| `ui-review/CODE-POLISH-ROADMAP.md` | Prior maintenance roadmap | refactor priorities | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Guardrails useful; predates root cause | **Reviewed** |
-| `ui-review/STATE-MATRIX.md` | Interaction-state inventory | connection/thread/turn/composer | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Missing stale/a11y/motion matrix | **Reviewed** |
-| `ui-review/UI-INVENTORY.md` | Visible UI inventory | bars/panes/cards/composer | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | M-23 older descriptions | **Reviewed** |
-| `ui-review/UX-DESIGN-DECISIONS.md` | Visual/layout decisions | tokens/layout/follow | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | M-23 older dark baseline | **Reviewed** |
-| `ui-review/screenshots/01-disconnected.png` | Historical screenshot 01 disconnected | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/02-connected-no-thread.png` | Historical screenshot 02 connected no thread | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/03-thread-normal-conversation.png` | Historical screenshot 03 thread normal conversation | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/04-active-streaming-turn.png` | Historical screenshot 04 active streaming turn | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/05-long-conversation.png` | Historical screenshot 05 long conversation | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/06-inspector-info.png` | Historical screenshot 06 inspector info | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/07-inspector-plan.png` | Historical screenshot 07 inspector plan | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/08-inspector-agents.png` | Historical screenshot 08 inspector agents | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/09-inspector-changes.png` | Historical screenshot 09 inspector changes | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/12-error-reconnect.png` | Historical screenshot 12 error reconnect | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/13-narrow-window.png` | Historical screenshot 13 narrow window | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/14-large-window.png` | Historical screenshot 14 large window | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/15-new-thread-draft.png` | Historical screenshot 15 new thread draft | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
-| `ui-review/screenshots/16-panels-hidden.png` | Historical screenshot 16 panels hidden | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/ui-review/code-polish-roadmap.md` | Prior maintenance roadmap | refactor priorities | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Guardrails useful; predates root cause | **Reviewed** |
+| `docs/ui-review/state-matrix.md` | Interaction-state inventory | connection/thread/turn/composer | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | Missing stale/a11y/motion matrix | **Reviewed** |
+| `docs/ui-review/ui-inventory.md` | Visible UI inventory | bars/panes/cards/composer | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | M-23 older descriptions | **Reviewed** |
+| `docs/ui-review/ux-decisions.md` | Visual/layout decisions | tokens/layout/follow | Markdown | Documentation review; no runtime interaction | repository | source/test cross-check | M-23 older dark baseline | **Reviewed** |
+| `docs/media/ui-review/01-disconnected.png` | Historical screenshot 01 disconnected | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/02-connected-no-thread.png` | Historical screenshot 02 connected no thread | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/03-thread-normal-conversation.png` | Historical screenshot 03 thread normal conversation | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/04-active-streaming-turn.png` | Historical screenshot 04 active streaming turn | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/05-long-conversation.png` | Historical screenshot 05 long conversation | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/06-inspector-info.png` | Historical screenshot 06 inspector info | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/07-inspector-plan.png` | Historical screenshot 07 inspector plan | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/08-inspector-agents.png` | Historical screenshot 08 inspector agents | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/09-inspector-changes.png` | Historical screenshot 09 inspector changes | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/12-error-reconnect.png` | Historical screenshot 12 error reconnect | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/13-narrow-window.png` | Historical screenshot 13 narrow window | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/14-large-window.png` | Historical screenshot 14 large window | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/15-new-thread-draft.png` | Historical screenshot 15 new thread draft | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
+| `docs/media/ui-review/16-panels-hidden.png` | Historical screenshot 16 panels hidden | rendered pixels | PNG | Visual inspection only | artifact | manual review | M-23 stale dark baseline | **Reviewed** |
 
 ### Browser parity/packaging
 

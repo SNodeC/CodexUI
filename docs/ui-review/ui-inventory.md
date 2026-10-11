@@ -1,13 +1,13 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="../docs/media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # CodexUI Current UI Inventory
 
-This is a historical UI inventory. Its measured-placeholder and request-acknowledgment descriptions are superseded by [current user behavior](../docs/ui-behavior.md#using-codexui) and the [remediation record](../docs/architecture/qt-remediation-findings-ledger.md#page-overview), not a current acceptance claim.
+This is a historical UI inventory. Its measured-placeholder and request-acknowledgment descriptions are superseded by [current user behavior](../guides/interaction-guide.md#using-codexui) and the [remediation record](../architecture/remediation/findings-ledger.md#page-overview), not a current acceptance claim.
 
 ## Top bar
 

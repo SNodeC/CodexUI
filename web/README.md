@@ -11,7 +11,7 @@ CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to a
 
 ## Source layout
 
-Follow the [browser build guide](../docs/build.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
+Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
 
 `npm run profile` from this directory repeats the large-thread presentation measurement. There is no standalone Node development or production server.
 
@@ -56,4 +56,4 @@ Verify page/assets delivery, the WSS handshake, controller/observer behavior and
 - `npm run verify:artifact` proves that the output is non-empty and relocatable below an arbitrary static base path.
 - The web qualification job checks the SDK from AISuite's default branch independently, runs the web suite, records the performance profile, installs the artifact through CMake, and uploads the verified staged tree as `codexui-web`.
 
-The authoritative scope and exceptions are in [`../docs/web-1.0-contract.md`](../docs/web-1.0-contract.md#page-overview).
+The authoritative scope and exceptions are in [`../docs/web/contract-1.0.md`](../docs/web/contract-1.0.md#page-overview).

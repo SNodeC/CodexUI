@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -17,7 +17,7 @@ This document specifies candidate targets and qualification gates, not an announ
 | CodexWebUI | 1.0.0 | relocatable `web/app-dist/` static artifact |
 | AISuite frontend SDK | 1.0.0 from AISuite default-branch source | publishable `@snodec/codex-frontend` package |
 
-CI checks out AISuite default-branch source for both native and web jobs, and SNode.C default-branch source for the native build. Checkout logs record the resolved commits; dependency commits are not pinned. The source layout and build commands are documented in [the browser build guide](build.md#browser-frontend).
+CI checks out AISuite default-branch source for both native and web jobs, and SNode.C default-branch source for the native build. Checkout logs record the resolved commits; dependency commits are not pinned. The source layout and build commands are documented in [the browser build guide](../guides/build-from-source.md#browser-frontend).
 
 ## Qualification and release gate
 

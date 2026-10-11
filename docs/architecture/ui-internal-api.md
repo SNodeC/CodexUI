@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -10,8 +10,8 @@
 This document is the canonical contract for the boundary between CodexUI's
 application logic and the established native Qt UI/UX. It describes behavior,
 call ordering, identity, ownership, and failure semantics in addition to C++
-method signatures. `docs/ui-behavior.md` remains the visible-product contract,
-and `docs/native-ui-ux-qualification-inventory.md` remains the test inventory.
+method signatures. `docs/guides/interaction-guide.md` remains the visible-product contract,
+and `docs/qualification/native-test-suite.md` remains the test inventory.
 
 The reference API is the native UI at
 `dbcbb1b4d30dc24d96ed06647198a1abc6fa4c3c`. The shared-node-graph cutover may

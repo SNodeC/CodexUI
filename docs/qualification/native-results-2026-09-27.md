@@ -1,13 +1,13 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
 # Native qualification execution record — 2026-09-27
 
-Specification: [canonical interactive inventory and visual approval matrix](native-ui-ux-qualification-inventory.md#page-overview).
+Specification: [canonical interactive inventory and visual approval matrix](native-test-suite.md#page-overview).
 This records execution, not a replacement plan or reduced acceptance scope.
 
 **Overall verdict: incomplete, not approved.** The recorded repairs are verified
@@ -3548,7 +3548,7 @@ new user input occurs; do not add a timer or another follow-state authority.
 Core replacement sketch:
 
 ```cpp
-connect(bar, &QScrollBar::actionTriggered, this, [this, bar](int) {
+connect(bar, &QScrollBar::actionTriggered, this, [this, bar](../int) {
   ++protocolScrollRevision;
   const int value = bar->sliderPosition();
   protocolFollowsTail = value >= bar->maximum() - 1;

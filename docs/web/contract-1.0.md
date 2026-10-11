@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -63,7 +63,7 @@ web/
     src/app/
 ```
 
-The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite’s API-read default branch for both native and browser builds, and SNode.C’s API-read default branch for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](build.md#browser-frontend).
+The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite’s API-read default branch for both native and browser builds, and SNode.C’s API-read default branch for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](../guides/build-from-source.md#browser-frontend).
 
 ## Frontend technology
 

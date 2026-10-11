@@ -221,17 +221,17 @@ Native tests reviewed/covered:
 
 Architecture/contract documentation covered:
 
-* `design/ux-decisions/thread-turn-model.md`
-* `docs/app-server-protocol/master-data-model.md`
-* `docs/codex-architecture.md`
-* `docs/native-ui-ux-qualification-inventory.md`
-* `docs/qt-virtualized-conversation-view.md`
-* `docs/two-thread-shared-node-graph.md`
-* `docs/ui-behavior.md`
-* `docs/ui-ux-internal-api.md`
-* `docs/web-1.0-contract.md`
-* `docs/web-qualification.md`
-* `docs/web-release.md`
+* `docs/ui-review/thread-turn-model.md`
+* `docs/architecture/app-server-data-model.md`
+* `docs/architecture/overview.md`
+* `docs/qualification/native-test-suite.md`
+* `docs/architecture/qt-virtualized-conversation-view.md`
+* `docs/architecture/shared-node-graph.md`
+* `docs/guides/interaction-guide.md`
+* `docs/architecture/ui-internal-api.md`
+* `docs/web/contract-1.0.md`
+* `docs/web/qualification.md`
+* `docs/web/release-process.md`
 
 Build/CI boundary covered:
 

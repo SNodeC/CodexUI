@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -9,7 +9,7 @@
 
 ## Using CodexUI
 
-Start with the [native or browser first run](../README.md#first-run). This page explains user behavior first, then records the native interaction/presentation contract. AISuite and the app-server own protocol, conversations, tools and persistence; CodexUI owns local presentation and interaction.
+Start with the [native or browser first run](../../README.md#first-run). This page explains user behavior first, then records the native interaction/presentation contract. AISuite and the app-server own protocol, conversations, tools and persistence; CodexUI owns local presentation and interaction.
 
 - **Connect and claim control:** use [Connection and controller ownership](#connection-and-controller-ownership). Controller/observer roles are not authentication; only connect trusted peers.
 - **Send and navigate:** select a thread, type a prompt and press Enter; Shift+Enter inserts a newline. Pending input stays associated with its destination when switching threads. See [Prompt submission and acknowledgment](#prompt-submission-and-acknowledgment) for the full keyboard/queue behavior.
@@ -19,14 +19,14 @@ Start with the [native or browser first run](../README.md#first-run). This page 
 
 ## Known limitations
 
-- Approval dialogs check bounded transport shape and reject unsafe context, but do not provide full standard-MCP schema/content validation or file-change stale-revision gating. Agent approval/sandbox policy remains separate. Review untrusted tool requests and edits accordingly; see the [approval boundary record](architecture/qt-remediation-findings-ledger.md#unresolved-evidence-questions-and-approval-gates).
-- Native interactive qualification remains incomplete, not an approval of every UI path. The [qualification record](native-ui-ux-qualification-results.md#page-overview) records its environment and outstanding work.
-- Dense emoji-heavy diffs were slow with the recorded stock Qt 6.10.2 build. An isolated patched-Qt experiment is not an installed fix or a promise for other Qt versions; the [performance record](native-ui-ux-qualification-results.md#page-overview) owns those measurements.
-- Browser scope differs from native scope. Consult the [native-only 1.0 features](web-1.0-contract.md#native-only-in-10) rather than assuming parity.
+- Approval dialogs check bounded transport shape and reject unsafe context, but do not provide full standard-MCP schema/content validation or file-change stale-revision gating. Agent approval/sandbox policy remains separate. Review untrusted tool requests and edits accordingly; see the [approval boundary record](../architecture/remediation/findings-ledger.md#unresolved-evidence-questions-and-approval-gates).
+- Native interactive qualification remains incomplete, not an approval of every UI path. The [qualification record](../qualification/native-results-2026-09-27.md#page-overview) records its environment and outstanding work.
+- Dense emoji-heavy diffs were slow with the recorded stock Qt 6.10.2 build. An isolated patched-Qt experiment is not an installed fix or a promise for other Qt versions; the [performance record](../qualification/native-results-2026-09-27.md#page-overview) owns those measurements.
+- Browser scope differs from native scope. Consult the [native-only 1.0 features](../web/contract-1.0.md#native-only-in-10) rather than assuming parity.
 
 ## Detailed native presentation contract
 
-The [method-level internal API](ui-ux-internal-api.md#page-overview) owns the native logic/UI boundary. The specifications below describe the projection and interaction rules, not a prerequisite for first use. All Qt popup/context menus, including text-widget menus, use a compact white rounded surface, neutral border, 30-pixel actions, neutral hover, blue-tinted checked actions, muted disabled actions and inset separators.
+The [method-level internal API](../architecture/ui-internal-api.md#page-overview) owns the native logic/UI boundary. The specifications below describe the projection and interaction rules, not a prerequisite for first use. All Qt popup/context menus, including text-widget menus, use a compact white rounded surface, neutral border, 30-pixel actions, neutral hover, blue-tinted checked actions, muted disabled actions and inset separators.
 
 ## Conversation source and structure
 
@@ -413,7 +413,7 @@ targets; runtime color conversion is not part of painting.
 
 Color primitives live in `UiStyle::Palette`; native renderers and stylesheets use semantic `UiStyle` roles such as `threadSelected`, `finalAnswerSurface`, and `focusBorder`. Change their palette assignments in `UiStyle.h` to recolor a role without coupling unrelated components. The bright yellow selection is an intentional exception to the shared chroma targets. Browser colors are defined by semantic CSS variables in `web/src/colors.css`; these retain the browser’s existing values. Component CSS consumes those variables. Source-policy checks reject direct native palette access and browser color literals outside their token definitions.
 
-The [historical card-polish sequence](native-ui-ux-qualification-inventory.md#historical-card-polish-sequence) belongs to engineering qualification, not the first-use journey.
+The [historical card-polish sequence](../qualification/native-test-suite.md#historical-card-polish-sequence) belongs to engineering qualification, not the first-use journey.
 
 ## Conversation scrolling
 
@@ -606,4 +606,4 @@ The default Unix endpoint matches the bridge's private runtime socket: valid pri
 
 **Claim control** asks the bridge to assign this frontend the controller role; **Release control** relinquishes it. Only one frontend controls a shared session. Observers cannot create threads or submit prompts, and cannot take an already-owned controller role merely by clicking Claim. This is routing policy, not authentication or agent approval/sandbox policy.
 
-If the connection opens but prompts remain unavailable, wait for provider readiness, check controller status, and select a loaded thread or create a disposable one. Keep unsent text when diagnosing failures; sanitize logs and conversation data before reporting the sequence. The [first-run instructions](../README.md#first-run) give the native and browser journeys.
+If the connection opens but prompts remain unavailable, wait for provider readiness, check controller status, and select a loaded thread or create a disposable one. Keep unsent text when diagnosing failures; sanitize logs and conversation data before reporting the sequence. The [first-run instructions](../../README.md#first-run) give the native and browser journeys.

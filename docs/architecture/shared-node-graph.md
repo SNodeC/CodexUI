@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -17,8 +17,8 @@ architecture.
 Work began on `codex/two-thread-shared-node-graph` with a clean worktree. `HEAD`,
 that branch, `master`, and `origin/master` all resolved to
 `dbcbb1b4d30dc24d96ed06647198a1abc6fa4c3c`. No repository-specific agent
-instruction file was present; `README.md`, `docs/codex-architecture.md`,
-`docs/ui-behavior.md`, the checked-in tests, and CI are the compatibility
+instruction file was present; `README.md`, `docs/architecture/overview.md`,
+`docs/guides/interaction-guide.md`, the checked-in tests, and CI are the compatibility
 oracles.
 
 The unchanged baseline built successfully. All nine native CTest tests passed
@@ -161,7 +161,7 @@ The implementation's checked, closed inventory is `ProtocolCatalog.cpp`. Its
 method names were verified against the app-server registry at Codex
 `305eed102d6ab5fc1228fec0737ba240eb29826b`, including compatibility and
 internal methods omitted by public schema generation. The accompanying
-`docs/app-server-protocol/master-data-model.md` is historical protocol research,
+`docs/architecture/app-server-data-model.md` is historical protocol research,
 not the design of this runtime. The complete surface is:
 
 | Direction | Methods |
@@ -289,11 +289,11 @@ is removed after cutover and is not retained as a fallback.
 ## Widget and UX compatibility contract
 
 The complete class, method, DTO, ordering, failure, and thread-affinity
-contract is [`ui-ux-internal-api.md`](ui-ux-internal-api.md#page-overview). The adapter and
+contract is [`ui-ux-internal-api.md`](ui-internal-api.md#page-overview). The adapter and
 Shell integration are accepted only when they satisfy that contract as well as
 the visible behavior in `ui-behavior.md`.
 
-The normative internal boundary is `docs/ui-ux-internal-api.md`. In
+The normative internal boundary is `docs/architecture/ui-internal-api.md`. In
 particular, a complete DTO is extracted under one short graph read, the guard
 is released, and only then is the established widget API called. The adapter
 owns no projected state. Widget-local focus, scroll, fold, draft, expansion,
@@ -336,7 +336,7 @@ canonical child thread ID (falling back to the spawn item only when necessary),
 so replay, progress, completion, and interruption update one logical row in
 stable first-spawn order without removing canonical items from `NodeGraph`.
 
-The complete visible behavior in `docs/ui-behavior.md` remains required,
+The complete visible behavior in `docs/guides/interaction-guide.md` remains required,
 including:
 
 - root/child thread hierarchy, ordering, selection, hydration, history paging,

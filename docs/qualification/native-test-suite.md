@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -523,9 +523,9 @@ The behavior inventory in sections 1–21 still applies in full.
 ### 22.9 Complete timestamp appearance inventory
 
 The schema inventory and formatter are authoritative:
-[Timestamp presentation](architecture/timestamp-presentation.md#page-overview),
-[protocol timing paths](../src/codex/ProtocolTimingPaths.inc) and
-[TimingPresentation](../src/codex/ui/TimingPresentation.cpp).
+[Timestamp presentation](../architecture/timestamp-presentation.md#page-overview),
+[protocol timing paths](../../src/codex/ProtocolTimingPaths.inc) and
+[TimingPresentation](../../src/codex/ui/TimingPresentation.cpp).
 These are supplied facts, not permission to fetch new APIs or invent times.
 
 | Surface/element | Required appearance |
@@ -590,7 +590,7 @@ passed by inference.
 
 ## Historical card-polish sequence
 
-This sequence was moved from the user behavior guide. It records implementation/qualification planning, not instructions or approval to modify current production code. [Current user behavior](ui-behavior.md#using-codexui) remains the reader entry point.
+This sequence was moved from the user behavior guide. It records implementation/qualification planning, not instructions or approval to modify current production code. [Current user behavior](../guides/interaction-guide.md#using-codexui) remains the reader entry point.
 
 This ordered register is the authoritative completion sequence for the current
 native card-polish pass. Each behavior is implemented and committed as a narrow,

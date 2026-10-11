@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../../README.md#project-overview" title="Codex(W)UI repository"><img src="../../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -19,10 +19,10 @@ Read and obey the complete instruction chain before doing anything else:
 
 Then read these four mandatory audit inputs completely:
 
-1. `docs/qt-ui-architecture-audit.md`
-2. `docs/architecture/reviews/claude-review-a.md`
-3. `docs/architecture/reviews/claude-review-b.md`
-4. `docs/architecture/reviews/chatgpt-review.md`
+1. `docs/architecture/qt-ui-audit.md`
+2. `docs/architecture/reviews/claude-a.md`
+3. `docs/architecture/reviews/claude-b.md`
+4. `docs/architecture/reviews/chatgpt.md`
 
 The local Qt audit has the highest evidentiary weight because it examined the
 current worktree and performed local diagnostics. The external reviews remain

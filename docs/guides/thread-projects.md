@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
 <p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
+  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
 </p>
 <!-- snodec:end page-header -->
 
@@ -82,8 +82,8 @@ not retried repeatedly within that connection.
 
 ## Qualification boundary
 
-These features are native-only. Offscreen/mock-backed checks do not establish real upstream project persistence, native-compositor behavior or screen-reader qualification. See the [qualification scope](native-ui-ux-qualification-inventory.md#page-overview) and historical execution evidence below.
+These features are native-only. Offscreen/mock-backed checks do not establish real upstream project persistence, native-compositor behavior or screen-reader qualification. See the [qualification scope](../qualification/native-test-suite.md#page-overview) and historical execution evidence below.
 
 ## Implementation record
 
-Historical verification and change accounting are kept in the [implementation record](records/thread-projects-verification.md#page-overview). Follow the current user guide above for behavior; historical test commands are not an onboarding requirement.
+Historical verification and change accounting are kept in the [implementation record](../records/thread-projects-verification.md#page-overview). Follow the current user guide above for behavior; historical test commands are not an onboarding requirement.
