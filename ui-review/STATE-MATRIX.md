@@ -16,17 +16,17 @@
 | Thread list | Background activity | Status changes without changing the user's selection. |
 | Thread list | Selected thread removed | Selection clears and the conversation returns to its empty state. |
 | New Thread | Draft | Dialog values and prompt remain local; one selected orange animated row appears immediately without creating an app-server thread. |
-| New Thread | Thread created, first prompt pending | The same row is rekeyed to the authoritative ID and remains animated through the first `turn/start` callback. |
-| New Thread | First prompt acknowledged | The same row switches to canonical styling without duplication or replacement. |
+| New Thread | Thread created, first prompt pending | The same row is rekeyed to the authoritative ID and retains pending feedback until the first authoritative user item materializes. |
+| New Thread | First prompt materialized | The same row switches to canonical styling without duplication or replacement. |
 | New Thread | Creation or first prompt failed | Animation stops and the retained row adopts explicit failure styling. |
-| Prompt | Locally admitted | Composer clears immediately; a muted-blue card appears in the destination thread, and its sweeping highlight starts only after one second without acknowledgment. |
+| Prompt | Locally admitted | Composer clears immediately; a muted-blue card appears in the destination thread, and its sweeping highlight starts only after one second without authoritative materialization. |
 | Prompt | Additional prompt admitted | Composer remains enabled; the card is queued behind the in-flight prompt for that thread. |
-| Prompt | Authoritative item arrives before result | Exact `clientUserMessageId` correlation may bind the item, but the card remains pending until its operation callback. |
-| Prompt | Acknowledged | The matching `turn/start` or `turn/steer` callback immediately ends pending feedback; the authoritative item inherits the card's stable visual key. |
+| Prompt | Authoritative item arrives before result | Exact `clientUserMessageId` correlation binds the authoritative item to the stable card; request acknowledgment remains separately owned by its operation callback. |
+| Prompt | Acknowledged | The matching callback acknowledges dispatch; feedback continues until authoritative materialization, whose item inherits the card’s stable visual key. |
 | Prompt | Failed | Animation stops and the card remains with an explicit error state. |
 | Prompt | Disconnect after admission | The authored prompt remains visible in explicit failed/uncertain recovery state; bridge-open never resends it automatically. |
 | Navigation | Switch away from pending prompt | Pending card and queue remain associated with their stable thread ID. |
-| Navigation | Return before acknowledgment | The same animated pending card is displayed. |
+| Navigation | Return before authoritative materialization | The same animated pending card is displayed. |
 | Navigation | Return to materialized running thread | Plan, Agents, Changes, and other per-thread widget state reappears without an automatic destructive read. |
 | Thread | First selection in a connection generation | One full read hydrates the thread's current graph nodes before prompt dispatch; Reload is the explicit forced read. |
 | Thread | Hydration failed | Submission leaves the composer draft intact and performs no dispatch; Reload must succeed before admission. |

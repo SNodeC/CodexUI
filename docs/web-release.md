@@ -17,7 +17,7 @@ This document specifies candidate targets and qualification gates, not an announ
 | CodexWebUI | 1.0.0 | relocatable `web/app-dist/` static artifact |
 | AISuite frontend SDK | 1.0.0 from AISuite default-branch source | publishable `@snodec/codex-frontend` package |
 
-CI checks out AISuite default-branch source for both native and web jobs, and SNode.C default-branch source for the native build. Checkout logs record the resolved commits; dependency commits are not pinned. The source layout and build commands are documented in `web/README.md`.
+CI checks out AISuite default-branch source for both native and web jobs, and SNode.C default-branch source for the native build. Checkout logs record the resolved commits; dependency commits are not pinned. The source layout and build commands are documented in [the browser build guide](build.md#browser-frontend).
 
 ## Qualification and release gate
 

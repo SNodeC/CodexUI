@@ -7,6 +7,8 @@
 
 # CodexUI Current UI Inventory
 
+This is a historical UI inventory. Its measured-placeholder and request-acknowledgment descriptions are superseded by [current user behavior](../docs/ui-behavior.md#using-codexui) and the [remediation record](../docs/architecture/qt-remediation-findings-ledger.md#page-overview), not a current acceptance claim.
+
 ## Top bar
 
 - One-line CodexUI lockup: 36-pixel brand mark, equally high application title,

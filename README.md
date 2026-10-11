@@ -77,13 +77,11 @@ To create a project or section, click the current grouping label—**Projects**,
 
 **CodexUI** integrates with the Linux desktop for local workspaces, project/section organization and desktop file interaction. Installation provides `codex-ui`, a desktop entry and an icon. Available transports depend on the build.
 
-**CodexWUI** connects through AISuite's frontend SDK without installing the Qt application. `codex-bridge` serves the built web assets; no Node runtime is required.
+**CodexWUI** (build/install component `CodexWebUI`) connects through AISuite's frontend SDK without installing the Qt application. `codex-bridge` serves the built web assets; no Node runtime is required.
 
-The frontends share protocol and lifecycle meaning, **not an identical feature inventory**. Native project/section management is not yet a browser feature. See the [browser scope and limitations](docs/web-1.0-contract.md#page-overview) before choosing a deployment.
+The frontends share protocol and lifecycle meaning, **not an identical feature inventory**. Native project/section management is not yet a browser feature. See the [native-only features and browser limitations](docs/web-1.0-contract.md#native-only-in-10) before choosing a deployment.
 
 ## Install
-
-Choose your route.
 
 <p>
   <a href="docs/build.md#native-desktop" title="Native desktop"><img src="docs/media/menu/route-native.svg" alt="Native desktop" width="152" height="24"></a>
@@ -124,13 +122,15 @@ codex-bridge --config-file /dev/null codex --bridge-web-root "$PWD/web/app-dist"
 
 Open **http://127.0.0.1:8080/**. The page and `/codex` WebSocket share that loopback listener. Connect, claim control if it is vacant, and use a disposable thread for a first prompt. Expect the thread list and streamed response, as with the native route. For installed assets, endpoint overrides and remote deployment, use the [browser deployment guide](web/README.md#deployment); no Node server is required.
 
+If the first run fails, check [connection and controller ownership](docs/ui-behavior.md#connection-and-controller-ownership) before retrying the prompt.
+
 ## Configuration
 
 For native endpoints, use **Connection** as described in [First run](#first-run); startup defaults come from command-line/SNode.C settings, while the dialog applies to the current session. Browser endpoints and retained URL settings are documented in [browser deployment](web/README.md#deployment).
 
 Controller/observer roles are routing permissions, **not authentication or tenant isolation**. Observers can receive session broadcasts and read approved workspace data, including files. Keep the Unix socket private and browser/network listeners on loopback unless an external authenticated TLS boundary protects them. App-server configuration remains authoritative for model selection, approvals and sandbox permissions.
 
-See [UI behavior](docs/ui-behavior.md#page-overview) for interaction details and [Architecture](#architecture) for component ownership.
+See [Connection and controller ownership](docs/ui-behavior.md#connection-and-controller-ownership) for endpoint and startup configuration; see [Using CodexUI](docs/ui-behavior.md#using-codexui) for interaction details and [Architecture](#architecture) for component ownership.
 
 <a id="how-it-fits-together"></a>
 
@@ -148,7 +148,7 @@ For the detailed state, threading and protocol boundaries, see the [architecture
 
 | Start here | Go deeper |
 | --- | --- |
-| [UI behavior](docs/ui-behavior.md#page-overview) | [Native state and threading](docs/two-thread-shared-node-graph.md#page-overview) |
+| [Using CodexUI](docs/ui-behavior.md#page-overview) | [Native state and threading](docs/two-thread-shared-node-graph.md#page-overview) |
 | [Projects and sections](docs/thread-projects-sections.md#page-overview) | [Architecture overview](docs/codex-architecture.md#page-overview) |
 | [Timestamps and durations](docs/architecture/timestamp-presentation.md#page-overview) | [Browser contract](docs/web-1.0-contract.md#page-overview) |
 | [Browser build and deployment](web/README.md#page-overview) | [Web qualification](docs/web-qualification.md#page-overview) · [Release process](docs/web-release.md#page-overview) |
@@ -157,7 +157,7 @@ For bug reports, include the revision, Qt version, connection type and the small
 
 ## Platforms
 
-The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web-1.0-contract.md#page-overview); they are not a promise of native/browser feature parity.
+The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web-1.0-contract.md#page-overview); they are not a promise of native/browser feature parity. Review the [known limitations](docs/ui-behavior.md#known-limitations) before relying on approval handling or native performance.
 
 ## Releases
 
@@ -165,7 +165,7 @@ No GitHub release or shared binary-package distribution is published yet; the do
 
 ## Contributing
 
-[Report an issue](https://github.com/SNodeC/CodexUI/issues) using the sanitized information in [Documentation](#documentation); read the existing [engineering guidelines](AGENTS.md) and [build/qualification guide](docs/build.md#quality-and-development).
+[Report an issue](https://github.com/SNodeC/CodexUI/issues) using the sanitized information in [Documentation](#documentation); read the existing [agent/engineering instructions](AGENTS.md) and [build/qualification guide](docs/build.md#quality-and-development).
 
 <!-- snodec:begin ecosystem -->
 ## Ecosystem

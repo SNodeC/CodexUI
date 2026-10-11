@@ -455,7 +455,7 @@ The behavior inventory in sections 1–21 still applies in full.
 | Steering You | Teal semantic family and steering phase; visibly nested in its correct turn rather than temporarily shown as a new outer turn. |
 | Pending normal/steering prompt | Corresponding blue/teal appearance, pending phase and delayed waiting sweep; accepted-but-not-yet-authoritative prompts remain pending. |
 | Failed prompt and recovery | Clear Not sent/error text and available recovery action; no continuing success/pending animation or lost authored text. |
-| Codex update | Yellow-family update surface/title and update phase; content legible without implying final completion. |
+| Codex update | Soft-amber update surface/title and update phase; content legible without implying final completion. |
 | Codex final answer | Purple-family surface/title and final answer phase; correct authoritative order and turn ownership. |
 | Reasoning | Explicit Reasoning title, readable Markdown summary and correct visibility-toggle behavior; no empty residual region when hidden. |
 | Command text and metadata | Readable monospace command area; workspace, exit/status and reported duration remain distinguishable from output. |
@@ -587,3 +587,108 @@ Likewise, a simulated bridge can prove UI/request handling, but **real project
 persistence and upstream interoperability require a separate run against an
 isolated real bridge/app-server backend**. Neither category should be marked
 passed by inference.
+
+## Historical card-polish sequence
+
+This sequence was moved from the user behavior guide. It records implementation/qualification planning, not instructions or approval to modify current production code. [Current user behavior](ui-behavior.md#using-codexui) remains the reader entry point.
+
+This ordered register is the authoritative completion sequence for the current
+native card-polish pass. Each behavior is implemented and committed as a narrow,
+independently reviewable change.
+
+1. **Complete:** interim Codex update cards use a clearly perceptible amber
+   surface, border, title, and phase identity; final answers remain violet.
+2. **Complete:** expose and persist a Files Changed “new cards start expanded”
+   control, applying it only when a new card is materialized.
+3. **Complete:** resolve changed-file paths against the canonical thread
+   workspace and open them with the system-default application.
+4. **Complete:** open image-ribbon images with the system-default image viewer;
+   CodexUI does not create or retain a separate image-viewer window.
+5. **Complete:** inventory card kinds suitable for an initial
+   expanded/collapsed control.
+6. **Complete:** inventory card kinds suitable for a show/hide control.
+7. **Complete:** update focused regression coverage and the internal UI API
+   contract for the completed card-polish behavior. Final integration
+   qualification is performed separately by the user.
+
+#### Initial expanded/collapsed control inventory
+
+Every content-bearing conversation card retains its own disclosure state for
+the selected thread. A header-level preference is justified only when the
+content is routinely large and users commonly want the same initial treatment
+for each newly arriving card. It never retroactively refolds an existing card.
+
+| Card kind | Current initial behavior | Header preference decision | UX rationale |
+|---|---|---|---|
+| User message | Expanded | Do not add | The authored prompt is the turn anchor and should remain immediately legible. |
+| Pending local prompt / steering | Expanded | Do not add | Admission, animation, failure recovery, and acknowledgement must remain visible. |
+| Final Codex answer | Expanded | Do not add | It is the primary result of the turn. |
+| Interim Codex update | Expanded when shown | Do not add | The existing visibility control is the useful choice; a second folding preference would be ambiguous. |
+| Command execution | User preference, expanded by default | Existing control | Commands and outputs vary greatly in height and recur frequently. |
+| Image generation | User preference, expanded by default | Existing control | Generated-image ribbons can consume substantial vertical space. |
+| File changes | User preference, collapsed by default | Added control | File lists can be long, but users reviewing code often want every new list opened. |
+| Agent activity | Collapsed | Candidate, not added | Results can be verbose, but a fifth folding control would crowd the header; retain per-card disclosure until explicit demand outweighs that cost. |
+| Reasoning | Collapsed when shown | Do not add | Show/hide already expresses the durable preference and avoids two controls for one content class. |
+| Plan | Collapsed | Candidate, not added | Plans are often useful expanded, but the Inspector already provides the persistent plan surface. |
+| Generic/unknown activity | Collapsed | Do not add | Diagnostic fallback content should be available without dominating the primary conversation. |
+| Outer turn/You section | Expanded | Do not add | Its disclosure is local navigation state governing the complete turn, not a repeated content-type default. |
+
+#### Show/hide control inventory
+
+Visibility preferences filter only the Qt presentation. Canonical items remain
+in NodeGraph, continue receiving updates, and return with their latest content
+and retained local fold state. Primary authorship, results, actionable pending
+state, and side-effect records are never eligible to disappear by default.
+
+| Card kind | Could be filtered? | Header-control decision | UX rationale |
+|---|---|---|---|
+| User message | No | Never add | Removing the prompt destroys the readable turn structure. |
+| Pending local prompt / steering | No | Never add | Users must see admission, progress, failure, and recovery state. |
+| Final Codex answer | No | Never add | The requested result is primary conversation content. |
+| Interim Codex update | Yes | Existing control | Updates are useful live context but optional during review. |
+| Reasoning | Yes | Existing control | Reasoning can be verbose and is explicitly optional presentation. |
+| Agent activity | Yes | Strong future candidate | Multi-agent traces can dominate long threads; filtering is safe while the canonical child and Inspector Agent state remain available. |
+| Plan | Yes | Future candidate | The Inspector retains the current plan, so duplicate conversation plan cards may be optional. |
+| Generic/unknown activity | Yes, cautiously | Future candidate | Low-level diagnostics may be hidden, but the default must remain visible so unknown protocol content is not silently concealed. |
+| Command execution | Technically yes | Do not add now | Commands document concrete side effects; folding controls bulk without erasing the audit trail. |
+| File changes | Technically yes | Do not add now | Changed paths are important side-effect evidence; the new initial-fold preference handles density. |
+| Image generation | Technically yes | Do not add now | Generated images are requested results; initial folding already controls vertical cost. |
+| Outer turn/You section | No | Never add | It is the structural and scrolling anchor for all cards in the turn. |
+
+If another visibility control is requested, Agent activity is the first
+recommended addition. It should reuse the existing local presentation-options
+path; it must not introduce a graph-side filter or another retained model.
+
+Browser persistence is an optional convenience: unavailable or denied local
+storage falls back to canonical defaults and never prevents the UI from
+starting or accepting preference changes.
+Web thread refresh, rename, fork, archive, and delete actions are single-flight.
+Mutation controls require current controller readiness, remain disabled while
+their operation is pending, and report operation failures through the canonical
+notice surface.
+Transient notices overlay the conversation workspace in native and WebUI. Their
+appearance, timeout, and dismissal never resize or reposition message content.
+
+Folding is an explicit geometry transaction. Collapsing keeps the selected
+title row fixed while the natural scroll range permits and shifts following
+cards upward. Expanding grows downward when the complete card remains visible;
+otherwise the viewport scrolls only enough to reveal it, so the title may move
+upward. The visible boundary excludes any extra composer height currently
+overlaying the conversation. The gesture pauses follow-latest. At the lower
+scroll limit, the viewport accepts the natural clamp instead of retaining
+artificial blank space.
+
+When enabled, Reasoning items remain stable progress cards even when the
+app-server provides no public summary; later content updates the same retained
+card in place.
+File-change cards list each supplied path and change kind and derive compact
+addition and deletion totals from the supplied per-file unified diffs. They do
+not duplicate the full review surface owned by the Changes inspector. Optional
+Command duration and Agent model, reasoning effort, child identity, path,
+sender, and receivers are shown only when app-server supplied them.
+
+Textual `plan` items remain conversation content. Structured
+`turn/plan/updated` state is shown only in the Inspector Plan tab, avoiding a
+duplicate representation in the conversation. Its typed conversation key,
+conversion and renderer remain available to textual plan items; structured
+turn state is deliberately not materialized as a conversation card.

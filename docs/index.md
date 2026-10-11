@@ -25,7 +25,7 @@ Start with the [repository README](../README.md#quick-start) for a first working
 ## User guides and references
 
 - [Build and install from source](build.md#page-overview)
-- [UI behavior](ui-behavior.md#page-overview)
+- [Using CodexUI](ui-behavior.md#page-overview)
 - [Projects and sections](thread-projects-sections.md#page-overview)
 - [Architecture overview](codex-architecture.md#page-overview)
 - [Timestamp presentation](architecture/timestamp-presentation.md#page-overview)

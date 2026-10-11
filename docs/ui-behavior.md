@@ -5,21 +5,28 @@
 </p>
 <!-- snodec:end page-header -->
 
-# CodexUI Interaction and Presentation Decisions
+# Interaction guide
 
-The method-level contract used to supply these behaviors is
-[`ui-ux-internal-api.md`](ui-ux-internal-api.md#page-overview). That document is the
-canonical logic/UI boundary for the native shared-node-graph integration;
-this file remains the visible-product behavior oracle.
+## Using CodexUI
 
-This document defines the current CodexUI interaction contract. AISuite and the
-Codex app-server own protocol and domain semantics; CodexUI owns only local
-presentation, input, selection, and scroll state.
+Start with the [native or browser first run](../README.md#first-run). This page explains user behavior first, then records the native interaction/presentation contract. AISuite and the app-server own protocol, conversations, tools and persistence; CodexUI owns local presentation and interaction.
 
-All Qt popup and context menus share one application-level visual contract,
-including menus created automatically by text widgets. They use a compact
-white rounded surface, neutral border, 30-pixel actions, neutral hover,
-blue-tinted checked actions, muted disabled actions, and inset separators.
+- **Connect and claim control:** use [Connection and controller ownership](#connection-and-controller-ownership). Controller/observer roles are not authentication; only connect trusted peers.
+- **Send and navigate:** select a thread, type a prompt and press Enter; Shift+Enter inserts a newline. Pending input stays associated with its destination when switching threads. See [Prompt submission and acknowledgment](#prompt-submission-and-acknowledgment) for the full keyboard/queue behavior.
+- **Attach files or pasted images:** use the file picker, Paste or drag/drop (up to sixteen attachments). File paths must be accessible to the app-server; selecting a local file does not upload it to a remote host. Pasted PNGs persist without automatic expiry, including unused pastes. Protect and manage the application's attachment directory deliberately.
+- **Read long conversations:** scrolling away from the bottom pauses follow-tail; return to the bottom to resume. Load 80 reveals more retained activity without replacing the conversation. See [Conversation scrolling](#conversation-scrolling).
+- **Inspect changes and activity:** use Plan, Agents, Changes and the per-thread inspectors; visibility switches hide presentation, not provider history. See [Inspector and Info presentation](#inspector-and-info-presentation).
+
+## Known limitations
+
+- Approval dialogs check bounded transport shape and reject unsafe context, but do not provide full standard-MCP schema/content validation or file-change stale-revision gating. Agent approval/sandbox policy remains separate. Review untrusted tool requests and edits accordingly; see the [approval boundary record](architecture/qt-remediation-findings-ledger.md#unresolved-evidence-questions-and-approval-gates).
+- Native interactive qualification remains incomplete, not an approval of every UI path. The [qualification record](native-ui-ux-qualification-results.md#page-overview) records its environment and outstanding work.
+- Dense emoji-heavy diffs were slow with the recorded stock Qt 6.10.2 build. An isolated patched-Qt experiment is not an installed fix or a promise for other Qt versions; the [performance record](native-ui-ux-qualification-results.md#page-overview) owns those measurements.
+- Browser scope differs from native scope. Consult the [native-only 1.0 features](web-1.0-contract.md#native-only-in-10) rather than assuming parity.
+
+## Detailed native presentation contract
+
+The [method-level internal API](ui-ux-internal-api.md#page-overview) owns the native logic/UI boundary. The specifications below describe the projection and interaction rules, not a prerequisite for first use. All Qt popup/context menus, including text-widget menus, use a compact white rounded surface, neutral border, 30-pixel actions, neutral hover, blue-tinted checked actions, muted disabled actions and inset separators.
 
 ## Conversation source and structure
 
@@ -205,19 +212,10 @@ retained by the authoritative user message, so acknowledgment does not reflow
 the attachment presentation. Filename URL delimiters such as `#` and `?` are
 encoded as path content rather than being misread as a fragment or query.
 
-Each pending prompt has a process-wide client-local submission ID and remains
-associated with its destination thread. It therefore remains visible when the
-user switches threads and returns. Successful correlated request
-acknowledgement or definitive failure stops delayed feedback immediately. The
-stable prompt row's fixed one-second admission deadline is the sole animation
-start trigger; the correlated `turn/start` or `turn/steer` result is the
-successful stop trigger. Unrelated worker updates cannot start, stop, or restart
-the sweep.
-The destination thread card uses that same pending-prompt lifecycle: it begins
-the same blue sweep at the same one-second deadline and stops on the same exact
-`turn/start` or `turn/steer` result. Multiple pending prompts keep the thread
-card active until none is awaiting acknowledgement. Unrelated thread or
-catalog traffic cannot start or stop it.
+Each pending prompt has a process-wide client-local submission ID and remains associated with its destination thread, including when switching away and back. A correlated successful `turn/start` or `turn/steer` result acknowledges request dispatch but does not by itself end waiting feedback. The original fixed one-second admission deadline remains in effect until the authoritative user item is materialized; definitive failure stops the sweep and retains an error/recovery card. Unrelated worker updates cannot start, stop or restart it.
+
+The destination thread card follows the same awaiting-conversation state. Multiple pending prompts keep it active until none is awaiting dispatch or authoritative materialization. Request acceptance and conversation visibility are distinct; unrelated thread/catalog traffic cannot complete either lifecycle.
+
 The timer controls only whether pending feedback is visible; it never
 acknowledges or promotes the prompt. If the authoritative app-server item
 arrives before or after the result, it inherits the pending card's stable visual
@@ -238,13 +236,7 @@ the canonical teal border and title treatment.
 No optimistic card is exchanged for a second identity, and the turn grows
 around it without changing existing nested card or local interaction state.
 
-At acknowledgment, the retained outer You card immediately uses the stronger
-static blue running border. That border belongs to the card across its local-
-prompt-to-authoritative-message morph while pending feedback stops; it
-has no animation, glow, shading, or geometry change. A successful `turn/start`
-result retains active ownership until the separate authoritative lifecycle
-catches up, so the optimistic-to-running handoff has no neutral-border frame.
-Completion restores the canonical border in place.
+At authoritative materialization, the retained outer You card uses the canonical running presentation in place, without changing its stable visual identity. A successful request result can arrive first; during that accepted-but-not-entered interval the prompt remains waiting. Completion restores the canonical completed presentation without a geometry change.
 
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
@@ -421,108 +413,7 @@ targets; runtime color conversion is not part of painting.
 
 Color primitives live in `UiStyle::Palette`; native renderers and stylesheets use semantic `UiStyle` roles such as `threadSelected`, `finalAnswerSurface`, and `focusBorder`. Change their palette assignments in `UiStyle.h` to recolor a role without coupling unrelated components. The bright yellow selection is an intentional exception to the shared chroma targets. Browser colors are defined by semantic CSS variables in `web/src/colors.css`; these retain the browser’s existing values. Component CSS consumes those variables. Source-policy checks reject direct native palette access and browser color literals outside their token definitions.
 
-### Native conversation-card polish register
-
-This ordered register is the authoritative completion sequence for the current
-native card-polish pass. Each behavior is implemented and committed as a narrow,
-independently reviewable change.
-
-1. **Complete:** interim Codex update cards use a clearly perceptible amber
-   surface, border, title, and phase identity; final answers remain violet.
-2. **Complete:** expose and persist a Files Changed “new cards start expanded”
-   control, applying it only when a new card is materialized.
-3. **Complete:** resolve changed-file paths against the canonical thread
-   workspace and open them with the system-default application.
-4. **Complete:** open image-ribbon images with the system-default image viewer;
-   CodexUI does not create or retain a separate image-viewer window.
-5. **Complete:** inventory card kinds suitable for an initial
-   expanded/collapsed control.
-6. **Complete:** inventory card kinds suitable for a show/hide control.
-7. **Complete:** update focused regression coverage and the internal UI API
-   contract for the completed card-polish behavior. Final integration
-   qualification is performed separately by the user.
-
-#### Initial expanded/collapsed control inventory
-
-Every content-bearing conversation card retains its own disclosure state for
-the selected thread. A header-level preference is justified only when the
-content is routinely large and users commonly want the same initial treatment
-for each newly arriving card. It never retroactively refolds an existing card.
-
-| Card kind | Current initial behavior | Header preference decision | UX rationale |
-|---|---|---|---|
-| User message | Expanded | Do not add | The authored prompt is the turn anchor and should remain immediately legible. |
-| Pending local prompt / steering | Expanded | Do not add | Admission, animation, failure recovery, and acknowledgement must remain visible. |
-| Final Codex answer | Expanded | Do not add | It is the primary result of the turn. |
-| Interim Codex update | Expanded when shown | Do not add | The existing visibility control is the useful choice; a second folding preference would be ambiguous. |
-| Command execution | User preference, expanded by default | Existing control | Commands and outputs vary greatly in height and recur frequently. |
-| Image generation | User preference, expanded by default | Existing control | Generated-image ribbons can consume substantial vertical space. |
-| File changes | User preference, collapsed by default | Added control | File lists can be long, but users reviewing code often want every new list opened. |
-| Agent activity | Collapsed | Candidate, not added | Results can be verbose, but a fifth folding control would crowd the header; retain per-card disclosure until explicit demand outweighs that cost. |
-| Reasoning | Collapsed when shown | Do not add | Show/hide already expresses the durable preference and avoids two controls for one content class. |
-| Plan | Collapsed | Candidate, not added | Plans are often useful expanded, but the Inspector already provides the persistent plan surface. |
-| Generic/unknown activity | Collapsed | Do not add | Diagnostic fallback content should be available without dominating the primary conversation. |
-| Outer turn/You section | Expanded | Do not add | Its disclosure is local navigation state governing the complete turn, not a repeated content-type default. |
-
-#### Show/hide control inventory
-
-Visibility preferences filter only the Qt presentation. Canonical items remain
-in NodeGraph, continue receiving updates, and return with their latest content
-and retained local fold state. Primary authorship, results, actionable pending
-state, and side-effect records are never eligible to disappear by default.
-
-| Card kind | Could be filtered? | Header-control decision | UX rationale |
-|---|---|---|---|
-| User message | No | Never add | Removing the prompt destroys the readable turn structure. |
-| Pending local prompt / steering | No | Never add | Users must see admission, progress, failure, and recovery state. |
-| Final Codex answer | No | Never add | The requested result is primary conversation content. |
-| Interim Codex update | Yes | Existing control | Updates are useful live context but optional during review. |
-| Reasoning | Yes | Existing control | Reasoning can be verbose and is explicitly optional presentation. |
-| Agent activity | Yes | Strong future candidate | Multi-agent traces can dominate long threads; filtering is safe while the canonical child and Inspector Agent state remain available. |
-| Plan | Yes | Future candidate | The Inspector retains the current plan, so duplicate conversation plan cards may be optional. |
-| Generic/unknown activity | Yes, cautiously | Future candidate | Low-level diagnostics may be hidden, but the default must remain visible so unknown protocol content is not silently concealed. |
-| Command execution | Technically yes | Do not add now | Commands document concrete side effects; folding controls bulk without erasing the audit trail. |
-| File changes | Technically yes | Do not add now | Changed paths are important side-effect evidence; the new initial-fold preference handles density. |
-| Image generation | Technically yes | Do not add now | Generated images are requested results; initial folding already controls vertical cost. |
-| Outer turn/You section | No | Never add | It is the structural and scrolling anchor for all cards in the turn. |
-
-If another visibility control is requested, Agent activity is the first
-recommended addition. It should reuse the existing local presentation-options
-path; it must not introduce a graph-side filter or another retained model.
-
-Browser persistence is an optional convenience: unavailable or denied local
-storage falls back to canonical defaults and never prevents the UI from
-starting or accepting preference changes.
-Web thread refresh, rename, fork, archive, and delete actions are single-flight.
-Mutation controls require current controller readiness, remain disabled while
-their operation is pending, and report operation failures through the canonical
-notice surface.
-Transient notices overlay the conversation workspace in native and WebUI. Their
-appearance, timeout, and dismissal never resize or reposition message content.
-
-Folding is an explicit geometry transaction. Collapsing keeps the selected
-title row fixed while the natural scroll range permits and shifts following
-cards upward. Expanding grows downward when the complete card remains visible;
-otherwise the viewport scrolls only enough to reveal it, so the title may move
-upward. The visible boundary excludes any extra composer height currently
-overlaying the conversation. The gesture pauses follow-latest. At the lower
-scroll limit, the viewport accepts the natural clamp instead of retaining
-artificial blank space.
-
-When enabled, Reasoning items remain stable progress cards even when the
-app-server provides no public summary; later content updates the same retained
-card in place.
-File-change cards list each supplied path and change kind and derive compact
-addition and deletion totals from the supplied per-file unified diffs. They do
-not duplicate the full review surface owned by the Changes inspector. Optional
-Command duration and Agent model, reasoning effort, child identity, path,
-sender, and receivers are shown only when app-server supplied them.
-
-Textual `plan` items remain conversation content. Structured
-`turn/plan/updated` state is shown only in the Inspector Plan tab, avoiding a
-duplicate representation in the conversation. Its typed conversation key,
-conversion and renderer remain available to textual plan items; structured
-turn state is deliberately not materialized as a conversation card.
+The [historical card-polish sequence](native-ui-ux-qualification-inventory.md#historical-card-polish-sequence) belongs to engineering qualification, not the first-use journey.
 
 ## Conversation scrolling
 
@@ -708,6 +599,8 @@ spinner contract is defined yet.
 ## Connection and controller ownership
 
 **Connection** opens **Bridge connection**. Choose a compiled transport, then enter **Socket path** for Unix or the host/port for a network transport (plus **WebSocket path** when applicable). **Apply and connect** updates the current UI session; command-line/SNode.C settings supply startup defaults. Cancelling the dialog does not apply changes. TLS certificate/verification settings remain part of the effective SNode.C configuration.
+
+For startup options, run `codex-ui --help=expanded`; inspect the application’s `codex-ui` section for `--bridge-websocket-endpoint` and `--bridge-maximum-frame-bytes`, and the selected instance for `remote`, `tls`, `connection` or `socket` options. `codex-ui -s` prints the effective configuration/template. Use `--write-config /path/to/private/codex-ui.conf` to write and exit, then `--config-file /path/to/private/codex-ui.conf` to load it as the same user; this explicit path avoids depending on a guessed per-distribution default location.
 
 The default Unix endpoint matches the bridge's private runtime socket: valid private `XDG_RUNTIME_DIR` plus `/codex-bridge.sock`, or `/tmp/codex-bridge-<uid>/codex-bridge.sock`. Run bridge and UI as the same user. A missing socket or unavailable provider is not controller denial: check transport connection and provider readiness separately.
 

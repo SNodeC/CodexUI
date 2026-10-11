@@ -7,7 +7,7 @@
 
 # CodexUI Qt UI architecture and usability audit
 
-**Status:** complete read-only architectural audit; no remediation is implemented or approved here.
+**Historical status:** read-only audit of the revision below, not a claim about current implementation. Subsequent S1/MR remediation is recorded in the [findings ledger](architecture/qt-remediation-findings-ledger.md#page-overview); current user behavior is described in [Using CodexUI](ui-behavior.md#using-codexui).
 **Audit date:** 2026-09-12 (Europe/Vienna)
 **Repository:** `/path/to/workspace/drafts/CodexUI/codexui`
 **Revision reviewed:** `629660e8882bddc7473ee5f1aab90c755ee6edd4` (`master`) plus the pre-existing uncommitted worktree recorded below.
