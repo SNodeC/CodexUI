@@ -39,6 +39,11 @@ find_package(
     COMPONENTS net-rc-stream-legacy net-rc-stream-tls
 )
 find_package(Qt6 6.6 REQUIRED COMPONENTS Widgets)
+# Package upgrades can preserve header timestamps. Keep all Qt consumers on the
+# same header version by making that version part of their compilation command.
+target_compile_definitions(
+    Qt6::Core INTERFACE CODEXUI_BUILD_QT_VERSION="${Qt6Core_VERSION}"
+)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
 
