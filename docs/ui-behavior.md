@@ -5,7 +5,7 @@
 </p>
 <!-- snodec:end page-header -->
 
-# Using CodexUI and understanding its behavior
+# Interaction guide
 
 ## Using CodexUI
 
