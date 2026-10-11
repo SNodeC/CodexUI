@@ -8,7 +8,11 @@
 
 Verification records for individual features.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [Thread Projects Verification](thread-projects-verification.md#page-overview)
 - [Timestamp Verification](timestamp-verification.md#page-overview)
+- [Codex 0.162.1 migration inventory](codex-0.162.1-migration-inventory.md#page-overview)
+- [Codex 0.162.1 local migration results](codex-0.162.1-migration-results.md#page-overview)
 <!-- snodec:end section-pages -->

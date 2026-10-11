@@ -8,6 +8,8 @@
 
 The CodexWebUI 1.0 contract, its qualification and the release-candidate process.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [CodexWebUI 1.0 Contract](contract-1.0.md#page-overview)
 - [CodexWebUI qualification](qualification.md#page-overview)

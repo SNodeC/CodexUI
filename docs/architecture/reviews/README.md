@@ -8,6 +8,8 @@
 
 Historical external architecture reviews; findings refer to their captured revision.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [External architecture review — ChatGPT](chatgpt.md#page-overview)
 - [External architecture review — Claude A](claude-a.md#page-overview)

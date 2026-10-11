@@ -8,6 +8,8 @@
 
 Architecture, internal contracts and design analyses of CodexUI.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
 - [Historical Codex app-server protocol and proposed master data model](app-server-data-model.md#page-overview)
 - [CodexUI architecture](overview.md#page-overview)

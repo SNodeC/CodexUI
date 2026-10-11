@@ -2,7 +2,10 @@
 <a name="project-overview"></a>
 
 <p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="docs/media/hero-mobile.svg">
   <img src="docs/media/readme-hero.svg" alt="Codex(W)UI — A workspace for the whole coding conversation." width="100%">
+  </picture>
 </p>
 
 <!-- snodec:begin organization -->
@@ -100,7 +103,7 @@ Build the native Qt desktop or browser assets served by `codex-bridge`. Both are
 
 ### Native desktop
 
-**You need:** the native build, a configured Codex executable available to the bridge user, and AISuite's `codex-bridge`. The bridge's generated protocol targets Codex 0.154.0; use the [AISuite entry page](https://github.com/SNodeC/AISuite#project-overview) to check compatibility before changing Codex versions.
+**You need:** the native build, a configured Codex executable available to the bridge user, and AISuite's `codex-bridge`. The bridge's generated protocol targets Codex 0.162.1; use the [AISuite entry page](https://github.com/SNodeC/AISuite#project-overview) to check compatibility before changing Codex versions.
 
 Start `codex-bridge --config-file /dev/null` as your own user in one terminal. In a second terminal, run from this checkout:
 
@@ -169,12 +172,14 @@ No GitHub release or shared binary-package distribution is published yet; the do
 
 ## Contributing
 
+[Engineering instructions for coding agents](AGENTS.md).
+
 [Report an issue](https://github.com/SNodeC/CodexUI/issues) using the sanitized information in [Documentation](#documentation); read the existing [agent/engineering instructions](AGENTS.md) and [build/qualification guide](docs/guides/build-from-source.md#quality-and-development).
 
 <!-- snodec:begin ecosystem -->
 ## Ecosystem
 
-[SNode.C organization](https://github.com/SNodeC) · Depends on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview)
+Depends on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview)
 <!-- snodec:end ecosystem -->
 
 <!-- snodec:begin footer -->

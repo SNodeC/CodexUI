@@ -8,7 +8,9 @@
 
 The Qt architecture remediation: findings ledger and working prompt.
 
+## Sections
+
 <!-- snodec:begin section-pages -->
-- [Qt architecture remediation findings ledger](findings-ledger.md#page-overview)
 - [CodexUI Qt architecture remediation thread prompt](thread-prompt.md#page-overview)
+- [Findings ledger](findings-ledger/README.md#page-overview)
 <!-- snodec:end section-pages -->

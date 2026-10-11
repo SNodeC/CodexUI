@@ -1,3 +1,9 @@
+<!-- snodec:begin page-header -->
+<a id="page-overview"></a>
+<p><picture><source media="(max-width: 640px)" srcset="../media/nav/banner-records-compact.svg"><img src="../media/nav/banner-records.svg" alt="CodexUI — Records" width="100%"></picture></p>
+<p><a href="README.md#page-overview" title="Up to Records"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-records-dark.svg"><img src="../media/nav/up-records-light.svg" alt="Up to Records" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNodeC organization"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNodeC organization" width="160" height="28"></picture></a><a href="../../README.md#project-overview" title="CodexUI repository"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" width="160" height="28"></picture></a><br clear="all"></p>
+<!-- snodec:end page-header -->
+
 # Codex 0.162.1 migration inventory
 
 Inventory date: 2026-10-11. This records the analysis phase before the migration diff. At that point, neither repository's production code or tests had been edited. The subsequent authorized local implementation and its verification are recorded in [the implementation report](codex-0.162.1-migration-results.md). Experimental API access stays enabled. No system-wide Codex was installed, and production CODEX_HOME/database/authentication were not used for runtime testing.
@@ -104,7 +110,7 @@ Paths beginning AISuite refer to `/home/voc/projects/drafts/AISuite-extraction/A
 
 ## Remaining additive schema changes and their owners
 
-There are 43 new canonical types, two removed canonical types and 44 structurally changed existing types. The table below is exhaustive at canonical-type level; union details follow. The machine-readable [schema delta](/tmp/codex-upgrade-audit/schema-delta.json) records this inventory and the raw schema entries for timestamp additions; both complete upstream schema snapshots remain in the same temporary evidence directory. Documentation-only description changes were excluded. Union arrays were normalized for comparison so ordering does not falsely imply removal.
+There are 43 new canonical types, two removed canonical types and 44 structurally changed existing types. The table below is exhaustive at canonical-type level; union details follow. The machine-readable `/tmp/codex-upgrade-audit/schema-delta.json` records this inventory and the raw schema entries for timestamp additions; both complete upstream schema snapshots remain in the same temporary evidence directory. Documentation-only description changes were excluded. Union arrays were normalized for comparison so ordering does not falsely imply removal.
 
 | Existing type | Added fields | Removed fields | Changed fields / structure |
 | --- | --- | --- | --- |
