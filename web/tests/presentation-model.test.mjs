@@ -539,3 +539,50 @@ test("stream text retains bounded tails and explicit discarded-byte metadata", (
     assert.equal(prompt.raw.text, oversized);
     assert.equal(prompt.textRetention, undefined);
 });
+
+test("item pagination retains wrapper lifecycle timestamps without replacing live completion", () => {
+    const {model, normalizer} = pipeline();
+    normalizer.serverNotification("thread/started", {thread: {id: "timing"}});
+    const page = (id, entries) => normalizer.operationResult("thread.items.list", id, {threadId: "timing"},
+        {id, result: {data: entries, nextCursor: null}});
+    page("initial", [{turnId: "turn", startedAtMs: 10, completedAtMs: 20,
+        item: {id: "item", type: "agentMessage", text: "history"}}]);
+    const raw = () => model.thread("timing").turns.get("turn").items.get("item").raw;
+    assert.equal(raw().startedAtMs, 10);
+    assert.equal(raw().completedAtMs, 20);
+    normalizer.serverNotification("item/completed", {threadId: "timing", turnId: "turn", completedAtMs: 90,
+        item: {id: "item", type: "agentMessage", text: "live"}});
+    page("delayed", [{turnId: "turn", startedAtMs: null, completedAtMs: 30,
+        item: {id: "item", type: "agentMessage"}}]);
+    assert.equal(raw().startedAtMs, 10);
+    assert.equal(raw().completedAtMs, 90);
+    assert.equal(raw().text, "live");
+    page("sparse", [{turnId: "turn", item: {id: "item", type: "agentMessage"}}]);
+    assert.equal(raw().startedAtMs, 10);
+    assert.equal(raw().completedAtMs, 90);
+});
+
+test("new unsupported notifications retain diagnostics without changing thread or turn authority", () => {
+    const {model, normalizer} = pipeline();
+    normalizer.serverNotification("thread/started", {thread: {id: "neutral", status: {type: "idle"}}});
+    normalizer.serverNotification("turn/started", {threadId: "neutral", turn: {id: "turn", status: "inProgress"}});
+    const thread = model.thread("neutral");
+    const before = structuredClone(thread);
+    for (const method of ["account/gatewayOAuth/changed", "thread/attachment/updated", "thread/prediction/updated"])
+        normalizer.serverNotification(method, {threadId: "neutral", turnId: "turn", status: "completed"});
+    assert.deepEqual(thread, before);
+});
+
+test("resume wrapper collaboration mode uses existing causal settings authority", () => {
+    const {model, normalizer} = pipeline();
+    const mode = value => ({mode: value, settings: {model: "gpt-current", reasoning_effort: "high", developer_instructions: null}});
+    normalizer.serverNotification("thread/started", {thread: {id: "resume-mode"}});
+    const dispatched = normalizer.sequence;
+    normalizer.serverNotification("thread/settings/updated", {threadId: "resume-mode", threadSettings: {collaborationMode: mode("default")}});
+    normalizer.operationResult("thread.resume", "delayed", {threadId: "resume-mode"},
+        {result: {thread: {id: "resume-mode"}, collaborationMode: mode("plan")}}, dispatched);
+    assert.deepEqual(model.thread("resume-mode").raw.collaborationMode, mode("default"));
+    normalizer.operationResult("thread.resume", "fresh", {threadId: "resume-mode"},
+        {result: {thread: {id: "resume-mode"}, collaborationMode: mode("plan")}}, normalizer.sequence);
+    assert.deepEqual(model.thread("resume-mode").raw.collaborationMode, mode("plan"));
+});

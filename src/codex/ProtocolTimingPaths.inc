@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
-// Schema-declared timestamp paths: Codex rust-v0.154.0, revision
-// 6b9826e3aa83b1a5947db50f4332cb9c65f1b340. @Type composes the same typed
+// Schema-declared timestamp paths: Codex rust-v0.162.1, revision
+// 092d3acd6bec3e3a14bdc7e7a2810ab628ab759d. @Type composes the same typed
 // contract in each wrapper; * visits only schema-declared collections.
 // Never discover date-looking keys recursively in arbitrary tool/user data.
 static const std::map<std::string_view, std::vector<std::string_view>,
@@ -16,7 +16,7 @@ static const std::map<std::string_view, std::vector<std::string_view>,
         {"ProjectReadResponse", {"project/@Project"}},
         {"ThreadSearchResponse", {"data/*/thread/@Thread"}},
         {"ThreadTurnsListResponse", {"data/*/@Turn"}},
-        {"ThreadItemsListResponse", {"data/*/item/@ThreadItem"}},
+        {"ThreadItemsListResponse", {"data/*/@ThreadItemEntry"}},
         {"PluginListResponse", {"marketplaces/*/plugins/*/@PluginSummary"}},
         {"PluginSearchResponse", {"data/*/plugin/@PluginSummary"}},
         {"PluginReadResponse", {"plugin/summary/@PluginSummary"}},
@@ -64,6 +64,11 @@ static const std::map<std::string_view, std::vector<std::string_view>,
         {"RateLimitResetCredit", {"expiresAt", "grantedAt"}},
         {"RemoteControlClient", {"lastSeenAt"}},
         {"ExternalAgentConfigImportHistory", {"completedAtMs"}},
+        {"ThreadItemEntry", {"startedAtMs", "completedAtMs", "item/@ThreadItem"}},
+        {"ThreadAttachment", {"createdAt"}},
+        {"ThreadAttachmentAddResponse", {"attachment/@ThreadAttachment"}},
+        {"ThreadAttachmentListResponse", {"data/*/@ThreadAttachment"}},
+        {"ThreadAttachmentUpdatedNotification", {"attachment/@ThreadAttachment"}},
         {"ThreadItem", {"durationMs", "failure/@RateLimitWindow"}},
         {"ItemLifecycle",
          {"startedAtMs", "completedAtMs", "durationMs",
@@ -79,7 +84,6 @@ static const std::map<std::string_view, std::string_view, std::less<>>
         {"thread/queue/start:result", "ThreadQueueStartResponse"},
         {"thread/metadata/update:result", "ThreadStartResponse"},
         {"thread/unarchive:result", "ThreadStartResponse"},
-        {"thread/rollback:result", "ThreadStartResponse"},
         {"thread/revert:result", "ThreadStartResponse"},
         {"thread/list:result", "ThreadListResponse"},
         {"project/list:result", "ProjectListResponse"},
@@ -91,6 +95,9 @@ static const std::map<std::string_view, std::string_view, std::less<>>
         {"thread/read:result", "ThreadStartResponse"},
         {"thread/turns/list:result", "ThreadTurnsListResponse"},
         {"thread/items/list:result", "ThreadItemsListResponse"},
+        {"thread/attachment/add:result", "ThreadAttachmentAddResponse"},
+        {"thread/attachment/list:result", "ThreadAttachmentListResponse"},
+        {"thread/attachment/updated:params", "ThreadAttachmentUpdatedNotification"},
         {"plugin/list:result", "PluginListResponse"},
         {"plugin/search:result", "PluginSearchResponse"},
         {"plugin/installed:result", "PluginListResponse"},

@@ -183,7 +183,7 @@ VisibleCardData cardData(std::size_t index) {
                       std::to_string(paragraph) +
                       " contains **Markdown**, wrapping, and a "
                       "[link](https://example.com).";
-      card.payload = AgentMessageData{std::move(markdown), true};
+      card.payload = AgentMessageData{std::move(markdown), "final_answer"};
     }
     break;
   case 2:
@@ -315,7 +315,7 @@ ConversationSnapshot sparseVisibilitySnapshot(std::size_t hiddenRows) {
   section.cards.push_back(
       {AuthoritativeItemKey{result.threadId, section.turnId, "tail"},
        CardKind::AgentMessage, result.threadId, section.turnId, "tail",
-       AgentMessageData{"Visible tail", true}});
+       AgentMessageData{"Visible tail", "final_answer"}});
   result.sections.push_back(std::move(section));
   return result;
 }
@@ -1222,7 +1222,7 @@ int main(int argc, char **argv) {
           "benchmark-thread",
           previous->turnId,
           item,
-          AgentMessageData{"Planned row", true}};
+          AgentMessageData{"Planned row", "final_answer"}};
       inserted.target = targets[sample];
       rows.push_back(
           {{std::move(inserted), "turn-section-" + std::to_string(section),

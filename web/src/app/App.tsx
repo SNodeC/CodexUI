@@ -506,7 +506,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
         body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
-        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.finalAnswer ? "final" : "update"; phaseClass = cardVariant; phaseLabel = data.finalAnswer ? "final answer" : "update";
+        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
         body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
@@ -718,7 +718,7 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
     const cardVisible = (card: VisibleCardData) => {
         if (card.kind === "reasoning") return presentation.showReasoning;
         if (card.kind !== "agentMessage") return true;
-        return (card.payload as AgentMessageData).finalAnswer || presentation.showCodexUpdates;
+        return ["final_answer", "partial_answer"].includes((card.payload as AgentMessageData).phase) || presentation.showCodexUpdates;
     };
     const cardCollapsed = (card: VisibleCardData, key: string) => {
         const initiallyCollapsed = (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)

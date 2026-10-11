@@ -187,7 +187,257 @@
     {"id": "kind-fallback", "kind": "completed", "expectedAgentStatus": "completed"},
     {"id": "forward-status-precedes-kind", "kind": "completed", "status": "futureProviderState", "expectedAgentStatus": "futureProviderState"}
   ],
+  "agentMessageCases": [
+    {
+      "phase": "commentary",
+      "label": "update",
+      "visibleWithoutUpdates": false
+    },
+    {
+      "phase": "partial_answer",
+      "label": "partial answer",
+      "visibleWithoutUpdates": true
+    },
+    {
+      "phase": "final_answer",
+      "label": "final answer",
+      "visibleWithoutUpdates": true
+    },
+    {
+      "phase": "future_phase",
+      "label": "update",
+      "visibleWithoutUpdates": false
+    },
+    {
+      "phase": "",
+      "label": "update",
+      "visibleWithoutUpdates": false
+    }
+  ],
   "pendingRequestCases": [
+    {
+      "id": "command-explicit",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "git status",
+        "kind": "command"
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {
+          "value": "accept",
+          "label": "Accept",
+          "tone": "approve",
+          "requiresInput": false
+        },
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "accept",
+          "choice": "accept",
+          "expected": {
+            "result": {
+              "decision": "accept"
+            }
+          }
+        },
+        {
+          "id": "undeclared-decline",
+          "choice": "decline",
+          "expected": null
+        }
+      ]
+    },
+    {
+      "id": "command-write-stdin",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "write_stdin --session-id 42 'yes\\n'",
+        "kind": "writeStdin",
+        "approvalId": "stdin-approval",
+        "environmentId": "terminal-environment",
+        "cwd": "/fixture/workspace"
+      },
+      "expectedDisclosure": {
+        "command": "write_stdin --session-id 42 'yes\\n'",
+        "kind": "writeStdin",
+        "approvalId": "stdin-approval",
+        "environmentId": "terminal-environment",
+        "cwd": "/fixture/workspace"
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {
+          "value": "accept",
+          "label": "Accept",
+          "tone": "approve",
+          "requiresInput": false
+        },
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "accept",
+          "choice": "accept",
+          "expected": {
+            "result": {
+              "decision": "accept"
+            }
+          }
+        },
+        {
+          "id": "undeclared-decline",
+          "choice": "decline",
+          "expected": null
+        }
+      ]
+    },
+    {
+      "id": "command-unknown-kind",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "git status",
+        "kind": "future"
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "accept",
+          "choice": "accept",
+          "expected": null
+        },
+        {
+          "id": "cancel",
+          "choice": "cancel",
+          "expected": {
+            "result": {
+              "decision": "cancel"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "command-null-kind",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "git status",
+        "kind": null
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "accept",
+          "choice": "accept",
+          "expected": null
+        },
+        {
+          "id": "cancel",
+          "choice": "cancel",
+          "expected": {
+            "result": {
+              "decision": "cancel"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "command-numeric-kind",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "git status",
+        "kind": 7
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "accept",
+          "choice": "accept",
+          "expected": null
+        },
+        {
+          "id": "cancel",
+          "choice": "cancel",
+          "expected": {
+            "result": {
+              "decision": "cancel"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "command-write-stdin-exec-amendment",
+      "method": "item/commandExecution/requestApproval",
+      "raw": {
+        "command": "git status",
+        "kind": "writeStdin",
+        "proposedExecpolicyAmendment": [
+          "git"
+        ]
+      },
+      "expectedKind": "command-approval",
+      "expectedActions": [
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "accept",
+          "choice": "accept",
+          "expected": null
+        },
+        {
+          "id": "cancel",
+          "choice": "cancel",
+          "expected": {
+            "result": {
+              "decision": "cancel"
+            }
+          }
+        }
+      ]
+    },
     {
       "id": "command-default",
       "method": "item/commandExecution/requestApproval",

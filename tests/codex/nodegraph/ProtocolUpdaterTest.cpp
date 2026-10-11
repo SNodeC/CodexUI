@@ -217,13 +217,13 @@ void groupedListsPreserveInterveningAssignments() {
 
 void catalogIsComplete() {
   const auto methods = protocolMethods();
-  require(methods.size() == 257, "catalog has all 257 methods");
-  require(protocolMethodCount(ProtocolDirection::ClientRequest) == 162,
-          "catalog has 162 client requests");
+  require(methods.size() == 271, "catalog has all 271 methods");
+  require(protocolMethodCount(ProtocolDirection::ClientRequest) == 173,
+          "catalog has 173 client requests");
   require(protocolMethodCount(ProtocolDirection::ServerRequest) == 11,
           "catalog has 11 server requests");
-  require(protocolMethodCount(ProtocolDirection::ServerNotification) == 83,
-          "catalog has 83 server notifications");
+  require(protocolMethodCount(ProtocolDirection::ServerNotification) == 86,
+          "catalog has 86 server notifications");
   require(protocolMethodCount(ProtocolDirection::ClientNotification) == 1,
           "catalog has one client notification");
 
@@ -259,13 +259,13 @@ void catalogIsComplete() {
     }
   }
   require(graphUpdates == 75, "75 server notifications update graph state");
-  require(operations == 163,
-          "162 requests plus initialized are worker operations");
+  require(operations == 174,
+          "173 requests plus initialized are worker operations");
   require(interactions == 11, "all server requests are interactions");
   require(
       effects == 6,
       "six provider notices update graph state and request a typed UI effect");
-  require(neutral == 2, "two internal raw-response events are neutral");
+  require(neutral == 5, "three new notifications and two internal raw-response events are neutral");
   require(!findProtocolMethod(ProtocolDirection::ServerNotification,
                               "unknown/method"),
           "unknown methods are not silently classified");
@@ -1030,6 +1030,9 @@ void effectiveThreadSettingsConvergeAcrossWireShapes() {
        Value::Object{
            {"thread", Value(Value::Object{{"id", Value("settings-thread")}})},
            {"model", Value("gpt-current")},
+           {"collaborationMode", Value(Value::Object{{"mode", Value("plan")},
+                {"settings", Value(Value::Object{{"model", Value("gpt-current")},
+                    {"reasoning_effort", Value("high")}, {"developer_instructions", Value(nullptr)}})}})},
            {"reasoningEffort", Value("high")},
            {"approvalPolicy", Value("never")},
            {"sandbox", Value("workspaceWrite")},
@@ -1038,7 +1041,11 @@ void effectiveThreadSettingsConvergeAcrossWireShapes() {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
     const auto state = read->state(thread);
-    require(thread && field(state, "model") &&
+    const auto *collaboration = field(state, "collaborationMode");
+    const auto *mode = collaboration && collaboration->asObject()
+                           ? valueMember(*collaboration->asObject(), "mode") : nullptr;
+    require(thread && mode && mode->asString() && *mode->asString() == "plan" &&
+                field(state, "model") &&
                 *field(state, "model")->asString() == "gpt-current" &&
                 field(state, "reasoningEffort") &&
                 *field(state, "reasoningEffort")->asString() == "high" &&
@@ -1332,6 +1339,8 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
   Value::Array firstPage{
       Value(Value::Object{
           {"turnId", Value("items-turn")},
+          {"startedAtMs", Value(std::uint64_t{10})},
+          {"completedAtMs", Value(std::uint64_t{20})},
           {"item", Value(Value::Object{{"id", Value("newer-item")},
                                        {"type", Value("agentMessage")}})}}),
       Value(Value::Object{
@@ -1349,7 +1358,11 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
     const NodeRef older =
         findItem(*read, "items-thread", "items-turn", "older-item");
     const auto state = read->state(turn);
-    require(turn &&
+    const auto newerState = read->state(findItem(*read, "items-thread", "items-turn", "newer-item"));
+    require(field(newerState, "startedAtMs") && field(newerState, "startedAtMs")->asUInt64() &&
+                *field(newerState, "startedAtMs")->asUInt64() == 10 &&
+                field(newerState, "completedAtMs") && field(newerState, "completedAtMs")->asUInt64() &&
+                *field(newerState, "completedAtMs")->asUInt64() == 20 && turn &&
                 protocolIds(*read, read->children(turn)) ==
                     std::vector<std::string>{"older-item", "newer-item"} &&
                 read->related(turn, RelationKind::TurnRootItem) ==
@@ -1419,6 +1432,8 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
                                         {"text", Value("newer live text")}})}}}));
   Value::Array delayedPage{Value(Value::Object{
       {"turnId", Value("items-turn")},
+      {"startedAtMs", Value(nullptr)},
+      {"completedAtMs", Value(std::uint64_t{30})},
       {"item", Value(Value::Object{{"id", Value("newer-item")},
                                    {"type", Value("agentMessage")},
                                    {"status", Value("inProgress")},
@@ -1434,9 +1449,11 @@ void threadItemPagesMaintainScopedContainmentAndOrder() {
         findItem(*read, "items-thread", "items-turn", "newer-item");
     const auto state = read->state(item);
     const Value *completedAt = field(state, "completedAtMs");
+    const Value *startedAt = field(state, "startedAtMs");
     require(item && state->status == NodeStatus::Completed &&
                 field(state, "text") && field(state, "text")->asString() &&
                 *field(state, "text")->asString() == "newer live text" &&
+                startedAt && startedAt->asUInt64() && *startedAt->asUInt64() == 10 &&
                 completedAt && completedAt->asUInt64() &&
                 *completedAt->asUInt64() == 90,
             "a delayed item page cannot overwrite post-request lifecycle "
@@ -5251,7 +5268,7 @@ void authoritativeReplacementRetiresItemsAndPreservesLocalTail() {
           "optimistic tail and its stable NodeRefs");
 }
 
-void rollbackAndRevertReplaceAuthoritativeHistory() {
+void revertReplacesAuthoritativeHistory() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
   const auto turn = [](std::string id, std::string itemId) {
@@ -5289,61 +5306,12 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
         findItem(*read, "history-mutation", "turn-2", "item-2-omitted");
   }
 
-  const ProtocolRequestId rollbackId("rollback-history");
-  const ApplyResult rollbackRequest = updater.apply(
-      {DecodedMessageKind::ClientRequest, "thread/rollback", rollbackId,
-       Value::Object{{"threadId", Value("history-mutation")},
-                     {"numTurns", Value(std::uint64_t{1})}}});
-  static_cast<void>(updater.apply(
-      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
-       Value::Object{
-           {"threadId", Value("history-mutation")},
-           {"turnId", Value("turn-2")},
-           {"startedAtMs", Value(std::uint64_t{100})},
-           {"item", Value(Value::Object{{"id", Value("post-rollback-request")},
-                                        {"type", Value("agentMessage")}})}}}));
-  NodeRef postRollbackRequest;
-  {
-    auto read = graph.tryRead();
-    postRollbackRequest =
-        findItem(*read, "history-mutation", "turn-2", "post-rollback-request");
-  }
-  const ApplyResult rolledBack = updater.apply(
-      {DecodedMessageKind::ClientResult, "thread/rollback", rollbackId,
-       Value::Object{
-           {"thread",
-            Value(Value::Object{
-                {"id", Value("history-mutation")},
-                {"turns", Value(Value::Array{turn("turn-1", "item-1"),
-                                             turn("turn-2", "item-2")})}})}},
-       rollbackRequest.primary});
   NodeRef firstTurn;
   NodeRef secondTurn;
   {
     auto read = graph.tryRead();
-    const NodeRef threadNode =
-        read->find({NodeKind::Thread, "history-mutation"});
     firstTurn = findTurn(*read, "history-mutation", "turn-1");
     secondTurn = findTurn(*read, "history-mutation", "turn-2");
-    require(
-        threadNode && firstTurn && secondTurn && postRollbackRequest &&
-            protocolIds(*read, read->children(threadNode)) ==
-                std::vector<std::string>{"turn-1", "turn-2"} &&
-            !read->find(removedTurn->id()) && !read->find(removedItem->id()) &&
-            !read->find(removedRetainedTurnItem->id()) &&
-            !read->find(postRollbackRequest->id()) &&
-            !read->live(removedTurn) && !read->live(removedItem) &&
-            !read->live(removedRetainedTurnItem) &&
-            !read->live(postRollbackRequest) &&
-            std::ranges::find(rolledBack.change.removed, removedTurn) !=
-                rolledBack.change.removed.end() &&
-            std::ranges::find(rolledBack.change.removed,
-                              removedRetainedTurnItem) !=
-                rolledBack.change.removed.end() &&
-            std::ranges::find(rolledBack.change.removed, postRollbackRequest) !=
-                rolledBack.change.removed.end(),
-        "successful rollback replaces returned history and retires every "
-        "superseded turn and item");
   }
 
   const ProtocolRequestId revertId("revert-history");
@@ -5381,6 +5349,8 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
     require(
         threadNode && postRevertRequest && read->children(threadNode).empty() &&
             !read->find(firstTurn->id()) && !read->find(secondTurn->id()) &&
+            !read->live(removedTurn) && !read->live(removedItem) &&
+            !read->live(removedRetainedTurnItem) &&
             !read->find(postRevertRequest->id()) && !read->live(firstTurn) &&
             !read->live(secondTurn) && !read->live(postRevertRequest) &&
             std::ranges::find(reverted.change.removed, postRevertRequest) !=
@@ -5448,7 +5418,7 @@ int main() {
   correlatedThreadReadsPreserveOnlyInterveningLiveState();
   chosenNameOverlaySurvivesUntilMatchingAcknowledgement();
   authoritativeReplacementRetiresItemsAndPreservesLocalTail();
-  rollbackAndRevertReplaceAuthoritativeHistory();
+  revertReplacesAuthoritativeHistory();
 
   if (failures != 0) {
     std::cerr << failures << " nodegraph protocol assertion(s) failed\n";

@@ -69,7 +69,7 @@ struct UserMessageData {
 
 struct AgentMessageData {
   std::string text;
-  bool finalAnswer = false;
+  std::string phase;
 
   bool operator==(const AgentMessageData &) const = default;
 };

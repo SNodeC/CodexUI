@@ -584,7 +584,7 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
         withTruncationNotice(graphMessageText(state),
                              graphOmittedTextBytes(state, "text"),
                              "Codex response", true),
-        scalarTextFromValue(valueMember(state, "phase")) == "final_answer"};
+        scalarTextFromValue(valueMember(state, "phase"))};
     break;
   case CardKind::CommandExecution: {
     std::string outputField = "aggregatedOutput";

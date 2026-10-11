@@ -157,6 +157,7 @@ test("conversation presentation preferences retain filtered cards and initialize
             {id: "reasoning-1", type: "reasoning", summary: ["Retained reasoning detail"]},
             {id: "update-1", type: "agentMessage", phase: "commentary", text: "Retained Codex update"},
             {id: "final-1", type: "agentMessage", phase: "final_answer", text: "Final answer always visible"},
+            {id: "partial-1", type: "agentMessage", phase: "partial_answer", text: "Partial answer always visible"},
             {id: "command-1", type: "commandExecution", command: "printf retained-command", status: "completed"},
             {id: "command-running", type: "commandExecution", command: "printf running-command", status: "inProgress"},
             {id: "image-1", type: "imageGeneration", path: "/missing/image.png", status: "completed", revisedPrompt: "Retained generated image"},
@@ -169,6 +170,7 @@ test("conversation presentation preferences retain filtered cards and initialize
     assert.doesNotMatch(defaults, /Retained reasoning detail/u);
     assert.match(defaults, /Retained Codex update/u);
     assert.match(defaults, /Final answer always visible/u);
+    assert.match(defaults, /Partial answer always visible/u);
     assert.doesNotMatch(defaults, /conversation-card commandExecution\s+collapsed/u);
     assert.match(defaults, /printf retained-command/u);
     assert.match(defaults, /Retained generated image/u);
@@ -202,6 +204,7 @@ test("conversation presentation preferences retain filtered cards and initialize
     assert.match(filtered, /aria-label="Expand card"/u);
     assert.doesNotMatch(filtered, /Retained Codex update/u);
     assert.match(filtered, /Final answer always visible/u);
+    assert.match(filtered, /Partial answer always visible/u);
     assert.match(filtered, /conversation-card commandExecution\s+collapsed/u);
     assert.doesNotMatch(filtered, /printf retained-command/u);
     assert.doesNotMatch(filtered, /Retained generated image/u);

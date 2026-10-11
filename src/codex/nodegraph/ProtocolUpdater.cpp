@@ -2700,8 +2700,12 @@ void ProtocolUpdater::applyGraphUpdate(
         if (!itemObject || turnId.empty())
           continue;
         NodeRef turn = ensureTurn(write, thread, turnId);
+        Value::Object itemFields = *itemObject;
+        for (const std::string_view key : {"startedAtMs", "completedAtMs"})
+          if (const Value *value = valueMember(*entry, key))
+            itemFields.insert_or_assign(std::string(key), *value);
         NodeRef item =
-            ingestItem(write, *itemObject, turn, {}, preserveChangesAfter);
+            ingestItem(write, itemFields, turn, {}, preserveChangesAfter);
         if (!item)
           continue;
         auto [position, inserted] =
@@ -2844,7 +2848,7 @@ void ProtocolUpdater::applyGraphUpdate(
           objectMember(message.payload, "thread")) {
     const bool authoritativeHistoryResult =
         message.kind == DecodedMessageKind::ClientResult &&
-        (method == "thread/rollback" || method == "thread/revert");
+        method == "thread/revert";
     const bool replaceTurns =
         message.kind == DecodedMessageKind::ClientResult &&
         (method == "thread/read" || authoritativeHistoryResult);

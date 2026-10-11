@@ -11,7 +11,7 @@ export type CardKind = "userMessage" | "agentMessage" | "commandExecution" | "ag
     | "reasoning" | "fileChanges" | "imageGeneration" | "plan" | "genericActivity" | "localPrompt";
 
 export interface UserMessageData {text: string; imagePaths: string[]}
-export interface AgentMessageData {text: string; finalAnswer: boolean}
+export interface AgentMessageData {text: string; phase: string}
 export interface CommandExecutionData {
     command: string; output: string; cwd: string; exitCode?: number; durationMilliseconds?: number;
 }

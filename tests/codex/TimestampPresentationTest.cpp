@@ -56,6 +56,13 @@ void timestampSchemaAndFormatting() {
     TimeUnit unit;
   };
   const Case cases[]{
+      {"thread/items/list", true,
+       {{"data", Json::array({{{"startedAtMs", 100001}, {"completedAtMs", 120001},
+                               {"item", {{"id", "item"}, {"type", "agentMessage"}}}}})}},
+       "data/0/completedAtMs", TimeUnit::Milliseconds},
+      {"thread/attachment/add", true,
+       {{"attachment", {{"createdAt", 100}, {"payload", {{"createdAt", 999}}}}}},
+       "attachment/createdAt", TimeUnit::Seconds},
       {"thread/read",
        true,
        {{"thread",
@@ -188,6 +195,11 @@ void timestampSchemaAndFormatting() {
            {"ExternalAgentConfigImportHistory", {{"completedAtMs", 100001}}}})
     check(protocolTimes(objectFromJson(fields), type).size() == fields.size(),
           type.c_str());
+  const auto attachmentTimes = protocolTimes(
+      Json{{"attachment", {{"createdAt", 100}, {"payload", {{"createdAt", 999}}}}}},
+      "thread/attachment/add", true);
+  check(!find(attachmentTimes, "attachment/payload/createdAt"),
+        "attachment payloads cannot invent schema-declared timestamps");
   auto epoch = ui::timingDetails({protocolTime("createdAt", 0)});
   check(epoch.contains("1970-01-01T00:00:00.000Z"),
         "epoch zero is a real instant");

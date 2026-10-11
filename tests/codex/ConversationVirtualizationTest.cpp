@@ -96,7 +96,7 @@ VisibleCardData message(std::size_t serial, std::string text = {}) {
           "virtual-thread",
           "turn-" + suffix,
           "item-" + suffix,
-          AgentMessageData{std::move(text), true}};
+          AgentMessageData{std::move(text), "final_answer"}};
 }
 
 ConversationSnapshot conversation(std::size_t count,
@@ -172,7 +172,7 @@ ConversationSnapshot pinnedTurnPage(std::size_t firstActivity,
         {AuthoritativeItemKey{"virtual-thread", "shared-turn",
                               "item-" + suffix},
          CardKind::AgentMessage, "virtual-thread", "shared-turn",
-         "item-" + suffix, AgentMessageData{"Answer " + suffix, true}});
+         "item-" + suffix, AgentMessageData{"Answer " + suffix, "final_answer"}});
   }
   result.sections.push_back(std::move(section));
   return result;
@@ -309,7 +309,7 @@ ConversationSnapshot singleMessageConversation(const std::string &threadId,
                        threadId,
                        "turn",
                        "message",
-                       AgentMessageData{text, true}};
+                       AgentMessageData{text, "final_answer"}};
   ConversationSnapshot snapshot;
   snapshot.threadId = threadId;
   snapshot.sections.push_back(
@@ -803,7 +803,7 @@ bool rejectedDeltaTransactionsAreAtomic() {
                         thread,
                         "turn-other",
                         "other",
-                        AgentMessageData{"Other row", true}};
+                        AgentMessageData{"Other row", "final_answer"}};
   other.target = secondTarget;
   ConversationSnapshot structuralSnapshot;
   structuralSnapshot.threadId = thread;
@@ -937,7 +937,7 @@ bool rejectedDeltaTransactionsAreAtomic() {
       thread,
       "old-turn",
       "old-item",
-      AgentMessageData{"Outside the resident suffix", true}};
+      AgentMessageData{"Outside the resident suffix", "final_answer"}};
   unrepresented.target = conflictingTarget;
   ConversationDelta outside;
   outside.threadId = thread;
@@ -1077,7 +1077,7 @@ bool largeRootReplacementPreservesTheResidentSurface() {
     section.cards.push_back(
         {AuthoritativeItemKey{thread, turn, item}, CardKind::AgentMessage,
          thread, turn, item,
-         AgentMessageData{"Stable retained Markdown " + item, true}});
+         AgentMessageData{"Stable retained Markdown " + item, "final_answer"}});
   }
   const std::string lastKey = stableKey(section.cards.back().key);
   ConversationSnapshot snapshot;
@@ -1288,7 +1288,7 @@ bool rootReplacementRecomputesFoldedSectionGeometry() {
     const std::string item = "child-" + std::to_string(serial);
     section.cards.push_back({AuthoritativeItemKey{thread, turn, item},
                              CardKind::AgentMessage, thread, turn, item,
-                             AgentMessageData{"Answer " + item, true}});
+                             AgentMessageData{"Answer " + item, "final_answer"}});
   }
   ConversationSnapshot snapshot;
   snapshot.threadId = thread;
@@ -1374,7 +1374,7 @@ bool prefixGeometryChangeRepaintsFollowingTurnSurface() {
                          thread,
                          "prefix-turn",
                          "prefix",
-                         AgentMessageData{"Short prefix", true}};
+                         AgentMessageData{"Short prefix", "final_answer"}};
   prefix.target = prefixTarget;
   VisibleCardData root{AuthoritativeItemKey{thread, "painted-turn", "root"},
                        CardKind::UserMessage,
@@ -1387,7 +1387,7 @@ bool prefixGeometryChangeRepaintsFollowingTurnSurface() {
                         thread,
                         "painted-turn",
                         "child",
-                        AgentMessageData{"Answer", true}};
+                        AgentMessageData{"Answer", "final_answer"}};
   ConversationSnapshot snapshot;
   snapshot.threadId = thread;
   snapshot.sections.push_back(
@@ -1476,7 +1476,7 @@ bool rightAnchoredCoalescedRowsMatchCanonicalOrder() {
                          thread,
                          turn,
                          id,
-                         AgentMessageData{id, true}};
+                         AgentMessageData{id, "final_answer"}};
     card.target = std::move(target);
     return card;
   };
@@ -1654,7 +1654,7 @@ bool boundedTailAppendIsViewportProportional() {
     value.itemId = "rooted-" + std::to_string(serial);
     value.payload = serial == 0
                         ? CardPayload{UserMessageData{"Root prompt", {}}}
-                        : CardPayload{AgentMessageData{"Nested answer", true}};
+                        : CardPayload{AgentMessageData{"Nested answer", "final_answer"}};
     rootedSection.cards.push_back(std::move(value));
   }
   rootedSection.rootCardKey = rootedSection.cards.front().key;
@@ -1676,7 +1676,7 @@ bool boundedTailAppendIsViewportProportional() {
     nestedTail.card.threadId = "virtual-thread";
     nestedTail.card.turnId = "rooted-turn";
     nestedTail.card.itemId = "rooted-" + std::to_string(serial);
-    nestedTail.card.payload = AgentMessageData{"Nested tail", true};
+    nestedTail.card.payload = AgentMessageData{"Nested tail", "final_answer"};
     nestedTail.sectionKey = "rooted-section";
     nestedTail.nested = true;
     return appendProjected(rootedView, std::move(nestedTail));
@@ -1713,7 +1713,7 @@ bool targetedVisibilityChangeIsLocal() {
   constexpr int TargetRow = 100;
   auto &initial = std::get<AgentMessageData>(
       snapshot.sections[TargetRow].cards.front().payload);
-  initial.finalAnswer = false;
+  initial.phase = "commentary";
   bool result = expect(changed(view.reconcile(std::move(snapshot))),
                        "a long thread with one filtered update reconciles");
   settle();
@@ -1724,7 +1724,7 @@ bool targetedVisibilityChangeIsLocal() {
                    "the non-final update begins filtered");
 
   VisibleCardData finalAnswer = *view.conversationModel()->card(TargetRow);
-  std::get<AgentMessageData>(finalAnswer.payload).finalAnswer = true;
+  std::get<AgentMessageData>(finalAnswer.payload).phase = "final_answer";
   const qulonglong sectionRebuilds =
       view.property("conversationSectionRangeRebuilds").toULongLong();
   const qulonglong indexRebuilds = view.conversationModel()
@@ -1990,7 +1990,7 @@ bool loadedYouLandmarksStayAccessibleAndVirtualized() {
         {AuthoritativeItemKey{snapshot.threadId, section.turnId,
                               "activity-" + suffix},
          CardKind::AgentMessage, snapshot.threadId, section.turnId,
-         "activity-" + suffix, AgentMessageData{"Activity " + suffix, true}});
+         "activity-" + suffix, AgentMessageData{"Activity " + suffix, "final_answer"}});
   }
   snapshot.sections.push_back(std::move(section));
   snapshot.hasMore = true;
@@ -2063,7 +2063,7 @@ bool semanticRootsRemainTheirOwnViewportAnchors() {
           snapshot.threadId,
           "history-turn-" + suffix,
           "history-item-" + suffix,
-          AgentMessageData{"Earlier answer " + suffix, true}};
+          AgentMessageData{"Earlier answer " + suffix, "final_answer"}};
       snapshot.sections.push_back({"history-section-" + suffix,
                                    history.turnId,
                                    {std::move(history)},
@@ -2079,7 +2079,7 @@ bool semanticRootsRemainTheirOwnViewportAnchors() {
         snapshot.threadId,
         "active-turn",
         "activity",
-        AgentMessageData{"Streaming answer", false}};
+        AgentMessageData{"Streaming answer", "commentary"}};
     TurnSection active;
     active.key = "active-section";
     active.turnId = "active-turn";
@@ -2095,7 +2095,7 @@ bool semanticRootsRemainTheirOwnViewportAnchors() {
                            snapshot.threadId,
                            "tail-turn-" + suffix,
                            "tail-item-" + suffix,
-                           AgentMessageData{"Later answer " + suffix, true}};
+                           AgentMessageData{"Later answer " + suffix, "final_answer"}};
       snapshot.sections.push_back({"tail-section-" + suffix,
                                    tail.turnId,
                                    {std::move(tail)},
@@ -2160,7 +2160,7 @@ bool semanticRootsRemainTheirOwnViewportAnchors() {
           snapshot.threadId,
           "after-turn-" + suffix,
           "after-item-" + suffix,
-          AgentMessageData{"After retained root " + suffix, true}};
+          AgentMessageData{"After retained root " + suffix, "final_answer"}};
       snapshot.sections.push_back({"after-section-" + suffix,
                                    tail.turnId,
                                    {std::move(tail)},
@@ -3612,7 +3612,7 @@ bool virtualTurnSurfaceUsesOneRenderer() {
                          "turn-surface",
                          "turn",
                          "answer",
-                         AgentMessageData{"Answer", true}};
+                         AgentMessageData{"Answer", "final_answer"}};
   snapshot.sections.push_back(
       {"turn-section", "turn", {root, nested}, root.key});
 
@@ -3714,7 +3714,7 @@ bool directTailGrowsTheRetainedTurnSurface() {
                "tail-growth",
                "active-turn",
                "answer",
-               AgentMessageData{"Final answer", true}};
+               AgentMessageData{"Final answer", "final_answer"}};
   tail.sectionKey = "active-section";
   tail.nested = true;
   tail.activeTurn = true;
@@ -3770,7 +3770,7 @@ bool directTailGrowsTheRetainedTurnSurface() {
       "tail-growth",
       "active-turn",
       "later-update",
-      AgentMessageData{"Later update", false}};
+      AgentMessageData{"Later update", "commentary"}};
   laterTail.sectionKey = "active-section";
   laterTail.nested = true;
   laterTail.activeTurn = true;
@@ -3924,7 +3924,7 @@ bool commandOutputScrollOwnsConversationFollowing() {
                thread,
                "turn",
                "answer",
-               AgentMessageData{std::string(1200, 'x'), true}};
+               AgentMessageData{std::string(1200, 'x'), "final_answer"}};
   tail.sectionKey = "section";
   tail.nested = true;
   tail.activeTurn = true;
@@ -4118,7 +4118,7 @@ bool offscreenCommandRemovalRetiresInnerAndOuterPause() {
          "turn-" + id,
          {{AuthoritativeItemKey{thread, "turn-" + id, id},
            CardKind::AgentMessage, thread, "turn-" + id, id,
-           AgentMessageData{std::string(180, 'x'), true}}},
+           AgentMessageData{std::string(180, 'x'), "final_answer"}}},
          std::nullopt});
   }
   snapshot.sections.push_back(
@@ -4689,7 +4689,7 @@ bool acknowledgedSteeringMovesAboveFollowingActivity() {
       "virtual-thread",
       "steering-turn",
       "after-steer",
-      AgentMessageData{"Activity caused by the steering prompt", false}};
+      AgentMessageData{"Activity caused by the steering prompt", "commentary"}};
   activity.sectionKey = "steering-section";
   activity.nested = true;
   activity.activeTurn = true;
@@ -4885,7 +4885,7 @@ bool collapsedAgentPhaseSettlesAuthoritativeGeometry() {
       "collapsed-phase",
       "turn",
       "message",
-      AgentMessageData{"Streaming answer", false}};
+      AgentMessageData{"Streaming answer", "commentary"}};
   ConversationSnapshot snapshot;
   snapshot.threadId = update.threadId;
   snapshot.sections.push_back({"section", "turn", {update}, std::nullopt});
@@ -4910,7 +4910,7 @@ bool collapsedAgentPhaseSettlesAuthoritativeGeometry() {
   const QRect before = view.visualRect(index);
 
   VisibleCardData finalAnswer = update;
-  std::get<AgentMessageData>(finalAnswer.payload).finalAnswer = true;
+  std::get<AgentMessageData>(finalAnswer.payload).phase = "final_answer";
   ConversationCard expected(finalAnswer, true, view.viewport(),
                             card ? card->width() : view.viewport()->width());
   expected.ensurePolished();
@@ -4940,7 +4940,7 @@ bool semanticSelectionsSurviveRecycling() {
       "markdown",
       AgentMessageData{"Select this Markdown payload across residency.\n\n"
                        "Mutable streaming tail.",
-                       true}};
+                       "final_answer"}};
   const VisibleCardData command{
       AuthoritativeItemKey{thread, "command-turn", "command"},
       CardKind::CommandExecution,
@@ -4974,7 +4974,7 @@ bool semanticSelectionsSurviveRecycling() {
          {{AuthoritativeItemKey{thread, "filler-turn-" + suffix,
                                 "filler-" + suffix},
            CardKind::AgentMessage, thread, "filler-turn-" + suffix,
-           "filler-" + suffix, AgentMessageData{std::string(180, 'x'), true}}},
+           "filler-" + suffix, AgentMessageData{std::string(180, 'x'), "final_answer"}}},
          std::nullopt});
   }
 
@@ -5246,7 +5246,7 @@ bool markdownCompletionCannotRetargetSelection() {
                          thread,
                          "syntax-turn-" + suffix,
                          "syntax-item-" + suffix,
-                         AgentMessageData{fixtures[index].before, true}};
+                         AgentMessageData{fixtures[index].before, "final_answer"}};
     snapshot.sections.push_back({"syntax-section-" + suffix,
                                  card.turnId,
                                  {std::move(card)},
@@ -5260,7 +5260,7 @@ bool markdownCompletionCannotRetargetSelection() {
                          thread,
                          "filler-turn-" + suffix,
                          "filler-item-" + suffix,
-                         AgentMessageData{std::string(180, 'x'), true}};
+                         AgentMessageData{std::string(180, 'x'), "final_answer"}};
     snapshot.sections.push_back({"filler-section-" + suffix,
                                  card.turnId,
                                  {std::move(card)},
@@ -5357,7 +5357,7 @@ bool keyboardNavigationAndViewIsolation() {
     const CardPayload payload =
         kind == CardKind::Reasoning
             ? CardPayload{ReasoningData{"hidden reasoning"}}
-            : CardPayload{AgentMessageData{"Visible row " + suffix, true}};
+            : CardPayload{AgentMessageData{"Visible row " + suffix, "final_answer"}};
     snapshot.sections.push_back(
         {"section-" + suffix,
          "turn-" + suffix,
@@ -5789,7 +5789,7 @@ bool bidirectionalLazyMeasurementPreservesNativeScrollMotion() {
                               "update-" + std::to_string(row)},
          CardKind::AgentMessage, "lazy-scroll-anchor", "turn",
          "update-" + std::to_string(row),
-         AgentMessageData{std::move(markdown), false}});
+         AgentMessageData{std::move(markdown), "commentary"}});
   }
   snapshot.sections.push_back(std::move(section));
 
@@ -6009,7 +6009,7 @@ bool streamingMarkdownKeepsOneDocument() {
       "markdown-tail",
       "turn",
       "update",
-      AgentMessageData{std::move(markdown), false}};
+      AgentMessageData{std::move(markdown), "commentary"}};
   ConversationSnapshot snapshot;
   snapshot.threadId = update.threadId;
   snapshot.sections.push_back(
@@ -6186,7 +6186,7 @@ bool interactiveResizeCoalescesConversationReflow() {
                               "resize-" + std::to_string(row)},
          CardKind::AgentMessage, "interactive-resize", "resize-turn",
          "resize-" + std::to_string(row),
-         AgentMessageData{std::move(text), false}});
+         AgentMessageData{std::move(text), "commentary"}});
   }
   snapshot.sections.push_back(std::move(section));
 
@@ -7258,7 +7258,7 @@ bool collapsedInteractionDefersEveryHeavyCardBody() {
        "deferred", "turn", "user", UserMessageData{large, {}}},
       {AuthoritativeItemKey{"deferred", "turn", "agent"},
        CardKind::AgentMessage, "deferred", "turn", "agent",
-       AgentMessageData{large, false}},
+       AgentMessageData{large, "commentary"}},
       {AuthoritativeItemKey{"deferred", "turn", "command"},
        CardKind::CommandExecution, "deferred", "turn", "command",
        CommandExecutionData{large, large, "/workspace", {}, {}},

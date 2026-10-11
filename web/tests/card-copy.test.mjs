@@ -21,7 +21,7 @@ test("card copy payloads preserve Markdown and structured source", () => {
     assert.deepEqual(cardCopyContent(prompt), {text: "# Prompt", markdown: true});
 
     const markdown = itemCard("agentMessage", "answer", {
-        text: "## Answer\n\n- **exact**", finalAnswer: true,
+        text: "## Answer\n\n- **exact**", phase: "final_answer",
     });
     assert.deepEqual(cardCopyContent(markdown), {
         text: "## Answer\n\n- **exact**", markdown: true,
@@ -49,7 +49,7 @@ test("card copy payloads preserve Markdown and structured source", () => {
 
 test("Copy precedes folding and remains available on collapsed cards", () => {
     const message = itemCard("agentMessage", "answer", {
-        text: "Source **Markdown**", finalAnswer: true,
+        text: "Source **Markdown**", phase: "final_answer",
     });
     const markup = renderToStaticMarkup(createElement(Card, {
         card: message, active: false, collapsed: true, onToggle() {},
@@ -144,7 +144,7 @@ test("local prompt sweep is rendered only after delayed feedback activates", () 
 });
 
 test("Codex phases are plain right-side metadata before Copy", () => {
-    const update = itemCard("agentMessage", "update", {text: "Working", finalAnswer: false});
+    const update = itemCard("agentMessage", "update", {text: "Working", phase: "commentary"});
     const updateMarkup = renderToStaticMarkup(createElement(Card, {
         card: update, active: true, collapsed: false, onToggle() {},
     }));
@@ -152,7 +152,7 @@ test("Codex phases are plain right-side metadata before Copy", () => {
     assert.ok(updateMarkup.indexOf("card-phase update") < updateMarkup.indexOf("card-copy-button"));
     assert.doesNotMatch(updateMarkup, /[·•]\s*update/u);
 
-    const final = itemCard("agentMessage", "final", {text: "Done", finalAnswer: true});
+    const final = itemCard("agentMessage", "final", {text: "Done", phase: "final_answer"});
     const finalMarkup = renderToStaticMarkup(createElement(Card, {
         card: final, active: false, collapsed: false, onToggle() {},
     }));

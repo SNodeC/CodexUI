@@ -39,8 +39,20 @@ namespace {
         MessageDisposition::WorkerOperationResult                              \
   }
 
-constexpr std::array<MethodDescriptor, 257> Methods{{
+constexpr std::array<MethodDescriptor, 271> Methods{{
     CODEXUI_CLIENT_REQUEST("initialize"),
+    CODEXUI_CLIENT_REQUEST("account/bedrock/checkGovCloudRequirements"),
+    CODEXUI_CLIENT_REQUEST("account/gatewayOAuth/read"),
+    CODEXUI_CLIENT_REQUEST("account/gatewayOAuth/login"),
+    CODEXUI_CLIENT_REQUEST("account/gatewayOAuth/cancel"),
+    CODEXUI_CLIENT_REQUEST("memory/status"),
+    CODEXUI_CLIENT_REQUEST("rollout/compress"),
+    CODEXUI_CLIENT_REQUEST("thread/attachment/add"),
+    CODEXUI_CLIENT_REQUEST("thread/attachment/list"),
+    CODEXUI_CLIENT_REQUEST("thread/attachment/remove"),
+    CODEXUI_CLIENT_REQUEST("thread/attachmentOwner/list"),
+    CODEXUI_CLIENT_REQUEST("thread/prediction/request"),
+    CODEXUI_CLIENT_REQUEST("userVerification/cancel"),
     CODEXUI_CLIENT_REQUEST("server/diagnostics"),
     CODEXUI_CLIENT_REQUEST("userVerification/status"),
     CODEXUI_CLIENT_REQUEST("userVerification/enroll"),
@@ -76,7 +88,6 @@ constexpr std::array<MethodDescriptor, 257> Methods{{
     CODEXUI_CLIENT_REQUEST("thread/backgroundTerminals/clean"),
     CODEXUI_CLIENT_REQUEST("thread/backgroundTerminals/list"),
     CODEXUI_CLIENT_REQUEST("thread/backgroundTerminals/terminate"),
-    CODEXUI_CLIENT_REQUEST("thread/rollback"),
     CODEXUI_CLIENT_REQUEST("thread/revert"),
     CODEXUI_CLIENT_REQUEST("thread/list"),
     CODEXUI_CLIENT_REQUEST("project/list"),
@@ -216,6 +227,9 @@ constexpr std::array<MethodDescriptor, 257> Methods{{
     CODEXUI_SERVER_REQUEST("execCommandApproval"),
 
     CODEXUI_NOTICE_NOTIFICATION("error"),
+    CODEXUI_NEUTRAL_NOTIFICATION("account/gatewayOAuth/changed"),
+    CODEXUI_NEUTRAL_NOTIFICATION("thread/attachment/updated"),
+    CODEXUI_NEUTRAL_NOTIFICATION("thread/prediction/updated"),
     CODEXUI_GRAPH_NOTIFICATION("thread/started"),
     CODEXUI_GRAPH_NOTIFICATION("thread/status/changed"),
     CODEXUI_GRAPH_NOTIFICATION("thread/archived"),
@@ -348,17 +362,17 @@ consteval bool hasUniqueKeys() {
   return true;
 }
 
-static_assert(Methods.size() == 257);
-static_assert(countDirection(ProtocolDirection::ClientRequest) == 162);
+static_assert(Methods.size() == 271);
+static_assert(countDirection(ProtocolDirection::ClientRequest) == 173);
 static_assert(countDirection(ProtocolDirection::ServerRequest) == 11);
-static_assert(countDirection(ProtocolDirection::ServerNotification) == 83);
+static_assert(countDirection(ProtocolDirection::ServerNotification) == 86);
 static_assert(countDirection(ProtocolDirection::ClientNotification) == 1);
 static_assert(countDisposition(MessageDisposition::WorkerOperationResult) ==
-              163);
+              174);
 static_assert(countDisposition(MessageDisposition::ReverseInteraction) == 11);
 static_assert(countDisposition(MessageDisposition::GraphUpdate) == 75);
 static_assert(countDisposition(MessageDisposition::IntentionallyStateNeutral) ==
-              2);
+              5);
 static_assert(countDisposition(MessageDisposition::NoticeGraphUpdate) == 6);
 static_assert(hasUniqueKeys());
 

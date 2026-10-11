@@ -2631,7 +2631,7 @@ void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
       "staged-b",
       "staged-b-turn",
       "duplicate",
-      middle::AgentMessageData{"Invalid duplicate", true}};
+      middle::AgentMessageData{"Invalid duplicate", "final_answer"}};
   middle::ConversationSnapshot rejected;
   rejected.threadId = "staged-b";
   rejected.sections.push_back(

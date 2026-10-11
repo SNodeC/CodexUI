@@ -90,7 +90,7 @@ VisibleCardData card(std::string key, nodegraph::NodeRef target,
   result.threadId = "thread";
   result.turnId = "turn";
   result.itemId = key;
-  result.payload = AgentMessageData{std::move(text), true};
+  result.payload = AgentMessageData{std::move(text), "final_answer"};
   result.target = std::move(target);
   return result;
 }
@@ -449,7 +449,7 @@ bool testVisibilityAndLargeModelRemainDataOnly() {
     row.itemId = "item-" + std::to_string(index);
     row.payload = row.kind == CardKind::Reasoning
                       ? CardPayload{ReasoningData{"summary"}}
-                      : CardPayload{AgentMessageData{"update", false}};
+                      : CardPayload{AgentMessageData{"update", "commentary"}};
     section.cards.push_back(std::move(row));
   }
   section.rootCardKey = section.cards.front().key;
@@ -474,7 +474,7 @@ bool testVisibilityAndLargeModelRemainDataOnly() {
   inserted.threadId = "large";
   inserted.turnId = "large-turn";
   inserted.itemId = "inserted";
-  inserted.payload = AgentMessageData{"inserted", true};
+  inserted.payload = AgentMessageData{"inserted", "final_answer"};
   ConversationRowPlacement insertedPlacement;
   insertedPlacement.card = std::move(inserted);
   insertedPlacement.sectionKey = "large-section";
@@ -719,7 +719,7 @@ bool testReversedSectionRootReplacementsRemainAtomic() {
     value.turnId = std::move(turn);
     value.itemId = id;
     value.payload = root ? CardPayload{UserMessageData{id, {}}}
-                         : CardPayload{AgentMessageData{id, true}};
+                         : CardPayload{AgentMessageData{id, "final_answer"}};
     value.target = std::move(target);
     return value;
   };
@@ -1030,7 +1030,7 @@ bool testTailAppendKeepsEveryLoadedIdentityIndex() {
     value.itemId = "item-" + std::to_string(position);
     value.payload = position == 0
                         ? CardPayload{UserMessageData{"Question", {}}}
-                        : CardPayload{AgentMessageData{"Answer", true}};
+                        : CardPayload{AgentMessageData{"Answer", "final_answer"}};
     section.cards.push_back(std::move(value));
   }
   section.rootCardKey = section.cards.front().key;
@@ -1049,7 +1049,7 @@ bool testTailAppendKeepsEveryLoadedIdentityIndex() {
     tail.card.threadId = "tail-thread";
     tail.card.turnId = "tail-turn";
     tail.card.itemId = "item-" + std::to_string(serial);
-    tail.card.payload = AgentMessageData{"Tail", true};
+    tail.card.payload = AgentMessageData{"Tail", "final_answer"};
     tail.sectionKey = "tail-section";
     tail.nested = true;
     return applyPlacement(model, std::move(tail),

@@ -1312,7 +1312,8 @@ bool ConversationItemModel::isPresented(
   if (card.kind != CardKind::AgentMessage)
     return true;
   const auto *message = std::get_if<AgentMessageData>(&card.payload);
-  return !message || message->finalAnswer || visibility_.showCodexUpdates;
+  return !message || message->phase == "final_answer" ||
+         message->phase == "partial_answer" || visibility_.showCodexUpdates;
 }
 
 void ConversationItemModel::rebuildIndexes() {

@@ -766,7 +766,7 @@ ReviewContext reviewContext(PendingRequestKind kind,
     context.disclosure = disclosedMembers(
         raw,
         {"additionalPermissions", "approvalId", "command", "commandActions",
-         "cwd", "environmentId", "itemId", "networkApprovalContext",
+         "cwd", "environmentId", "itemId", "kind", "networkApprovalContext",
          "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments",
          "reason", "startedAtMs", "threadId", "turnId"},
         {"availableDecisions"}, context);
@@ -836,7 +836,11 @@ bool approvalContextComplete(PendingRequestKind kind,
     const auto command = raw.find("command");
     const auto execAmendment = raw.find("proposedExecpolicyAmendment");
     const auto networkAmendments = raw.find("proposedNetworkPolicyAmendments");
-    if ((command != raw.end() && !command->is_null() &&
+    const auto kind = raw.find("kind");
+    if ((kind != raw.end() && *kind != "command" && *kind != "writeStdin") ||
+        (kind != raw.end() && *kind == "writeStdin" &&
+         execAmendment != raw.end() && !execAmendment->is_null()) ||
+        (command != raw.end() && !command->is_null() &&
          !nonEmptyString(raw, "command")) ||
         (commands != raw.end() && !commands->is_null() &&
          !validCommandActions(*commands)) ||

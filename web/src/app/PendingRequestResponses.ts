@@ -364,7 +364,7 @@ function validMcpApprovalMetadata(raw: unknown): boolean {
 
 const disclosureFields: Readonly<Record<string, readonly [readonly string[], readonly string[]]>> = {
     "command-approval": [["additionalPermissions", "approvalId", "command", "commandActions", "cwd", "environmentId",
-        "itemId", "networkApprovalContext", "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments", "reason",
+        "itemId", "kind", "networkApprovalContext", "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments", "reason",
         "startedAtMs", "threadId", "turnId"], ["availableDecisions"]],
     "file-change-approval": [["grantRoot", "itemId", "reason", "startedAtMs", "threadId", "turnId"], []],
     "user-input": [["autoResolutionMs", "isBlocking", "itemId", "threadId", "turnId"], ["questions"]],
@@ -465,7 +465,10 @@ function approvalContextComplete(request: PendingRequestPresentation): boolean {
     if (!requestContext(request).complete || !isObject(request.raw)) return false;
     const raw = request.raw;
     if (request.kind === "command-approval") {
-        if ((raw.command !== undefined && raw.command !== null && !nonEmptyString(raw, "command"))
+        if ((raw.kind !== undefined && raw.kind !== "command" && raw.kind !== "writeStdin")
+            || (raw.kind === "writeStdin" && raw.proposedExecpolicyAmendment !== undefined
+                && raw.proposedExecpolicyAmendment !== null)
+            || (raw.command !== undefined && raw.command !== null && !nonEmptyString(raw, "command"))
             || (raw.commandActions !== undefined && raw.commandActions !== null && !validCommandActions(raw.commandActions))
             || (raw.networkApprovalContext !== undefined && raw.networkApprovalContext !== null
                 && !validNetworkApprovalContext(raw.networkApprovalContext))

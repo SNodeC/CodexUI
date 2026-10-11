@@ -734,7 +734,9 @@ export class PresentationModel {
             const item = member(entry, "item");
             if (turnId === "" || !isObject(item)) continue;
             const turn = thread.turns.get(turnId) ?? this.upsertTurn(thread, {id: turnId}, false);
-            const merged = this.upsertItem(thread, turn, item);
+            const merged = this.upsertItem(thread, turn, {...item,
+                ...(Object.hasOwn(entry, "startedAtMs") ? {startedAtMs: entry.startedAtMs} : {}),
+                ...(Object.hasOwn(entry, "completedAtMs") ? {completedAtMs: entry.completedAtMs} : {})});
             if (merged.id === "") continue;
             const page = pages.get(turnId) ?? new Set<string>();
             page.add(merged.id);
@@ -877,8 +879,11 @@ export class PresentationModel {
             turn.items.set(id, result);
             turn.itemOrder.push(id);
         } else {
-            resetIncomingTextBounds(result, raw);
-            mergePreservingCompleteness(result.raw, raw);
+            const incoming = live ? raw : {...raw};
+            if (!live) for (const field of ["startedAtMs", "completedAtMs"])
+                if (typeof result.raw[field] === "number" && Number.isInteger(result.raw[field])) incoming[field] = result.raw[field];
+            resetIncomingTextBounds(result, incoming);
+            mergePreservingCompleteness(result.raw, incoming);
         }
         if ((lifecycle === "completed" || lifecycle === "started")
             && isEmptyStatus(statusFromValue(member(raw, "status"))))

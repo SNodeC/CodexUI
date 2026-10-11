@@ -145,7 +145,7 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
         status = UnknownStatus;
         kind = "agentMessage";
         payload = {text: withTruncationNotice(messageText(item), omittedTextBytes(presentation, "text"), "Codex response", true),
-            finalAnswer: stringMember(item, "phase") === "final_answer"} satisfies AgentMessageData;
+            phase: stringMember(item, "phase")} satisfies AgentMessageData;
     } else if (type === "commandExecution") {
         kind = "commandExecution";
         const outputField = stringMember(item, "aggregatedOutput") !== "" ? "aggregatedOutput" : "output";

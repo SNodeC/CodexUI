@@ -69,9 +69,9 @@ constexpr std::array InternalServerNotifications{
 // These assertions deliberately couple this integration test to the installed
 // generated schema.  An AISuite protocol update must therefore be reconciled
 // with the explicit CodexUI compatibility surface and the graph catalog.
-static_assert(GeneratedClientRequests.size() == 159);
+static_assert(GeneratedClientRequests.size() == 170);
 static_assert(GeneratedServerRequests.size() == 11);
-static_assert(GeneratedServerNotifications.size() == 81);
+static_assert(GeneratedServerNotifications.size() == 84);
 static_assert(GeneratedClientNotifications.size() == 1);
 static_assert(LegacyClientRequests.size() == 3);
 static_assert(InternalServerNotifications.size() == 2);
@@ -249,12 +249,12 @@ bool testGeneratedSchemaCatalogCoverage() {
   passed &=
       expect(catalogDirectionEqualsUnion(ClientRequest, GeneratedClientRequests,
                                          LegacyClientRequests),
-             "162 client requests exactly match generated plus legacy methods");
+             "173 client requests exactly match generated plus legacy methods");
   passed &= expect(
       catalogDirectionEqualsUnion(ServerNotification,
                                   GeneratedServerNotifications,
                                   InternalServerNotifications),
-      "83 server notifications exactly match generated plus internal methods");
+      "86 server notifications exactly match generated plus internal methods");
   passed &=
       expect(catalogDirectionEqualsUnion(ClientNotification,
                                          GeneratedClientNotifications, {}),

@@ -826,7 +826,7 @@ bool conversationOwnershipAndAtomicReconcileContract() {
       card(CardKind::UserMessage, "user", UserMessageData{"Question", {}}));
   section.rootCardKey = section.cards.front().key;
   section.cards.push_back(
-      card(CardKind::AgentMessage, "agent", AgentMessageData{"Answer", true}));
+      card(CardKind::AgentMessage, "agent", AgentMessageData{"Answer", "final_answer"}));
   snapshot.sections.push_back(std::move(section));
   const bool reconciled = changed(view.reconcile(snapshot));
   QCoreApplication::processEvents();

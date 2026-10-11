@@ -598,8 +598,11 @@ std::optional<QString> selectionSource(const VisibleCardData &card, bool nested,
           if (role == SelectionRole::Title)
             return QStringLiteral("Codex");
           if (role == SelectionRole::Phase)
-            return payload.finalAnswer ? QStringLiteral("final answer")
-                                       : QStringLiteral("update");
+            return payload.phase == "final_answer"
+                       ? QStringLiteral("final answer")
+                   : payload.phase == "partial_answer"
+                       ? QStringLiteral("partial answer")
+                       : QStringLiteral("update");
           if (role == SelectionRole::MarkdownBody)
             return text(payload.text);
         } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
@@ -1917,21 +1920,25 @@ public:
   }
 
   void updateComposition(const AgentMessageData &message) {
-    const QString messagePhase = message.finalAnswer ? QStringLiteral("final")
-                                                     : QStringLiteral("update");
+    const QString messagePhase = message.phase == "final_answer"
+                                     ? QStringLiteral("final")
+                                     : QStringLiteral("update");
     if (this->messagePhase != messagePhase) {
       this->messagePhase = messagePhase;
       owner->setProperty("messagePhase", messagePhase);
       repolishIfPolished();
     }
-    showPhase(message.finalAnswer ? QStringLiteral("final answer")
-                                  : QStringLiteral("update"),
+    showPhase(message.phase == "final_answer"
+                  ? QStringLiteral("final answer")
+              : message.phase == "partial_answer"
+                  ? QStringLiteral("partial answer")
+                  : QStringLiteral("update"),
               QStringLiteral("agentMessagePhase"));
     presentation::setLabelTone(*phase,
-                               message.finalAnswer ? "success" : "active");
+                               message.phase == "final_answer" ? "success" : "active");
     layout->setContentsMargins(12 - UiStyle::markdownSelectionGutter,
-                               message.finalAnswer ? 10 : 8, 12,
-                               message.finalAnswer ? 10 : 8);
+                               message.phase == "final_answer" ? 10 : 8, 12,
+                               message.phase == "final_answer" ? 10 : 8);
     if (collapsed) {
       markdownBody->setVisible(!message.text.empty());
       markBodyProjectionDeferred();

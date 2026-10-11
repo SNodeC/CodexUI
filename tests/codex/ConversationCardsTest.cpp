@@ -387,7 +387,7 @@ VisibleCardData agentCard(const std::string &threadId,
           threadId,
           turnId,
           itemId,
-          AgentMessageData{utf8(text), index % 3 == 0}};
+          AgentMessageData{utf8(text), index % 3 == 0 ? "final_answer" : "commentary"}};
 }
 
 VisibleCardData cardForAppearanceAudit(const std::string &threadId,
@@ -403,7 +403,7 @@ VisibleCardData cardForAppearanceAudit(const std::string &threadId,
     payload = UserMessageData{"User appearance audit", {}};
     break;
   case CardKind::AgentMessage:
-    payload = AgentMessageData{"Agent appearance audit", true};
+    payload = AgentMessageData{"Agent appearance audit", "final_answer"};
     break;
   case CardKind::CommandExecution:
     payload = CommandExecutionData{"printf audit", {}, "/workspace", {}, {}};
@@ -607,12 +607,12 @@ bool testMessageIdentityPalette() {
       VisibleCardData{
           AuthoritativeItemKey{"identity-palette", "turn", "update"},
           CardKind::AgentMessage, "identity-palette", "turn", "update",
-          AgentMessageData{"Working", false}},
+          AgentMessageData{"Working", "commentary"}},
       false);
   ConversationCard final(
       VisibleCardData{AuthoritativeItemKey{"identity-palette", "turn", "final"},
                       CardKind::AgentMessage, "identity-palette", "turn",
-                      "final", AgentMessageData{"Response", true}},
+                      "final", AgentMessageData{"Response", "final_answer"}},
       false);
   for (ConversationCard *card : {&user, &update, &final}) {
     card->resize(600, card->sizeHint().height());
@@ -907,7 +907,7 @@ bool testMarkdownLongLinesWrapInsideMaterializedCards() {
                                              nested ? "nested" : "root"},
                         CardKind::AgentMessage, "markdown-overflow", "turn",
                         nested ? "nested" : "root",
-                        AgentMessageData{markdown, false}},
+                        AgentMessageData{markdown, "commentary"}},
         false);
     card.setNestedPresentation(nested);
     card.resize(nested ? 676 : 700, card.sizeHint().height());
@@ -1704,7 +1704,7 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
       "turn",
       "streaming-response",
       AgentMessageData{"The completed response must appear immediately.",
-                       false}};
+                       "commentary"}};
   ConversationSnapshot snapshot;
   snapshot.threadId = thread;
   snapshot.sections.push_back(
@@ -1729,7 +1729,7 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
       "updates are filtered");
 
   VisibleCardData completed = snapshot.sections.front().cards.back();
-  std::get<AgentMessageData>(completed.payload).finalAnswer = true;
+  std::get<AgentMessageData>(completed.payload).phase = "final_answer";
   result &= expect(applyPresentation(view, std::move(completed)) ==
                        PresentationImpact::GeometryChanged,
                    "completion makes the indexed response visible");
@@ -1772,7 +1772,7 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
       liveSnapshot.threadId,
       "live-turn",
       "live-answer",
-      AgentMessageData{"Live final answer", true}};
+      AgentMessageData{"Live final answer", "final_answer"}};
   liveSnapshot.sections.front().cards.push_back(liveResponse);
   result &= expect(changed(optimisticView.reconcile(liveSnapshot)),
                    "the final response inserts into the acknowledged Turn");
@@ -1902,7 +1902,7 @@ bool testCardCopyControls() {
        QStringLiteral("/tmp/only-image.png"),
        false},
       {{AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
-        thread, "turn", "agent", AgentMessageData{"## Answer\n\n- item", true}},
+        thread, "turn", "agent", AgentMessageData{"## Answer\n\n- item", "final_answer"}},
        QStringLiteral("## Answer\n\n- item"),
        true},
       {{AuthoritativeItemKey{thread, "turn", "command"},
@@ -2168,7 +2168,7 @@ bool testMarkdownSelectionGutter() {
     for (bool nested : {false, true}) {
       VisibleCardData data{AuthoritativeItemKey{"gutter", "turn", "item"},
                            CardKind::AgentMessage, "gutter", "turn", "item",
-                           AgentMessageData{source.toStdString(), true}};
+                           AgentMessageData{source.toStdString(), "final_answer"}};
       if (prompt) {
         data.kind = CardKind::UserMessage;
         data.payload = UserMessageData{source.toStdString(), {}};
@@ -2510,7 +2510,7 @@ bool testMutableCardsAndCommandOutput() {
                        "|\n|---|---|\n| State | 10 |\n\n"
                        "[Docs](https://example.com)"}},
       {AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
-       thread, "turn", "agent", AgentMessageData{"answer", false}},
+       thread, "turn", "agent", AgentMessageData{"answer", "commentary"}},
       {AuthoritativeItemKey{thread, "turn", "command"},
        CardKind::CommandExecution, thread, "turn", "command",
        CommandExecutionData{
@@ -2768,7 +2768,7 @@ bool testMutableCardsAndCommandOutput() {
   std::get<UserMessageData>(cards[0].payload).text += " updated";
   auto &agent = std::get<AgentMessageData>(cards[1].payload);
   agent.text += " updated";
-  agent.finalAnswer = true;
+  agent.phase = "final_answer";
   auto &command = std::get<CommandExecutionData>(cards[2].payload);
   QString longCommand;
   for (int line = 0; line < 30; ++line)
@@ -2956,7 +2956,7 @@ bool testCardFoldingGeometryAndRetention() {
       thread,
       "turn",
       "agent",
-      AgentMessageData{"Codex also starts expanded.", true}};
+      AgentMessageData{"Codex also starts expanded.", "final_answer"}};
   const VisibleCardData reasoning{
       AuthoritativeItemKey{thread, "turn", "reasoning"},
       CardKind::Reasoning,
@@ -3586,9 +3586,9 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       {"turn:presentation-options:turn",
        "turn",
        {{updateKey, CardKind::AgentMessage, thread, "turn", "update",
-         AgentMessageData{"First retained update", false}},
+         AgentMessageData{"First retained update", "commentary"}},
         {finalKey, CardKind::AgentMessage, thread, "turn", "final",
-         AgentMessageData{"Final answer remains visible", true}},
+         AgentMessageData{"Final answer remains visible", "final_answer"}},
         {reasoningKey, CardKind::Reasoning, thread, "turn", "reasoning",
          ReasoningData{"First retained reasoning"}},
         {firstCommandKey, CardKind::CommandExecution, thread, "turn",
@@ -3946,7 +3946,7 @@ bool testRootlessFinalAnswerGeometrySettlement() {
       thread,
       "turn",
       "answer",
-      AgentMessageData{"Implemented the requested child-thread change.", true}};
+      AgentMessageData{"Implemented the requested child-thread change.", "final_answer"}};
   ConversationGraphSpec snapshot{
       thread, {{"turn:rootless-child", "turn", {activity, answer}}}, false};
 
@@ -4010,7 +4010,7 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
       thread,
       "turn",
       "answer",
-      AgentMessageData{"Retained final answer is materializing.", true}};
+      AgentMessageData{"Retained final answer is materializing.", "final_answer"}};
   TurnGraphSpec section{"turn:retained", "turn", {prompt}, prompt.key};
   for (int index = 0; index < 4; ++index)
     section.cards.push_back(
@@ -4090,7 +4090,7 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
       thread,
       "later-turn",
       "later-answer",
-      AgentMessageData{"The later result is complete.", true}};
+      AgentMessageData{"The later result is complete.", "final_answer"}};
   snapshot.sections.push_back({"turn:later",
                                "later-turn",
                                {laterPrompt, laterAnswer},
@@ -5200,6 +5200,32 @@ bool testSharedPresentationContract() {
         copy && QApplication::clipboard()->text().toStdString() == expected,
         "shared contract: real native Copy preserves projected text");
   };
+  for (const auto &entry : contract.at("agentMessageCases")) {
+    context = "agentMessageCases[" + entry.at("phase").get<std::string>() + "]";
+    const auto data = projectedGenericCard({{"id", "phase"}, {"type", "agentMessage"},
+                                           {"phase", entry.at("phase")}, {"text", "Phase fixture"}});
+    passed &= check(data.has_value(), "agent message projects from protocol state");
+    if (!data)
+      continue;
+    const auto *message = std::get_if<AgentMessageData>(&data->payload);
+    passed &= check(message && message->phase == entry.at("phase").get<std::string>(), "phase survives projection");
+    ConversationCard card(*data, true);
+    const auto *label = card.findChild<QLabel *>(QStringLiteral("agentMessagePhase"));
+    passed &= check(label && label->text().toStdString() == entry.at("label").get<std::string>(), "visible phase label");
+    checkCopy(*data, "Phase fixture");
+    ConversationItemModel model;
+    ConversationSnapshot snapshot;
+    snapshot.threadId = "detail";
+    TurnSection section;
+    section.key = "phase-section";
+    section.turnId = "turn";
+    section.cards.push_back(*data);
+    snapshot.sections.push_back(std::move(section));
+    static_cast<void>(model.replaceConversation(std::move(snapshot)));
+    static_cast<void>(model.setVisibility({false, false}));
+    passed &= check(model.data(model.index(0, 0), ConversationItemModel::PresentedRole).toBool() ==
+                        entry.at("visibleWithoutUpdates").get<bool>(), "partial and final answers survive hidden updates");
+  }
   for (const auto &[index, entry] : contract.at("labelCases").items()) {
     context = "labelCases[" + index + "]";
     passed &=

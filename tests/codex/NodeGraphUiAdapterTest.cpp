@@ -3338,6 +3338,9 @@ bool frontendPresentationContractIsShared() {
     PendingRequestDescriptor request;
     request.kind = kind;
     request.raw = fixtureRaw(entry);
+    if (entry.contains("expectedDisclosure"))
+      check(PendingRequestPolicy::disclosure(request) == entry.at("expectedDisclosure"),
+            prefix + "review discloses stdin input and terminal context completely");
     nlohmann::json actions = nlohmann::json::array();
     for (const PendingRequestAction &candidate :
          PendingRequestPolicy::actions(request))

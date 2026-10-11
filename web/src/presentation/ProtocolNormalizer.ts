@@ -65,6 +65,9 @@ interface EventDescriptor {
 }
 
 const remainingNotifications: Readonly<Record<string, EventDescriptor>> = {
+    "thread/attachment/updated": {type: "thread.attachment.updated", authority: "none"},
+    "thread/prediction/updated": {type: "thread.prediction.updated", authority: "none"},
+    "account/gatewayOAuth/changed": {type: "account.gateway-oauth.changed", authority: "none"},
     "thread/reverted": {type: "thread.reverted", authority: "merge"},
     "skills/changed": {type: "catalog.skills.invalidated", authority: "none"},
     "thread/goal/updated": {type: "thread.goal.changed", authority: "replace"},
@@ -219,7 +222,9 @@ export class ProtocolNormalizer {
             }, "replace", scope);
         } else if (method === "item/started" || method === "item/completed") {
             const candidate = member(params, "item", {});
-            const item = isObject(candidate) ? candidate : {};
+            const item = isObject(candidate) ? {...candidate} : {};
+            for (const field of ["startedAtMs", "completedAtMs"])
+                if (Object.hasOwn(params, field)) item[field] = params[field];
             const itemScope = {...scope};
             if (!Object.hasOwn(itemScope, "itemId") && Object.hasOwn(item, "id") && item.id !== null) {
                 itemScope.itemId = item.id;

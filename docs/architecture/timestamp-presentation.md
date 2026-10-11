@@ -8,21 +8,18 @@
 
 ## Authority and inventory
 
-The protocol remains the time authority. `ProtocolTimingPaths.inc` records the
-declared fields from Codex `rust-v0.154.0`, source revision
-`6b9826e3aa83b1a5947db50f4332cb9c65f1b340`. It composes shared type paths rather
-than searching arbitrary tool output or user text for date-looking keys.
-Update these paths alongside future protocol schema changes.
+The protocol remains the time authority. `ProtocolTimingPaths.inc` records the declared fields from Codex `rust-v0.162.1`, source revision `092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`. It composes shared type paths rather than searching arbitrary tool output or user text for date-looking keys. Update these paths alongside future protocol schema changes.
 
 | Context | Fields | Units |
 | --- | --- | --- |
 | Thread | createdAt, updatedAt, recencyAt, sectionEnteredAt | Unix seconds |
 | Turn | startedAt, completedAt; durationMs | Unix seconds; duration milliseconds |
-| Item lifecycle | startedAtMs, completedAtMs; durationMs | Unix milliseconds; duration milliseconds |
+| Item lifecycle, including paginated item wrappers | startedAtMs, completedAtMs; durationMs | Unix milliseconds; duration milliseconds |
 | Timeline | started_at, completed_at; duration_ms | Unix seconds; duration milliseconds |
 | Approval and automatic/strict review | startedAtMs, completedAtMs, where declared | Unix milliseconds |
 | Hook | startedAt, completedAt; durationMs | Unix seconds; duration milliseconds |
 | Project | createdAt, updatedAt, recencyAt | Unix seconds |
+| Persistent thread attachment | createdAt | Unix seconds |
 | Thread goal | createdAt, updatedAt | Unix seconds |
 | Workspace message | createdAt, archivedAt | Unix seconds |
 | File metadata | createdAtMs, modifiedAtMs | Unix milliseconds; zero means unavailable |
