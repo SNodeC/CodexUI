@@ -37,7 +37,7 @@ The bridge, not this static frontend, owns the encrypted listener. A build with 
 
 ```sh
 VPN_IP=YOUR_PRIVATE_INTERFACE_ADDRESS
-codex-bridge --bridge-web-root /path/to/installed/share/codexui/web \
+codex-bridge codex --bridge-web-root /path/to/installed/share/codexui/web \
   codex-bridge-wss-ipv4 --disabled=false \
     local --host "$VPN_IP" --port 8443 \
     tls --cert /path/to/server-chain.pem --cert-key /path/to/server-key.pem

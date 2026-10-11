@@ -1361,9 +1361,9 @@ guards, useful diagnostics, incremental update paths and visual behavior.
 
 ## Historical remediation record
 
-Date: 2026-09-12  
+Date: 2026-09-12
 Repository: `/path/to/workspace/drafts/CodexUI/codexui`
-Branch/HEAD: `master` at `629660e8882bddc7473ee5f1aab90c755ee6edd4`  
+Branch/HEAD: `master` at `629660e8882bddc7473ee5f1aab90c755ee6edd4`
 Upstream: `origin/master`, ahead/behind `0/0`
 
 This is the authoritative ledger for the Qt architecture remediation. It
@@ -2903,8 +2903,8 @@ accepted dependency order:
   production/test LOC effects remain unclassified until reproduction.
 - **M-43 — controller/observer conversation-card order divergence (reported;
   reproduction pending, deferred until after H-11).** Live screenshots
-  `/home/voc/Screenshots/Screenshot_20260916_143549.png` (controller) and
-  `/home/voc/Screenshots/Screenshot_20260916_143648.png` (observer) show the
+  `/path/to/workspace/Screenshots/Screenshot_20260916_143549.png` (controller) and
+  `/path/to/workspace/Screenshots/Screenshot_20260916_143648.png` (observer) show the
   same `Big architectural refactoring` conversation segment in different card
   orders: the controller places the `You` steering card before `File changes`,
   while the observer places `File changes` before that `You` card. The captures

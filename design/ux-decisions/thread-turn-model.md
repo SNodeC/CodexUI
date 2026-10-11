@@ -86,7 +86,7 @@ preceding acknowledgment. Queues belonging to different threads are
 independent.
 
 Only the correlated `turn/start` or `turn/steer` completion callback can
-acknowledge a prompt. A successful callback immediately ends pending feedback.
+acknowledge a prompt. A successful callback acknowledges dispatch; pending feedback continues until the authoritative user item materializes, retaining the original admission deadline.
 Every submission carries a unique `clientUserMessageId`, allowing
 the authoritative user item to inherit the local card's stable visual key even
 when multiple prompts have identical text. Failure stops the animation and

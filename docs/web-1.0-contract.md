@@ -9,7 +9,7 @@
 
 ## Purpose
 
-CodexWebUI is the browser presentation of the existing CodexUI product. It is not another backend and does not replace or reimplement `codex-bridge`. Version 1.0 requires a production-built browser application that can perform the complete web parity scope below against the canonical bridge. A web feature is complete only after it independently proves behavioral equality with the corresponding current C++ feature.
+CodexWebUI is the build/install name for **CodexWUI**, the browser presentation of the existing CodexUI product. It is not another backend and does not replace or reimplement `codex-bridge`. Version 1.0 requires a production-built browser application that can perform the complete web parity scope below against the canonical bridge. A web feature is complete only after it independently proves behavioral equality with the corresponding current C++ feature.
 
 The native Qt application remains supported. Native and browser frontends may be connected to the same bridge at the same time and follow the same controller/observer rules.
 
@@ -63,7 +63,7 @@ web/
     src/app/
 ```
 
-The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite `master` for both native and browser builds, and SNode.C `master` for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](../web/README.md#page-overview).
+The web presentation normalizer and reducer live here because they express CodexUI behavior, not bridge semantics. CI follows AISuite’s API-read default branch for both native and browser builds, and SNode.C’s API-read default branch for the native build. Checkout logs record the resolved commits; dependency revisions are not pinned. Local builds use the installed C++ packages and the frontend SDK checkout described in [the browser build guide](build.md#browser-frontend).
 
 ## Frontend technology
 
