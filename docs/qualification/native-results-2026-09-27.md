@@ -1,8 +1,7 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
-<p>
-  <a href="../../README.md#project-overview" title="Codex(W)UI repository"><img src="../media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
-</p>
+<p><picture><source media="(max-width: 640px)" srcset="../media/nav/banner-qualification-compact.svg"><img src="../media/nav/banner-qualification.svg" alt="CodexUI — Qualification" width="100%"></picture></p>
+<p><a href="README.md#page-overview" title="Up to Qualification"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-qualification-dark.svg"><img src="../media/nav/up-qualification-light.svg" alt="Up to Qualification" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNodeC organization"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNodeC organization" width="160" height="28"></picture></a><a href="../../README.md#project-overview" title="CodexUI repository"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" width="160" height="28"></picture></a><br clear="all"></p>
 <!-- snodec:end page-header -->
 
 # Native qualification execution record — 2026-09-27

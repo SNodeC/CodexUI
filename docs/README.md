@@ -1,21 +1,20 @@
 <!-- snodec:begin page-header -->
 <a id="page-overview"></a>
-<p>
-  <a href="../README.md#project-overview" title="Codex(W)UI repository"><img src="media/page-banner.svg" alt="Codex(W)UI repository" width="100%"></a>
-</p>
+<p><picture><source media="(max-width: 640px)" srcset="media/nav/banner-documentation-compact.svg"><img src="media/nav/banner-documentation.svg" alt="CodexUI — Documentation" width="100%"></picture></p>
+<p><a href="../README.md#project-overview" title="Up to CodexUI"><picture><source media="(prefers-color-scheme: dark)" srcset="media/nav/up-codexui-dark.svg"><img src="media/nav/up-codexui-light.svg" alt="Up to CodexUI" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNodeC organization"><picture><source media="(prefers-color-scheme: dark)" srcset="media/nav/organization-dark.svg"><img align="right" src="media/nav/organization-light.svg" alt="SNodeC organization" width="160" height="28"></picture></a><a href="../README.md#project-overview" title="CodexUI repository"><picture><source media="(prefers-color-scheme: dark)" srcset="media/nav/repository-dark.svg"><img align="right" src="media/nav/repository-light.svg" alt="CodexUI repository" width="160" height="28"></picture></a><br clear="all"></p>
 <!-- snodec:end page-header -->
 
 # Codex(W)UI documentation
 
 <!-- snodec:begin menu -->
 <p>
-  <a href="../README.md#quick-start" title="Start"><img src="media/menu/snodec-start-108.svg" alt="Start" width="133" height="28"></a>
-  <a href="../README.md#install" title="Install"><img src="media/menu/snodec-install-108.svg" alt="Install" width="133" height="28"></a>
-  <a href="guides/build-from-source.md#page-overview" title="Build"><img src="media/menu/snodec-build-108.svg" alt="Build" width="133" height="28"></a>
-  <a href="../README.md#first-run" title="Use"><img src="media/menu/snodec-use-108.svg" alt="Use" width="133" height="28"></a>
-  <a href="../README.md#configuration" title="Configure"><img src="media/menu/snodec-configure-108.svg" alt="Configure" width="133" height="28"></a>
-  <a href="../README.md#architecture" title="Architecture"><img src="media/menu/snodec-architecture-108.svg" alt="Architecture" width="133" height="28"></a>
-  <a href="../README.md#contributing" title="Contribute"><img src="media/menu/snodec-contribute-108.svg" alt="Contribute" width="133" height="28"></a>
+  <a href="../README.md#quick-start" title="Start"><img src="media/menu/snodec-start-108.svg" alt="Start" width="160" height="28"></a>
+  <a href="../README.md#install" title="Install"><img src="media/menu/snodec-install-108.svg" alt="Install" width="160" height="28"></a>
+  <a href="guides/build-from-source.md#page-overview" title="Build"><img src="media/menu/snodec-build-108.svg" alt="Build" width="160" height="28"></a>
+  <a href="../README.md#first-run" title="Use"><img src="media/menu/snodec-use-108.svg" alt="Use" width="160" height="28"></a>
+  <a href="../README.md#configuration" title="Configure"><img src="media/menu/snodec-configure-108.svg" alt="Configure" width="160" height="28"></a>
+  <a href="../README.md#architecture" title="Architecture"><img src="media/menu/snodec-architecture-108.svg" alt="Architecture" width="160" height="28"></a>
+  <a href="../README.md#contributing" title="Contribute"><img src="media/menu/snodec-contribute-108.svg" alt="Contribute" width="160" height="28"></a>
 </p>
 
 <!-- snodec:end menu -->
@@ -49,3 +48,12 @@ These documents describe implementation decisions, qualification scope or histor
 - [Timestamp verification](records/timestamp-verification.md#page-overview)
 
 [Repository](../README.md#project-overview) · [SNode.C organization](https://github.com/SNodeC)
+
+<!-- snodec:begin section-pages -->
+- [Architecture](architecture/README.md#page-overview)
+- [Guides](guides/README.md#page-overview)
+- [Qualification](qualification/README.md#page-overview)
+- [Records](records/README.md#page-overview)
+- [UI review](ui-review/README.md#page-overview)
+- [Web UI](web/README.md#page-overview)
+<!-- snodec:end section-pages -->
