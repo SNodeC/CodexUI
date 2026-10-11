@@ -23,13 +23,13 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 <!-- snodec:begin menu -->
 <p>
-  <a href="#quick-start" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="108" height="24"></a>
-  <a href="#install" title="Install"><img src="docs/media/menu/snodec-install-108.svg" alt="Install" width="108" height="24"></a>
-  <a href="docs/build.md#page-overview" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="108" height="24"></a>
-  <a href="#first-run" title="Use"><img src="docs/media/menu/snodec-use-108.svg" alt="Use" width="108" height="24"></a>
-  <a href="#configuration" title="Configure"><img src="docs/media/menu/snodec-configure-108.svg" alt="Configure" width="108" height="24"></a>
-  <a href="#architecture" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="108" height="24"></a>
-  <a href="#contributing" title="Contribute"><img src="docs/media/menu/snodec-contribute-108.svg" alt="Contribute" width="108" height="24"></a>
+  <a href="#quick-start" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="133" height="28"></a>
+  <a href="#install" title="Install"><img src="docs/media/menu/snodec-install-108.svg" alt="Install" width="133" height="28"></a>
+  <a href="docs/build.md#page-overview" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="133" height="28"></a>
+  <a href="#first-run" title="Use"><img src="docs/media/menu/snodec-use-108.svg" alt="Use" width="133" height="28"></a>
+  <a href="#configuration" title="Configure"><img src="docs/media/menu/snodec-configure-108.svg" alt="Configure" width="133" height="28"></a>
+  <a href="#architecture" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="133" height="28"></a>
+  <a href="#contributing" title="Contribute"><img src="docs/media/menu/snodec-contribute-108.svg" alt="Contribute" width="133" height="28"></a>
 </p>
 
 <!-- snodec:end menu -->
@@ -84,8 +84,8 @@ The frontends share protocol and lifecycle meaning, **not an identical feature i
 ## Install
 
 <p>
-  <a href="docs/build.md#native-desktop" title="Native desktop"><img src="docs/media/menu/route-native.svg" alt="Native desktop" width="152" height="24"></a>
-  <a href="docs/build.md#browser-frontend" title="Browser frontend"><img src="docs/media/menu/route-browser.svg" alt="Browser frontend" width="152" height="24"></a>
+  <a href="docs/build.md#native-desktop" title="Native desktop"><img src="docs/media/menu/route-native.svg" alt="Native desktop" width="188" height="28"></a>
+  <a href="docs/build.md#browser-frontend" title="Browser frontend"><img src="docs/media/menu/route-browser.svg" alt="Browser frontend" width="188" height="28"></a>
 </p>
 
 Build the native Qt desktop or browser assets served by `codex-bridge`. Both are source-installation routes, not binary releases; running the browser assets requires neither Qt nor a Node runtime.
