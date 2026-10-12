@@ -1893,21 +1893,34 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
   ThreadChannels channels;
   WorkerLogic logic(graph, channels);
 
+  NodeRef project, section;
+  {
+    auto write = graph.write();
+    project = write.upsert({NodeKind::Project, "draft-project"});
+    section = write.upsert({NodeKind::ThreadSection, "draft-section"});
+    static_cast<void>(write.finish());
+  }
   RuntimeAction action;
   action.kind = RuntimeActionKind::CreateThread;
   action.promptText = "first prompt exactly";
   action.payload = {
       {"threadStart", Value(Value::Object{{"cwd", Value("/workspace")},
-                                          {"model", Value("gpt-current")}})},
+                                          {"model", Value("gpt-current")},
+                                          {"projectId", Value("draft-project")}})},
       {"turnStart",
        Value(Value::Object{{"approvalPolicy", Value("on-request")}})},
-      {"requestedName", Value("Named locally")}};
+      {"requestedName", Value("Named locally")},
+      {"sectionId", Value("draft-section")}};
   PromptTransition admitted =
       logic.admitFirstPrompt(std::move(action), 100, 100'000);
   require(admitted.command &&
               admitted.command->kind == PromptCommandKind::CreateThread &&
               admitted.command->requestedName == "Named locally" &&
               admitted.command->options.contains("cwd") &&
+              admitted.command->options.contains("projectId") &&
+              admitted.command->options.at("projectId").asString() &&
+              *admitted.command->options.at("projectId").asString() == "draft-project" &&
+              admitted.command->sectionId == "draft-section" &&
               !admitted.command->options.contains("requestedName") &&
               admitted.command->turnOptions.contains("approvalPolicy"),
           "new-thread admission separates exact thread, turn, and rename "
@@ -1925,6 +1938,8 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
             read->related(runtime, RelationKind::UiSelectionTarget) ==
                 std::vector<NodeRef>{draft} &&
             read->parent(read->parent(localPrompt)) == draft &&
+            read->related(draft, RelationKind::ProjectMembership) == std::vector<NodeRef>{project} &&
+            read->related(draft, RelationKind::SectionMembership) == std::vector<NodeRef>{section} &&
             stringFieldEquals(read->state(draft), "name", "Named locally") &&
             stringFieldEquals(read->state(draft), "cwd", "/workspace") &&
             stringFieldEquals(read->state(draft), "creationCorrelation",
@@ -1953,6 +1968,8 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
             admitted.command->thread == actual &&
             admitted.command->options.contains("approvalPolicy") &&
             !read->find(draft->id()) &&
+            read->related(actual, RelationKind::ProjectMembership).empty() &&
+            read->related(actual, RelationKind::SectionMembership).empty() &&
             read->parent(read->parent(localPrompt)) == actual &&
             read->related(actual, RelationKind::PendingPrompt) ==
                 std::vector<NodeRef>{localPrompt} &&

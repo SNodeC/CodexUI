@@ -1754,27 +1754,35 @@ bool ThreadPane::applyItemPresentation(
   return true;
 }
 
-void ThreadPane::beginOptimisticThread(std::string id,
-                                       std::string presentationKey,
-                                       std::string title, std::string cwd) {
-  if (draftItem && draftItem->presentationKey != presentationKey)
+void ThreadPane::beginOptimisticThread(const ui::ThreadListRow &draft) {
+  if (draftItem && draftItem->presentationKey != draft.presentationKey)
     retireOptimisticThread();
   if (!draftItem) {
-    auto *item = new ThreadTreeItem(tree, std::move(presentationKey));
+    auto *item = new ThreadTreeItem(tree, draft.presentationKey);
     draftItem = item;
     rows.emplace(item->presentationKey, item);
     tree->insertTopLevelItem(0, item);
   }
-  ui::ThreadListRow draft;
-  draft.id = std::move(id);
-  draft.title = std::move(title);
-  draft.cwd = std::move(cwd);
   static_cast<void>(applyItemPresentation(draftItem, draft, true,
                                           QDateTime::currentMSecsSinceEpoch()));
   static_cast<void>(repositionRootItem(draftItem));
   tree->setCurrentItem(draftItem);
   tree->setActiveThread(draftItem);
   updateAnimationTimer();
+}
+
+std::optional<ui::ThreadListRow> ThreadPane::optimisticThread() const {
+  if (!draftItem)
+    return {};
+  ui::ThreadListRow row;
+  row.id = draftItem->id;
+  row.presentationKey = draftItem->presentationKey;
+  row.title = draftItem->title;
+  row.cwd = draftItem->cwd;
+  row.createdAt = row.recencyAt = draftItem->animationEpoch / 1000;
+  row.projectId = draftItem->projectId;
+  row.sectionId = draftItem->sectionId;
+  return row;
 }
 
 void ThreadPane::discardOptimisticThread(const std::string &threadId) {
@@ -2030,10 +2038,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       reparented = place(item, parent, position);
     if (item->presentationKey == currentKey && item->target == currentTarget)
       currentReparented = reparented || ancestorReparented;
-    if (item == draftItem) {
+    if (item == draftItem && row.target)
       draftItem = nullptr;
-    }
-    static_cast<void>(applyItemPresentation(item, row, false, {}, false));
+    static_cast<void>(applyItemPresentation(item, row, item == draftItem,
+                                            item->animationEpoch, false));
     // These describe placement, not a targeted status/title presentation.
     item->parentThread = row.parentThread;
     item->order = row.order;
@@ -2074,17 +2082,12 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   const bool retainDraft =
       draftItem &&
       !findPresentation(snapshot.roots, draftItem->presentationKey);
-  const int draftPosition = static_cast<int>(
-      std::ranges::lower_bound(roots, ui::ThreadRowKind::Thread, {},
-                               [](const auto *row) { return row->kind; }) -
-      roots.begin());
   int rootPosition = 0;
-  if (retainDraft) {
+  if (retainDraft)
     wanted.insert(draftItem->presentationKey);
-    static_cast<void>(place(draftItem, nullptr, draftPosition));
-  }
   for (const ui::ThreadListRow *row : roots) {
-    if (retainDraft && rootPosition == draftPosition)
+    if (retainDraft && !draftItem->parent() &&
+        rootPosition == tree->indexOfTopLevelItem(draftItem))
       ++rootPosition;
     reconcile(*row, nullptr, rootPosition++, false);
   }

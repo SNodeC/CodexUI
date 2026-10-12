@@ -62,8 +62,8 @@ public:
   void setActions(Actions actions);
   void refresh(const ui::ThreadListSnapshot &snapshot);
   [[nodiscard]] bool applyRowPresentation(const ui::ThreadListRow &row);
-  void beginOptimisticThread(std::string id, std::string presentationKey,
-                             std::string title, std::string cwd);
+  void beginOptimisticThread(const ui::ThreadListRow &draft);
+  [[nodiscard]] std::optional<ui::ThreadListRow> optimisticThread() const;
   void discardOptimisticThread(const std::string &threadId);
   void setSortCriterion(SortCriterion criterion);
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;

@@ -600,6 +600,12 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
         threadState.fields.emplace("name", Value(pending.requestedName));
       pending.thread = write.upsert(
           {NodeKind::Thread, "local-thread:" + suffix}, std::move(threadState));
+      if (const NodeRef project = write.find(
+              {NodeKind::Project, objectString(pending.options, "projectId")}))
+        write.relate(pending.thread, RelationKind::ProjectMembership, project);
+      if (const NodeRef section =
+              write.find({NodeKind::ThreadSection, pending.sectionId}))
+        write.relate(pending.thread, RelationKind::SectionMembership, section);
       creatingThreads_.insert_or_assign(pending.creationCorrelation,
                                         pending.thread);
       NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});

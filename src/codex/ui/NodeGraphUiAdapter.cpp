@@ -1757,7 +1757,8 @@ NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
 std::optional<ThreadListSnapshot>
 NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
                             std::uint64_t *graphRevision,
-                            const ThreadBrowserOptions *browser) const {
+                            const ThreadBrowserOptions *browser,
+                            const ThreadListRow *draft) const {
   if (!graph_)
     return std::nullopt;
   auto read = graph_->tryRead();
@@ -1815,6 +1816,8 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
     if (!projected)
       return {};
     ThreadListRow row = std::move(*projected);
+    if (draft && row.presentationKey == draft->presentationKey)
+      draft = nullptr;
     std::unordered_set<const nodegraph::Node *> localChildren;
     for (const nodegraph::RelationKind kind :
          {nodegraph::RelationKind::StructuralChildThread,
@@ -1857,6 +1860,10 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
     if (!row.id.empty())
       result.roots.push_back(std::move(row));
   }
+  // A graph-owned correlated row supersedes the renderer-local draft above.
+  // Any remaining UI draft participates in the same membership projection.
+  if (draft)
+    result.roots.push_back(*draft);
   if (browser) {
     const auto catalogState = [&](std::string_view method,
                                   const nlohmann::json &parameters) {
@@ -1977,11 +1984,11 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
         row.children.clear();
         row.parentThread = parent;
         const auto target = row.target;
-        if ((browser->archived == 2 ||
+        if (!row.target || ((browser->archived == 2 ||
              row.archived == (browser->archived == 1)) &&
             (browser->title.empty() ||
              QString::fromStdString(row.title).contains(
-                 QString::fromStdString(browser->title), Qt::CaseInsensitive)))
+                 QString::fromStdString(browser->title), Qt::CaseInsensitive))))
           flat.push_back(std::move(row));
         self(self, std::move(children), target);
       }
@@ -2003,7 +2010,7 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
     std::vector<std::size_t> roots;
     for (std::size_t i = 0; i < flat.size(); ++i) {
       const auto parent = positions.find(flat[i].parentThread.get());
-      if (parent != positions.end() &&
+      if (flat[i].parentThread && parent != positions.end() &&
           familyKey(flat[i]) == familyKey(flat[parent->second]))
         descendants[parent->second].push_back(i);
       else

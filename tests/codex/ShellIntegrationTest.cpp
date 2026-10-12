@@ -8,6 +8,7 @@
 #include "codex/FrontendSession.h"
 #include "codex/FileSelectionDialog.h"
 #include "codex/NewThreadDialog.h"
+#include "codex/ThreadBrowser.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/ShellWidget.h"
 #include "codex/middle/ComposerPane.h"
@@ -3824,7 +3825,7 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           "an exact selected-row removal does not reset the conversation");
 }
 
-void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
+void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration, bool grouped = false) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
   WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
@@ -3833,6 +3834,29 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   shell.resize(1500, 850);
   shell.show();
   makeReady(worker);
+  if (grouped) {
+    {
+      auto write = FrontendSessionTestPeer::graph(session).write();
+      for (const std::string method : {"project/list", "threadSection/list"}) {
+        NodeState catalog;
+        catalog.fields = {{"loaded", Value(true)}, {"unsupported", Value(false)}};
+        static_cast<void>(write.upsert(
+            {NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}, std::move(catalog)));
+      }
+      static_cast<void>(write.finish());
+    }
+    for (const std::string method : {"project/list", "threadSection/list"}) {
+      const ProtocolRequestId id("group-draft-" + method);
+      const auto request = worker.applyDetailed(
+          {DecodedMessageKind::ClientRequest, method, id, {}});
+      Value::Array data;
+      if (method == "project/list")
+        data.emplace_back(Value::Object{{"id", Value("openwrt")}, {"name", Value("OpenWRT")},
+            {"roots", Value::Array{Value::Object{{"path", Value("/tmp")}}}}});
+      static_cast<void>(worker.apply({DecodedMessageKind::ClientResult, method, id,
+                                     {{"data", Value(std::move(data))}}, request.primary}));
+    }
+  }
   spin(40);
 
   const QString chosenName = QStringLiteral("Chosen UI name");
@@ -3854,7 +3878,28 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   require(newThread != nullptr, "the existing New thread control is available");
   if (!newThread)
     return;
-  newThread->click();
+  if (grouped) {
+    QTreeWidgetItem *project = threadItem(list, "openwrt");
+    require(project != nullptr, "the OpenWRT project is visible before draft creation");
+    if (!project)
+      return;
+    QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection,
+                             Q_ARG(QPoint, list->visualItemRect(project).center()));
+    QPointer<QMenu> menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+    QAction *createHere = nullptr;
+    if (menu)
+      for (QAction *action : menu->actions())
+        if (action->text() == QStringLiteral("New thread here…"))
+          createHere = action;
+    require(createHere && createHere->isEnabled(), "the project exposes New thread here");
+    if (!createHere)
+      return;
+    createHere->trigger();
+    if (menu)
+      menu->close();
+  } else {
+    newThread->click();
+  }
   spin(40);
 
   auto *approval =
@@ -3863,6 +3908,10 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
     approval->setCurrentIndex(approval->findData(QStringLiteral("never")));
   QTreeWidgetItem *draft = threadItem(list, "draft:new-thread");
   QTreeWidgetItem *const stableDraft = draft;
+  const auto staysInProject = [&] {
+    return !grouped || (stableDraft && stableDraft->parent() == threadItem(list, "openwrt"));
+  };
+  require(staysInProject(), "New thread here displays its draft inside OpenWRT immediately");
   auto *threadAnimation =
       shell.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
   require(draft && list->currentItem() == draft && approval &&
@@ -3876,7 +3925,7 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   static_cast<void>(worker.connectionSettings(
       {{"selected", Value("unix")}, {"endpoint", Value("local")}}));
   spin(40);
-  require(draft && list->currentItem() == draft,
+  require(draft && list->currentItem() == draft && staysInProject(),
           "an unrelated shared-graph change preserves draft selection");
 
   auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
@@ -3904,6 +3953,9 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
                                          : turnStart->second.asObject();
   require(creates == 1 && create.promptText == promptText.toStdString() &&
               threadOptions && turnOptions &&
+              (!grouped || (threadOptions->contains("projectId") &&
+                            threadOptions->at("projectId").asString() &&
+                            *threadOptions->at("projectId").asString() == "openwrt")) &&
               threadOptions->contains("approvalPolicy") &&
               threadOptions->at("approvalPolicy").asString() &&
               *threadOptions->at("approvalPolicy").asString() == "never" &&
@@ -3923,7 +3975,7 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   const NodeRef graphDraft =
       transition.command ? transition.command->thread : NodeRef{};
   require(
-      graphDraft && list && list->currentItem() == stableDraft && approval &&
+      graphDraft && list && list->currentItem() == stableDraft && staysInProject() && approval &&
           approval->currentData() == QStringLiteral("never") &&
           list->currentItem()->data(0, Qt::UserRole).toString().toStdString() ==
               graphDraft->id().canonical &&
@@ -3937,12 +3989,21 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   if (!transition.command)
     return;
   const NodeRef localPrompt = transition.command->localPrompt;
+  if (grouped) {
+    const ProtocolRequestId id("group-draft-thread-start");
+    const auto request = worker.applyDetailed({DecodedMessageKind::ClientRequest,
+        "thread/start", id, {{"projectId", Value("openwrt")}}});
+    static_cast<void>(worker.apply({DecodedMessageKind::ClientResult, "thread/start", id,
+        {{"thread", Value::Object{{"id", Value("created-thread")},
+                                  {"projectId", Value("openwrt")},
+                                  {"name", Value(chosenName.toStdString())}}}}, request.primary}));
+  }
   require(worker.attachCreatedThread(*transition.command, "created-thread") ==
               ChannelSendStatus::Accepted,
           "the worker attaches the accepted canonical thread exactly once");
   require(spinUntil(
               [&] {
-                return threadItem(list, "created-thread") == stableDraft &&
+                return threadItem(list, "created-thread") == stableDraft && staysInProject() &&
                        approval &&
                        approval->currentData() == QStringLiteral("never") &&
                        list->currentItem() == stableDraft &&
@@ -6005,6 +6066,7 @@ int main(int argc, char **argv) {
   forkActionsExposeLineageAndAdvancedOptions(*configuration);
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration);
+  optimisticDraftUsesOneTypedCreateAction(*configuration, true);
   emptyOptimisticDraftIsAbandonedOnThreadSelection(*configuration);
   contendedUserSelectionKeepsTheLatestVisibleRow(*configuration);
   secondNewThreadIsGuardedWhileCreationIsInFlight(*configuration);

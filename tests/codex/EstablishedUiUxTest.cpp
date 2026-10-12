@@ -54,6 +54,7 @@
 namespace codexui::codex::middle {
 namespace {
 
+
 bool expect(bool condition, const char *message) {
   if (condition)
     return true;
@@ -790,8 +791,12 @@ bool threadPaneSnapshotAndActionContract() {
                      "the established action API emits the exact target");
   }
 
-  pane.beginOptimisticThread("draft:new-thread", "creation:test", "New thread",
-                             "/workspace");
+  ui::ThreadListRow draft;
+  draft.id = "draft:new-thread";
+  draft.presentationKey = "creation:test";
+  draft.title = "New thread";
+  draft.cwd = "/workspace";
+  pane.beginOptimisticThread(draft);
   QCoreApplication::processEvents();
   result &= expect(tree && tree->topLevelItemCount() == 2,
                    "the optimistic row appears through normal refresh");

@@ -556,6 +556,9 @@ struct ShellWidget::Impl final {
   [[nodiscard]] bool submitPending(const PendingRequestDescriptor &request,
                                    PendingRequestSubmission submission);
   void hydrateSelectedThreadIfNeeded(nodegraph::NodeRef thread);
+  [[nodiscard]] std::optional<ui::ThreadListSnapshot>
+  threadSnapshot(std::uint64_t *revision = nullptr);
+  void beginThreadDraft(NewThreadDraft draft);
   void beginNewThreadDialog(std::string project = {}, std::string section = {},
                             std::string workspace = {});
   [[nodiscard]] std::optional<NewThreadDraft>
@@ -1112,9 +1115,7 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   pendingConversation = false;
   clearPendingConversationItems();
   std::uint64_t threadRevision = 0;
-  if (auto threads =
-          uiAdapter.threads(boundGraphThread, &threadRevision,
-                            &middleRegion->threads().browserOptions())) {
+  if (auto threads = threadSnapshot(&threadRevision)) {
     middleRegion->threads().refresh(*threads);
     routedThreadRevision = threadRevision;
   }
@@ -1554,9 +1555,7 @@ void ShellWidget::Impl::commitPendingPanes() {
   }
   if (hasFrameBudget() && pendingThreadPane) {
     std::uint64_t graphRevision = 0;
-    if (auto threads =
-            uiAdapter.threads(boundGraphThread, &graphRevision,
-                              &middleRegion->threads().browserOptions())) {
+    if (auto threads = threadSnapshot(&graphRevision)) {
       pendingThreadPane = false;
       pendingThreadRows.clear();
       routedThreadRevision = graphRevision;
@@ -2431,6 +2430,33 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
       (boundGraphThread || newThreadDraft) && !status.activeTurn);
 }
 
+std::optional<ui::ThreadListSnapshot>
+ShellWidget::Impl::threadSnapshot(std::uint64_t *revision) {
+  const auto draft = middleRegion->threads().optimisticThread();
+  return uiAdapter.threads(boundGraphThread, revision,
+                           &middleRegion->threads().browserOptions(),
+                           draft ? &*draft : nullptr);
+}
+
+void ShellWidget::Impl::beginThreadDraft(NewThreadDraft draft) {
+  newThreadDraft = draft;
+  creationDraftCorrelation =
+      "qt-draft:" + std::to_string(nextCreationDraftSerial++);
+  selectedGraphThreadId.clear();
+  bindGraphPanes({});
+  ui::ThreadListRow row;
+  row.id = DraftThreadId;
+  row.presentationKey =
+      ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation);
+  row.title = draft.name.isEmpty() ? "New thread" : utf8(draft.name);
+  row.cwd = utf8(draft.workspace);
+  row.projectId = draft.projectId;
+  row.sectionId = draft.sectionId;
+  middleRegion->threads().beginOptimisticThread(row);
+  if (auto threads = threadSnapshot())
+    middleRegion->threads().refresh(*threads);
+}
+
 void ShellWidget::Impl::beginNewThreadDialog(std::string project,
                                              std::string section,
                                              std::string workspace) {
@@ -2453,17 +2479,7 @@ void ShellWidget::Impl::beginNewThreadDialog(std::string project,
   NewThreadDraft draft = dialog.draft();
   draft.projectId = std::move(project);
   draft.sectionId = std::move(section);
-  newThreadDraft = draft;
-  creationDraftCorrelation =
-      "qt-draft:" + std::to_string(nextCreationDraftSerial++);
-  selectedGraphThreadId.clear();
-  bindGraphPanes({});
-  middleRegion->threads().beginOptimisticThread(
-      DraftThreadId,
-      ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation),
-      draft.name.trimmed().isEmpty() ? "New thread"
-                                     : utf8(draft.name.trimmed()),
-      utf8(draft.workspace));
+  beginThreadDraft(std::move(draft));
   middleRegion->composer().clearDraft();
   middleRegion->composer().promptEditor()->setFocus();
 }
@@ -2819,15 +2835,7 @@ void ShellWidget::Impl::recoverPrompt(const nodegraph::NodeRef &prompt) {
         valueMember(*threadStart, "developerInstructions")));
     draft.ephemeral = boolFromValue(valueMember(*threadStart, "ephemeral"));
   }
-  newThreadDraft = draft;
-  creationDraftCorrelation =
-      "qt-draft:" + std::to_string(nextCreationDraftSerial++);
-  selectedGraphThreadId.clear();
-  bindGraphPanes({});
-  middleRegion->threads().beginOptimisticThread(
-      DraftThreadId,
-      ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation),
-      utf8(draft.name), utf8(draft.workspace));
+  beginThreadDraft(std::move(draft));
   middleRegion->composer().promptEditor()->setPlainText(text(authoredText));
   middleRegion->composer().setAttachments(std::move(attachments));
   middleRegion->composer().promptEditor()->setFocus();

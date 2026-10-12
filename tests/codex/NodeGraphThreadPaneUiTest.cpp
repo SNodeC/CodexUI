@@ -54,6 +54,19 @@
 namespace codexui::codex {
 namespace {
 
+ui::ThreadListRow localDraft(std::string id, std::string key,
+                              std::string title, std::string cwd,
+                              std::string project = {}, std::string section = {}) {
+  ui::ThreadListRow row;
+  row.id = std::move(id);
+  row.presentationKey = std::move(key);
+  row.title = std::move(title);
+  row.cwd = std::move(cwd);
+  row.projectId = std::move(project);
+  row.sectionId = std::move(section);
+  return row;
+}
+
 class AnimationDurationStyle final : public QProxyStyle {
 public:
   explicit AnimationDurationStyle(int duration) : duration_(duration) {}
@@ -382,6 +395,139 @@ bool groupLabelsIdentifyDestinationsWithoutRoutineIds() {
   return passed;
 }
 
+bool localDraftsUseOneGroupingProjection() {
+  using namespace nodegraph;
+  NodeGraph graph;
+  const auto fields = [](nlohmann::json value) { return *valueFromJson(value).asObject(); };
+  NodeRef firstProject, secondProject, section;
+  {
+    auto write = graph.write();
+    const auto entity = [&](NodeKind kind, std::string id, nlohmann::json data) {
+      NodeState state;
+      state.fields = fields(std::move(data));
+      return write.upsert({kind, std::move(id)}, std::move(state));
+    };
+    firstProject = entity(NodeKind::Project, "project-a", {{"name", "OpenWRT"}});
+    secondProject = entity(NodeKind::Project, "project-b", {{"name", "CodexUI"}});
+    section = entity(NodeKind::ThreadSection, "shared-section", {{"name", "Pinned"}});
+    entity(NodeKind::ThreadSection, "standalone-section", {{"name", "Research"}});
+    for (const std::string method : {"project/list", "threadSection/list"})
+      entity(NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object()),
+             {{"loaded", true}, {"unsupported", false}});
+    NodeState connection;
+    connection.status = NodeStatus::Connected;
+    connection.fields = fields({{"providerState", "ready"}, {"role", "controller"}});
+    static_cast<void>(write.upsert({NodeKind::Connection, "connection"}, std::move(connection)));
+    static_cast<void>(write.finish());
+  }
+  ui::NodeGraphUiAdapter adapter(graph);
+  AnimationDurationStyle normalMotion(100);
+  middle::ThreadPane pane;
+  pane.resize(330, 680);
+  if (const int width = qEnvironmentVariableIntValue("CODEXUI_GROUP_WIDTH"); width > 0)
+    pane.resize(width, 680);
+  auto snapshot = adapter.threads({}, nullptr, &pane.browserOptions());
+  if (!snapshot)
+    return false;
+  pane.refresh(*snapshot);
+  pane.show();
+  QApplication::processEvents();
+  auto *tree = threadTree(pane);
+  tree->setStyle(&normalMotion);
+  bool passed = true;
+  for (const auto &[project, sectionId] :
+       {std::pair{"project-a", ""}, std::pair{"project-b", "shared-section"},
+        std::pair{"", "standalone-section"}}) {
+    const ui::ThreadListRow local = localDraft("draft:new-thread", "creation:group-draft",
+                                               "New thread", "/workspace", project, sectionId);
+    pane.beginOptimisticThread(local);
+    const auto retained = pane.optimisticThread();
+    const auto projected = adapter.threads({}, nullptr, &pane.browserOptions(),
+                                            retained ? &*retained : nullptr);
+    passed &= require(projected.has_value(), "local draft projects with graph groups");
+    if (!projected)
+      continue;
+    pane.refresh(*projected);
+    QApplication::processEvents();
+    auto *draft = threadItem(tree, local.id);
+    auto *const stableDraft = draft;
+    auto *parent = draft ? draft->parent() : nullptr;
+    passed &= require(draft && parent && tree->currentItem() == draft &&
+                          parent->data(0, Qt::UserRole).toString().toStdString() ==
+                              (local.sectionId.empty() ? local.projectId : local.sectionId),
+                      "a draft is selected inside its chosen project or section");
+    if (!draft)
+      continue;
+    if (!local.projectId.empty() && !local.sectionId.empty())
+      passed &= require(parent->parent() == threadItem(tree, local.projectId),
+                        "a section draft retains its project ancestry");
+    const auto epoch = pane.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
+    const auto accessibleDraft = threadAccessible(tree, draft);
+    const auto accessibleId = accessibleDraft ? QAccessible::uniqueId(accessibleDraft) : 0;
+    pane.refresh(*projected);
+    passed &= require(threadItem(tree, local.id) == stableDraft &&
+                          stableDraft->parent() == parent && tree->currentItem() == stableDraft &&
+                          pane.optimisticThread() && epoch && epoch->isActive() &&
+                          (!accessibleId || QAccessible::accessibleInterface(accessibleId) == accessibleDraft),
+                      "refresh preserves grouped draft lifetime, selection and animation");
+    const QString captures = qEnvironmentVariable("CODEXUI_DRAFT_SCREENSHOT_DIR");
+    if (!captures.isEmpty())
+      passed &= require(pane.grab().save(captures + "/draft-dpr-" + QString::number(pane.devicePixelRatioF()) + "-" + QString::fromStdString(local.projectId) + "-" + QString::fromStdString(local.sectionId) + ".png"),
+                        "grouped draft screenshot is captured");
+    ui::ThreadBrowserOptions filtered = pane.browserOptions();
+    filtered.title = "does not match the draft";
+    filtered.archived = 1;
+    const auto filteredProjection = adapter.threads({}, nullptr, &filtered, &local);
+    if (filteredProjection)
+      pane.refresh(*filteredProjection);
+    passed &= require(threadItem(tree, local.id) == stableDraft && stableDraft->parent() &&
+                          tree->currentItem() == stableDraft,
+                      "an active local draft remains in its group under browser filters");
+    pane.refresh(*projected);
+    for (const auto mode : {ui::ThreadGrouping::Sections, ui::ThreadGrouping::Ungrouped,
+                            ui::ThreadGrouping::Projects}) {
+      ui::ThreadBrowserOptions browser = pane.browserOptions();
+      browser.grouping = mode;
+      const auto changed = adapter.threads({}, nullptr, &browser, &local);
+      if (changed)
+        pane.refresh(*changed);
+      passed &= require(threadItem(tree, local.id) == stableDraft && tree->currentItem() == stableDraft &&
+                            (mode != ui::ThreadGrouping::Ungrouped || !stableDraft->parent()),
+                        "changing grouping reuses the local draft's row and selection");
+    }
+    parent = stableDraft->parent();
+    const auto admitted = [&] {
+      auto write = graph.write();
+      NodeState state;
+      state.fields = fields({{"name", local.title}, {"creationCorrelation", "group-draft"}, {"local", true}});
+      auto target = write.upsert({NodeKind::Thread, "local-thread:group-draft"}, std::move(state));
+      if (!local.projectId.empty())
+        write.relate(target, RelationKind::ProjectMembership,
+                     local.projectId == "project-a" ? firstProject : secondProject);
+      if (!local.sectionId.empty())
+        write.relate(target, RelationKind::SectionMembership,
+                     local.sectionId == "shared-section" ? section :
+                         write.find({NodeKind::ThreadSection, local.sectionId}));
+      static_cast<void>(write.finish());
+      return target;
+    }();
+    const auto promoted = adapter.threads(admitted, nullptr, &pane.browserOptions(), &local);
+    if (promoted)
+      pane.refresh(*promoted);
+    passed &= require(threadItem(tree, admitted->id().canonical) == stableDraft &&
+                          stableDraft->parent() == parent && tree->currentItem() == stableDraft &&
+                          !pane.optimisticThread() && !threadItem(tree, local.id),
+                      "graph admission promotes the same grouped row without duplication or movement");
+    {
+      auto write = graph.write();
+      write.remove(admitted);
+      static_cast<void>(write.finish());
+    }
+    pane.refresh(*snapshot);
+  }
+  return passed;
+}
+
 bool groupedThreadsPreserveIdentityAndInteractions() {
   using namespace nodegraph;
   NodeGraph graph;
@@ -518,8 +664,7 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     passed &=
         require(projectsFirst(), "changing thread sort keeps projects first");
   }
-  pane.beginOptimisticThread("draft-order", "draft-order", "Draft",
-                             "/workspace");
+  pane.beginOptimisticThread(localDraft("draft-order", "draft-order", "Draft", "/workspace"));
   passed &= require(projectsFirst(), "creating a draft keeps projects first");
   pane.refresh(*snapshot);
   passed &=
@@ -1995,8 +2140,7 @@ bool optimisticCreationHandsOneRowToGraphAuthority() {
   pane.resize(320, 420);
   if (QTreeWidget *tree = threadTree(pane))
     tree->setStyle(&normalMotion);
-  pane.beginOptimisticThread("draft:new-thread", "creation:test", "Chosen name",
-                             "/workspace");
+  pane.beginOptimisticThread(localDraft("draft:new-thread", "creation:test", "Chosen name", "/workspace"));
   ui::ThreadListSnapshot empty;
   empty.selectedThreadId = "draft:new-thread";
   pane.refresh(empty);
@@ -2127,8 +2271,7 @@ bool optimisticDiscardRetiresAuthorityBeforeSelectionReentry() {
     pane.discardOptimisticThread("draft:new-thread");
   };
   pane.setActions(std::move(actions));
-  pane.beginOptimisticThread("draft:new-thread", "creation:first", "First",
-                             "/workspace");
+  pane.beginOptimisticThread(localDraft("draft:new-thread", "creation:first", "First", "/workspace"));
   pane.show();
   QApplication::processEvents();
 
@@ -2145,8 +2288,7 @@ bool optimisticDiscardRetiresAuthorityBeforeSelectionReentry() {
                "draft retirement repeated or disturbed the user selection"))
     return false;
 
-  pane.beginOptimisticThread("draft:new-thread", "creation:second", "Second",
-                             "/workspace");
+  pane.beginOptimisticThread(localDraft("draft:new-thread", "creation:second", "Second", "/workspace"));
   QApplication::processEvents();
   return require(threadItem(tree, "draft:new-thread") == tree->currentItem(),
                  "draft retirement prevented a later creation from starting");
@@ -2872,6 +3014,7 @@ int main(int argc, char **argv) {
   }
   passed &= codexui::codex::forkNamesPreserveTheirLineage();
   passed &= codexui::codex::groupLabelsIdentifyDestinationsWithoutRoutineIds();
+  passed &= codexui::codex::localDraftsUseOneGroupingProjection();
   passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
   passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
   passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();

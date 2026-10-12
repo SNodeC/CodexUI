@@ -49,6 +49,8 @@ Other clients' metadata is read freshly before replacement and preserved.
 This is not a compare-and-swap transaction: the protocol offers no revision
 precondition against a concurrent writer between that read and update.
 
+A local new-thread draft appears immediately inside its chosen project or section. Draft creation, refresh and prompt recovery use the same grouping projection as graph-owned threads; admission promotes the same row and preserves its selection.
+
 New-thread group context carries the project into thread/start and assigns the
 section after creation. A failed section assignment retains the created thread,
 reports the failure, and can be retried through Assign section without resending
