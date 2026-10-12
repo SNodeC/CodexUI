@@ -6,13 +6,6 @@
 
 # Findings ledger
 
-- [Qt architecture remediation findings ledger](current-repair-plan.md#page-overview)
-- [Historical remediation and S1–S4 checkpoints](historical-record.md#page-overview)
-- [S5 shared foundations and live conversation gates](s5-shared-foundations.md#page-overview)
-- [S5 middle-region audit and MR-9 evidence](s5-middle-region-audit.md#page-overview)
-- [S5 resumed-worktree and final S3 checkpoints](s5-resumed-worktree.md#page-overview)
-- [Consolidated findings and external-review crosswalk](findings-and-crosswalk.md#page-overview)
-
 ## Sections
 
 <!-- snodec:begin section-pages -->

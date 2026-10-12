@@ -30,13 +30,13 @@ Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNod
 
 <!-- snodec:begin menu -->
 <p>
-  <a href="#quick-start" title="Start"><img src="docs/media/menu/snodec-start-108.svg" alt="Start" width="160" height="28"></a>
-  <a href="#install" title="Install"><img src="docs/media/menu/snodec-install-108.svg" alt="Install" width="160" height="28"></a>
-  <a href="docs/guides/build-from-source.md#page-overview" title="Build"><img src="docs/media/menu/snodec-build-108.svg" alt="Build" width="160" height="28"></a>
-  <a href="#first-run" title="Use"><img src="docs/media/menu/snodec-use-108.svg" alt="Use" width="160" height="28"></a>
-  <a href="#configuration" title="Configure"><img src="docs/media/menu/snodec-configure-108.svg" alt="Configure" width="160" height="28"></a>
-  <a href="#architecture" title="Architecture"><img src="docs/media/menu/snodec-architecture-108.svg" alt="Architecture" width="160" height="28"></a>
-  <a href="#contributing" title="Contribute"><img src="docs/media/menu/snodec-contribute-108.svg" alt="Contribute" width="160" height="28"></a>
+  <a href="#quick-start" title="Start"><img src="docs/media/menu/start.svg" alt="Start" width="160" height="28"></a>
+  <a href="#install" title="Install"><img src="docs/media/menu/install.svg" alt="Install" width="160" height="28"></a>
+  <a href="docs/guides/build-from-source.md#page-overview" title="Build"><img src="docs/media/menu/build.svg" alt="Build" width="160" height="28"></a>
+  <a href="#first-run" title="Use"><img src="docs/media/menu/use.svg" alt="Use" width="160" height="28"></a>
+  <a href="#configuration" title="Configure"><img src="docs/media/menu/configure.svg" alt="Configure" width="160" height="28"></a>
+  <a href="#architecture" title="Architecture"><img src="docs/media/menu/architecture.svg" alt="Architecture" width="160" height="28"></a>
+  <a href="#contributing" title="Contribute"><img src="docs/media/menu/contribute.svg" alt="Contribute" width="160" height="28"></a>
 </p>
 
 <!-- snodec:end menu -->
@@ -72,7 +72,7 @@ In the native threads panel, **projects contain the visual grouping; sections or
 
 To create a project or section, click the current grouping label—**Projects**, **Sections** or **Ungrouped**—above the thread list. Use a thread's context menu to assign its project and section. Creation and assignment require controller access and server support.
 
-[![Read the grouping and lifecycle guide](docs/media/menu/further-grouping-lifecycle.svg)](docs/guides/thread-projects.md#page-overview)
+Next: [Read the grouping and lifecycle guide](docs/guides/thread-projects.md#page-overview).
 
 ### Choose your frontend
 
@@ -90,12 +90,7 @@ The frontends share protocol and lifecycle meaning, **not an identical feature i
 
 ## Install
 
-<p>
-  <a href="docs/guides/build-from-source.md#native-desktop" title="Native desktop"><img src="docs/media/menu/route-native.svg" alt="Native desktop" width="160" height="28"></a>
-  <a href="docs/guides/build-from-source.md#browser-frontend" title="Browser frontend"><img src="docs/media/menu/route-browser.svg" alt="Browser frontend" width="160" height="28"></a>
-</p>
-
-Build the native Qt desktop or browser assets served by `codex-bridge`. Both are source-installation routes, not binary releases; running the browser assets requires neither Qt nor a Node runtime.
+Build [native Qt desktop](docs/guides/build-from-source.md#native-desktop) or [browser assets](docs/guides/build-from-source.md#browser-frontend) served by codex-bridge; follow the build guide for prerequisites and commands.
 
 ## First run
 
@@ -152,6 +147,8 @@ On the native side, a SNode.C worker owns protocol processing and writes one sha
 For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/architecture/overview.md#page-overview).
 
 ## Documentation
+
+[Documentation index](docs/README.md#page-overview): guides, architecture, qualification and engineering records for CodexUI.
 
 | Start here | Go deeper |
 | --- | --- |
