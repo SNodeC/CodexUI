@@ -198,9 +198,9 @@ public:
             0, item == last ? UiStyle::projectCardEdgePadding : 0};
   }
   void setActiveThread(ThreadTreeItem *item) {
-    activeThreadIndex_ = item ? indexFromItem(item) : QModelIndex{};
-    // Refresh both the old and new enclosing cards, including reparenting.
-    viewport()->update();
+    if (std::exchange(activeThreadIndex_, item ? indexFromItem(item) : QModelIndex{}) !=
+        activeThreadIndex_)
+      viewport()->update();
   }
   [[nodiscard]] QModelIndex activeCardIndex() const {
     QModelIndex index = activeThreadIndex_;
@@ -1292,8 +1292,6 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   tree->setContextMenuPolicy(Qt::CustomContextMenu);
   tree->setItemDelegate(new ThreadItemDelegate(tree));
-  connect(tree, &QTreeView::expanded, tree, &QTreeView::doItemsLayout);
-  connect(tree, &QTreeView::collapsed, tree, &QTreeView::doItemsLayout);
   optimisticAnimation = new QTimer(tree);
   optimisticAnimation->setObjectName(
       QStringLiteral("optimisticThreadAnimation"));
