@@ -8,13 +8,13 @@
 
 <!-- snodec:begin menu -->
 <p>
-  <a href="../README.md#quick-start" title="Start"><img src="media/menu/snodec-start-108.svg" alt="Start" width="160" height="28"></a>
-  <a href="../README.md#install" title="Install"><img src="media/menu/snodec-install-108.svg" alt="Install" width="160" height="28"></a>
-  <a href="guides/build-from-source.md#page-overview" title="Build"><img src="media/menu/snodec-build-108.svg" alt="Build" width="160" height="28"></a>
-  <a href="../README.md#first-run" title="Use"><img src="media/menu/snodec-use-108.svg" alt="Use" width="160" height="28"></a>
-  <a href="../README.md#configuration" title="Configure"><img src="media/menu/snodec-configure-108.svg" alt="Configure" width="160" height="28"></a>
-  <a href="../README.md#architecture" title="Architecture"><img src="media/menu/snodec-architecture-108.svg" alt="Architecture" width="160" height="28"></a>
-  <a href="../README.md#contributing" title="Contribute"><img src="media/menu/snodec-contribute-108.svg" alt="Contribute" width="160" height="28"></a>
+  <a href="../README.md#quick-start" title="Start"><img src="media/menu/start.svg" alt="Start" width="160" height="28"></a>
+  <a href="../README.md#install" title="Install"><img src="media/menu/install.svg" alt="Install" width="160" height="28"></a>
+  <a href="guides/build-from-source.md#page-overview" title="Build"><img src="media/menu/build.svg" alt="Build" width="160" height="28"></a>
+  <a href="../README.md#first-run" title="Use"><img src="media/menu/use.svg" alt="Use" width="160" height="28"></a>
+  <a href="../README.md#configuration" title="Configure"><img src="media/menu/configure.svg" alt="Configure" width="160" height="28"></a>
+  <a href="../README.md#architecture" title="Architecture"><img src="media/menu/architecture.svg" alt="Architecture" width="160" height="28"></a>
+  <a href="../README.md#contributing" title="Contribute"><img src="media/menu/contribute.svg" alt="Contribute" width="160" height="28"></a>
 </p>
 
 <!-- snodec:end menu -->
@@ -58,8 +58,5 @@ These documents describe implementation decisions, qualification scope or histor
 - [Timestamp verification](records/timestamp-verification.md#page-overview)
 - [Codex 0.162.1 migration inventory](records/codex-0.162.1-migration-inventory.md#page-overview)
 - [Codex 0.162.1 local migration results](records/codex-0.162.1-migration-results.md#page-overview)
-
-
-
 
 [Media assets](media/README.md).
