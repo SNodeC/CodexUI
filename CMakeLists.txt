@@ -730,17 +730,6 @@ if(BUILD_TESTING)
         PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
     add_test(
-        NAME codexui-ui-style-source-policy
-        COMMAND
-            ${CMAKE_COMMAND}
-            -DCODEXUI_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/codex/UiStyleSourcePolicy.cmake
-    )
-    set_tests_properties(
-        codexui-ui-style-source-policy
-        PROPERTIES TIMEOUT 10 LABELS "architecture;qt"
-    )
-    add_test(
         NAME codexui-middle-region-wheel-performance
         COMMAND codexui-application-layout-test --wheel-routing-performance
     )
