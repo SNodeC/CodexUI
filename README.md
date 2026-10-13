@@ -148,6 +148,8 @@ For the detailed state, threading and protocol boundaries, see the [architecture
 
 ## Documentation
 
+Manual CI builds and qualifies the desktop and browser editions, including shared verification and frontend SDK checks. See the organization [workflow graph](https://github.com/SNodeC/.github/blob/main/docs/workflow-graph.md#page-overview) for triggers and artifact boundaries.
+
 [Documentation index](docs/README.md#page-overview): guides, architecture, qualification and engineering records for CodexUI.
 
 | Start here | Go deeper |
