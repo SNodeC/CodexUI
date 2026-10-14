@@ -73,7 +73,7 @@
     --card-border: #dce2eb;
     --card-shadow: #1720330a;
     --card-title-text: #38445a;
-    --update-message-phase-text: #285fca;
+    --update-message-phase-text: #8a5208;
     --final-answer-phase-text: #176b45;
     --steering-message-text: #146f73;
     --copy-success-text: #176b45;
@@ -96,8 +96,8 @@
     --active-turn-border: #6f98e8;
     --active-work-border: #98a2b3;
     --reasoning-accent: #7896df;
-    --update-message-surface: #fff;
-    --update-message-border: #dce2eb;
+    --update-message-surface: #fff4dc;
+    --update-message-border: #f0d79e;
     --final-answer-surface: #f4f0ff;
     --final-answer-border: #d4c5f2;
     --final-answer-text: #53389e;

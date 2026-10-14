@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {qualifyCatchup} from "./qualify-catchup.mjs";
 import {spawn} from "node:child_process";
 import {constants as fsConstants} from "node:fs";
 import {access, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
@@ -465,7 +466,8 @@ const fullTopBarMeasurement = `(()=>{
     }
     const top=document.querySelector(".top-bar").getBoundingClientRect();
     const actionBounds=actions.getBoundingClientRect();
-    return {width:innerWidth,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+    const footer=document.querySelector(".status-bar").getBoundingClientRect();
+    return {width:innerWidth,footerBottom:footer.bottom,viewportHeight:innerHeight,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
         top:{left:top.left,right:top.right,bottom:top.bottom,height:top.height},
         actions:{left:actionBounds.left,right:actionBounds.right,bottom:actionBounds.bottom},
         drawers:[...document.querySelectorAll(".responsive-pane-button")].map(button=>button.textContent.trim())};
@@ -473,6 +475,7 @@ const fullTopBarMeasurement = `(()=>{
 
 function assertTopBar(measurement, width) {
     assert.equal(measurement.width, width);
+    assert(measurement.footerBottom <= measurement.viewportHeight + 0.5, "footer remains inside the responsive shell");
     assert.equal(measurement.overflow, 0, `${width}px layout must not overflow the document`);
     assert(measurement.top.left >= 0 && measurement.top.right <= width);
     assert(measurement.actions.left >= 0 && measurement.actions.right <= width);
@@ -518,7 +521,7 @@ try {
     const trapped = await devTools.evaluate(`(()=>{document.dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",shiftKey:true,bubbles:true,cancelable:true}));
         const backward=document.activeElement?.textContent?.trim();document.dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",bubbles:true,cancelable:true}));
         return {backward,forward:document.activeElement?.getAttribute("aria-label")}})()`);
-    assert.deepEqual(trapped, {backward: "Protocol", forward: "Close Inspector drawer"});
+    assert.deepEqual(trapped, {backward: "Info", forward: "Close Inspector drawer"});
     const closed = await devTools.evaluate(`(async()=>{document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}));
         await new Promise(done=>setTimeout(done,30));return {drawer:Boolean(document.querySelector("#inspector-pane")),
         focus:document.activeElement?.getAttribute("aria-controls"),inert:[...document.querySelectorAll("[data-modal-background]")].some(element=>element.hasAttribute("inert"))}})()`);
@@ -544,6 +547,7 @@ try {
         assertTopBar(measurement, width);
         assert.deepEqual(measurement.drawers, ["☰ Threads", "ⓘ Inspector"]);
     }
+    await devTools.evaluate(`document.querySelector(".qualification-control")?.remove()`);
     await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: true, maxTouchPoints: 1});
     await waitUntil(devTools, `matchMedia("(pointer: coarse)").matches`, "coarse-pointer media query");
     const touch = await devTools.evaluate(`({coarse:matchMedia("(pointer: coarse)").matches,
@@ -681,7 +685,8 @@ try {
             reasoning_effort: "low"}},
     });
 
-    console.log(JSON.stringify({browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    const catchup = await qualifyCatchup(devTools);
+    console.log(JSON.stringify({catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

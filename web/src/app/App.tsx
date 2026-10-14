@@ -1,10 +1,12 @@
+import {protocolTimes, targetTimes, timingSummary, timingDetails, tokenUsage} from "../presentation/PresentationTelemetry.js";
+import type {ProtocolTime, TimingTarget, TokenUsageText} from "../presentation/PresentationTelemetry.js";
 import {memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
     AuthoritativeHistoryPageSize, UnknownStatus, anchoredScrollTop, changeSettingDraft, displayStatus,
-    fixedSettingChoices, humanizeProtocolLabel as humanize,
+    fixedSettingChoices, humanizeProtocolLabel as humanize, isObject, member,
     foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
     isEmptyStatus, isWorkingStatus, projectTurnPlan, settingDraftFor, settingPresentation, settingPromptOptions, statusTone,
@@ -18,7 +20,7 @@ import type {
 } from "../index.js";
 import {DraftThreadId} from "./BrowserFrontendSession.js";
 import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
-import type {AgentPresentation} from "../presentation/PresentationModel.js";
+import type {WorkspaceGroup, AgentPresentation} from "../presentation/PresentationModel.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
@@ -67,6 +69,7 @@ interface DrawerPaneProps {
     drawer?: boolean;
     paneRef?: RefObject<HTMLElement>;
     onClose?: () => void;
+    onHide?: () => void;
 }
 
 interface ThreadPresentationTarget {threadId: string; presentationKey: string}
@@ -81,11 +84,13 @@ interface ConversationPresentationOptions {
     showCodexUpdates: boolean;
     commandsInitiallyExpanded: boolean;
     imagesInitiallyExpanded: boolean;
+    fileChangesInitiallyExpanded: boolean;
 }
 
-function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "image"}) {
+function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "image" | "files"}) {
     if (kind === "reasoning") return <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="6" r="4"/><path d="M5.5 9 6.5 11h3L10.5 9M7 13h2"/></svg>;
     if (kind === "updates") return <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 11.5 4 14l4-2.5h3.5A2.5 2.5 0 0 0 14 9V5a2.5 2.5 0 0 0-2.5-2.5h-7A2.5 2.5 0 0 0 2 5v4a2.5 2.5 0 0 0 2.5 2.5Z"/><path d="M5.5 7h.01M8 7h.01M10.5 7h.01"/></svg>;
+    if (kind === "files") return <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4zM9 1.5v3h3M6 8h4M6 11h4" /></svg>;
     if (kind === "command") return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="m4.5 6 2 2-2 2M8.5 10h3"/></svg>;
     return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="10.5" cy="5.5" r="1"/><path d="m3.5 11 3-3.5 2 2L10 8l2.5 3"/></svg>;
 }
@@ -107,6 +112,7 @@ const defaultConversationPresentation: ConversationPresentationOptions = {
     showCodexUpdates: true,
     commandsInitiallyExpanded: true,
     imagesInitiallyExpanded: true,
+    fileChangesInitiallyExpanded: false,
 };
 
 function storedConversationPresentation(): ConversationPresentationOptions {
@@ -120,6 +126,7 @@ function storedConversationPresentation(): ConversationPresentationOptions {
         showCodexUpdates: boolean("codexui.conversation.showCodexUpdates", true),
         commandsInitiallyExpanded: boolean("codexui.conversation.commandsInitiallyExpanded", true),
         imagesInitiallyExpanded: boolean("codexui.conversation.imagesInitiallyExpanded", true),
+        fileChangesInitiallyExpanded: boolean("codexui.conversation.fileChangesInitiallyExpanded", false),
     };
 }
 
@@ -143,6 +150,7 @@ function persistConversationPresentation(options: ConversationPresentationOption
     writeBrowserStorage("codexui.conversation.showCodexUpdates", String(options.showCodexUpdates));
     writeBrowserStorage("codexui.conversation.commandsInitiallyExpanded", String(options.commandsInitiallyExpanded));
     writeBrowserStorage("codexui.conversation.imagesInitiallyExpanded", String(options.imagesInitiallyExpanded));
+    writeBrowserStorage("codexui.conversation.fileChangesInitiallyExpanded", String(options.fileChangesInitiallyExpanded));
 }
 
 function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
@@ -152,15 +160,23 @@ const ThreadSortControl = memo(function ThreadSortControl({value, onChange}: {va
     return <label className="thread-sort"><span>Sort</span><select aria-label="Thread sort order" value={value}
         onChange={event => onChange(event.target.value as ThreadSortCriterion)}>
         <option value="alphanumeric">Alphanumeric</option><option value="created">Created</option>
-        <option value="recent">Recent</option></select></label>;
+        <option value="recent">Recent</option><option value="section">Section order</option></select></label>;
 });
 
-function ThreadPane({session, onRequestNewThread, onRequestForkWithOptions, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; onRequestNewThread: () => void; onRequestForkWithOptions: (target: ThreadPresentationTarget) => void} & DrawerPaneProps) {
+function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkWithOptions, drawer = false, paneRef, onClose, onHide}: {session: BrowserFrontendSession; onRequestNewThread: (draft?: NewThreadDraft) => void; onRequestGroup: (kind: "project" | "section", group?: WorkspaceGroup, readOnly?: boolean) => void; onRequestForkWithOptions: (target: ThreadPresentationTarget) => void} & DrawerPaneProps) {
     const snapshot = session.getSnapshot();
     const selected = snapshot.selectedThreadId;
+    useEffect(() => session.refreshGroups(), [session]);
     const [, forceDisclosureState] = useState(0);
-    const [sortCriterion, setSortCriterion] = useState<ThreadSortCriterion>("recent");
-    const [contextMenu, setContextMenu] = useState<ThreadPresentationTarget & {x: number; y: number; trigger: HTMLElement} | null>(null);
+    const sortCriterion = session.browser.sort;
+    const [search, setSearch] = useState(session.browser.search);
+    const groupSignature = [...session.groups("project").map(group => group.id), ...session.groups("section").map(group => group.id)].join("\0");
+    useEffect(() => {
+        if (!session.groupingAvailable() || session.browser.grouping === "ungrouped") return;
+        for (const [kind, groups] of [["project", session.model.projects], ["section", session.model.sections]] as const)
+            for (const id of groups.keys()) if (session.groupExpanded(`${kind}:${id}`)) session.browseGroup(kind, id);
+    }, [session, groupSignature, session.browser.search, session.browser.archive, sortCriterion, session.browser.grouping]);
+    const [contextMenu, setContextMenu] = useState<(ThreadPresentationTarget | {kind: "project" | "section"; group: WorkspaceGroup; projectId: string}) & {x: number; y: number; trigger: HTMLElement} | null>(null);
     const contextMenuRef = useRef<HTMLDivElement>(null);
     const requestMoreNearEnd = (list: HTMLDivElement) => {
         if (list.scrollHeight - list.scrollTop - list.clientHeight <= Math.max(48, list.clientHeight / 2))
@@ -190,12 +206,14 @@ function ThreadPane({session, onRequestNewThread, onRequestForkWithOptions, draw
     }, [contextMenu]);
     const openContextMenu = (threadId: string, presentationKey: string, x: number, y: number, trigger: HTMLElement) =>
         setContextMenu({threadId, presentationKey, x, y, trigger});
-    const contextThread = contextMenu && session.threadVisualKey(contextMenu.threadId) === contextMenu.presentationKey
+    const contextThread = contextMenu && "threadId" in contextMenu && session.threadVisualKey(contextMenu.threadId) === contextMenu.presentationKey
         ? session.model.thread(contextMenu.threadId) : undefined;
-    useEffect(() => { if (contextMenu && !contextThread) setContextMenu(null); }, [contextMenu, contextThread]);
+    const groupTarget = contextMenu && "group" in contextMenu ? contextMenu : undefined;
+    const contextGroup = groupTarget && (groupTarget.kind === "project" ? session.model.projects : session.model.sections).get(groupTarget.group.id) === groupTarget.group ? groupTarget : undefined;
+    useEffect(() => { if (contextMenu && !contextGroup && !contextThread) setContextMenu(null); }, [contextMenu, contextThread, contextGroup]);
     const connection = session.model.connection();
     const providerReady = connection.connected && connection.providerState === "ready";
-    const invokeContextAction = (action: () => void) => { setContextMenu(null); action(); };
+    const invokeContextAction = (action: () => void) => { contextMenu?.trigger.focus(); setContextMenu(null); action(); };
     const navigateContextMenu = (event: React.KeyboardEvent<HTMLDivElement>) => {
         if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
         const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
@@ -213,20 +231,21 @@ function ThreadPane({session, onRequestNewThread, onRequestForkWithOptions, draw
     };
     const visibleRows: {id: string; presentationKey: string; depth: number; position: number;
         setSize: number; expanded: boolean}[] = [];
+    const eligibleThreads = new Set(session.browserThreadIds());
     const appendVisibleRows = (ids: readonly string[], depth: number) => {
-        const present = ids.filter(id => session.model.thread(id) || id === DraftThreadId && snapshot.newThreadDraft);
+        const present = ids.filter(id => eligibleThreads.has(id) || id === DraftThreadId && snapshot.newThreadDraft);
         for (let index = 0; index < present.length; ++index) {
             const id = present[index]!;
             const presentationKey = session.threadVisualKey(id);
             const thread = session.model.thread(id);
             const expanded = session.viewportState.threadExpanded(id, presentationKey);
             visibleRows.push({id, presentationKey, depth, position: index + 1, setSize: present.length, expanded});
-            if (thread && expanded) appendVisibleRows(thread.childThreadOrder, depth + 1);
+            if (thread && expanded) appendVisibleRows(thread.childThreadOrder.filter(child => session.browser.grouping === "ungrouped"
+                || ["projectId", "sectionId"].every(key => session.model.thread(child)?.[key as "projectId" | "sectionId"] === thread[key as "projectId" | "sectionId"])), depth + 1);
         }
     };
-    appendVisibleRows([
-        ...(snapshot.newThreadDraft ? [DraftThreadId] : []), ...session.threadOrder(sortCriterion),
-    ], 0);
+    const roots = [...(snapshot.newThreadDraft ? [DraftThreadId] : []), ...session.threadOrder(sortCriterion)];
+    const membership = (id: string, key: "projectId" | "sectionId") => id === DraftThreadId ? snapshot.newThreadDraft?.[key] ?? "" : session.model.thread(id)?.[key] ?? "";
     const renderThread = ({id, presentationKey, depth, position, setSize, expanded}: (typeof visibleRows)[number]): ReactNode => {
         const thread = session.model.thread(id);
         const draft = id === DraftThreadId ? snapshot.newThreadDraft : undefined;
@@ -252,12 +271,12 @@ function ThreadPane({session, onRequestNewThread, onRequestForkWithOptions, draw
             `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : threadTimestampText(thread.lastActivityAt)}`,
             ...(parentId ? [`Parent: ${session.model.thread(parentId)?.title || parentId}`] : [])];
         const accessibleDetails = hoverDetails.join(", ");
-        const contextOpen = contextMenu?.threadId === id && contextMenu.presentationKey === presentationKey;
+        const contextOpen = Boolean(contextMenu && "threadId" in contextMenu && contextMenu.threadId === id && contextMenu.presentationKey === presentationKey);
         return <div key={presentationKey} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
             aria-posinset={position} aria-setsize={setSize} aria-expanded={hasChildren ? expanded : undefined}
             aria-label={accessibleDetails} title={hoverDetails.join("\n")}>
             <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextOpen ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
-                onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, presentationKey, event.clientX, event.clientY, event.currentTarget); }}>
+                onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, presentationKey, event.clientX, event.clientY, event.currentTarget.querySelector<HTMLElement>(".thread-row") ?? event.currentTarget); }}>
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded ? "⌄" : "›") : ""}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
                     aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id, presentationKey), onClose)}>
@@ -269,31 +288,138 @@ function ThreadPane({session, onRequestNewThread, onRequestForkWithOptions, draw
             </div>
         </div>;
     };
+    const renderRows = (ids: string[], depth: number) => {
+        visibleRows.length = 0; appendVisibleRows(ids, depth); return visibleRows.map(renderThread);
+    };
+    const pageControls = (pages: ReturnType<BrowserFrontendSession["threadPages"]>) => pages.map((page, index) =>
+        (page.pending || page.error || page.nextCursor) && <button key={index} className="load-more" disabled={page.pending}
+            onClick={() => session.loadPage(page)}>{page.pending ? "Loading…" : page.error ? `Retry: ${page.error}` : "Load more"}</button>);
+    const groupLabels = new Map<WorkspaceGroup, string>();
+    for (const kind of ["project", "section"] as const) {
+        const groups = session.groups(kind), names = new Map<string, number>(), qualifiers = new Map<string, number>();
+        const root = (group: WorkspaceGroup) => { const roots = member(group.raw, "roots", []); return Array.isArray(roots) ? stringMember(roots[0], "path") : ""; };
+        for (const group of groups) { names.set(group.name, (names.get(group.name) ?? 0) + 1); const key = `${group.name}\0${root(group)}`; qualifiers.set(key, (qualifiers.get(key) ?? 0) + 1); }
+        for (const group of groups) groupLabels.set(group, (group.name || "Unnamed") + ((names.get(group.name) ?? 0) > 1
+            ? ` · ${kind === "project" && root(group) ? root(group) + ((qualifiers.get(`${group.name}\0${root(group)}`) ?? 0) > 1 ? ` · ${group.id}` : "") : group.id}` : ""));
+    }
+    const groupLabel = (_kind: "project" | "section", group: WorkspaceGroup) => groupLabels.get(group) ?? group.name;
+    const renderGroup = (kind: "project" | "section", group: WorkspaceGroup, ids: string[], nested = false, projectId = ""): ReactNode => {
+        const expanded = session.groupExpanded(`${kind}:${group.id}`);
+        const active = membership(selected, `${kind}Id`) === group.id;
+        return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={groupLabel(kind, group)} aria-expanded={expanded}>
+            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}>{expanded ? "⌄" : "›"} {groupLabel(kind, group)}</button>
+                <button className="thread-menu-trigger group-menu-trigger" aria-label={`Actions for ${groupLabel(kind, group)}`} aria-haspopup="menu"
+                    aria-expanded={contextGroup?.group === group && contextGroup.projectId === projectId}
+                    onClick={event => { const bounds = event.currentTarget.getBoundingClientRect(); setContextMenu({kind, group, projectId, x: bounds.right, y: bounds.bottom, trigger: event.currentTarget}); }}>•••</button></header>
+            {expanded && <div role="group">{kind === "project" ? renderProjectMembers(ids, group.id) : renderRows(ids, nested ? 2 : 1)}
+                {pageControls(session.threadPages({[`${kind}Id`]: group.id}))}</div>}
+        </section>;
+    };
+    const renderProjectMembers = (ids: string[], projectId: string): ReactNode => <>{session.groups("section").filter(section => ids.some(id => membership(id, "sectionId") === section.id))
+        .map(section => renderGroup("section", section, ids.filter(id => membership(id, "sectionId") === section.id), true, projectId))}
+        {renderRows(ids.filter(id => !session.model.sections.has(membership(id, "sectionId"))), 1)}</>;
+    const projects = session.groups("project").sort((a, b) => Number(b.raw.recencyAt ?? 0) - Number(a.raw.recencyAt ?? 0));
+    if (session.browser.manualProjects) projects.sort((a, b) => Number(a.raw.position ?? 0) - Number(b.raw.position ?? 0));
+    const grouped = session.groupingAvailable() && session.browser.grouping !== "ungrouped";
+    const projectRoots = grouped && session.browser.grouping === "projects" ? projects : [];
+    const standalone = roots.filter(id => !projectRoots.some(group => membership(id, "projectId") === group.id));
     return <aside ref={paneRef} className={`thread-pane${drawer ? " responsive-drawer drawer-left" : ""}`} id={drawer ? "thread-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "thread-pane-title" : undefined}>
         <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
-            <div className="pane-heading-actions"><button className="icon-button" onClick={onRequestNewThread} title="New thread" aria-label="New thread">＋</button>
+            <div className="pane-heading-actions"><button className="icon-button" onClick={() => onRequestNewThread()} title="New thread" aria-label="New thread">＋</button>
+                {onHide && <button onClick={onHide} aria-label="Hide Threads">Hide</button>}
                 {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
-        <ThreadSortControl value={sortCriterion} onChange={setSortCriterion} />
+        <div className="thread-browser-controls"><label>Group<select aria-label="Thread grouping" value={session.browser.grouping} onChange={event => session.changeBrowser({grouping: event.target.value as typeof session.browser.grouping})}><option value="projects">Projects</option><option value="sections">Sections</option><option value="ungrouped">Ungrouped</option></select></label>
+            <button onClick={() => session.refreshBrowser()} disabled={!providerReady}>Refresh</button>
+            <button disabled={!session.canSubmit() || !session.groupingAvailable()} onClick={() => onRequestGroup("project")}>New project…</button><button disabled={!session.canSubmit() || !session.groupingAvailable()} onClick={() => onRequestGroup("section")}>New section…</button>
+            <label><input type="checkbox" checked={session.browser.manualProjects} onChange={event => session.changeBrowser({manualProjects: event.target.checked})} />Manual project order</label>
+            <input aria-label="Search thread titles" placeholder="Search titles · Enter" value={search} onChange={event => { setSearch(event.target.value); if (!event.target.value) session.changeBrowser({search: ""}); }} onKeyDown={event => { if (event.key === "Enter") session.changeBrowser({search: search.trim()}); }} />
+            <label>Show<select aria-label="Thread archive filter" value={session.browser.archive} onChange={event => session.changeBrowser({archive: event.target.value as typeof session.browser.archive})}><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
+        <ThreadSortControl value={sortCriterion} onChange={sort => session.changeBrowser({sort})} />
         <div className="thread-list" role="tree" aria-label="Threads"
             onScroll={event => requestMoreNearEnd(event.currentTarget)}>
-            {visibleRows.map(renderThread)}
+            {projectRoots.map(group => renderGroup("project", group, roots.filter(id => membership(id, "projectId") === group.id)))}
+            {grouped && session.groups("section").filter(section => standalone.some(id => membership(id, "sectionId") === section.id)
+                || !session.model.threadIds().some(id => membership(id, "sectionId") === section.id)).map(section => renderGroup("section", section, standalone.filter(id => membership(id, "sectionId") === section.id)))}
+            {renderRows(standalone.filter(id => !grouped || !session.model.sections.has(membership(id, "sectionId"))), 0)}
+            {pageControls(session.threadPages())}
+            {session.catalogPages().map((page, index) => <div key={index}>{pageControls([page])}</div>)}
         </div>
-        {contextThread && contextMenu && <div ref={contextMenuRef} className="thread-context-menu" role="menu" aria-label={`Actions for ${contextThread.title || contextThread.id}`} onKeyDown={navigateContextMenu}>
+        {contextMenu && (contextThread || contextGroup) && <div ref={contextMenuRef} className="thread-context-menu" role="menu" aria-label={contextGroup ? `Actions for ${groupLabel(contextGroup.kind, contextGroup.group)}` : `Actions for ${contextThread?.title}`} onKeyDown={navigateContextMenu}>
+            {contextGroup ? <>
+                <button role="menuitem" disabled={!session.canSubmit()} onClick={() => invokeContextAction(() => {
+                    const projectId = contextGroup.kind === "project" ? contextGroup.group.id : contextGroup.projectId;
+                    const roots = member(session.model.projects.get(projectId)?.raw, "roots", []);
+                    onRequestNewThread({workspace: Array.isArray(roots) ? stringMember(roots[0], "path") : "", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false,
+                        ...(projectId ? {projectId} : {}), ...(contextGroup.kind === "section" ? {sectionId: contextGroup.group.id} : {})});
+                })}>New thread here…</button>
+                <button role="menuitem" onClick={() => invokeContextAction(() => onRequestGroup(contextGroup.kind, contextGroup.group, true))}>Details…</button>
+                <button role="menuitem" disabled={!session.canSubmit()} onClick={() => invokeContextAction(() => onRequestGroup(contextGroup.kind, contextGroup.group))}>Edit…</button>
+                <button role="menuitem" disabled={!session.canSubmit()} onClick={() => invokeContextAction(() => { if (window.confirm("Delete this group? Its threads will be retained.")) void session.manageGroup(`${contextGroup.kind}.delete`, {[`${contextGroup.kind}Id`]: contextGroup.group.id}, contextGroup.group); })}>Delete group…</button>
+                {contextGroup.kind === "project" && <label>Move project before<select aria-label="Move project before" value="" disabled={!session.canSubmit()} onChange={event => { const value = event.target.value; if (value) invokeContextAction(() => void session.manageGroup("project.move", {projectId: contextGroup.group.id, ...(value === "__end__" ? {} : {beforeProjectId: value})}, contextGroup.group)); }}>
+                    <option value="">Choose destination</option>{session.groups("project").filter(other => other !== contextGroup.group).map(other => <option key={other.id} value={other.id}>{groupLabel("project", other)}</option>)}<option value="__end__">Move to end</option></select></label>}
+            </> : contextThread && "threadId" in contextMenu && <>
+            {session.model.childOwnership(contextThread.id)?.parentThreadId && <button role="menuitem" onClick={() => invokeContextAction(() => session.selectThread(session.model.childOwnership(contextThread.id)!.parentThreadId))}>Go to parent</button>}
+            {(["project", "section"] as const).map(kind => <label key={kind}>Assign {kind}<select aria-label={`Assign ${kind}`} value="" disabled={!session.canSubmit() || !session.groupingAvailable()} onChange={event => { const value = event.target.value; if (value) invokeContextAction(() => void session.assignThreadGroup(contextThread.id, kind, value === "__none__" ? "" : value)); }}><option value="">Choose {kind}</option><option value="__none__">Remove from {kind}</option>{[...(kind === "project" ? session.model.projects : session.model.sections).values()].map(group => <option key={group.id} value={group.id}>{groupLabel(kind, group)}</option>)}</select></label>)}
+            {contextThread.sectionId && <label>Move before in shared section<select aria-label="Move before in shared section" value="" disabled={!session.canSubmit()} onChange={event => { if (event.target.value) invokeContextAction(() => void session.assignThreadGroup(contextThread.id, "section", contextThread.sectionId, event.target.value === "__end__" ? undefined : event.target.value)); }}><option value="">Choose destination</option>{session.model.threadIds().filter(id => id !== contextThread.id && session.model.thread(id)?.sectionId === contextThread.sectionId).map(id => <option key={id} value={id}>{session.model.thread(id)!.title}</option>)}<option value="__end__">Move to end</option></select></label>}
             <button role="menuitem" disabled={!providerReady} onClick={() => invokeContextAction(() => session.reloadThread(contextThread.id, contextMenu.presentationKey))}>Reload</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.rename", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => { const name = window.prompt("Thread name", contextThread.title); if (name?.trim()) session.renameThread(contextThread.id, name.trim(), contextMenu.presentationKey); })}>Rename</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id, undefined, contextMenu.presentationKey))}>Quick fork</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => onRequestForkWithOptions({threadId: contextThread.id, presentationKey: contextMenu.presentationKey}))}>Fork with options…</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.archive", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => session.archiveThread(contextThread.id, contextThread.archived, contextMenu.presentationKey))}>{contextThread.archived ? "Unarchive" : "Archive"}</button>
             <button role="menuitem" className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => { if (window.confirm(`Delete “${contextThread.title || contextThread.id}”?`)) session.deleteThread(contextThread.id, contextMenu.presentationKey); })}>Delete</button>
+            </>}
         </div>}
     </aside>;
+}
+
+export function GroupDialog({session, kind, group, readOnly, onClose}: {session: BrowserFrontendSession; kind: "project" | "section"; group?: WorkspaceGroup; readOnly: boolean; onClose: () => void}) {
+    const dialog = useRef<HTMLDialogElement>(null);
+    const [name, setName] = useState(group?.name ?? "");
+    const [roots, setRoots] = useState(() => {
+        const values = member(group?.raw, "roots", []); return Array.isArray(values) ? values.map(root => stringMember(root, "path")).join("\n") : "";
+    });
+    const [description, setDescription] = useState(stringMember(member(group?.raw, "metadata", {}), "codexui.description"));
+    const [icon, setIcon] = useState(stringMember(member(group?.raw, "appearance", {}), "icon"));
+    const [color, setColor] = useState(stringMember(member(group?.raw, "appearance", {}), "color"));
+    const [error, setError] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [idempotencyKey] = useState(() => Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, "0")).join(""));
+    useEffect(() => {
+        const previous = document.activeElement as HTMLElement | null;
+        dialog.current?.showModal();
+        return () => { if (previous?.isConnected) previous.focus(); };
+    }, []);
+    const save = async (event: FormEvent) => {
+        event.preventDefault(); if (saving || readOnly || !session.canSubmit()) return;
+        if (!name.trim()) { setError("Enter a name."); return; }
+        const paths = roots.split("\n").map(path => path.trim()).filter(Boolean);
+        if (kind === "project" && paths.some(path => !path.startsWith("/"))) { setError("Workspace roots must be absolute app-server paths."); return; }
+        setSaving(true); setError("");
+        const parameters = kind === "project" ? {name: name.trim(), roots: paths.map(path => ({path})),
+            ...(group ? {projectId: group.id, description} : {idempotencyKey, metadata: {"codexui.description": description}})}
+            : {name: name.trim(), ...(group ? {sectionId: group.id} : {}), appearance: {icon: icon || null, color: color || null}};
+        const saved = await session.manageGroup(`${kind}.${group ? "update" : "create"}`, parameters, group);
+        setSaving(false); if (saved) onClose(); else setError("The group was not saved. Review the notice and retry.");
+    };
+    return <dialog ref={dialog} className="new-thread-dialog group-dialog" aria-labelledby="group-dialog-title" onCancel={onClose}>
+        <header><h2 id="group-dialog-title">{group ? readOnly ? "Details" : "Edit" : "New"} {kind}</h2></header>
+        <form onSubmit={event => void save(event)}>
+            <label>Name<input autoFocus value={name} readOnly={readOnly} onChange={event => setName(event.target.value)} /></label>
+            {kind === "project" ? <><label>Roots<textarea value={roots} readOnly={readOnly} onChange={event => setRoots(event.target.value)} placeholder="One absolute app-server path per line" /></label>
+                <label>Description<textarea value={description} readOnly={readOnly} onChange={event => setDescription(event.target.value)} /></label><p>Descriptions organise work; they are not model instructions.</p></>
+                : <><label>Icon<input value={icon} readOnly={readOnly} onChange={event => setIcon(event.target.value)} /></label><label>Colour<input value={color} readOnly={readOnly} onChange={event => setColor(event.target.value)} /></label><p>Sections are shared across projects. Changes apply everywhere.</p></>}
+            {readOnly && <pre className="state-json">{JSON.stringify(group?.raw, null, 2)}</pre>}
+            {error && <p role="alert">{error}</p>}
+            <footer><button type="button" onClick={onClose}>{readOnly ? "Close" : "Cancel"}</button>{!readOnly && <button type="submit" disabled={saving || !session.canSubmit()}>{saving ? "Saving…" : "Save"}</button>}</footer>
+        </form>
+    </dialog>;
 }
 
 export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "create", onCancel, onContinue}: {initialWorkspace: string; initialDraft?: NewThreadDraft; purpose?: "create" | "fork"; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
     const dialog = useRef<HTMLElement>(null);
     const workspaceInput = useRef<HTMLInputElement>(null);
-    const [workspace, setWorkspace] = useState(initialDraft?.workspace ?? initialWorkspace);
+    const [workspace, setWorkspace] = useState(initialDraft?.workspace || initialWorkspace);
     const [name, setName] = useState(initialDraft?.ephemeral ? "" : (initialDraft?.name ?? ""));
     const [baseInstructions, setBaseInstructions] = useState(initialDraft?.baseInstructions ?? "");
     const [developerInstructions, setDeveloperInstructions] = useState(initialDraft?.developerInstructions ?? "");
@@ -308,7 +434,8 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
         event.preventDefault();
         if (workspace.trim() === "") { setError("Enter the app-server workspace path."); workspaceInput.current?.focus(); return; }
         onContinue({workspace: workspace.trim(), name: ephemeral ? "" : name.trim(), baseInstructions: baseInstructions.trim(),
-            developerInstructions: developerInstructions.trim(), ephemeral});
+            developerInstructions: developerInstructions.trim(), ephemeral,
+            ...(initialDraft?.projectId ? {projectId: initialDraft.projectId} : {}), ...(initialDraft?.sectionId ? {sectionId: initialDraft.sectionId} : {})});
     };
     const keyDown = (event: React.KeyboardEvent<HTMLElement>) => {
         if (event.key === "Escape") { event.preventDefault(); onCancel(); return; }
@@ -464,14 +591,20 @@ export async function writeCardClipboard(content: CardCopyContent): Promise<"cop
     catch { return "failed"; }
 }
 
-function ScrollableCode({text, className, label}: {text: string; className: string; label: string}) {
+function ScrollableCode({text, className, label, state}: {text: string; className: string; label: string; state: {scrollTop: number; following: boolean}}) {
     const surface = useRef<HTMLPreElement>(null);
-    const following = useRef(true);
+    const appliedScrollTop = useRef<number>();
     useBrowserLayoutEffect(() => {
-        if (following.current && surface.current) surface.current.scrollTop = surface.current.scrollHeight;
-    }, [text]);
+        const element = surface.current; if (!element) return;
+        const settle = () => { element.scrollTop = state.following ? element.scrollHeight : state.scrollTop; appliedScrollTop.current = element.scrollTop; };
+        settle();
+        const observer = new ResizeObserver(settle); observer.observe(element);
+        return () => observer.disconnect();
+    }, [text, state]);
     return <pre ref={surface} className={className} tabIndex={0} aria-label={label}
-        onScroll={event => { const element = event.currentTarget; following.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 2; }}
+        onScroll={event => { const element = event.currentTarget; if (appliedScrollTop.current === element.scrollTop) { appliedScrollTop.current = undefined; return; }
+            appliedScrollTop.current = undefined; state.scrollTop = element.scrollTop;
+            state.following = className === "command-output" && element.scrollHeight - element.scrollTop - element.clientHeight <= 2; }}
         onWheel={event => {
             const element = event.currentTarget;
             if (nestedScrollConsumes(event.deltaY, element.scrollTop, element.clientHeight, element.scrollHeight)) event.stopPropagation();
@@ -480,7 +613,8 @@ function ScrollableCode({text, className, label}: {text: string; className: stri
 
 type ClipboardOutcome = "copied" | "unsupported" | "failed";
 
-export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
+export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false, times = [], onTiming, onRestore, commandScroll, outputScroll}: {times?: ProtocolTime[]; onTiming?: () => void; onRestore?: () => void; commandScroll?: {scrollTop: number; following: boolean}; outputScroll?: {scrollTop: number; following: boolean}; card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
+    const fallbackScroll = useRef({command: {scrollTop: 0, following: false}, output: {scrollTop: 0, following: true}});
     const [copyFeedback, setCopyFeedback] = useState<{text: string; failed: boolean}>();
     const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout>>();
     useEffect(() => () => { if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current); }, []);
@@ -504,7 +638,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         body = <><SafeMarkdown text={userMessageMarkdownText(data.text)} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
-        body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
+        body = <><SafeMarkdown text={userMessageMarkdownText(data.prompt)} /><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}{data.requiresExplicitRecovery && onRestore && <button onClick={onRestore}>Restore to composer</button>}</>;
     } else if (card.kind === "agentMessage") {
         const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
         body = <SafeMarkdown text={data.text} />;
@@ -514,8 +648,8 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     } else if (card.kind === "commandExecution") {
         const data = card.payload as CommandExecutionData; title = "Command execution";
         const metadata = commandMetadata(data);
-        body = <><ScrollableCode className="command-line" label="Command" text={trimTrailingEmptyLines(data.command)} />
-            {data.output && <ScrollableCode className="command-output" label="Command output" text={trimTrailingEmptyLines(data.output)} />}
+        body = <><ScrollableCode className="command-line" label="Command" state={commandScroll ?? fallbackScroll.current.command} text={trimTrailingEmptyLines(data.command)} />
+            {data.output && <ScrollableCode className="command-output" label="Command output" state={outputScroll ?? fallbackScroll.current.output} text={trimTrailingEmptyLines(data.output)} />}
             {metadata && <small className="card-status">{metadata}</small>}</>;
     } else if (card.kind === "fileChanges") {
         const data = card.payload as FileChangesData; title = "File changes";
@@ -543,7 +677,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const activeWork = isWorkingStatus(card.status);
     const delayedPending = card.kind === "localPrompt" && (card.payload as LocalPromptData).showPendingAnimation;
     return <article className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span>{onTiming && <button className="card-timing" title={timingDetails(times)} aria-label="Timing details" onClick={onTiming}>{timingSummary(times) || "—"}</button>}<span className="card-meta">{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
@@ -586,7 +720,7 @@ export function ThreadLoadingSurface({spinning}: {spinning: boolean}) {
     </div>;
 }
 
-function Conversation({session, paneControls}: {session: BrowserFrontendSession; paneControls?: ReactNode}) {
+function Conversation({session, paneControls, onInspect, usage}: {session: BrowserFrontendSession; usage: TokenUsageText; paneControls?: ReactNode; onInspect: (view: "requests" | "timing", target?: TimingTarget) => void}) {
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
     const projectionId = snapshot.selectedThreadId;
@@ -636,6 +770,10 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
     }, [presentationKey, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const draftGeneration = session.composerVisualKey();
+    const [authored, setAuthored] = useState({generation: draftGeneration, text: ""});
+    const prompt = authored.generation === draftGeneration ? authored.text : "";
+    const setPrompt = (text: string) => setAuthored({generation: session.composerVisualKey(), text});
+    const attention = [...session.model.pendingRequestPresentations().values()][0];
     const settingsDrafts = session.settingDrafts;
     const [settingsStateRevision, forceSettingsState] = useState(0);
     const settingsIdentity = presentationKey;
@@ -724,7 +862,8 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
         const initiallyCollapsed = (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)
             || (card.kind === "imageGeneration" && !presentation.imagesInitiallyExpanded)
             || (card.kind === "reasoning" && Boolean((card.payload as ReasoningData).summary))
-            || ["fileChanges", "agentActivity", "plan", "genericActivity"].includes(card.kind);
+            || (card.kind === "fileChanges" && !presentation.fileChangesInitiallyExpanded)
+            || ["agentActivity", "plan", "genericActivity"].includes(card.kind);
         return viewport.cardCollapsed(projectionId, presentationKey, key, initiallyCollapsed);
     };
     const toggleCard = (key: string, collapsed: boolean) => {
@@ -747,13 +886,18 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
     const historyPagePending = session.historyPagePending(projectionId, presentationKey);
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
-        return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
+        return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} times={card.key.kind === "item" ? targetTimes(session.model, {threadId: card.threadId, turnId: card.turnId, itemId: card.itemId}) : []}
+            onTiming={() => onInspect("timing", {threadId: card.threadId, turnId: card.turnId, ...(card.itemId ? {itemId: card.itemId} : {})})}
+            onRestore={() => { if (card.kind === "localPrompt") { const text = session.restorePrompt(projectionId, (card.payload as LocalPromptData).submissionId, presentationKey, prompt); if (text !== undefined) { setPrompt(text); queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message Codex']")?.focus()); } } }}
+            {...(card.kind === "commandExecution" ? {commandScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:command`, false), outputScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:output`, true)} : {})} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
             <div className="conversation-lockup"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
                 <p className="conversation-meta">{thread ? thread.cwd
                     : projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>
+                <TokenUsage content={usage} />
+                {thread && <button className="thread-timing" onClick={() => onInspect("timing", {threadId: projectionId})} title={timingDetails(protocolTimes(thread.raw, "Thread"))}>Thread timing</button>}
                 {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={statusTone(thread.status)}>{displayStatus(thread.status)}</strong></p>}</div></div>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
@@ -761,6 +905,7 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
                     <button className={presentation.showReasoning ? "active" : ""} aria-label={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} data-tooltip={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} aria-pressed={presentation.showReasoning} onClick={() => updatePresentation({showReasoning: !presentation.showReasoning})}><PresentationIcon kind="reasoning" /></button>
                     <button className={presentation.showCodexUpdates ? "active" : ""} aria-label={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} data-tooltip={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} aria-pressed={presentation.showCodexUpdates} onClick={() => updatePresentation({showCodexUpdates: !presentation.showCodexUpdates})}><PresentationIcon kind="updates" /></button>
                     <button className={presentation.commandsInitiallyExpanded ? "active" : ""} aria-label={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} data-tooltip={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} aria-pressed={presentation.commandsInitiallyExpanded} onClick={() => updatePresentation({commandsInitiallyExpanded: !presentation.commandsInitiallyExpanded})}><PresentationIcon kind="command" /></button>
+                    <button className={presentation.fileChangesInitiallyExpanded ? "active" : ""} data-tooltip={presentation.fileChangesInitiallyExpanded ? "New file changes cards start expanded" : "New file changes cards start collapsed"} aria-label={presentation.fileChangesInitiallyExpanded ? "New file changes cards start expanded" : "New file changes cards start collapsed"} aria-pressed={presentation.fileChangesInitiallyExpanded} onClick={() => updatePresentation({fileChangesInitiallyExpanded: !presentation.fileChangesInitiallyExpanded})}><PresentationIcon kind="files" /></button>
                     <button className={presentation.imagesInitiallyExpanded ? "active" : ""} aria-label={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} data-tooltip={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} aria-pressed={presentation.imagesInitiallyExpanded} onClick={() => updatePresentation({imagesInitiallyExpanded: !presentation.imagesInitiallyExpanded})}><PresentationIcon kind="image" /></button>
                 </div>
             </div>
@@ -793,6 +938,10 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
                     })}</>}
         </div>
         <div ref={composerDock} className="composer-dock">
+            {attention && <div className="attention-strip" role="status"><span>A Codex request needs attention · {humanize(attention.kind)}</span>
+                <button onClick={() => onInspect("requests")}>Review {session.model.pendingRequestPresentations().size} request(s)</button>
+                {pendingDecisionOptions(attention).filter(decision => !decision.requiresInput && decision.value !== "submit").slice(0, 2).map(decision => <button key={decision.value} disabled={!session.canResolvePending(attention)} onClick={() => session.resolvePending(attention, {choice: decision.value})}>{decision.label}</button>)}
+            </div>}
             <SettingsPanel key={`settings:${settingsIdentity}`} draft={settingsDraft} presentation={settingsProjection}
                 onChange={(field, value) => {
                 if (session.threadVisualKey(projectionId) !== settingsIdentity) return;
@@ -801,7 +950,7 @@ function Conversation({session, paneControls}: {session: BrowserFrontendSession;
                 forceSettingsState(revision => revision + 1);
             }} />
             <Composer key={`shared-composer:${draftGeneration}`} session={session} presentationKey={presentationKey}
-                active={Boolean(thread || projectionId === DraftThreadId) && session.canSubmit()} options={settingsOptions} />
+                active={Boolean(thread || projectionId === DraftThreadId) && session.canSubmit()} options={settingsOptions} prompt={prompt} onChange={setPrompt} />
         </div>
     </main>;
 }
@@ -831,9 +980,9 @@ const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange
     </div>;
 }, (previous, current) => previous.draft === current.draft && previous.presentation === current.presentation);
 
-function Composer({session, presentationKey, active, options}: {session: BrowserFrontendSession;
+function Composer({session, presentationKey, active, options, prompt, onChange}: {prompt: string; onChange: (text: string) => void; session: BrowserFrontendSession;
     presentationKey: string; active: boolean; options: ReturnType<typeof settingPromptOptions>}) {
-    const [prompt, setPrompt] = useState("");
+    const setPrompt = onChange;
     const editor = useRef<HTMLTextAreaElement>(null);
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     useBrowserLayoutEffect(() => {
@@ -911,8 +1060,7 @@ function inspectorAgentCopyText(id: string, agent: AgentPresentation): string {
     return values.join("\n");
 }
 
-export function InspectorAgentCard({id, agent}: {id: string; agent: AgentPresentation}) {
-    const [expanded, setExpanded] = useState(false);
+export function InspectorAgentCard({id, agent, expanded = false, onToggle}: {id: string; agent: AgentPresentation; expanded?: boolean; onToggle?: () => void}) {
     const [copied, setCopied] = useState(false);
     const feedbackTimer = useRef<ReturnType<typeof setTimeout>>();
     useEffect(() => () => { if (feedbackTimer.current) clearTimeout(feedbackTimer.current); }, []);
@@ -926,14 +1074,18 @@ export function InspectorAgentCard({id, agent}: {id: string; agent: AgentPresent
     return <article className={`agent-card${expanded ? " expanded" : " collapsed"}`}>
         <header><strong>{title}</strong><span className="agent-card-actions"><span className={`status ${statusTone(agent.status)}`}>{displayStatus(agent.status)}</span>
             <button className={`agent-copy-button${copied ? " copied" : ""}`} onClick={() => void copy()} aria-label="Copy agent content"><CopyIcon checked={copied} /></button>
-            <button className="agent-fold-button" onClick={() => setExpanded(value => !value)} aria-label={expanded ? "Collapse agent" : "Expand agent"}><FoldIcon collapsed={!expanded} /></button></span></header>
+            <button className="agent-fold-button" onClick={onToggle} aria-label={expanded ? "Collapse agent" : "Expand agent"}><FoldIcon collapsed={!expanded} /></button></span></header>
         {expanded && <div className="agent-card-content">{agent.childThreadId && <small>Thread {agent.childThreadId}</small>}
-            {typeof agent.raw.resultText === "string" && <p>{agent.raw.resultText}</p>}</div>}
+            <small>{agentMetadata({tool: stringMember(agent.raw, "tool"), kind: "", prompt: "", resultText: "", receivers: Array.isArray(agent.raw.receiverThreadIds) ? agent.raw.receiverThreadIds.map(String) : [], model: stringMember(agent.raw, "model"), reasoningEffort: stringMember(agent.raw, "reasoningEffort"), childThreadId: "", agentPath: stringMember(agent.raw, "agentPath"), senderThreadId: stringMember(agent.raw, "senderThreadId")}, agent.status)}</small>
+            {stringMember(agent.raw, "prompt") && <div className="card-text">{stringMember(agent.raw, "prompt")}</div>}
+            {typeof agent.raw.resultText === "string" && <SafeMarkdown text={agent.raw.resultText} />}</div>}
     </article>;
 }
 
-function Inspector({session, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession} & DrawerPaneProps) {
-    const [tab, setTab] = useState<"plan" | "agents" | "requests" | "state" | "protocol">("plan");
+interface Inspection {tab: "plan" | "agents" | "requests" | "info"; detail: "choices" | "state" | "protocol" | "timing"; target?: TimingTarget; identity?: string}
+function Inspector({session, inspection, onInspect, drawer = false, paneRef, onClose, onHide}: {session: BrowserFrontendSession; inspection: Inspection; onInspect: (inspection: Inspection) => void} & DrawerPaneProps) {
+    const [, forceAgentFold] = useState(0);
+    const tab = inspection.tab === "info" ? inspection.detail : inspection.tab;
     const selectedThreadId = session.getSnapshot().selectedThreadId;
     const selected = session.model.thread(selectedThreadId);
     const selectedPresentationKey = session.threadVisualKey(selectedThreadId);
@@ -948,22 +1100,33 @@ function Inspector({session, drawer = false, paneRef, onClose}: {session: Browse
     return <aside ref={paneRef} className={`inspector-pane${drawer ? " responsive-drawer drawer-right" : ""}`} id={drawer ? "inspector-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "inspector-pane-title" : undefined}>
         <div className="pane-heading"><div><span className="eyebrow">Details</span><h2 id={drawer ? "inspector-pane-title" : undefined}>Inspector</h2></div>
+            {onHide && <button onClick={onHide} aria-label="Hide Inspector">Hide</button>}
             {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Inspector drawer">×</button>}</div>
-        <nav className="inspector-tabs">{(["plan", "agents", "requests", "state", "protocol"] as const).map(value =>
-            <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{humanize(value)}{value === "requests" && pendingRequests.size > 0 ? ` ${pendingRequests.size}` : ""}</button>)}</nav>
+        <nav className="inspector-tabs">{(["plan", "agents", "requests", "info"] as const).map(value =>
+            <button key={value} className={inspection.tab === value ? "active" : ""} onClick={() => onInspect({...inspection, tab: value})}>{humanize(value)}{value === "requests" && pendingRequests.size > 0 ? ` ${pendingRequests.size}` : ""}</button>)}</nav>
         <div className="inspector-content">
+            {inspection.tab === "info" && (tab === "choices" ? <div className="info-choices">{(["state", "protocol", "timing"] as const).map(detail => <button key={detail} onClick={() => onInspect({...inspection, detail})}>{humanize(detail)}</button>)}</div>
+                : <button className="subtle-button" onClick={() => onInspect({...inspection, detail: "choices"})}>‹ Info</button>)}
+            {tab === "timing" && <><h3>Timing</h3><pre className="state-json">{inspection.target && inspection.identity !== session.threadVisualKey(inspection.target.threadId)
+                ? "Object is no longer available."
+                : timingDetails(targetTimes(session.model, inspection.target ?? {threadId: selectedThreadId}, true))}</pre><p className="muted-copy">Event timestamps are supplied by app-server, not inferred from browser receipt time.</p></>}
             {tab === "plan" && (!selected ? <p className="muted-copy">Select a thread to inspect its plan.</p> : latestPlan ? <div className="plan-view">
                 {latestPlan.explanation && <p>{latestPlan.explanation}</p>}
                 {latestPlan.legacyText && <SafeMarkdown text={latestPlan.legacyText} />}
                 {latestPlan.steps.map((step, index) => <div key={index}><StatusDot tone={statusTone(step.status)} /><span>{step.text}</span><small>{displayStatus(step.status)}</small></div>)}
             </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
-            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => <InspectorAgentCard key={`${selectedPresentationKey}:${id}`} id={id} agent={selected.agents.get(id)!} />))}
+            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => <InspectorAgentCard key={`${selectedPresentationKey}:${id}`} id={id} agent={selected.agents.get(id)!} expanded={!session.viewportState.cardCollapsed(selectedThreadId, selectedPresentationKey, `inspector:${id}`, true)}
+                onToggle={() => { const key = `inspector:${id}`; session.viewportState.setCardCollapsed(selectedThreadId, selectedPresentationKey, key, !session.viewportState.cardCollapsed(selectedThreadId, selectedPresentationKey, key, true)); forceAgentFold(value => value + 1); }} />))}
             {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.presentationKey} request={request} session={session} />))}
             {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={displayStatus(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(plainState?.changedFileCount ?? 0)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
             {tab === "protocol" && <div className="protocol-list">{[...session.getSnapshot().protocolFrames].reverse().map((frame, index) => <details key={index}><summary>{humanize(String((frame as Record<string, unknown>).type ?? (frame as Record<string, unknown>).action ?? "Frame"))}</summary><pre>{JSON.stringify(frame, null, 2)}</pre></details>)}</div>}
         </div>
     </aside>;
 }
+function TokenUsage({content}: {content: TokenUsageText}) {
+    return <details className="token-usage"><summary>{content.summary}</summary><pre>{content.details}</pre></details>;
+}
+
 function Info({label, value}: {label: string; value: string}) { return <div className="info-row"><span>{label}</span><strong>{value || "—"}</strong></div>; }
 
 function RequestCard({request, session}: {request: PendingRequestPresentation; session: BrowserFrontendSession}) {
@@ -1035,6 +1198,7 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
 
 export function App({session}: {session: BrowserFrontendSession}) {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
+    const usage = tokenUsage(session.model, snapshot.selectedThreadId);
     const connection = session.model.connection();
     const role = session.role();
     const connectionTone = connection.connected ? "success" : connection.retrying ? "warning" : "muted";
@@ -1043,11 +1207,16 @@ export function App({session}: {session: BrowserFrontendSession}) {
         : connection.retrying ? "Connecting" : "Offline";
     const [url, setUrl] = useState(snapshot.bridgeUrl);
     const canControl = role === "controller";
+    const [inspection, setInspection] = useState<Inspection>({tab: "plan", detail: "choices"});
+    const [panes, setPanes] = useState({threads: true, inspector: true, left: 260, right: 300});
     const responsiveMode = useResponsiveMode();
     const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
     const [newThreadDialog, setNewThreadDialog] = useState(false);
+    const [groupDraft, setGroupDraft] = useState<NewThreadDraft>();
+    const [groupDialog, setGroupDialog] = useState<{kind: "project" | "section"; group?: WorkspaceGroup; readOnly: boolean}>();
     const [forkWithOptionsTarget, setForkWithOptionsTarget] = useState<ThreadPresentationTarget | null>(null);
     const shell = useRef<HTMLDivElement>(null);
+    const resizeStart = useRef<{x: number; width: number; side: "left" | "right"}>();
     const threadTrigger = useRef<HTMLButtonElement>(null);
     const inspectorTrigger = useRef<HTMLButtonElement>(null);
     const threadDrawer = useRef<HTMLElement>(null);
@@ -1061,7 +1230,8 @@ export function App({session}: {session: BrowserFrontendSession}) {
         ? forkWithOptionsTarget : null;
     const modalOpen = Boolean(activeDrawer || newThreadDialog || activeForkTarget);
     const closeDrawer = () => setDrawer(null);
-    const requestNewThread = () => { closeDrawer(); setNewThreadDialog(true); };
+    const requestNewThread = (draft?: NewThreadDraft) => { setGroupDraft(draft); closeDrawer(); setNewThreadDialog(true); };
+    const requestGroup = (kind: "project" | "section", group?: WorkspaceGroup, readOnly = false) => { closeDrawer(); setGroupDialog({kind, ...(group ? {group} : {}), readOnly}); };
     const requestForkWithOptions = (target: ThreadPresentationTarget) => {
         closeDrawer(); setForkWithOptionsTarget(target);
     };
@@ -1110,6 +1280,29 @@ export function App({session}: {session: BrowserFrontendSession}) {
             pendingFocusReturn.current = trigger;
         };
     }, [activeDrawer]);
+    const inspect = (view: "requests" | "timing", target?: TimingTarget) => {
+        setInspection(view === "requests" ? {tab: "requests", detail: "choices"}
+            : {tab: "info", detail: "timing", ...(target ? {target, identity: session.threadVisualKey(target.threadId)} : {})});
+        setPanes(current => ({...current, inspector: true}));
+        if (inspectorOverlay) setDrawer("inspector");
+    };
+    const resizePane = (side: "left" | "right", width: number) => {
+        const other = side === "left" ? "right" : "left", visible = side === "left" ? panes.inspector : panes.threads;
+        const budget = (shell.current?.clientWidth ?? window.innerWidth) - 420 - 8 * (Number(panes.threads) + Number(panes.inspector));
+        const next = Math.max(180, Math.min(600, width, budget - (visible ? 180 : 0)));
+        const opposite = shell.current?.querySelector<HTMLElement>(other === "left" ? ".thread-pane" : ".inspector-pane")?.getBoundingClientRect().width ?? panes[other];
+        setPanes(current => ({...current, [side]: next, [other]: visible ? Math.min(opposite, budget - next) : current[other]}));
+    };
+    const separator = (side: "left" | "right") => <div className="pane-separator" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={side === "left" ? "Resize Threads" : "Resize Inspector"}
+        aria-valuemin={180} aria-valuemax={600} aria-valuenow={panes[side]}
+        onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+            event.preventDefault(); const width = event.currentTarget.previousElementSibling?.getBoundingClientRect().width ?? panes[side];
+            const actual = side === "left" ? width : shell.current?.querySelector(".inspector-pane")?.getBoundingClientRect().width ?? panes.right;
+            resizePane(side, event.key === "Home" ? 180 : event.key === "End" ? 600 : actual + (event.key === "ArrowRight" ? 10 : -10) * (side === "left" ? 1 : -1));
+        } }}
+        onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); resizeStart.current = {x: event.clientX, width: shell.current?.querySelector(side === "left" ? ".thread-pane" : ".inspector-pane")?.getBoundingClientRect().width ?? panes[side], side}; }}
+        onPointerMove={event => { const start = resizeStart.current; if (start?.side === side) resizePane(side, start.width + (event.clientX - start.x) * (side === "left" ? 1 : -1)); }}
+        onPointerUp={() => { resizeStart.current = undefined; }} onLostPointerCapture={() => { resizeStart.current = undefined; }} />;
     const paneControls = <>
         {threadsOverlay && <button ref={threadTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="thread-pane" aria-expanded={activeDrawer === "threads"} onClick={() => setDrawer("threads")}><span aria-hidden="true">☰</span> Threads</button>}
         {inspectorOverlay && <button ref={inspectorTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="inspector-pane" aria-expanded={activeDrawer === "inspector"} onClick={() => setDrawer("inspector")}><span aria-hidden="true">ⓘ</span> Inspector</button>}
@@ -1118,25 +1311,32 @@ export function App({session}: {session: BrowserFrontendSession}) {
         <header className="top-bar" data-modal-background aria-hidden={modalOpen || undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
             <div className="workspace-breadcrumb">{session.model.thread(snapshot.selectedThreadId)?.cwd || snapshot.newThreadDraft?.workspace || "No workspace"}</div>
             <div className="top-actions">
+                {responsiveMode === "desktop" && !panes.threads && <button onClick={() => setPanes(current => ({...current, threads: true}))}>Show threads</button>}
+                {responsiveMode === "desktop" && !panes.inspector && <button onClick={() => setPanes(current => ({...current, inspector: true}))}>Show inspector</button>}
+                {session.model.pendingRequestPresentations().size > 0 && <button className="requests-indicator" onClick={() => inspect("requests")}>{session.model.pendingRequestPresentations().size} requests</button>}
                 {connection.connected && <button className="subtle-button" onClick={() => canControl ? session.releaseController() : session.claimController()}>{canControl ? "Release control" : "Claim control"}</button>}
                 <label className="connection-control"><input value={url} onChange={event => setUrl(event.target.value)} aria-label="Bridge WebSocket URL" />
                     <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label>
             </div>
         </header>
         {snapshot.notice && <div className="notice-banner" data-modal-background role="alert" aria-hidden={modalOpen || undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
-        <div className="workspace-grid" data-modal-background aria-hidden={modalOpen || undefined}>
-            {!threadsOverlay && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} />}
-            <Conversation session={session} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
-            {!inspectorOverlay && <Inspector session={session} />}
+        <div className="workspace-grid" style={responsiveMode === "desktop" ? {gridTemplateColumns: `${panes.threads ? `minmax(180px, ${panes.left}px) 8px ` : ""}minmax(420px, 1fr)${panes.inspector ? ` 8px minmax(180px, ${panes.right}px)` : ""}`} : undefined} data-modal-background aria-hidden={modalOpen || undefined}>
+            {!threadsOverlay && (responsiveMode !== "desktop" || panes.threads) && <ThreadPane {...(responsiveMode === "desktop" ? {onHide: () => setPanes(current => ({...current, threads: false}))} : {})} session={session} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} />}
+            {responsiveMode === "desktop" && panes.threads && separator("left")}
+            <Conversation usage={usage.thread} onInspect={inspect} session={session} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
+            {responsiveMode === "desktop" && panes.inspector && separator("right")}
+            {!inspectorOverlay && panes.inspector && <Inspector onHide={() => setPanes(current => ({...current, inspector: false}))} session={session} inspection={inspection} onInspect={setInspection} />}
         </div>
         <footer className="status-bar" data-modal-background aria-hidden={modalOpen || undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
+            <TokenUsage content={usage.overall} />
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
         {activeDrawer && <button type="button" className="drawer-backdrop" tabIndex={-1} onClick={closeDrawer} aria-label={`Close ${activeDrawer === "threads" ? "Threads" : "Inspector"} drawer`} />}
-        {activeDrawer === "threads" && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestForkWithOptions={requestForkWithOptions} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
-        {activeDrawer === "inspector" && <Inspector session={session} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
-        {newThreadDialog && <NewThreadDialog initialWorkspace={session.model.thread(snapshot.selectedThreadId)?.cwd ?? ""} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
+        {activeDrawer === "threads" && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "inspector" && <Inspector session={session} inspection={inspection} onInspect={setInspection} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
+        {groupDialog && <GroupDialog session={session} {...groupDialog} onClose={() => setGroupDialog(current => current === groupDialog ? undefined : current)} />}
+        {newThreadDialog && <NewThreadDialog {...(groupDraft ? {initialDraft: groupDraft} : {})} initialWorkspace={session.model.thread(snapshot.selectedThreadId)?.cwd ?? ""} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
         {activeForkTarget && <NewThreadDialog purpose="fork" initialWorkspace={session.model.thread(activeForkTarget.threadId)?.cwd ?? ""} initialDraft={session.forkDraft(activeForkTarget.threadId)} onCancel={() => setForkWithOptionsTarget(null)} onContinue={forkThreadWithOptions} />}
     </div>;
 }

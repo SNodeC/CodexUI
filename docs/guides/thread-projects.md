@@ -4,9 +4,9 @@
 <p><a href="README.md#page-overview" title="Up to Guides"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-guides-dark.svg"><img src="../media/nav/up-guides-light.svg" alt="Up to Guides" title="Up to Guides" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNode.C organization"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/organization-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/organization-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization"></picture></a><a href="../../README.md#project-overview" title="CodexUI repository"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/repository-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/repository-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" title="CodexUI repository"></picture></a><br clear="all"></p>
 <!-- snodec:end page-header -->
 
-# Native thread projects and sections
+# Thread projects and sections
 
-Projects and sections are native grouping features. Memberships remain server-owned; grouping changes presentation rather than creating duplicate threads.
+Projects and sections are shared native and browser grouping features. Memberships remain server-owned; grouping changes presentation rather than creating duplicate threads.
 
 ## Authoritative visual decision
 
@@ -23,8 +23,7 @@ Projects and sections are native grouping features. Memberships remain server-ow
 - Same-membership agent/fork children retain their hierarchy. Cross-membership
   children appear in their own group and offer Go to parent.
 
-The existing QTreeWidget, delegate, disclosure controls, selection and accessible
-tree remain the sole implementation. The delegate owns enclosing-card painting;
+In native CodexUI, the existing QTreeWidget, delegate, disclosure controls, selection and accessible tree remain the sole implementation. The delegate owns enclosing-card painting;
 the superseded per-row stylesheet frames are removed. No index widgets,
 container widgets, second renderer, scrolling offsets or layout timers were added.
 
@@ -83,7 +82,7 @@ not retried repeatedly within that connection.
 
 ## Qualification boundary
 
-These features are native-only. Offscreen/mock-backed checks do not establish real upstream project persistence, native-compositor behavior or screen-reader qualification. See the [qualification scope](../qualification/native-test-suite.md#page-overview) and historical execution evidence below.
+The browser follows this grouping contract through its existing presentation model, session, and React thread-row renderer. Native offscreen checks and browser mock-backed checks do not establish real upstream project persistence, native-compositor behavior or screen-reader qualification. See the [qualification scope](../qualification/native-test-suite.md#page-overview) and historical execution evidence below.
 
 ## Implementation record
 

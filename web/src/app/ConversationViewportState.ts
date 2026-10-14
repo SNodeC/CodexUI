@@ -11,6 +11,7 @@ interface ThreadViewport {
     anchor: ConversationViewportAnchor | undefined;
     foldedCards: Map<string, boolean>;
     expanded: boolean;
+    codeScroll: Map<string, {scrollTop: number; following: boolean}>;
 }
 
 export interface ConversationViewportAnchor {cardKey: string; pixelOffset: number}
@@ -44,6 +45,7 @@ function initialViewport(identity: string, owner: object): ThreadViewport {
         anchor: undefined,
         foldedCards: new Map(),
         expanded: false,
+        codeScroll: new Map(),
     };
 }
 
@@ -155,6 +157,14 @@ export class ConversationViewportState {
         if (!state) return false;
         state.expanded = expanded;
         return true;
+    }
+
+    codeScroll(threadId: string, presentationKey: string, cardKey: string, output: boolean): {scrollTop: number; following: boolean} {
+        const state = this.state(threadId, presentationKey);
+        if (!state) return {scrollTop: 0, following: output};
+        let scroll = state.codeScroll.get(cardKey);
+        if (!scroll) { scroll = {scrollTop: 0, following: output}; state.codeScroll.set(cardKey, scroll); }
+        return scroll;
     }
 
     private state(threadId: string, presentationKey: string): ThreadViewport | undefined {

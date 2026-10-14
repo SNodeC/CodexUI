@@ -12,6 +12,31 @@ evidence-backed only where the same fixture corpus is executed by native C++
 and browser TypeScript. The other suites are browser-local regression evidence;
 they neither execute Qt nor claim pixel identity with it.
 
+## Browser catch-up qualification
+
+The browser catch-up suite executes production React controls against an isolated simulated WebSocket provider. It covers project metadata preservation, section creation, empty/grouped navigation, search and archive filters, grouped first-prompt creation, token/context display, timing navigation, command/output scroll and folding, agent content and retained disclosure, pending-request attention, pane controls, and explicit failed-prompt restoration. These are browser-local interaction checks; they do not establish real provider persistence or cross-platform screen-reader behavior. Set `CODEXUI_BROWSER_SCREENSHOTS` to capture the desktop verification frame for visual inspection.
+
+The shared `frontend-presentation.json` corpus now includes timing-path/unit and token-snapshot cases executed by both native `NodeGraphUiAdapterTest` and browser `browser-catchup.test.mjs`. Browser tests also verify that `TimingPaths.ts` exactly matches the generated native `ProtocolTimingPaths.inc` table. Regenerate it with `node web/tools/generate-timing-paths.mjs` after changing the schema-declared native timing paths. Frontend-local request tests separately cover stale search results, query pagination and retry, generation retirement, unavailable catalogs, group deletion/recreation, observer gating, fresh project metadata, section-assignment failure, and restoration identity.
+
+### Local verification — 2026-10-15
+
+The implementation was verified in the working tree based on `ee461fe`, preserving the pre-existing workflow, build-guide, package, and browser-build changes. Node.js v24.21.0 and Chrome 155.0.8059.39 were used. The installed AISuite frontend SDK was resolved through `/usr/local`; the full CMake-prepared isolated release passed 402 browser tests, presentation profiling, production bundling, Chrome qualification, and arbitrary-base-path artifact relocation. All 83 native CTest cases passed under Xvfb with `QT_QPA_PLATFORM=offscreen`, 14-way execution where applicable, and `CODEXUI_TIMING_POLICY=report`. The native adapter aggregation benchmark reported one accepted elapsed-time warning; this run does not establish that the native timing overrun was fixed.
+
+| Measurement | Before catch-up | Final isolated release | Existing limit |
+| --- | ---: | ---: | ---: |
+| Model: 10,000-item hydration | 24.31 ms | 24.95 ms | 47 ms |
+| Model: complete projection | 15.44 ms | 15.29 ms | 45 ms |
+| Model: 2,000 streaming deltas | 2.48 ms | 2.36 ms | 4 ms |
+| Model: 10,000 presentation lifetimes | 5.52 ms | 6.14 ms | 20 ms |
+| Browser: 10,000-item hydration wall time | 86.00 ms | 86.10 ms | 141 ms |
+| Browser: 2,000-delta settlement | 25.60 ms | 25.20 ms | 47 ms |
+
+The browser retained 80 resident cards for the 10,000-item workload, stable card/text/settings identities, zero settings structural mutations during streaming, and a detached-anchor displacement of 0.391 px against its 1 px bound. These are individual local measurements, not statistically established performance improvements. Desktop, project-dialog, mobile, and mobile-Threads screenshots were inspected; the populated mobile shell retains its footer, and group menus reuse the existing viewport-bounded keyboard/focus controller. The production bundle passes qualification and emits Vite's advisory for a JavaScript chunk above 500 kB.
+
+Production accounting for this change is +782/-180 lines (net +602), including the generated timing table, its generator, and only this task's additions to the pre-existing untracked browser CMake setup. Tests, fixtures, and browser qualification support are +803/-61 lines (net +742). Documentation and unrelated pre-existing changes are excluded. Growth supplies previously absent workflows and typed projections; the previous singleton thread pager and separate group-popup implementation were removed. The existing single rollout-repair timer is reused. Query identities and causal revisions retire with their provider lifetime; command scroll and agent disclosure use the existing thread-presentation store; pane geometry has one React owner, and keyboard resizing uses the displayed pane widths after a window-size change. Browser `ResizeObserver` settlement distinguishes its own scroll events from user detachment without a new polling timer.
+
+The new native/browser differential evidence covers the shared timing and token corpus. Other new workflows are browser-local simulated-provider evidence. Real app-server project persistence, cross-client upstream interoperability, real screen readers, and native compositor behavior were not qualified by this change; the native-only filesystem, Git, desktop integration, and transport exclusions remain in force.
+
 ## Verification gates
 
 ### Accepted timing policy — 2026-09-22

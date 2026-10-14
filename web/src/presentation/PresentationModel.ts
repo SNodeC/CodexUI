@@ -1,3 +1,5 @@
+import {protocolTimes} from "./PresentationTelemetry.js";
+import type {ProtocolTime} from "./PresentationTelemetry.js";
 import {
     isObject,
     isPresentationFrame,
@@ -42,6 +44,7 @@ export interface ItemPresentation {
 
 export interface TurnPresentation {
     id: string;
+    timing: ProtocolTime[];
     status: PresentationStatus;
     itemOrder: string[];
     items: Map<string, ItemPresentation>;
@@ -62,8 +65,12 @@ export interface ChildThreadOwnership {
     agentId: string;
 }
 
+export interface WorkspaceGroup {id: string; name: string; raw: JsonObject}
+
 export interface ThreadPresentation {
     id: string;
+    projectId: string; sectionId: string;
+    membershipSequence: Map<string, number>;
     activeTurnId?: string;
     title: string;
     preview: string;
@@ -347,7 +354,7 @@ function mergeEffectiveThreadSettings(thread: ThreadPresentation, incoming: Json
 
 function newThread(id: string): ThreadPresentation {
     return {
-        id, title: "", preview: "", cwd: "", status: UnknownStatus,
+        id, projectId: "", sectionId: "", membershipSequence: new Map(), title: "", preview: "", cwd: "", status: UnknownStatus,
         turnOrder: [], turns: new Map(), raw: {},
         settingStamps: new Map(), agentOrder: [], agents: new Map(),
         childThreadOrder: [], archived: false, historyNextCursor: "", historyHasMore: false,
@@ -355,11 +362,16 @@ function newThread(id: string): ThreadPresentation {
 }
 
 function newTurn(id: string): TurnPresentation {
-    return {id, status: UnknownStatus, itemOrder: [], items: new Map(), plan: {}};
+    return {id, timing: [], status: UnknownStatus, itemOrder: [], items: new Map(), plan: {}};
 }
 
 export class PresentationModel {
     private readonly threads = new Map<string, ThreadPresentation>();
+    private readonly groupRevisions = new Map<string, number>();
+    readonly projects = new Map<string, WorkspaceGroup>();
+    readonly sections = new Map<string, WorkspaceGroup>();
+    accountUsage: JsonObject = {};
+    accountUsageFailed = false;
     private readonly childOwnerships = new Map<string, ChildThreadOwnership>();
     private readonly pendingRequests = new Map<string, PendingRequestPresentation>();
     private readonly connectionState: ConnectionPresentation = {
@@ -469,10 +481,24 @@ export class PresentationModel {
         const data = member(event, "data", {});
         const scope = objectMember(event, "scope");
         if (event.kind === "result") {
-            if (event.ok !== true) return;
             const action = stringMember(event, "action");
+            if (action === "account.usage.read") this.accountUsageFailed = event.ok !== true;
+            if (event.ok !== true) return;
             const requestSequence = unsignedValue(member(data, "requestSequence")) || undefined;
-            if (action === "threads.list") this.mergeThreadList(member(data, "threads", []), requestSequence);
+            if (action === "projects.list" || action === "sections.list") {
+                const groups = action === "projects.list" ? this.projects : this.sections;
+                if (Array.isArray(member(data, "data"))) for (const raw of member(data, "data", []) as unknown[]) if (isObject(raw)) this.upsertGroup(groups, raw, requestSequence);
+            } else if (["project.read", "project.create", "project.update"].includes(action)) {
+                this.upsertGroup(this.projects, objectMember(data, "project"), requestSequence);
+            } else if (["section.create", "section.update"].includes(action)) {
+                this.upsertGroup(this.sections, objectMember(data, "section"), requestSequence);
+            } else if (action === "project.delete" || action === "section.delete") {
+                const project = action === "project.delete", id = stringMember(scope, project ? "projectId" : "sectionId");
+                (project ? this.projects : this.sections).delete(id); this.groupRevisions.set(`${project ? "project" : "section"}:${id}`, sequence);
+            }
+            else if (action === "account.usage.read") this.accountUsage = clone(isObject(data) ? data : {});
+            else if (action === "thread.metadata") this.upsertThread(objectMember(data, "thread"), false, true, requestSequence);
+            else if (action === "threads.list") this.mergeThreadList(member(data, "threads", []), requestSequence);
             else if (action === "thread.read") {
                 this.upsertThread(objectMember(data, "thread"), stringMember(event, "authority") === "replace",
                     true, requestSequence);
@@ -556,8 +582,7 @@ export class PresentationModel {
             const thread = this.threads.get(stringMember(scope, "threadId"));
             if (thread) {
                 const lifecycle = stringMember(data, "state");
-                if (lifecycle === "archived") thread.archived = true;
-                else if (lifecycle === "unarchived") thread.archived = false;
+                if (lifecycle === "archived" || lifecycle === "unarchived") { thread.archived = lifecycle === "archived"; thread.membershipSequence.set("archived", sequence); }
                 else if (lifecycle === "closed") {
                     thread.status = statusFromValue("notLoaded");
                     thread.raw.status = "notLoaded";
@@ -570,6 +595,17 @@ export class PresentationModel {
         }
         if (type === "thread.removed") {
             this.removeThread(stringMember(scope, "threadId"));
+            return;
+        }
+        if (type === "workspace.project.changed") {
+            const id = stringMember(data, "projectId");
+            this.groupRevisions.set(`project:${id}`, sequence);
+            if (stringMember(data, "changeType") === "deleted") this.projects.delete(id);
+            return;
+        }
+        if (type === "thread.project.changed") {
+            const thread = this.threads.get(stringMember(scope, "threadId"));
+            if (thread) { thread.raw = {...thread.raw, projectId: member(data, "projectId", null)}; thread.projectId = stringMember(data, "projectId"); thread.membershipSequence.set("projectId", sequence); }
             return;
         }
         if (type === "pending-request.upsert") {
@@ -596,6 +632,10 @@ export class PresentationModel {
             this.upsertThread({id: threadId}, false, false);
             thread = this.threads.get(threadId);
             if (!thread) return;
+        }
+        if (type === "thread.token-usage.changed" && isObject(data)) {
+            thread.raw = {...thread.raw, tokenUsage: clone(member(data, "tokenUsage", {}))};
+            return;
         }
         if (type === "thread.settings.changed" && isObject(data)) {
             if (authority === "none" || authority === "remove") return;
@@ -762,6 +802,15 @@ export class PresentationModel {
             result = newThread(id);
             this.threads.set(id, result);
         }
+        const incoming = {...raw};
+        for (const key of ["projectId", "section", "archived"] as const) {
+            if (preserveSettingsAfter !== undefined && (result.membershipSequence.get(key) ?? 0) >= preserveSettingsAfter) {
+                delete incoming[key];
+            } else if (Object.hasOwn(incoming, key)) result.membershipSequence.set(key, this.lastSequence);
+        }
+        raw = incoming;
+        if (Object.hasOwn(raw, "projectId")) result.projectId = stringMember(raw, "projectId");
+        if (Object.hasOwn(raw, "section")) result.sectionId = stringMember(raw.section, "id");
         const previousThreadStatus = result.status;
         const terminalTurnStatuses = new Map<string, PresentationStatus>();
         if (replaceTurns) {
@@ -848,6 +897,10 @@ export class PresentationModel {
             result = newTurn(id);
             thread.turns.set(id, result);
             thread.turnOrder.push(id);
+        }
+        for (const time of protocolTimes(raw, "Turn")) {
+            const index = result.timing.findIndex(before => before.field === time.field);
+            if (index < 0) result.timing.push(time); else result.timing[index] = time;
         }
         const status = statusFromValue(member(raw, "status"));
         if (!isEmptyStatus(status) && !(isTerminalTurnStatus(result.status) && isActiveStatus(status))) result.status = status;
@@ -1111,7 +1164,24 @@ export class PresentationModel {
         }
     }
 
+    finishGroupCatalog(kind: "project" | "section", ids: readonly string[], startedAtSequence: number): void {
+        const groups = kind === "project" ? this.projects : this.sections; const retained = new Set(ids);
+        for (const id of groups.keys()) if (!retained.has(id) && (this.groupRevisions.get(`${kind}:${id}`) ?? 0) < startedAtSequence) { groups.delete(id); this.groupRevisions.set(`${kind}:${id}`, this.lastSequence); }
+    }
+
+    private upsertGroup(groups: Map<string, WorkspaceGroup>, raw: JsonObject, preserveAfter?: number): void {
+        const id = stringMember(raw, "id");
+        if (!id) return;
+        const key = `${groups === this.projects ? "project" : "section"}:${id}`;
+        if (preserveAfter !== undefined && (this.groupRevisions.get(key) ?? 0) >= preserveAfter) return;
+        this.groupRevisions.set(key, this.lastSequence);
+        const group = groups.get(id);
+        if (group) { group.name = stringMember(raw, "name"); group.raw = clone(raw); }
+        else groups.set(id, {id, name: stringMember(raw, "name"), raw: clone(raw)});
+    }
+
     private clearProviderState(): void {
+        this.projects.clear(); this.sections.clear(); this.groupRevisions.clear(); this.accountUsage = {}; this.accountUsageFailed = false;
         this.orderedThreads = [];
         this.threads.clear();
         this.childOwnerships.clear();
