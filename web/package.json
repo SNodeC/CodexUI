@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": {"node": ">=22"},
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:app": "vite build",
@@ -14,7 +16,7 @@
     "verify:artifact": "node tools/verify-artifact.mjs"
   },
   "dependencies": {
-    "@snodec/codex-frontend": "file:../../../AISuite-extraction/AISuite-final/packages/codex-frontend",
+    "@snodec/codex-frontend": "file:aisuite-frontend.tgz",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-markdown": "10.1.0",

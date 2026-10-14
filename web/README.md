@@ -10,23 +10,25 @@ CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to a
 
 ## Source layout
 
-Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
+Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for installed SDK discovery, isolated application build and release qualification. The AISuite checkout location is not a dependency.
 
-`npm run profile` from this directory repeats the large-thread presentation measurement. There is no standalone Node development or production server.
+`npm run profile` from the prepared build-directory npm workspace repeats the large-thread presentation measurement. There is no standalone Node development or production server.
 
 For the shortest launch path, use [First run: browser edition](../README.md#browser-edition).
 
 ## Deployment
 
-`npm run build:app` creates the relocatable static artifact in `app-dist/`. The standalone packaging project verifies and installs it with:
+In the prepared npm workspace, `npm run build:app` creates the relocatable static artifact in `app-dist/`. The standalone packaging project verifies and installs it with:
 
 ```sh
-cmake -S . -B package-build -DCMAKE_INSTALL_PREFIX=/desired/prefix
+cmake -S /path/to/CodexUI/web -B package-build \
+  -DCODEXUI_WEB_DIST_DIR=/path/to/build/codex-web/web/app-dist \
+  -DCMAKE_INSTALL_PREFIX=/desired/prefix
 cmake --build package-build --target codexui-web-artifact
 cmake --install package-build --component CodexWebUI
 ```
 
-The combined CodexUI build includes this project by default and installs the artifact in `share/codexui/web`; native-only builds must explicitly configure `-DCODEXUI_INSTALL_WEB=OFF`. The existing `codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the generated `/assets/` files from that directory while `/codex` remains the WebSocket upgrade route. A page delivered over HTTPS automatically derives the corresponding same-origin `wss://.../codex` URL.
+The combined CodexUI build includes this project by default; select the built artifact with `CODEXUI_WEB_DIST_DIR` and installs the artifact in `share/codexui/web`; native-only builds must explicitly configure `-DCODEXUI_INSTALL_WEB=OFF`. The existing `codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the generated `/assets/` files from that directory while `/codex` remains the WebSocket upgrade route. A page delivered over HTTPS automatically derives the corresponding same-origin `wss://.../codex` URL.
 
 The configured bridge URL is retained in browser local storage. Controller/observer roles are not authentication; keep the listener on loopback or behind an external authenticated TLS boundary. Observers may receive broadcasts and read permitted workspace files. Provider-side workspace paths and generated-image paths are displayed as remote metadata; the application does not imply access to the browser machine's filesystem. Failed WebSocket openings release their transport through the SDK detach callback; an explicit retry waits for that release before constructing its replacement.
 
@@ -48,6 +50,8 @@ Verify page/assets delivery, the WSS handshake, controller/observer behavior and
 
 
 ## Verification
+
+Run these npm commands in the prepared build-directory workspace, not the source directory.
 
 - `npm test` builds TypeScript and runs all presentation, projection, lifecycle, viewport, supporting-surface, and server-render qualification tests.
 - `npm run build:app` verifies the production Vite bundle.

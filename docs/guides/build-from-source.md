@@ -63,34 +63,28 @@ The [interactive qualification inventory](../qualification/native-test-suite.md#
 
 ## Browser frontend
 
-The browser release build needs **Node.js 22+**, **Chrome or Chromium** for browser qualification, and AISuite's frontend SDK source. Set `CHROME_BIN` if the browser is not installed at one of the usual system paths. Its local package dependency currently expects this checkout layout:
+The browser release build needs **Node.js 22+**, **Chrome or Chromium** for browser qualification, and the installed AISuite frontend SDK package. Set `CHROME_BIN` if the browser is not installed at one of the usual system paths. Install the SDK with AISuite's normal build or its [standalone SDK installation](https://github.com/SNodeC/AISuite/blob/master/packages/codex-frontend/README.md#consume-the-sdk-from-source). The two source repositories may be checked out anywhere; CodexUI does not read the AISuite checkout.
 
-```text
-workspace/
-├── AISuite-extraction/AISuite-final/   # SNodeC/AISuite, default branch
-└── CodexUI/codexui/                  # this repository
-```
-
-The unusual directory names are required by the current `web/package.json` local SDK dependency; they are not a recommendation for a second checkout system. From an empty directory, create that layout explicitly (Git uses each repository's default branch without hard-coding its name):
+From the CodexUI repository root, select your SDK installation prefix and any writable build directory:
 
 ```sh
-mkdir workspace
-cd workspace
-git clone https://github.com/SNodeC/AISuite.git AISuite-extraction/AISuite-final
-git clone https://github.com/SNodeC/CodexUI.git CodexUI/codexui
-cd CodexUI/codexui
+cmake -S web/cmake -B /path/to/build/codex-web -DCMAKE_PREFIX_PATH=/usr/local
+cmake --build /path/to/build/codex-web --target codexui-web-release
 ```
 
-From `CodexUI/codexui/`:
+CMake resolves the installed SDK archive, prepares an isolated npm workspace, and runs the existing complete release qualification. Generated package metadata, node_modules and browser artifacts stay in the build directory. Use `CMAKE_PREFIX_PATH` for a custom SDK installation prefix. Separate sibling build directories remain supported.
+
+The output is `/path/to/build/codex-web/web/app-dist/`. Install it using the existing static-artifact packager:
 
 ```sh
-npm ci --prefix ../../AISuite-extraction/AISuite-final/packages/codex-frontend
-npm test --prefix ../../AISuite-extraction/AISuite-final/packages/codex-frontend
-npm ci --prefix web
-npm run release --prefix web
+cmake -S web -B /path/to/build/codex-web-package \
+  -DCODEXUI_WEB_DIST_DIR=/path/to/build/codex-web/web/app-dist \
+  -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build /path/to/build/codex-web-package
+sudo cmake --install /path/to/build/codex-web-package --component CodexWebUI
 ```
 
-The output is `web/app-dist/`. A combined install places it in `share/codexui/web`; the bridge can serve the application and `/codex` WebSocket from one listener. See [browser packaging and deployment](../../web/README.md#page-overview) for standalone installation and endpoint configuration.
+For a combined native/browser install, pass the same `CODEXUI_WEB_DIST_DIR` when configuring the native project. The bridge can serve the installed artifact and `/codex` WebSocket from one listener. See [browser packaging and deployment](../../web/README.md#page-overview) for endpoint configuration.
 
 For native execution, return to [First run](../../README.md#first-run); qualification commands and coverage boundaries are in [Quality and development](#quality-and-development).
 
