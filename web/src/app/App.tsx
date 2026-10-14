@@ -280,7 +280,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded ? "⌄" : "›") : ""}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
                     aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id, presentationKey), onClose)}>
-                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : statusTone(status) || "muted"} /><strong>{title}</strong>
+                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : statusTone(status) || "muted"} /><span className="thread-title">{title}</span>
                 </button>
                 {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
                     aria-haspopup="menu" aria-expanded={contextOpen}

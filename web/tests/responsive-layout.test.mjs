@@ -78,7 +78,7 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
     assert.doesNotMatch(markup, /role="group"/u,
         "all exact thread rows share one keyed React parent across reparenting");
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, Workspace: \/workspace, Status: completed, Recent turn: [^,]+, Created: [^,]+, Last activity: /u);
-    assert.match(markup, /<strong>Accessible thread<\/strong><\/button>/u);
+    assert.match(markup, /<span class="thread-title">Accessible thread<\/span><\/button>/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
     assert.match(markup, /Last activity:[\s\S]*<strong class="success">completed<\/strong>/u);
     session.dispose();

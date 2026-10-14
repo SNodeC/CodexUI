@@ -268,7 +268,7 @@ const exactInteractionLifetimeCheck = `(async()=>{
         method:'thread/started',params:{thread:{id,preview,status:{type:'idle'},...(parentThreadId?{parentThreadId}:{})}}}});
     receiveThread('reparent-parent','Reparent parent');receiveThread('reparent-child','Reparent child','reparent-parent');
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
-    const treeItem=title=>[...document.querySelectorAll('.thread-row strong')]
+    const treeItem=title=>[...document.querySelectorAll('.thread-title')]
         .find(label=>label.textContent===title)?.closest('[role="treeitem"]');
     treeItem('Reparent parent').querySelector('.tree-toggle').click();
     await new Promise(complete=>requestAnimationFrame(()=>complete()));

@@ -42,7 +42,7 @@ export async function qualifyCatchup(devTools) {
         notify("thread/started",{thread:threads.get("profile")});button("Refresh").click();
         await waitFor(()=>document.querySelectorAll(".browser-group").length>=3,"group catalogs");await frame();
         check(document.querySelector(".thread-list").textContent.includes("Empty section"),"empty section discoverable");
-        check([...document.querySelectorAll(".thread-row strong")].filter(node=>node.textContent==="Profile thread").length===1,"thread not duplicated");
+        check([...document.querySelectorAll(".thread-title")].filter(node=>node.textContent==="Profile thread").length===1,"thread not duplicated");
         // Project edit goes through a fresh read, preserving another client's metadata.
         const project=[...document.querySelectorAll(".browser-group")].find(group=>group.querySelector(":scope > header .group-disclosure")?.textContent.includes("Project Alpha"));
         const groupTrigger=project.querySelector(":scope > header .group-menu-trigger");
@@ -62,8 +62,8 @@ export async function qualifyCatchup(devTools) {
         const sectionDialog=document.querySelector("dialog[open]");set(sectionDialog.querySelector("input"),"New empty section");button("Save",sectionDialog).click();
         await waitFor(()=>!document.querySelector("dialog[open]")&&document.querySelector(".thread-list").textContent.includes("New empty section"),"section created");
         const archive=document.querySelector('[aria-label="Thread archive filter"]');set(archive,"archived");
-        await waitFor(()=>[...document.querySelectorAll(".thread-row strong")].some(node=>node.textContent==="Archived thread"),"archived browser query");
-        check(![...document.querySelectorAll(".thread-row strong")].some(node=>node.textContent==="Profile thread"),"active hidden by archive filter");
+        await waitFor(()=>[...document.querySelectorAll(".thread-title")].some(node=>node.textContent==="Archived thread"),"archived browser query");
+        check(![...document.querySelectorAll(".thread-title")].some(node=>node.textContent==="Profile thread"),"active hidden by archive filter");
         set(archive,"active");const search=document.querySelector('[aria-label="Search thread titles"]');set(search,"No match");
         search.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));await frame();
         check(document.querySelectorAll(".thread-row").length===0,"search filters across retained entities");set(search,"");await frame();

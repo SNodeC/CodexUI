@@ -176,7 +176,7 @@ test("grouped UI contains empty groups, one representation per thread, and full 
     session.model.applyEvent(result(2, 1, "sections.list", "s", true, {data: [{id: "s", name: "Section"}, {id: "empty", name: "Empty section"}]}));
     session.model.applyEvent(result(3, 1, "threads.list", "t", true, {threads: [{id: "t", name: "Only once", projectId: "p", section: {id: "s"}}]}));
     const markup = renderToStaticMarkup(createElement(App, {session}));
-    assert.equal((markup.match(/<strong>Only once<\/strong>/gu) ?? []).length, 1);
+    assert.equal((markup.match(/<span class="thread-title">Only once<\/span>/gu) ?? []).length, 1);
     for (const text of ["Empty section", "New project…", "New section…", "Thread archive filter", "Search thread titles", "Section order", "New file changes cards start collapsed", "Overall tokens", "Resize Threads", "Hide Inspector"]) assert.ok(markup.includes(text), text);
     session.dispose();
 });
