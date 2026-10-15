@@ -5,64 +5,7 @@ import {BrowserFrontendSession, DraftThreadId, suggestForkName} from "../dist/ap
 import {cardKeys, changeSettingDraft, result, settingDraftFor, settingPromptOptions, stableKey,
     turnSettingCatalog} from "../dist/index.js";
 
-class FakeSocket {
-    protocol = "codex";
-    readyState = 0;
-    bufferedAmount = 0;
-    binaryType = "arraybuffer";
-    onopen = null;
-    onmessage = null;
-    onerror = null;
-    onclose = null;
-    sent = [];
-    send(data) { this.sent.push(JSON.parse(data)); }
-    close(_code, reason) { this.readyState = 3; this.onclose?.({reason}); }
-    open() { this.readyState = 1; this.onopen?.(); }
-    receive(message) { this.onmessage?.({data: JSON.stringify(message)}); }
-    receiveText(data) { this.onmessage?.({data}); }
-}
-
-class DelayedCloseSocket extends FakeSocket {
-    closeReason = "";
-    close(_code, reason) { this.readyState = 2; this.closeReason = reason; }
-    finishClose() { this.readyState = 3; this.onclose?.({reason: this.closeReason}); }
-}
-
-function appserver(payload) { return {kind: "appserver", payload}; }
-function requests(socket, method) {
-    return socket.sent.filter(message => message.kind === "appserver" && message.payload.method === method);
-}
-function respond(socket, request, result) {
-    socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, result}));
-}
-function reject(socket, request, message) {
-    socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, error: {code: -32000, message}}));
-}
-function rejectWithCode(socket, request, code, message) {
-    socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, error: {code, message}}));
-}
-async function readyProvider(socket, connectionId, role = "controller", providerGeneration = 1) {
-    socket.receive({kind: "bridge.connection", event: "opened", connectionId, role});
-    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration});
-    await Promise.resolve();
-}
-async function completeControllerHydration(socket, thread, nextCursor = null) {
-    const resume = requests(socket, "thread/resume").at(-1);
-    assert.ok(resume, "controller hydration starts with metadata-only resume");
-    assert.deepEqual(resume.payload.params, {threadId: thread.id, excludeTurns: true});
-    const {turns = [], ...metadata} = thread;
-    respond(socket, resume, {thread: metadata});
-    await Promise.resolve(); await Promise.resolve();
-    const page = requests(socket, "thread/turns/list").at(-1);
-    assert.ok(page, "metadata resume is followed by one bounded turn page");
-    assert.deepEqual(page.payload.params, {
-        threadId: thread.id, limit: 80, sortDirection: "desc", itemsView: "summary",
-    });
-    respond(socket, page, {data: turns, nextCursor});
-    await Promise.resolve(); await Promise.resolve();
-    return {resume, page};
-}
-const waitForPublish = () => new Promise(resolve => setTimeout(resolve, 25));
+import {FakeSocket, DelayedCloseSocket, appserver, requests, respond, reject, rejectWithCode, readyProvider, completeControllerHydration, waitForPublish} from "./browser-harness.mjs";
 
 test("browser session defaults to the bridge's canonical WebSocket endpoint", () => {
     assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "ws://127.0.0.1:8080/codex");

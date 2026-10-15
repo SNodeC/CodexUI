@@ -12,6 +12,8 @@ CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to a
 
 Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for the AISuite checkout layout, SDK build, application build and release qualification. Run its commands from the repository root.
 
+Reusable browser colors and the brand icon are generated from native `src/codex/ui/UiStyle.h` and `resources/icons/codex-ui.svg`. After changing those sources, run `node web/tools/generate-ui-assets.mjs` from the repository root; do not edit `web/src/colors.css` or `web/src/brand.svg` independently. The test suite rejects drift.
+
 `npm run profile` from this directory repeats the large-thread presentation measurement. There is no standalone Node development or production server.
 
 For the shortest launch path, use [First run: browser edition](../README.md#browser-edition).

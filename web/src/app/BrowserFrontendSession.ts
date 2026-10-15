@@ -9,10 +9,10 @@ import type {WebSocketFactory} from "@snodec/codex-frontend";
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
 import {PresentationModel} from "../presentation/PresentationModel.js";
-import type {PendingRequestPresentation} from "../presentation/PresentationModel.js";
+import type {PendingRequestPresentation, WorkspaceGroup} from "../presentation/PresentationModel.js";
 import {ProtocolNormalizer} from "../presentation/ProtocolNormalizer.js";
 import {PromptCoordinator, indexAuthoritativeItems, localCardVisible, promptWithFileLinks} from "../conversation/PromptCoordinator.js";
-import type {AttachmentDraft, PromptDispatch} from "../conversation/PromptCoordinator.js";
+import type {AttachmentDraft, PromptDispatch, PromptRecoveryContext} from "../conversation/PromptCoordinator.js";
 import {DefaultAuthoritativeItemLimit, projectConversation} from "../conversation/ConversationProjection.js";
 import {PendingAnimationDelayMilliseconds} from "../conversation/MiddleTypes.js";
 import type {ConversationSnapshot} from "../conversation/MiddleTypes.js";
@@ -49,6 +49,12 @@ const actionMethods = {
     "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
     "thread.turns.list": "thread/turns/list", "thread.items.list": "thread/items/list",
     "thread.archive": "thread/archive", "thread.unarchive": "thread/unarchive", "thread.delete": "thread/delete",
+    "projects.list": "project/list", "project.read": "project/read", "project.create": "project/create",
+    "project.update": "project/update", "project.move": "project/move", "project.delete": "project/delete",
+    "sections.list": "threadSection/list", "section.create": "threadSection/create",
+    "section.update": "threadSection/update", "section.delete": "threadSection/delete",
+    "thread.metadata": "thread/metadata/update", "thread.section": "thread/section/move",
+    "account.usage.read": "account/usage/read",
     "models.list": "model/list", "permission-profiles.list": "permissionProfile/list",
     "turn.start": "turn/start", "turn.steer": "turn/steer", "turn.interrupt": "turn/interrupt",
 } as const;
@@ -63,15 +69,21 @@ export interface BrowserSessionSnapshot {
     readonly notice: string;
     readonly bridgeUrl: string;
 }
-export interface NewThreadDraft {
-    workspace: string;
-    name: string;
-    baseInstructions: string;
-    developerInstructions: string;
-    ephemeral: boolean;
-}
+export interface NewThreadDraft extends PromptRecoveryContext {}
 
-export type ThreadSortCriterion = "alphanumeric" | "created" | "recent";
+export type ThreadSortCriterion = "alphanumeric" | "created" | "recent" | "section";
+export interface ThreadBrowserOptions {
+    grouping: "projects" | "sections" | "ungrouped"; search: string;
+    archive: "active" | "archived" | "all"; sort: ThreadSortCriterion; manualProjects: boolean;
+}
+export interface BrowserPage {
+    action: "threads.list" | "projects.list" | "sections.list"; parameters: JsonObject;
+    ids: string[]; nextCursor: string; pending: boolean; error: string;
+    seen: Set<string>; loadMore: boolean; repairPending: boolean; startedAtSequence: number;
+}
+function pageKey(action: string, parameters: JsonObject): string {
+    return action + JSON.stringify(Object.entries(parameters).sort(([a], [b]) => a.localeCompare(b)));
+}
 
 const threadTitleCollator = new Intl.Collator(undefined, {
     numeric: true, sensitivity: "base", ignorePunctuation: true,
@@ -148,12 +160,12 @@ export class BrowserFrontendSession {
     private reconnectAfterDetach = false;
     private lifecycleEpoch = 0;
     private catalogHydrationKey = "";
-    private threadListInFlightEpoch = -1;
-    private threadListRepairPending = false;
-    private threadListLoadMoreRequested = false;
-    private threadListNextCursor = "";
-    private readonly threadListSeenCursors = new Set<string>();
-    private threadListCycle = 0;
+    readonly browser: ThreadBrowserOptions = {grouping: "projects", search: "", archive: "active", sort: "recent", manualProjects: false};
+    private readonly pages = new Map<string, BrowserPage>();
+    private readonly catalogReads = new Set<BrowserPage>();
+    private readonly catalogQueue: {page: BrowserPage; cursor: string; repair: boolean}[] = [];
+    private readonly unsupportedCatalogs = new Set<string>();
+    private readonly groupExpansion = new Map<string, boolean>();
     private threadListRepairTimer: ReturnType<typeof setTimeout> | undefined;
     private bridgeUrl: string;
     private readonly createWebSocket: WebSocketFactory | undefined;
@@ -161,6 +173,14 @@ export class BrowserFrontendSession {
 
     constructor(bridgeUrl = BrowserFrontendSession.defaultBridgeUrl(), createWebSocket?: WebSocketFactory) {
         this.bridgeUrl = bridgeUrl;
+        try {
+            const stored = JSON.parse(readBrowserStorage(`codexui.browser:${bridgeUrl}`) ?? "{}");
+            if (["projects", "sections", "ungrouped"].includes(stored.grouping)) this.browser.grouping = stored.grouping;
+            if (["recent", "created", "alphanumeric", "section"].includes(stored.sort)) this.browser.sort = stored.sort;
+            this.browser.manualProjects = stored.manualProjects === true;
+            if (Array.isArray(stored.expansion)) for (const entry of stored.expansion)
+                if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "boolean") this.groupExpansion.set(entry[0], entry[1]);
+        } catch { /* Invalid preferences use canonical defaults. */ }
         this.createWebSocket = createWebSocket;
         this.normalizer = new ProtocolNormalizer(frame => {
             const scope = isObject(frame.scope) ? frame.scope : {};
@@ -263,6 +283,7 @@ export class BrowserFrontendSession {
     }
     dispose(): void {
         this.disposed = true;
+        this.pages.clear(); this.catalogQueue.length = 0; this.catalogReads.clear();
         this.connection.dispose(); this.transport = undefined;
         for (const timer of this.pendingAnimationTimers.values()) clearTimeout(timer);
         this.pendingAnimationTimers.clear();
@@ -320,6 +341,8 @@ export class BrowserFrontendSession {
             workspace: draft.workspace.trim(), name: draft.ephemeral ? "" : draft.name.trim(),
             baseInstructions: draft.baseInstructions.trim(), developerInstructions: draft.developerInstructions.trim(),
             ephemeral: draft.ephemeral,
+            ...(draft.projectId ? {projectId: draft.projectId} : {}),
+            ...(draft.sectionId ? {sectionId: draft.sectionId} : {}),
         };
         this.selectedThreadId = DraftThreadId;
         ++this.composerGeneration;
@@ -373,7 +396,15 @@ export class BrowserFrontendSession {
         return activityAt;
     }
     threadOrder(criterion: ThreadSortCriterion = "recent"): readonly string[] {
-        const order = this.model.threadOrder().filter(id => this.model.childOwnership(id) === undefined);
+        const eligible = this.browserThreadIds();
+        const present = new Set(eligible);
+        const order = eligible.filter(id => {
+            const parent = this.model.childOwnership(id)?.parentThreadId;
+            if (!parent || !present.has(parent)) return true;
+            return this.browser.grouping !== "ungrouped" && ["projectId", "sectionId"].some(key =>
+                this.model.thread(id)?.[key as "projectId" | "sectionId"] !== this.model.thread(parent)?.[key as "projectId" | "sectionId"]);
+        });
+        if (criterion === "section") return order;
         const timestamp = (threadId: string) => {
             const thread = this.model.thread(threadId);
             if (criterion === "created") return thread?.createdAt;
@@ -426,7 +457,11 @@ export class BrowserFrontendSession {
         const admittedAt = Date.now();
         const activeTurnId = destination === DraftThreadId ? undefined : this.model.activeTurnId(destination);
         const submissionId = this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
-            activeTurnId, admittedAt, activeTurnId === undefined ? this.nextPromptActivityAt(admittedAt) : undefined);
+            activeTurnId, admittedAt, activeTurnId === undefined ? this.nextPromptActivityAt(admittedAt) : undefined,
+            (destination === DraftThreadId ? this.newThreadDraft : undefined) ?? {workspace: stringMember(threadOptions, "cwd") || thread?.cwd || "", name: "Recovered prompt",
+                baseInstructions: stringMember(threadOptions, "baseInstructions"), developerInstructions: stringMember(threadOptions, "developerInstructions"), ephemeral: threadOptions.ephemeral === true,
+                ...(thread?.projectId ? {projectId: thread?.projectId} : {}),
+                ...(thread?.sectionId ? {sectionId: thread?.sectionId} : {})});
         this.schedulePendingAnimation(submissionId);
         if (destination !== DraftThreadId) {
             this.threadRuntime(destination);
@@ -440,6 +475,7 @@ export class BrowserFrontendSession {
             if (threadDraft?.baseInstructions) createOptions.baseInstructions = threadDraft.baseInstructions;
             if (threadDraft?.developerInstructions) createOptions.developerInstructions = threadDraft.developerInstructions;
             if (threadDraft?.ephemeral) createOptions.ephemeral = true;
+            if (threadDraft?.projectId) createOptions.projectId = threadDraft.projectId;
             if (threadDraft?.workspace && !Object.hasOwn(createOptions, "cwd")) createOptions.cwd = threadDraft.workspace;
             const created = await this.requestPromise("thread.create", createOptions);
             this.newThreadCreationInFlight = false;
@@ -471,12 +507,23 @@ export class BrowserFrontendSession {
                 this.model.setThreadTitleLocally(id, requestedName);
                 this.renameThread(id, requestedName);
             }
+            if (threadDraft?.sectionId) await this.assignThreadGroup(id, "section", threadDraft.sectionId);
             this.publish();
         }
         queueMicrotask(() => this.dispatchNextPrompt(destination));
         return true;
     }
 
+    restorePrompt(threadId: string, submissionId: number, presentationKey: string, currentDraft: string): string | undefined {
+        const submission = this.prompts.submission(threadId, submissionId);
+        if (!this.matchesThreadPresentation(threadId, presentationKey) || !submission || submission.state !== "failed") return;
+        if (currentDraft !== "") { this.setNotice("Clear or send the current draft before restoring this prompt. The preserved prompt was not changed.", false); return; }
+        const text = submission.prompt;
+        if (this.newThreadCreationInFlight) { this.setNotice("The current new thread is still being created.", false); return; }
+        this.beginNewThread(submission.recoveryContext);
+        this.setNotice("The unsent prompt was restored to a new-thread draft.", false);
+        return text;
+    }
     interrupt(presentationKey?: string): void {
         const threadId = this.selectedThreadId;
         const targetKey = presentationKey ?? this.threadVisualKey(threadId);
@@ -585,14 +632,9 @@ export class BrowserFrontendSession {
     }
     private invalidateProviderWork(): void {
         ++this.lifecycleEpoch;
-        ++this.threadListCycle;
         if (this.threadListRepairTimer) clearTimeout(this.threadListRepairTimer);
         this.threadListRepairTimer = undefined;
-        this.threadListInFlightEpoch = -1;
-        this.threadListRepairPending = false;
-        this.threadListLoadMoreRequested = false;
-        this.threadListNextCursor = "";
-        this.threadListSeenCursors.clear();
+        this.pages.clear(); this.catalogQueue.length = 0; this.catalogReads.clear();
         this.historicalHydrationQueue.length = 0;
         this.historicalHydrations.clear();
         this.historicalHydrationVisited.clear();
@@ -792,6 +834,8 @@ export class BrowserFrontendSession {
             void this.requestInitialThreadPage();
             this.request("models.list", {});
             this.request("permission-profiles.list", {});
+            this.request("account.usage.read", {});
+            this.refreshGroups();
         }
         const queued = new Set(this.prompts.queuedThreadIds());
         if (this.selectedThreadId !== "" && this.selectedThreadId !== DraftThreadId)
@@ -842,98 +886,185 @@ export class BrowserFrontendSession {
             ? {ok: false, stale: true, error: response.error}
             : Object.hasOwn(response, "result") ? {ok: true, data: response.result} : {ok: false, error: response.error}), acceptResult));
     }
-    private threadListParameters(useStateDbOnly: boolean, cursor = ""): JsonObject {
-        return {
-            sortKey: "recency_at", sortDirection: "desc", limit: 100, useStateDbOnly,
-            ...(cursor === "" ? {} : {cursor}),
-        };
+    private persistBrowser(): void {
+        writeBrowserStorage(`codexui.browser:${this.bridgeUrl}`, JSON.stringify({grouping: this.browser.grouping, sort: this.browser.sort, manualProjects: this.browser.manualProjects, expansion: [...this.groupExpansion]}));
     }
-    private async requestInitialThreadPage(): Promise<OperationResponse> {
-        const epoch = this.lifecycleEpoch;
-        if (this.threadListInFlightEpoch === epoch) return {ok: true};
-        if (this.threadListRepairPending) return {ok: true};
-        const cycle = ++this.threadListCycle;
-        if (this.threadListRepairTimer) clearTimeout(this.threadListRepairTimer);
-        this.threadListRepairTimer = undefined;
-        this.threadListRepairPending = true;
-        this.threadListLoadMoreRequested = false;
-        this.threadListNextCursor = "";
-        this.threadListSeenCursors.clear();
-        this.threadListInFlightEpoch = epoch;
-        let response: OperationResponse;
-        try {
-            response = await this.requestPromise("threads.list", this.threadListParameters(true),
-                () => cycle === this.threadListCycle);
-        } finally {
-            if (this.threadListInFlightEpoch === epoch && cycle === this.threadListCycle) {
-                this.threadListInFlightEpoch = -1;
-            }
-        }
-        if (response.stale || epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle)
-            return response;
-        if (response.ok) this.threadListNextCursor = stringMember(response.data, "nextCursor");
-        this.threadListRepairTimer = setTimeout(() => {
+    changeBrowser(change: Partial<ThreadBrowserOptions>): void {
+        const queryChanged = change.search !== undefined || change.archive !== undefined || change.sort !== undefined;
+        const catalogChanged = change.manualProjects !== undefined;
+        Object.assign(this.browser, change); this.persistBrowser();
+        if (queryChanged) {
+            if (this.threadListRepairTimer) clearTimeout(this.threadListRepairTimer);
             this.threadListRepairTimer = undefined;
-            void this.repairThreadList(epoch, cycle);
-        }, 16);
-        return response;
-    }
-    private async repairThreadList(epoch: number, cycle: number): Promise<void> {
-        if (this.disposed || epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle)
-            return;
-        this.threadListInFlightEpoch = epoch;
-        const response = await this.requestPromise("threads.list", this.threadListParameters(false),
-            () => cycle === this.threadListCycle);
-        if (epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle) return;
-        this.threadListInFlightEpoch = -1;
-        this.threadListRepairPending = false;
-        if (!response.ok || response.stale) {
-            if (!response.stale) this.setNotice(`Thread reconciliation failed: ${this.errorMessage(response)}`);
-            if (this.threadListLoadMoreRequested) {
-                this.threadListLoadMoreRequested = false;
-                this.loadMoreThreads();
-            }
-            return;
+            for (const [key, page] of this.pages) if (page.action === "threads.list") this.retirePage(key, page);
+            this.requestInitialThreadPage();
         }
-        this.threadListNextCursor = stringMember(response.data, "nextCursor");
+        if (catalogChanged) {
+            for (const [key, page] of this.pages) if (page.action === "projects.list") this.retirePage(key, page);
+            this.refreshGroups();
+        }
         this.publish();
-        if (this.threadListLoadMoreRequested) {
-            this.threadListLoadMoreRequested = false;
-            this.loadMoreThreads();
+    }
+    groupExpanded(key: string): boolean { return this.groupExpansion.get(key) ?? true; }
+    toggleGroup(kind: "project" | "section", id: string): void {
+        const key = `${kind}:${id}`; const expanded = !this.groupExpanded(key);
+        this.groupExpansion.set(key, expanded); this.persistBrowser();
+        if (expanded) this.browseGroup(kind, id);
+        this.publish();
+    }
+    private threadParameters(archived: boolean, membership: JsonObject = {}): JsonObject {
+        return {sortKey: this.browser.sort === "section" ? "section_position" : "recency_at",
+            sortDirection: this.browser.sort === "section" ? "asc" : "desc", limit: 100,
+            ...(archived ? {archived: true} : {}), ...(this.browser.search ? {searchTerm: this.browser.search} : {}), ...membership};
+    }
+    threadPages(membership: JsonObject = {}): BrowserPage[] {
+        return (this.browser.archive === "all" ? [false, true] : [this.browser.archive === "archived"])
+            .map(archived => this.page("threads.list", this.threadParameters(archived, membership)));
+    }
+    private page(action: BrowserPage["action"], parameters: JsonObject): BrowserPage {
+        const key = pageKey(action, parameters);
+        let page = this.pages.get(key);
+        if (!page) {
+            page = {action, parameters, ids: [], nextCursor: "", pending: false, error: "", seen: new Set(), loadMore: false, repairPending: false, startedAtSequence: 0};
+            this.pages.set(key, page);
+        }
+        return page;
+    }
+    private retirePage(key: string, page: BrowserPage): void {
+        this.pages.delete(key); this.catalogReads.delete(page);
+        for (let index = this.catalogQueue.length - 1; index >= 0; --index)
+            if (this.catalogQueue[index]!.page === page) this.catalogQueue.splice(index, 1);
+    }
+    private currentPage(page: BrowserPage): boolean { return this.pages.get(pageKey(page.action, page.parameters)) === page; }
+    private requestInitialThreadPage(): void {
+        if (this.providerReady()) for (const page of this.threadPages()) this.readPage(page);
+    }
+    browseGroup(kind: "project" | "section", id: string): void {
+        if (this.providerReady()) for (const page of this.threadPages({[`${kind}Id`]: id}))
+            if (!page.pending && !page.ids.length && !page.seen.size && !page.error) this.readPage(page);
+    }
+    refreshGroups(): void {
+        if (!this.providerReady()) return;
+        for (const action of ["projects.list", "sections.list"] as const) {
+            if (this.unsupportedCatalogs.has(action)) continue;
+            const parameters: JsonObject = action === "projects.list" ? {limit: 100, sortKey: this.browser.manualProjects ? "position" : "recencyAt", sortDirection: this.browser.manualProjects ? "asc" : "desc"} : {limit: 100};
+            const old = this.pages.get(pageKey(action, parameters));
+            if (old?.pending) this.retirePage(pageKey(action, parameters), old);
+            const page = this.page(action, parameters); if (!page.pending) { page.seen.clear(); this.readPage(page); }
         }
     }
-    loadMoreThreads(): void {
+    groups(kind: "project" | "section") { return [...(kind === "project" ? this.model.projects : this.model.sections).values()]; }
+    catalogPages(): readonly BrowserPage[] { return [...this.pages.values()].filter(page => page.action !== "threads.list"); }
+    refreshBrowser(): void {
         if (!this.providerReady()) return;
-        if (this.threadListInFlightEpoch === this.lifecycleEpoch || this.threadListRepairPending) {
-            this.threadListLoadMoreRequested = true;
-            return;
+        for (const [key, page] of this.pages) {
+            if (page.parameters.projectId && !this.model.projects.has(String(page.parameters.projectId))
+                || page.parameters.sectionId && !this.model.sections.has(String(page.parameters.sectionId))) this.retirePage(key, page);
+            else { page.seen.clear(); this.readPage(page); }
         }
-        const cursor = this.threadListNextCursor;
-        if (cursor === "" || this.threadListSeenCursors.has(cursor)) {
-            if (this.threadListSeenCursors.has(cursor)) this.threadListNextCursor = "";
-            return;
+    }
+    loadMoreThreads(): void { for (const page of this.threadPages()) this.loadPage(page); }
+    loadPage(page: BrowserPage): void {
+        if (!this.providerReady() || !this.currentPage(page)) return;
+        if (page.pending || page.repairPending) { page.loadMore = true; return; }
+        if (page.error) this.readPage(page, page.nextCursor);
+        else if (page.nextCursor && !page.seen.has(page.nextCursor)) this.readPage(page, page.nextCursor);
+    }
+    private readPage(page: BrowserPage, cursor = "", repair = false): void {
+        if (!this.providerReady() || !this.currentPage(page) || page.pending || this.unsupportedCatalogs.has(page.action)) return;
+        page.pending = true; page.error = "";
+        this.catalogQueue.push({page, cursor, repair}); this.drainCatalogReads(); this.schedulePublish();
+    }
+    private drainCatalogReads(): void {
+        while (this.catalogReads.size < 2) {
+            const next = this.catalogQueue.findIndex(({page}) => this.currentPage(page)
+                && (page.action === "threads.list" || ![...this.catalogReads].some(read => read.action !== "threads.list")));
+            if (next < 0) return;
+            const {page, cursor, repair} = this.catalogQueue.splice(next, 1)[0]!;
+            this.catalogReads.add(page);
+            const parameters = {...page.parameters, ...(page.action === "threads.list" ? {useStateDbOnly: !repair} : {}), ...(cursor ? {cursor} : {})};
+            const epoch = this.lifecycleEpoch;
+            if (!cursor) page.startedAtSequence = this.normalizer.sequence;
+            void this.requestPromise(page.action, parameters, () => this.currentPage(page)).then(response => {
+                this.catalogReads.delete(page);
+                if (epoch !== this.lifecycleEpoch || !this.currentPage(page)) { this.drainCatalogReads(); return; }
+                page.pending = false;
+                if (!response.ok) {
+                    page.error = this.errorMessage(response);
+                    if (isObject(response.error) && response.error.code === -32601 && page.action !== "threads.list") this.unsupportedCatalogs.add(page.action);
+                } else {
+                    const data = isObject(response.data) && Array.isArray(response.data.data) ? response.data.data : [];
+                    const ids = data.map(raw => stringMember(raw, "id")).filter(Boolean);
+                    page.ids = [...new Set(cursor || repair ? [...page.ids, ...ids] : ids)];
+                    page.seen.add(cursor);
+                    page.nextCursor = stringMember(response.data, "nextCursor");
+                    if (page.nextCursor && page.seen.has(page.nextCursor)) page.nextCursor = "";
+                    if (!page.nextCursor && page.action !== "threads.list") this.model.finishGroupCatalog(page.action === "projects.list" ? "project" : "section", page.ids, page.startedAtSequence);
+                }
+                const general = page.action === "threads.list" && !page.parameters.projectId && !page.parameters.sectionId && !page.parameters.archived;
+                if (general && !cursor && !repair && !this.threadListRepairTimer) {
+                    page.repairPending = true;
+                    this.threadListRepairTimer = setTimeout(() => {
+                        this.threadListRepairTimer = undefined;
+                        if (this.currentPage(page)) { page.repairPending = false; this.readPage(page, "", true); }
+                    }, 16);
+                }
+                if (page.loadMore && !page.repairPending) { page.loadMore = false; this.loadPage(page); }
+                this.publish(); this.drainCatalogReads();
+            });
         }
-        this.threadListSeenCursors.add(cursor);
-        const epoch = this.lifecycleEpoch;
-        const cycle = this.threadListCycle;
-        this.threadListInFlightEpoch = epoch;
-        void this.requestPromise("threads.list", this.threadListParameters(true, cursor),
-            () => cycle === this.threadListCycle).then(response => {
-            if (epoch !== this.lifecycleEpoch || cycle !== this.threadListCycle) return;
-            this.threadListInFlightEpoch = -1;
-            if (!response.ok || response.stale) {
-                this.threadListSeenCursors.delete(cursor);
-                this.threadListLoadMoreRequested = false;
-                if (!response.stale) this.setNotice(`Loading more threads failed: ${this.errorMessage(response)}`);
-                return;
-            }
-            this.threadListNextCursor = stringMember(response.data, "nextCursor");
-            this.publish();
-            if (this.threadListLoadMoreRequested) {
-                this.threadListLoadMoreRequested = false;
-                this.loadMoreThreads();
-            }
+    }
+    browserThreadIds(): string[] {
+        const pages = this.threadPages();
+        const ids = this.browser.search || this.browser.sort === "section" ? pages.flatMap(page => page.ids) : [...this.model.threadIds()];
+        if (this.browser.sort === "section") for (const page of this.pages.values()) if (page.action === "threads.list" && page.parameters.sectionId) ids.push(...page.ids);
+        return [...new Set(ids)].filter(id => {
+            const thread = this.model.thread(id);
+            return thread && (this.browser.archive === "all" || thread.archived === (this.browser.archive === "archived"));
         });
+    }
+    groupingAvailable(): boolean { return !this.unsupportedCatalogs.size; }
+    async manageGroup(action: Extract<Action, `project.${string}` | `section.${string}`>, parameters: JsonObject, target?: WorkspaceGroup): Promise<boolean> {
+        if (!this.canSubmit()) return false;
+        const key = `${action}:${stringMember(parameters, "projectId") || stringMember(parameters, "sectionId")}`;
+        if (this.pendingUserOperations.has(key)) return false;
+        const groups = action.startsWith("project.") ? this.model.projects : this.model.sections;
+        const id = stringMember(parameters, "projectId") || stringMember(parameters, "sectionId");
+        const expected = target ?? groups.get(id);
+        const current = () => !expected || groups.get(id) === expected;
+        if (!current()) return false;
+        const identity = {}; this.pendingUserOperations.set(key, identity); this.publish();
+        const epoch = this.lifecycleEpoch;
+        try {
+            if (action === "project.update") {
+                const fresh = await this.requestPromise("project.read", {projectId: parameters.projectId}, current);
+                if (epoch !== this.lifecycleEpoch || !current() || !this.canSubmit() || !fresh.ok) {
+                    if (!fresh.stale) this.setNotice(`Project update failed: ${this.errorMessage(fresh)}`); return false;
+                }
+                const metadata = member(member(fresh.data, "project", {}), "metadata", {});
+                const {description, ...update} = parameters;
+                parameters = {...update, metadata: {...(isObject(metadata) ? metadata : {}), "codexui.description": description}};
+            }
+            const response = await this.requestPromise(action, parameters, current);
+            if (response.stale || epoch !== this.lifecycleEpoch) return false;
+            if (!response.ok) { this.setNotice(this.errorMessage(response)); return false; }
+            this.refreshBrowser(); return true;
+        } finally {
+            if (this.pendingUserOperations.get(key) === identity) this.pendingUserOperations.delete(key);
+            this.schedulePublish();
+        }
+    }
+    async assignThreadGroup(threadId: string, kind: "project" | "section", id: string, beforeThreadId?: string): Promise<boolean> {
+        const action = kind === "project" ? "thread.metadata" : "thread.section";
+        const response = await this.performUserOperation(action, action, {threadId, [`${kind}Id`]: id || (kind === "project" ? "" : null),
+            ...(beforeThreadId ? {beforeThreadId} : {})}, `Assign ${kind}`);
+        if (!response?.ok || response.stale) return false;
+        if (kind === "section") {
+            const refresh = await this.requestPromise("thread.read", {threadId, includeTurns: false});
+            if (refresh.stale) return false;
+            if (!refresh.ok) this.setNotice(`Section changed, but metadata refresh failed: ${this.errorMessage(refresh)}`);
+        }
+        this.refreshBrowser(); return true;
     }
     private performUserOperation(keyAction: Action, action: Action, parameters: JsonObject,
         failureContext: string, presentationKey?: string): Promise<OperationResponse> | undefined {
@@ -1058,12 +1189,14 @@ export class BrowserFrontendSession {
         const type = stringMember(frame, "type");
         const data = isObject(frame.data) ? frame.data : {};
         if (providerReset) {
+            this.unsupportedCatalogs.clear();
             this.invalidateProviderWork();
             this.retireProviderPresentations();
         }
         if (requestsReset) this.resolvingRequests.clear();
         if (type === "connection.lifecycle") {
             const state = stringMember(data, "state");
+            if (state === "connecting") this.unsupportedCatalogs.clear();
             if (["connecting", "retrying", "disconnected", "failure"].includes(state)) this.invalidateProviderWork();
         } else if (type === "connection.provider") {
             const state = stringMember(data, "state");
@@ -1075,6 +1208,9 @@ export class BrowserFrontendSession {
                     this.ensureThreadHydrated(this.selectedThreadId);
                 this.dispatchQueuedPrompts();
             });
+        } else if (type === "workspace.project.changed" || type === "thread.project.changed") {
+            this.refreshGroups();
+            this.refreshBrowser();
         } else if (type === "thread.removed") {
             const scope = isObject(frame.scope) ? frame.scope : {};
             const threadId = stringMember(scope, "threadId");

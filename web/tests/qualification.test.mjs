@@ -61,8 +61,9 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     assert.doesNotMatch(markup, /Last changed/u);
     assert.match(markup, /aria-describedby="composer-keyboard-hint"/u);
     assert.match(markup, /aria-keyshortcuts="Enter Control\+Enter Meta\+Enter"/u);
-    assert.match(markup, /id="composer-keyboard-hint">Enter to send · Shift\+Enter for a new line/u);
-    assert.match(markup, /aria-expanded="false"/u);
+    assert.match(markup, /id="composer-keyboard-hint" class="visually-hidden">Enter to send · Shift\+Enter for a new line/u);
+    assert.match(markup, /class="additional-settings"><button type="button" popovertarget=/u, "advanced settings use a native popover");
+    assert.doesNotMatch(markup, /<textarea[^>]*disabled/u, "offline users can compose while submission is unavailable");
     session.dispose();
 });
 

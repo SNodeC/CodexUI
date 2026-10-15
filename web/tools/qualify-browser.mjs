@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {qualifyCatchup} from "./qualify-catchup.mjs";
 import {spawn} from "node:child_process";
 import {constants as fsConstants} from "node:fs";
 import {access, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
@@ -229,7 +230,7 @@ const applicationProfileSetup = `(async()=>{
         "profile metadata resume");
     const resume=socket.sent.findLast(message=>message.kind==="appserver"&&message.payload.method==="thread/resume");
     await waitFor(()=>socket.pendingCatalogs.length===2,"deferred settings catalogs");
-    const settingsToggle=document.querySelector(".settings-toggle");settingsToggle.click();
+    const settingsToggle=document.querySelector(".additional-settings > button");settingsToggle.click();
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const grid=document.querySelector(".settings-grid");
     const selectFor=caption=>[...grid.querySelectorAll("label")].find(
@@ -267,7 +268,7 @@ const exactInteractionLifetimeCheck = `(async()=>{
         method:'thread/started',params:{thread:{id,preview,status:{type:'idle'},...(parentThreadId?{parentThreadId}:{})}}}});
     receiveThread('reparent-parent','Reparent parent');receiveThread('reparent-child','Reparent child','reparent-parent');
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
-    const treeItem=title=>[...document.querySelectorAll('.thread-row strong')]
+    const treeItem=title=>[...document.querySelectorAll('.thread-title')]
         .find(label=>label.textContent===title)?.closest('[role="treeitem"]');
     treeItem('Reparent parent').querySelector('.tree-toggle').click();
     await new Promise(complete=>requestAnimationFrame(()=>complete()));
@@ -314,7 +315,7 @@ const applicationProfileHydrate = `(async()=>{
 
 const applicationProfilePrepare = `(async()=>{
     const profile=globalThis.codexuiApplicationProfile;
-    document.querySelector(".settings-toggle").click();
+    document.querySelector(".additional-settings > button").click();
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const grid=document.querySelector(".settings-grid");if(!grid)throw new Error("Settings grid did not open");
     const controls=[...grid.querySelectorAll("select,input")];const options=[...grid.querySelectorAll("option")];
@@ -432,13 +433,13 @@ const applicationSettingsDomContract = `(async()=>{
     await setValue("Workspace","/authored/browser");
     await setValue("Access","danger-full-access");
     const fullAccessNetwork={value:controlFor("Network").value,disabled:controlFor("Network").disabled,
-        title:labelFor("Network").title};
+        title:labelFor("Network").title,color:getComputedStyle(controlFor("Network")).color,background:getComputedStyle(controlFor("Network")).backgroundColor};
     await setValue("Permission profile",":workspace");
     const profileSelected={value:controlFor("Permission profile").value,access:controlFor("Access").value,
         network:controlFor("Network").value};
     await setValue("Access","workspace-write");
     await setValue("Network","enabled");
-    const changedText=document.querySelector(".settings-toggle")?.textContent||"";
+    const changedText=document.querySelector(".additional-settings > button")?.textContent||"";
 
     profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"turn/completed",params:{
         threadId:"profile",turn:{id:"turn-79",status:"completed"}}}});
@@ -465,7 +466,8 @@ const fullTopBarMeasurement = `(()=>{
     }
     const top=document.querySelector(".top-bar").getBoundingClientRect();
     const actionBounds=actions.getBoundingClientRect();
-    return {width:innerWidth,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+    const footer=document.querySelector(".status-bar").getBoundingClientRect();
+    return {width:innerWidth,footerBottom:footer.bottom,viewportHeight:innerHeight,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
         top:{left:top.left,right:top.right,bottom:top.bottom,height:top.height},
         actions:{left:actionBounds.left,right:actionBounds.right,bottom:actionBounds.bottom},
         drawers:[...document.querySelectorAll(".responsive-pane-button")].map(button=>button.textContent.trim())};
@@ -473,6 +475,7 @@ const fullTopBarMeasurement = `(()=>{
 
 function assertTopBar(measurement, width) {
     assert.equal(measurement.width, width);
+    assert(measurement.footerBottom <= measurement.viewportHeight + 0.5, "footer remains inside the responsive shell");
     assert.equal(measurement.overflow, 0, `${width}px layout must not overflow the document`);
     assert(measurement.top.left >= 0 && measurement.top.right <= width);
     assert(measurement.actions.left >= 0 && measurement.actions.right <= width);
@@ -505,9 +508,9 @@ try {
     await setWidth(devTools, 760);
     await waitUntil(devTools, `document.querySelectorAll(".responsive-pane-button").length===2`, "760px drawer controls");
     assertTopBar(await devTools.evaluate(fullTopBarMeasurement), 760);
-    const focus = await devTools.evaluate(`(()=>{const input=document.querySelector(".connection-control input");input.focus();
+    const focus = await devTools.evaluate(`(()=>{const input=document.querySelector(".connection-control input");document.querySelector(".connection-menu > button").click();input.focus();
         const style=getComputedStyle(input);return [style.outlineStyle,style.outlineWidth,style.outlineColor]})()`);
-    assert.deepEqual(focus, ["solid", "2px", "rgb(111, 152, 232)"]);
+    assert.deepEqual(focus, ["solid", "2px", "rgb(84, 113, 166)"]);
 
     const opened = await devTools.evaluate(`(async()=>{[...document.querySelectorAll(".responsive-pane-button")]
         .find(button=>button.textContent.includes("Inspector")).click();await new Promise(done=>setTimeout(done,30));
@@ -518,7 +521,7 @@ try {
     const trapped = await devTools.evaluate(`(()=>{document.dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",shiftKey:true,bubbles:true,cancelable:true}));
         const backward=document.activeElement?.textContent?.trim();document.dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",bubbles:true,cancelable:true}));
         return {backward,forward:document.activeElement?.getAttribute("aria-label")}})()`);
-    assert.deepEqual(trapped, {backward: "Protocol", forward: "Close Inspector drawer"});
+    assert.deepEqual(trapped, {backward: "Info", forward: "Close Inspector drawer"});
     const closed = await devTools.evaluate(`(async()=>{document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}));
         await new Promise(done=>setTimeout(done,30));return {drawer:Boolean(document.querySelector("#inspector-pane")),
         focus:document.activeElement?.getAttribute("aria-controls"),inert:[...document.querySelectorAll("[data-modal-background]")].some(element=>element.hasAttribute("inert"))}})()`);
@@ -544,6 +547,7 @@ try {
         assertTopBar(measurement, width);
         assert.deepEqual(measurement.drawers, ["☰ Threads", "ⓘ Inspector"]);
     }
+    await devTools.evaluate(`document.querySelector(".qualification-control")?.remove()`);
     await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: true, maxTouchPoints: 1});
     await waitUntil(devTools, `matchMedia("(pointer: coarse)").matches`, "coarse-pointer media query");
     const touch = await devTools.evaluate(`({coarse:matchMedia("(pointer: coarse)").matches,
@@ -663,7 +667,7 @@ try {
     assert.deepEqual(settingsDom.unsupportedStyle,
         {disabled: true, title: "The selected model does not support style choices"});
     assert.deepEqual(settingsDom.fullAccessNetwork,
-        {value: "enabled", disabled: true, title: "Full access already includes network access"});
+        {value: "enabled", disabled: true, title: "Full access already includes network access", color: "rgb(152, 162, 179)", background: "rgb(246, 248, 251)"});
     assert.deepEqual(settingsDom.profileSelected,
         {value: ":workspace", access: "default", network: "default"});
     assert.match(settingsDom.changedText, /12 changed/u);
@@ -681,7 +685,8 @@ try {
             reasoning_effort: "low"}},
     });
 
-    console.log(JSON.stringify({browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    const catchup = await qualifyCatchup(devTools);
+    console.log(JSON.stringify({catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

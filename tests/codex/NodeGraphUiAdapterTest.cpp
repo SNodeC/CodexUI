@@ -5,6 +5,7 @@
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
 #include "codex/TurnSettingsPolicy.h"
+#include "codex/ProtocolTiming.h"
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 
@@ -2771,6 +2772,40 @@ bool frontendPresentationContractIsShared() {
   const auto check = [&passed](bool condition, const std::string &message) {
     passed &= require(condition, message.c_str());
   };
+  for (const auto &entry : contract.at("timingCases")) {
+    const auto times = protocolTimes(entry.at("body"), entry.at("method").get<std::string>(), entry.at("response").get<bool>());
+    auto actual = nlohmann::json::array();
+    for (const auto &time : times) {
+      nlohmann::json value{{"field", time.field}, {"unavailableZero", time.unavailableZero},
+          {"unit", time.unit == TimeUnit::Seconds ? "seconds" : time.unit == TimeUnit::Milliseconds ? "milliseconds" : "duration"}};
+      if (time.value) value["value"] = *time.value;
+      actual.push_back(std::move(value));
+    }
+    check(actual == entry.at("expected"), "shared timing contract: " + entry.at("id").get<std::string>());
+  }
+  for (const auto &entry : contract.at("tokenUsageCases")) {
+    nodegraph::NodeGraph graph;
+    NodeGraphUiAdapter adapter(graph);
+    {
+      auto write = graph.write();
+      for (const auto &thread : entry.at("threads")) {
+        auto node = write.upsert({NodeKind::Thread, thread.at("id").get<std::string>()});
+        write.setField(node, "tokenUsage", valueFromJson(thread.at("tokenUsage")));
+      }
+      if (entry.contains("account")) {
+        auto account = write.upsert({NodeKind::Account, "account/usage/read"});
+        write.setField(account, "summary", valueFromJson(entry.at("account").at("summary")));
+      }
+      static_cast<void>(write.finish());
+    }
+    auto read = graph.tryRead();
+    const auto usage = adapter.tokenUsage(read->find({NodeKind::Thread, entry.at("selected").get<std::string>()}), *read);
+    const std::string prefix = "shared token contract: " + entry.at("id").get<std::string>();
+    check(usage.thread.summary == entry.at("threadSummary").get<std::string>(), prefix + " thread");
+    check(usage.overall.summary == entry.at("overallSummary").get<std::string>(), prefix + " overall");
+    for (const auto &detail : entry.at("threadDetails")) check(usage.thread.details.find(detail.get<std::string>()) != std::string::npos, prefix + " thread details");
+    for (const auto &detail : entry.at("overallDetails")) check(usage.overall.details.find(detail.get<std::string>()) != std::string::npos, prefix + " overall details");
+  }
   const auto normalized = [](const std::string &raw) {
     const nodegraph::Value value(raw);
     return statusFromNode(nodegraph::nodeStatusFromValue(&value), raw);
