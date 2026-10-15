@@ -110,24 +110,38 @@ The following behavior is required before the combined product is called version
 | Connection | Configure a WebSocket URL, connect, disconnect, reconnect, and present bridge/provider state |
 | Roles | Present controller/observer state and claim or release control |
 | Threads | Discover, sort, select, hydrate, reload, create, rename, fork, archive, unarchive, and delete |
-| Hierarchy | Preserve parent/child ownership and expandable thread branches |
+| Hierarchy | Preserve parent/child ownership, expandable thread branches, and Go to parent across groups |
+| Organisation | Projects / Sections / Ungrouped, title search, Active / Archived / All, manual project and section ordering, group details/edit/delete, membership, and group-aware thread creation |
 | Turns | Start, steer, interrupt, resume when required, and recover after provider generations |
-| Composer | Retain drafts, admit prompts locally, queue independently per thread, and acknowledge by correlated result |
+| Composer | Retain drafts, admit prompts locally, queue independently per thread, acknowledge by correlated result, and explicitly restore failed prompts without automatic resubmission |
 | Settings | Model, reasoning, access, network, workspace path, approval, personality, profile, reviewer, service tier, summary, and collaboration mode |
 | Conversation | User, assistant, reasoning, command, file-change, agent, image-metadata, plan, and fallback activity cards |
 | Streaming | Update retained cards without reordering, rebuilding unchanged cards, or moving a paused reading position |
 | Attention | Present and resolve every supported pending-request category |
-| Inspector | Plan, Agents, Requests, State, and Protocol views |
+| Inspector | Plan, Agents, Requests, and Info with State, Protocol, and Timing details |
+| Telemetry | Selected-thread and overall token usage with context estimates, exact protocol timing, and explicit unavailable values |
 | Diagnostics | Bounded notices and human-readable event labels without changing protocol values |
-| Usability | Responsive desktop layout, keyboard operation, accessible names, contrast, and reduced-motion behavior |
+| Usability | Responsive desktop layout, keyboard/pointer pane resizing, hide/restore, keyboard operation, accessible names, contrast, and reduced-motion behavior |
 
 Prompt admission, stable first-response placement, per-thread scroll ownership, card folding, safe Markdown, bounded command output, controller eligibility, and reconnect hydration follow the native behavior documents. Visual geometry may be browser-native; the behavioral invariant may not silently change. Conversation paging pins each represented turn's complete-history root prompt as structural context outside the activity budget; steering prompts never become turn roots.
+
+The browser projects reusable colors and the brand icon from native `UiStyle` and the native SVG resource. Compact controls use Noto Sans at 10.667 px; conversation text and the prompt use 12 px with a 17 px line height. Desktop pane proportions, thread/group row heights, card borders, phase colors, disclosure/Copy glyphs, and the two-column basic settings follow the native presentation. Connection, grouping, token details, and additional settings use browser popovers with platform dismissal and focus behavior. Responsive drawers and coarse-pointer targets remain browser adaptations.
+
+Draft editing remains available offline and to observers; mutation eligibility still governs submission. Ordinary held typing, deletion, cursor movement, and selection belong to the textarea. Only submission Enter is intercepted, including suppression of repeated Enter; Shift+Enter and IME composition retain normal editing. The prompt grows from its compact 32 px editor to at most 20 text lines, including reflow after pane/window resizing, using the existing composer geometry observer.
+
+Projects and sections follow the [shared grouping behavior](../guides/thread-projects.md#page-overview). The browser replaces its global cursor with query-scoped pagers, bounded to two concurrent catalog reads. All issues separate active and archived queries; section order retains active-before-archived order. Filter changes retire old query identities before their responses can update the model. Group catalogs retain independent identity and causal revisions, including deletion, until the provider generation retires. Unsupported group methods fall back to the existing thread hierarchy and are not retried repeatedly in that provider connection. Section edits made by another frontend are discovered on explicit refresh, reconnect, or reopening the Threads drawer; the protocol has no invented section notification.
+
+A new-thread draft retains its project and section context. Creation sends the project in `thread/start`, then assigns the section. Section-assignment failure retains the created thread and admits its first prompt once; retry uses Assign section. Project description edits freshly read foreign metadata before replacing only `codexui.description`, with a controller/generation/identity check before the update. The protocol provides no compare-and-swap precondition.
+
+Five conversation controls retain Reasoning/Updates visibility and Command/Image/File Changes initial expansion preferences. Changing a default never refolds existing cards. Command text starts at the beginning; only output follows its tail. Command/output scroll state and Inspector agent disclosure belong to the existing thread-presentation lifetime and survive folding, tab changes, and temporary pane removal. Failed prompts offer Restore to composer, preserve exact text and creation context, refuse to overwrite authored text, and require explicit submission in the recovered draft.
+
+Token displays distinguish cumulative thread snapshots, the latest context estimate, available-thread aggregate coverage, and account lifetime scope. Timing uses schema-declared units and paths generated from the native timing table; missing/null values and filesystem zero sentinels remain explicit. Card timing opens the existing Info surface. Provider-local paths remain remote metadata, not browser-local file links.
 
 Controller selection refreshes metadata and live subscription with `thread/resume(excludeTurns:true)` before requesting one bounded `thread/turns/list` page. Observer selection starts directly with that read-only page. Selection becomes ready only after the first page; older turn pages are loaded one at a time by explicit demand, while item pages and active retained agent children use the same global bounded hydration policy as the native frontend. Neither frontend automatically requests complete retained history.
 
 Thread selection clears only the conversation message surface immediately. Hydration and React preparation remain identified by the latest selected thread; superseded results cannot reveal content. Loads finishing within 500 ms show no spinner. Longer loads show the same centered 30 px neutral-gray ring and 3 px stroke as the native UI, and remove both the ring and its CSS animation when the complete selected-thread frame is revealed.
 
-The responsive shell keeps Threads, Conversation, and Inspector visible above 1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes Inspector as an accessible overlay drawer; at 760 px and below Conversation is the single in-flow column and both side panes use accessible overlay drawers. The page itself must not overflow horizontally; narrow controls wrap or compact while intentionally scrollable card content retains its local overflow.
+The responsive shell initially keeps Threads, Conversation, and Inspector visible above 1160 px, with keyboard/pointer splitters and explicit hide/restore controls. At tablet widths it keeps Threads and Conversation in-flow and exposes Inspector as an accessible overlay drawer; at 760 px and below Conversation is the single in-flow column and both side panes use accessible overlay drawers. The page itself must not overflow horizontally; narrow controls wrap or compact while intentionally scrollable card content retains its local overflow.
 
 Pending-request cards disclose literal structured fields rather than exposing the retained raw request object. Their controls are generated per request family: declared approval decisions, multi-answer user input, MCP accept/decline/cancel, permission turn/session scope, legacy decisions, and explicit unavailable/unsupported results. Responses require a ready provider, current controller ownership, and the current request generation and identity; one sent response disables that request until authoritative removal.
 
@@ -162,7 +176,8 @@ These exclusions must not be represented by controls that appear functional. Add
 | JSON-RPC callbacks and connection snapshot | TypeScript frontend SDK |
 | Normalized threads, turns, items, plans, agents, requests, and telemetry | Web presentation model |
 | Exact thread-presentation identity, selected thread, settings drafts, card/tree folding, scroll anchors | Browser frontend session |
-| Inspector tab, focus, transient menus, and authored Composer form state | React application |
+| Inspector tab, focus, context menu, and authored Composer form state | React application |
+| Standard popover visibility, outside dismissal, Escape, and invoker focus return | Browser platform |
 
 State never appears in two owners in the same layer. Components receive typed projections and commands; they do not parse app-server methods or retain a second copy of normalized domain collections.
 

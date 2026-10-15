@@ -23,6 +23,8 @@ export type PresentationSink = (frame: PresentationFrame) => void;
 
 const stableScopeKeys = [
     "threadId",
+    "projectId",
+    "sectionId",
     "turnId",
     "itemId",
     "processId",
@@ -321,13 +323,13 @@ export class ProtocolNormalizer {
             if (action === "threads.list") {
                 const threads = member(value, "data", []);
                 data = {
-                    threads: Array.isArray(threads) ? threads : [],
+                    threads: Array.isArray(threads) ? threads.map(thread => isObject(thread) && context.archived === true ? {...thread, archived: true} : thread) : [],
                     nextCursor: member(value, "nextCursor"),
                     backwardsCursor: member(value, "backwardsCursor"),
                     ...requestSequence,
                 };
                 authority = "merge";
-            } else if (action === "thread.read") {
+            } else if (action === "thread.read" || action === "thread.metadata") {
                 const candidate = member(value, "thread", {});
                 const thread = isObject(candidate) ? candidate : {};
                 data = {thread, ...requestSequence};
@@ -370,6 +372,8 @@ export class ProtocolNormalizer {
                 }
                 data = {thread, ...requestSequence};
                 authority = "merge";
+            } else if (action === "projects.list" || action === "sections.list" || action.startsWith("project.") || action.startsWith("section.")) {
+                data = {...value, ...requestSequence}; authority = "merge";
             } else if (action === "models.list") {
                 const models = member(value, "data", []);
                 data = {

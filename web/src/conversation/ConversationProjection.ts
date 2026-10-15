@@ -252,7 +252,7 @@ export function projectConversation(
             showPendingAnimation: submission.state !== "failed"
                 && nowMilliseconds - submission.admittedAtMilliseconds >= PendingAnimationDelayMilliseconds,
             error: submission.error, imagePaths: localImagePaths(submission),
-            admittedAtMilliseconds: submission.admittedAtMilliseconds, requiresExplicitRecovery: false,
+            admittedAtMilliseconds: submission.admittedAtMilliseconds, requiresExplicitRecovery: submission.state === "failed",
         };
         const turnRootPosition = authoritativeItems.turnRoots.get(turnId);
         const turnRoot = turnRootPosition === undefined && submission.startsTurn;

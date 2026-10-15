@@ -3,12 +3,17 @@ import {isObject, stringMember} from "../presentation/PresentationProtocol.js";
 import type {AuthoritativeItemKey, LocalPromptKey, PromptState} from "./MiddleTypes.js";
 
 export interface AttachmentDraft {path: string; name: string; mimeType: string; size: number}
+export interface PromptRecoveryContext {
+    workspace: string; name: string; baseInstructions: string; developerInstructions: string;
+    ephemeral: boolean; projectId?: string; sectionId?: string;
+}
 export interface PromptSubmission {
     id: number; admissionOrdinal: number; threadId: string; clientUserMessageId: string; prompt: string;
     attachments: AttachmentDraft[]; turnOptions: Record<string, unknown>; state: PromptState;
     admittedAtMilliseconds: number; error: string; admissionAnchor?: AuthoritativeItemKey;
     startsTurn: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
     sortActivityAt?: number;
+    recoveryContext?: PromptRecoveryContext;
 }
 export interface PromptDispatch {
     id: number; threadId: string; clientUserMessageId: string; prompt: string; attachments: AttachmentDraft[];
@@ -99,13 +104,14 @@ export class PromptCoordinator {
 
     admit(threadId: string, prompt: string, attachments: AttachmentDraft[], turnOptions: Record<string, unknown>,
         authoritativeThread: ThreadPresentation | undefined, activeTurnId: string | undefined, now: number,
-        sortActivityAt?: number): number {
+        sortActivityAt?: number, recoveryContext?: PromptRecoveryContext): number {
         const submission: PromptSubmission = {
             id: this.nextSubmissionId++, admissionOrdinal: this.nextAdmissionOrdinal++, threadId,
             clientUserMessageId: `codexui-${now}-${this.nextSubmissionId - 1}`, prompt, attachments: structuredClone(attachments),
             turnOptions: structuredClone(turnOptions), state: "queued", admittedAtMilliseconds: now, error: "",
             startsTurn: activeTurnId === undefined,
         };
+        if (recoveryContext) submission.recoveryContext = structuredClone(recoveryContext);
         if (activeTurnId === undefined && sortActivityAt !== undefined) submission.sortActivityAt = sortActivityAt;
         if (activeTurnId !== undefined) submission.expectedTurnId = activeTurnId;
         if (authoritativeThread) {
