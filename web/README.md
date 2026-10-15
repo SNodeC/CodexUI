@@ -8,19 +8,19 @@
 
 CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to an AISuite `codex-bridge` WebSocket endpoint with the `codex` subprotocol. It contains no web server, bridge router, controller authority, or persistent Codex state. Its build and browser qualification require Node.js 22 or newer and Chrome or Chromium. Set `CHROME_BIN` to its executable if it is outside the usual system paths.
 
-## Source layout
+## Build workspace
 
 Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for installed SDK discovery, isolated application build and release qualification. The AISuite checkout location is not a dependency.
 
 Reusable browser colors and the brand icon are generated from native `src/codex/ui/UiStyle.h` and `resources/icons/codex-ui.svg`. After changing those sources, run `node web/tools/generate-ui-assets.mjs` from the repository root; do not edit `web/src/colors.css` or `web/src/brand.svg` independently. The test suite rejects drift.
 
-`npm run profile` from the prepared build-directory npm workspace repeats the large-thread presentation measurement. There is no standalone Node development or production server.
+`npm run profile` from the prepared `<browser-build>/web` npm workspace repeats the large-thread presentation measurement. There is no standalone Node development or production server.
 
 For the shortest launch path, use [First run: browser edition](../README.md#browser-edition).
 
 ## Deployment
 
-In the prepared npm workspace, `npm run build:app` creates the relocatable static artifact in `app-dist/`. The standalone packaging project verifies and installs it with:
+In the prepared `<browser-build>/web` npm workspace, `npm run build:app` creates the relocatable static artifact in `<browser-build>/web/app-dist/`. The standalone packaging project verifies and installs it with:
 
 ```sh
 cmake -S /path/to/CodexUI/web -B package-build \
@@ -30,7 +30,7 @@ cmake --build package-build --target codexui-web-artifact
 cmake --install package-build --component CodexWebUI
 ```
 
-The combined CodexUI build includes this project by default; select the built artifact with `CODEXUI_WEB_DIST_DIR` and installs the artifact in `share/codexui/web`; native-only builds must explicitly configure `-DCODEXUI_INSTALL_WEB=OFF`. The existing `codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the generated `/assets/` files from that directory while `/codex` remains the WebSocket upgrade route. A page delivered over HTTPS automatically derives the corresponding same-origin `wss://.../codex` URL.
+The combined CodexUI build includes this packaging project by default; select the built artifact with `CODEXUI_WEB_DIST_DIR`. Installation copies it into `<codexui-install-prefix>/share/codexui/web`; native-only builds must explicitly configure `-DCODEXUI_INSTALL_WEB=OFF`. The existing `codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the generated `/assets/` files while `/codex` remains the WebSocket upgrade route. Its default static root comes from AISuite's configured install data directory. If CodexUI is installed elsewhere, set `codex --bridge-web-root /path/to/installed/share/codexui/web` to the actual artifact directory; the installation prefixes need not match. A page delivered over HTTPS automatically derives the corresponding same-origin `wss://.../codex` URL.
 
 The configured bridge URL is retained in browser local storage. Controller/observer roles are not authentication; keep the listener on loopback or behind an external authenticated TLS boundary. Observers may receive broadcasts and read permitted workspace files. Provider-side workspace paths and generated-image paths are displayed as remote metadata; the application does not imply access to the browser machine's filesystem. Failed WebSocket openings release their transport through the SDK detach callback; an explicit retry waits for that release before constructing its replacement.
 
@@ -53,7 +53,7 @@ Verify page/assets delivery, the WSS handshake, controller/observer behavior and
 
 ## Verification
 
-Run these npm commands in the prepared build-directory workspace, not the source directory.
+Run these npm commands in the prepared `<browser-build>/web` workspace, not the source directory.
 
 - `npm test` builds TypeScript and runs all presentation, projection, lifecycle, viewport, supporting-surface, and server-render qualification tests.
 - `npm run build:app` verifies the production Vite bundle.

@@ -13,10 +13,10 @@ This document specifies candidate targets and qualification gates, not an announ
 | Component | Target version or revision | Release output |
 | --- | --- | --- |
 | CodexUI native application | 1.0.0 | installed `codex-ui`, desktop entry, and icon |
-| CodexWebUI | 1.0.0 | relocatable `web/app-dist/` static artifact |
+| CodexWebUI | 1.0.0 | relocatable `<browser-build>/web/app-dist/` static artifact |
 | AISuite frontend SDK | 1.0.0 from AISuite default-branch source | publishable `@snodec/codex-frontend` package |
 
-CI checks out AISuite default-branch source for both native and web jobs, and SNode.C default-branch source for the native build. Checkout logs record the resolved commits; dependency commits are not pinned. The source layout and build commands are documented in [the browser build guide](../guides/build-from-source.md#browser-frontend).
+CI checks out AISuite default-branch source for both native and web jobs, and SNode.C default-branch source for the native build. Checkout logs record the resolved commits; dependency commits are not pinned. The independent SDK and application builds are documented in [the browser build guide](../guides/build-from-source.md#browser-frontend).
 
 ## Qualification and release gate
 
@@ -30,7 +30,7 @@ A release candidate is eligible only when one CI revision proves all of the foll
 - the complete registered native CTest suite passes against AISuite default-branch source;
 - `git diff --check` passes and the recorded performance profile shows no material regression from `web-qualification.md`.
 
-The CI artifact is named `codexui-web`. Combined CMake builds require the web artifact by default; a native-only build must explicitly set `CODEXUI_INSTALL_WEB=OFF`. Installation copies the static tree into the CodexUI data directory, and the existing `codex-bridge` listener serves it alongside `/codex`. No Node process, web-specific backend, or protocol extension is part of the release.
+The CI artifact is named `codexui-web`. Combined CMake builds require the web artifact by default; a native-only build must explicitly set `CODEXUI_INSTALL_WEB=OFF`. Installation copies the static tree into the CodexUI data directory. The existing `codex-bridge` listener serves it alongside `/codex`; set `codex --bridge-web-root PATH` to the installed artifact when it differs from AISuite's configured default static root. No Node process, web-specific backend, or protocol extension is part of the release.
 
 ## Operator checks
 

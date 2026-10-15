@@ -13,7 +13,7 @@ set(CODEXUI_WEB_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/app-dist" CACHE PATH
 if(NOT EXISTS "${CODEXUI_WEB_DIST_DIR}/index.html")
     message(FATAL_ERROR
         "CodexWebUI artifact is missing at ${CODEXUI_WEB_DIST_DIR}. "
-        "Run 'npm ci' and 'npm run release' in the CodexWebUI source directory, "
+        "Build with web/cmake and set -DCODEXUI_WEB_DIST_DIR=<browser-build>/web/app-dist, "
         "or configure a native-only build with -DCODEXUI_INSTALL_WEB=OFF.")
 endif()
 

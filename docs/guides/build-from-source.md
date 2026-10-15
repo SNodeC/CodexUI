@@ -10,7 +10,7 @@
 
 ### Prerequisites
 
-The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets (the installed Qt version must satisfy that minimum), pkg-config, libgit2 development files, and compatible **SNode.C** and **AISuite** CMake installations. On Debian/Ubuntu, development packages include `libgit2-dev` and `qt6-base-dev` (plus your toolchain/build tools). Check the installed Qt version with `pkg-config --modversion Qt6Widgets`: the package name alone does not guarantee Qt 6.6+. Use a distribution/toolchain providing that minimum rather than bypassing CMake's check.
+The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets (the installed Qt version must satisfy that minimum), pkg-config, libgit2 development files, and compatible **SNode.C** and **AISuite** CMake installations. Their source checkouts and build directories are independent of CodexUI; CMake discovers their installed packages through `CMAKE_PREFIX_PATH`. On Debian/Ubuntu, development packages include `libgit2-dev` and `qt6-base-dev` (plus your toolchain/build tools). Check the installed Qt version with `pkg-config --modversion Qt6Widgets`: the package name alone does not guarantee Qt 6.6+. Use a distribution/toolchain providing that minimum rather than bypassing CMake's check.
 
 Build [SNode.C](https://github.com/SNodeC/snode.c#project-overview) and [AISuite](https://github.com/SNodeC/AISuite#project-overview) from their default branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
@@ -32,9 +32,9 @@ cmake -S . -B build -G Ninja \
 cmake --build build --parallel 14
 ```
 
-This is an explicit **native-only** build. For a combined install, build the web artifact first as described below, then configure with `CODEXUI_INSTALL_WEB=ON`.
+This is an explicit **native-only** build. For a combined install, build the web artifact first as described below, then configure with `CODEXUI_INSTALL_WEB=ON` and `CODEXUI_WEB_DIST_DIR=/path/to/build/codex-web/web/app-dist`.
 
-For the browser build and its required checkout layout, see [Browser frontend](#browser-frontend).
+For installed SDK prerequisites and browser build instructions, see [Browser frontend](#browser-frontend).
 
 ### Install the build
 
@@ -72,7 +72,7 @@ cmake -S web/cmake -B /path/to/build/codex-web -DCMAKE_PREFIX_PATH=/usr/local
 cmake --build /path/to/build/codex-web --target codexui-web-release
 ```
 
-CMake resolves the installed SDK archive, prepares an isolated npm workspace, and runs the existing complete release qualification. Generated package metadata, node_modules and browser artifacts stay in the build directory. Use `CMAKE_PREFIX_PATH` for a custom SDK installation prefix. Separate sibling build directories remain supported.
+CMake resolves the installed SDK archive, prepares an isolated npm workspace, and runs the existing complete release qualification. Generated package metadata, node_modules and browser artifacts stay in the build directory. Use `CMAKE_PREFIX_PATH` for a custom SDK installation prefix. No sibling checkout or build-directory arrangement is required.
 
 The output is `/path/to/build/codex-web/web/app-dist/`. Install it using the existing static-artifact packager:
 
