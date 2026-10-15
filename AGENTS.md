@@ -4,7 +4,7 @@ The global engineering instructions in `~/.codex/AGENTS.md` apply in full.
 
 ## Required reading: native interactive qualification
 
-[Canonical interactive Xvfb test suite and visual approval matrix](docs/qualification/native-test-suite.md).
+[Canonical interactive Xvfb test suite and visual approval matrix](docs/qualification/native-test-suite.md#banner).
 
 ## Markdown formatting
 

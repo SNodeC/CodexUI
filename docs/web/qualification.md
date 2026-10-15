@@ -1,13 +1,13 @@
 <!-- snodec:begin page-header -->
-<a id="page-overview"></a>
+<a id="banner"></a><a id="page-overview"></a>
 <p><picture><source media="(max-width: 640px)" srcset="../media/nav/banner-web-ui-compact.svg"><img src="../media/nav/banner-web-ui.svg" alt="CodexUI — Web UI" width="100%"></picture></p>
-<p><a href="README.md#page-overview" title="Up to Web UI"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-web-ui-dark.svg"><img src="../media/nav/up-web-ui-light.svg" alt="Up to Web UI" title="Up to Web UI" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNode.C organization"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/organization-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/organization-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization"></picture></a><a href="../../README.md#project-overview" title="CodexUI repository"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/repository-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/repository-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" title="CodexUI repository"></picture></a><br clear="all"></p>
+<p><a href="README.md#banner" title="Up to Web UI"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-web-ui-dark.svg"><img src="../media/nav/up-web-ui-light.svg" alt="Up to Web UI" title="Up to Web UI" width="160" height="28"></picture></a><a href="https://github.com/VolkerChristian#banner" title="Volker Christian account"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/account-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/account-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/account-dark.svg"><img align="right" src="../media/nav/account-light.svg" alt="Volker Christian account" title="Volker Christian account"></picture></a><a href="https://github.com/SNodeC#banner" title="SNode.C organization"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/organization-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/organization-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization"></picture></a><a href="../../README.md#banner" title="CodexUI repository"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/repository-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/repository-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" title="CodexUI repository"></picture></a><br clear="all"></p>
 <!-- snodec:end page-header -->
 
 # CodexWebUI qualification
 
 This record qualifies the browser frontend against
-[the web 1.0 contract](contract-1.0.md#page-overview). Cross-frontend agreement is
+[the web 1.0 contract](contract-1.0.md#banner). Cross-frontend agreement is
 evidence-backed only where the same fixture corpus is executed by native C++
 and browser TypeScript. The other suites are browser-local regression evidence;
 they neither execute Qt nor claim pixel identity with it.
@@ -160,7 +160,7 @@ Timing runs were serial and separate from builds/tests; all execution checks
 used `xvfb-run -a env QT_QPA_PLATFORM=offscreen`. The production artifact was
 rebuilt and its relocatability verified. Intermediate failures, source/LOC
 accounting, exact commands and qualification limitations are retained in the
-[remediation ledger](../architecture/remediation/findings-ledger/README.md#page-overview).
+[remediation ledger](../architecture/remediation/findings-ledger/README.md#banner).
 This is local-worktree evidence, not a claim of universally lag-free operation;
 the AISuite source change must accompany CodexUI in subsequent releases.
 

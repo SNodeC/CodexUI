@@ -1,7 +1,7 @@
 <!-- snodec:begin page-header -->
-<a id="page-overview"></a>
+<a id="banner"></a><a id="page-overview"></a>
 <p><picture><source media="(max-width: 640px)" srcset="../media/nav/banner-architecture-compact.svg"><img src="../media/nav/banner-architecture.svg" alt="CodexUI — Architecture" width="100%"></picture></p>
-<p><a href="README.md#page-overview" title="Up to Architecture"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-architecture-dark.svg"><img src="../media/nav/up-architecture-light.svg" alt="Up to Architecture" title="Up to Architecture" width="160" height="28"></picture></a><a href="https://github.com/SNodeC" title="SNode.C organization"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/organization-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/organization-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization"></picture></a><a href="../../README.md#project-overview" title="CodexUI repository"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/repository-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/repository-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" title="CodexUI repository"></picture></a><br clear="all"></p>
+<p><a href="README.md#banner" title="Up to Architecture"><picture><source media="(prefers-color-scheme: dark)" srcset="../media/nav/up-architecture-dark.svg"><img src="../media/nav/up-architecture-light.svg" alt="Up to Architecture" title="Up to Architecture" width="160" height="28"></picture></a><a href="https://github.com/VolkerChristian#banner" title="Volker Christian account"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/account-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/account-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/account-dark.svg"><img align="right" src="../media/nav/account-light.svg" alt="Volker Christian account" title="Volker Christian account"></picture></a><a href="https://github.com/SNodeC#banner" title="SNode.C organization"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/organization-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/organization-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/organization-dark.svg"><img align="right" src="../media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization"></picture></a><a href="../../README.md#banner" title="CodexUI repository"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="../media/nav/repository-icon-dark.svg"><source media="(max-width: 640px)" srcset="../media/nav/repository-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="../media/nav/repository-dark.svg"><img align="right" src="../media/nav/repository-light.svg" alt="CodexUI repository" title="CodexUI repository"></picture></a><br clear="all"></p>
 <!-- snodec:end page-header -->
 
 # CodexUI architecture
@@ -43,17 +43,17 @@ There is no internal JSONL, socketpair payload path, presentation model, mirror
 graph, snapshot history, or callback framework. The complete implemented
 native contract, ownership rules, protocol inventory, backpressure behavior,
 widget binding, and qualification are in
-[two-thread-shared-node-graph.md](shared-node-graph.md#page-overview).
+[two-thread-shared-node-graph.md](shared-node-graph.md#banner).
 
 Concrete interaction and rendering behavior is specified in
-[ui-behavior.md](../guides/interaction-guide.md#page-overview).
+[ui-behavior.md](../guides/interaction-guide.md#banner).
 
 ## Browser application
 
 The browser frontend connects to `codex-bridge` over WebSocket and has a
 separate TypeScript implementation appropriate to that process boundary. Its
 architecture, parity boundary, and limitations are documented in
-[web-1.0-contract.md](../web/contract-1.0.md#page-overview). The native node graph is not a new
+[web-1.0-contract.md](../web/contract-1.0.md#banner). The native node graph is not a new
 service or public protocol and is not shared with the browser.
 
 ## Local Git Changes
