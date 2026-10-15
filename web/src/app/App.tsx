@@ -1,6 +1,6 @@
 import {protocolTimes, targetTimes, timingSummary, timingDetails, tokenUsage} from "../presentation/PresentationTelemetry.js";
 import type {ProtocolTime, TimingTarget, TokenUsageText} from "../presentation/PresentationTelemetry.js";
-import {memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
+import {memo, useId, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -96,11 +96,11 @@ function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "
 }
 
 function CopyIcon({checked}: {checked: boolean}) {
-    return <svg viewBox="0 0 16 16" aria-hidden="true"><g className="copy-glyph"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></g><path className="check-glyph" d="m3 8 3.25 3.25L14 3.5" data-visible={checked ? "true" : "false"}/></svg>;
+    return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><g className="copy-glyph"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></g><path className="check-glyph" d="m3 8 3.25 3.25L14 3.5" data-visible={checked ? "true" : "false"}/></svg>;
 }
 
-function FoldIcon({collapsed}: {collapsed: boolean}) {
-    return <svg viewBox="0 0 16 16" aria-hidden="true"><path d={collapsed ? "m10 3-5 5 5 5" : "m3 6 5 5 5-5"} /></svg>;
+function FoldIcon({collapsed, leading = false}: {collapsed: boolean; leading?: boolean}) {
+    return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={collapsed ? leading ? "m6 3 5 5-5 5" : "m10 3-5 5 5 5" : "m3 6 5 5 5-5"} /></svg>;
 }
 
 function ImageRibbon({paths}: {paths: string[]}) {
@@ -157,7 +157,7 @@ function StatusDot({tone}: {tone: string}) { return <span className={`status-dot
 
 const ThreadSortControl = memo(function ThreadSortControl({value, onChange}: {value: ThreadSortCriterion;
     onChange: (value: ThreadSortCriterion) => void}) {
-    return <label className="thread-sort"><span>Sort</span><select aria-label="Thread sort order" value={value}
+    return <label className="thread-sort"><span>Sort:</span><select aria-label="Thread sort order" value={value}
         onChange={event => onChange(event.target.value as ThreadSortCriterion)}>
         <option value="alphanumeric">Alphanumeric</option><option value="created">Created</option>
         <option value="recent">Recent</option><option value="section">Section order</option></select></label>;
@@ -275,9 +275,9 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         return <div key={presentationKey} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
             aria-posinset={position} aria-setsize={setSize} aria-expanded={hasChildren ? expanded : undefined}
             aria-label={accessibleDetails} title={hoverDetails.join("\n")}>
-            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextOpen ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
+            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextOpen ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 12}px`}}
                 onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, presentationKey, event.clientX, event.clientY, event.currentTarget.querySelector<HTMLElement>(".thread-row") ?? event.currentTarget); }}>
-                <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded ? "⌄" : "›") : ""}</button>
+                <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren && <FoldIcon collapsed={!expanded} leading />}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
                     aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id, presentationKey), onClose)}>
                     <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : statusTone(status) || "muted"} /><span className="thread-title">{title}</span>
@@ -306,8 +306,8 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const renderGroup = (kind: "project" | "section", group: WorkspaceGroup, ids: string[], nested = false, projectId = ""): ReactNode => {
         const expanded = session.groupExpanded(`${kind}:${group.id}`);
         const active = membership(selected, `${kind}Id`) === group.id;
-        return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={groupLabel(kind, group)} aria-expanded={expanded}>
-            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}>{expanded ? "⌄" : "›"} {groupLabel(kind, group)}</button>
+        return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={groupLabel(kind, group)} aria-expanded={expanded}>
+            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><span>{kind === "project" ? "Project · " : !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
                 <button className="thread-menu-trigger group-menu-trigger" aria-label={`Actions for ${groupLabel(kind, group)}`} aria-haspopup="menu"
                     aria-expanded={contextGroup?.group === group && contextGroup.projectId === projectId}
                     onClick={event => { const bounds = event.currentTarget.getBoundingClientRect(); setContextMenu({kind, group, projectId, x: bounds.right, y: bounds.bottom, trigger: event.currentTarget}); }}>•••</button></header>
@@ -325,17 +325,18 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const standalone = roots.filter(id => !projectRoots.some(group => membership(id, "projectId") === group.id));
     return <aside ref={paneRef} className={`thread-pane${drawer ? " responsive-drawer drawer-left" : ""}`} id={drawer ? "thread-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "thread-pane-title" : undefined}>
-        <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
-            <div className="pane-heading-actions"><button className="icon-button" onClick={() => onRequestNewThread()} title="New thread" aria-label="New thread">＋</button>
+        <div className="pane-heading"><div><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
+            <div className="pane-heading-actions">
                 {onHide && <button onClick={onHide} aria-label="Hide Threads">Hide</button>}
                 {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
-        <div className="thread-browser-controls"><label>Group<select aria-label="Thread grouping" value={session.browser.grouping} onChange={event => session.changeBrowser({grouping: event.target.value as typeof session.browser.grouping})}><option value="projects">Projects</option><option value="sections">Sections</option><option value="ungrouped">Ungrouped</option></select></label>
+        <button className="new-thread-button" onClick={() => onRequestNewThread()} aria-label="New thread">+ New thread</button>
+        <div className="thread-toolbar"><Menu className="thread-browser-menu" label={`${humanize(session.browser.grouping)} ⌄`}><div className="thread-browser-controls">
+            <label>Group<select aria-label="Thread grouping" value={session.browser.grouping} onChange={event => session.changeBrowser({grouping: event.target.value as typeof session.browser.grouping})}><option value="projects">Projects</option><option value="sections">Sections</option><option value="ungrouped">Ungrouped</option></select></label>
             <button onClick={() => session.refreshBrowser()} disabled={!providerReady}>Refresh</button>
             <button disabled={!session.canSubmit() || !session.groupingAvailable()} onClick={() => onRequestGroup("project")}>New project…</button><button disabled={!session.canSubmit() || !session.groupingAvailable()} onClick={() => onRequestGroup("section")}>New section…</button>
             <label><input type="checkbox" checked={session.browser.manualProjects} onChange={event => session.changeBrowser({manualProjects: event.target.checked})} />Manual project order</label>
-            <input aria-label="Search thread titles" placeholder="Search titles · Enter" value={search} onChange={event => { setSearch(event.target.value); if (!event.target.value) session.changeBrowser({search: ""}); }} onKeyDown={event => { if (event.key === "Enter") session.changeBrowser({search: search.trim()}); }} />
-            <label>Show<select aria-label="Thread archive filter" value={session.browser.archive} onChange={event => session.changeBrowser({archive: event.target.value as typeof session.browser.archive})}><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
-        <ThreadSortControl value={sortCriterion} onChange={sort => session.changeBrowser({sort})} />
+        </div></Menu><ThreadSortControl value={sortCriterion} onChange={sort => session.changeBrowser({sort})} /></div>
+        <div className="thread-filter"><input aria-label="Search thread titles" placeholder="Search titles · Enter" value={search} onChange={event => { setSearch(event.target.value); if (!event.target.value) session.changeBrowser({search: ""}); }} onKeyDown={event => { if (event.key === "Enter") session.changeBrowser({search: search.trim()}); }} /><label><span className="visually-hidden">Show</span><select aria-label="Thread archive filter" value={session.browser.archive} onChange={event => session.changeBrowser({archive: event.target.value as typeof session.browser.archive})}><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
         <div className="thread-list" role="tree" aria-label="Threads"
             onScroll={event => requestMoreNearEnd(event.currentTarget)}>
             {projectRoots.map(group => renderGroup("project", group, roots.filter(id => membership(id, "projectId") === group.id)))}
@@ -824,10 +825,11 @@ function Conversation({session, paneControls, onInspect, usage}: {session: Brows
     useBrowserLayoutEffect(() => {
         const dock = composerDock.current; const owner = pane.current;
         if (!dock || !owner || typeof ResizeObserver === "undefined") return;
-        let previousHeight = 0;
+        let previousHeight = 0, previousWidth = dock.clientWidth;
         const observer = new ResizeObserver(() => {
             if (session.threadVisualKey(projectionId) !== presentationKey) return;
-            const element = scroll.current; const height = Math.ceil(dock.getBoundingClientRect().height);
+            const width = dock.clientWidth; if (width !== previousWidth) { const editor = dock.querySelector("textarea"); if (editor) resizePromptEditor(editor); previousWidth = width; }
+            const element = scroll.current; const height = Math.ceil(owner.getBoundingClientRect().bottom - dock.getBoundingClientRect().top);
             if (height === previousHeight) return;
             const saved = viewport.scroll(projectionId, presentationKey);
             const anchor = element ? conversationAnchor(element) ?? saved.anchor : saved.anchor;
@@ -892,13 +894,13 @@ function Conversation({session, paneControls, onInspect, usage}: {session: Brows
             {...(card.kind === "commandExecution" ? {commandScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:command`, false), outputScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:output`, true)} : {})} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
-        <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
+        <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">CONVERSATION</span>
             <div className="conversation-lockup"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
-                <p className="conversation-meta">{thread ? thread.cwd
-                    : projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>
-                <TokenUsage content={usage} />
-                {thread && <button className="thread-timing" onClick={() => onInspect("timing", {threadId: projectionId})} title={timingDetails(protocolTimes(thread.raw, "Thread"))}>Thread timing</button>}
-                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={statusTone(thread.status)}>{displayStatus(thread.status)}</strong></p>}</div></div>
+                {!thread && <p className="conversation-meta">{projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>}
+                {thread && <span className={`conversation-state ${statusTone(thread.status)}`}>{displayStatus(thread.status)}</span>}
+                <div className="conversation-facts"><TokenUsage content={usage} />
+                {thread && <button className="thread-timing" onClick={() => onInspect("timing", {threadId: projectionId})} aria-label="Thread timing" title={timingDetails(protocolTimes(thread.raw, "Thread"))}>◷</button>}
+                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)}</p>}</div></div></div>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
@@ -926,7 +928,7 @@ function Conversation({session, paneControls, onInspect, usage}: {session: Brows
                         session.loadMoreHistory(projectionId, presentationKey);
                     forceCardState(value => value + 1);
                 }}>{historyPagePending ? "Loading earlier activity…" : "Load earlier activity"}</button>}
-                    {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
+                    {visibleSections.length === 0 && <div className="empty-state"><h3>Conversation activity appears here</h3></div>}
                     {visibleSections.map(section => {
                         const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
                         const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
@@ -957,13 +959,9 @@ function Conversation({session, paneControls, onInspect, usage}: {session: Brows
 
 const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange}: {draft: SettingDraft;
     presentation: SettingPresentation; onChange: (field: SettingField, value: string) => void}) {
-    const [open, setOpen] = useState(false);
     const {values, touched} = draft;
     const select = (label: string, field: SettingField, choices: SettingPresentation["models"], enabled = true, tooltip = "") => <label title={tooltip || undefined}><span>{label}</span><select value={values[field]} disabled={!enabled} onChange={event => onChange(field, event.target.value)}>{choices.map(choice => <option key={choice.value} value={choice.value} title={choice.description || undefined}>{choice.label}</option>)}</select></label>;
-    return <div className={`settings-panel ${open ? "open" : ""}`}
-        onWheel={event => event.preventDefault()}>
-        <button className="settings-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>Turn settings <span>{touched.size > 0 ? `${touched.size} changed` : "Thread defaults"} {open ? "⌃" : "⌄"}</span></button>
-        {open && <div className="settings-grid">
+    return <div className="settings-panel" onWheel={event => event.preventDefault()}><div className="settings-grid">
             {select("Model", "model", presentation.models)}
             {select("Reasoning", "effort", presentation.efforts)}
             {select("Access", "sandbox", fixedSettingChoices("sandbox", values.sandbox))}
@@ -971,14 +969,32 @@ const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange
             <label><span>Workspace</span><input value={values.cwd} placeholder="Provider workspace path" onChange={event => onChange("cwd", event.target.value)} /></label>
             {select("Approval", "approval", fixedSettingChoices("approval", values.approval))}
             {select("Style", "personality", fixedSettingChoices("personality", values.personality), presentation.personalityDisabledReason === "", presentation.personalityDisabledReason)}
+            <div className="additional-setting"><span>Additional</span><Menu className="additional-settings" label={`More${touched.size > 0 ? ` · ${touched.size} changed` : ""}`}><div>
             {select("Approval reviewer", "reviewer", fixedSettingChoices("reviewer", values.reviewer))}
             {select("Permission profile", "permissionProfile", presentation.permissionProfiles)}
             {select("Service tier", "serviceTier", presentation.serviceTiers)}
             {select("Reasoning summary", "summary", fixedSettingChoices("summary", values.summary))}
             {select("Collaboration mode", "collaboration", fixedSettingChoices("collaboration", values.collaboration))}
-        </div>}
+            </div></Menu></div>
+        </div>
     </div>;
 }, (previous, current) => previous.draft === current.draft && previous.presentation === current.presentation);
+
+function Menu({label, className, children}: {label: string; className: string; children: ReactNode}) {
+    const id = useId();
+    return <div className={className}><button type="button" {...{popovertarget: id}}>{label}</button><div id={id} className="menu-popover" {...{popover: "auto"}} role="dialog" aria-label={label} onWheel={event => event.stopPropagation()} onClick={event => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.hidePopover(); }}>{children}</div></div>;
+}
+
+function resizePromptEditor(element: HTMLTextAreaElement) {
+    element.form?.classList.remove("expanded");
+    element.style.height = "auto";
+    element.form?.classList.toggle("expanded", element.scrollHeight > 32);
+    const maximum = Math.ceil(parseFloat(getComputedStyle(element).lineHeight) * 20 + 10);
+    element.style.maxHeight = `${maximum}px`;
+    element.style.height = `${Math.min(element.scrollHeight, maximum)}px`;
+    element.style.overflowY = element.scrollHeight > maximum ? "auto" : "hidden";
+    if (element.scrollHeight <= maximum) element.scrollTop = 0;
+}
 
 function Composer({session, presentationKey, active, options, prompt, onChange}: {prompt: string; onChange: (text: string) => void; session: BrowserFrontendSession;
     presentationKey: string; active: boolean; options: ReturnType<typeof settingPromptOptions>}) {
@@ -986,14 +1002,7 @@ function Composer({session, presentationKey, active, options, prompt, onChange}:
     const editor = useRef<HTMLTextAreaElement>(null);
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     useBrowserLayoutEffect(() => {
-        const element = editor.current;
-        if (!element) return;
-        element.style.height = "auto";
-        const maximum = 180;
-        element.style.height = `${Math.min(element.scrollHeight, maximum)}px`;
-        const scrollable = element.scrollHeight > maximum;
-        element.style.overflowY = scrollable ? "auto" : "hidden";
-        if (!scrollable) element.scrollTop = 0;
+        if (editor.current) resizePromptEditor(editor.current);
     }, [prompt]);
     const submit = (event: FormEvent) => {
         event.preventDefault();
@@ -1003,19 +1012,19 @@ function Composer({session, presentationKey, active, options, prompt, onChange}:
         setPrompt("");
     };
     return <form className="composer" onSubmit={submit}>
-        <textarea ref={editor} value={prompt} disabled={!active} onChange={event => setPrompt(event.target.value)}
+        <textarea ref={editor} value={prompt} onChange={event => setPrompt(event.target.value)}
             aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
             onKeyDown={event => { const composing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229; if (shouldSubmitPromptFromKey({
                 key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
                 shiftKey: event.shiftKey, repeat: event.repeat,
                 isComposing: composing,
             })) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
-            else if (event.repeat && !event.shiftKey && !composing) event.preventDefault(); }}
+            else if (event.key === "Enter" && event.repeat && !event.shiftKey && !composing) event.preventDefault(); }}
             onWheel={event => event.stopPropagation()}
-            placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={1} />
-        <div className="composer-actions"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span>
-            <span className="composer-submit-actions"><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || prompt.trim() === ""}>{running ? "Steer ↑" : "Send ↑"}</button>
-                {running && <button type="button" className="stop-button" onClick={() => session.interrupt(presentationKey)}>■ Stop</button>}</span></div>
+            placeholder="Message Codex" rows={1} />
+        <div className="composer-actions"><span id="composer-keyboard-hint" className="visually-hidden">Enter to send · Shift+Enter for a new line</span>
+            <span className="composer-submit-actions"><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || prompt.trim() === ""}>{running ? "Steer" : "Send"}</button>
+                {running && <button type="button" className="stop-button" onClick={() => session.interrupt(presentationKey)}>Stop</button>}</span></div>
     </form>;
 }
 
@@ -1099,7 +1108,7 @@ function Inspector({session, inspection, onInspect, drawer = false, paneRef, onC
     const plainState = inspectorPlainState(selected, tab === "state");
     return <aside ref={paneRef} className={`inspector-pane${drawer ? " responsive-drawer drawer-right" : ""}`} id={drawer ? "inspector-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "inspector-pane-title" : undefined}>
-        <div className="pane-heading"><div><span className="eyebrow">Details</span><h2 id={drawer ? "inspector-pane-title" : undefined}>Inspector</h2></div>
+        <div className="pane-heading"><div><h2 id={drawer ? "inspector-pane-title" : undefined}>Inspector</h2></div>
             {onHide && <button onClick={onHide} aria-label="Hide Inspector">Hide</button>}
             {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Inspector drawer">×</button>}</div>
         <nav className="inspector-tabs">{(["plan", "agents", "requests", "info"] as const).map(value =>
@@ -1124,7 +1133,7 @@ function Inspector({session, inspection, onInspect, drawer = false, paneRef, onC
     </aside>;
 }
 function TokenUsage({content}: {content: TokenUsageText}) {
-    return <details className="token-usage"><summary>{content.summary}</summary><pre>{content.details}</pre></details>;
+    return <Menu className="token-usage" label={content.summary}><pre>{content.details}</pre></Menu>;
 }
 
 function Info({label, value}: {label: string; value: string}) { return <div className="info-row"><span>{label}</span><strong>{value || "—"}</strong></div>; }
@@ -1208,7 +1217,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const [url, setUrl] = useState(snapshot.bridgeUrl);
     const canControl = role === "controller";
     const [inspection, setInspection] = useState<Inspection>({tab: "plan", detail: "choices"});
-    const [panes, setPanes] = useState({threads: true, inspector: true, left: 260, right: 300});
+    const [panes, setPanes] = useState({threads: true, inspector: true, left: 282, right: 404});
     const responsiveMode = useResponsiveMode();
     const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
     const [newThreadDialog, setNewThreadDialog] = useState(false);
@@ -1248,6 +1257,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
         if (forkWithOptionsTarget && !activeForkTarget) setForkWithOptionsTarget(null);
     }, [forkWithOptionsTarget, activeForkTarget]);
     useBrowserLayoutEffect(() => {
+        if (modalOpen) for (const popover of shell.current?.querySelectorAll<HTMLElement>(":popover-open") ?? []) popover.hidePopover();
         for (const region of shell.current?.querySelectorAll<HTMLElement>("[data-modal-background]") ?? [])
             region.toggleAttribute("inert", modalOpen);
         if (!modalOpen && pendingFocusReturn.current) {
@@ -1263,10 +1273,10 @@ export function App({session}: {session: BrowserFrontendSession}) {
         const trigger = activeDrawer === "threads" ? threadTrigger.current : inspectorTrigger.current;
         if (!pane) return;
         const focusableSelector = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex=\"-1\"])";
-        const focusables = () => [...pane.querySelectorAll<HTMLElement>(focusableSelector)].filter(element => element.offsetParent !== null);
+        const focusables = () => [...pane.querySelectorAll<HTMLElement>(focusableSelector)].filter(element => element.getClientRects().length > 0);
         (pane.querySelector<HTMLElement>("[data-drawer-close]") ?? pane).focus();
         const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape") { event.preventDefault(); closeDrawer(); return; }
+            if (event.key === "Escape" && !document.querySelector(":popover-open")) { event.preventDefault(); closeDrawer(); return; }
             if (event.key !== "Tab") return;
             const available = focusables();
             if (available.length === 0) { event.preventDefault(); pane.focus(); return; }
@@ -1308,15 +1318,15 @@ export function App({session}: {session: BrowserFrontendSession}) {
         {inspectorOverlay && <button ref={inspectorTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="inspector-pane" aria-expanded={activeDrawer === "inspector"} onClick={() => setDrawer("inspector")}><span aria-hidden="true">ⓘ</span> Inspector</button>}
     </>;
     return <div ref={shell} className={`app-shell${activeDrawer ? " drawer-visible" : ""}`}>
-        <header className="top-bar" data-modal-background aria-hidden={modalOpen || undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
+        <header className="top-bar" data-modal-background aria-hidden={modalOpen || undefined}><div className="brand"><img className="brand-mark" src={new URL("../brand.svg", import.meta.url).href} alt="" /><b>CodexUI</b><small>Codex agent workspace</small></div>
             <div className="workspace-breadcrumb">{session.model.thread(snapshot.selectedThreadId)?.cwd || snapshot.newThreadDraft?.workspace || "No workspace"}</div>
             <div className="top-actions">
                 {responsiveMode === "desktop" && !panes.threads && <button onClick={() => setPanes(current => ({...current, threads: true}))}>Show threads</button>}
                 {responsiveMode === "desktop" && !panes.inspector && <button onClick={() => setPanes(current => ({...current, inspector: true}))}>Show inspector</button>}
                 {session.model.pendingRequestPresentations().size > 0 && <button className="requests-indicator" onClick={() => inspect("requests")}>{session.model.pendingRequestPresentations().size} requests</button>}
                 {connection.connected && <button className="subtle-button" onClick={() => canControl ? session.releaseController() : session.claimController()}>{canControl ? "Release control" : "Claim control"}</button>}
-                <label className="connection-control"><input value={url} onChange={event => setUrl(event.target.value)} aria-label="Bridge WebSocket URL" />
-                    <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label>
+                <Menu className="connection-menu" label="Connection ⌄"><label className="connection-control"><input value={url} onChange={event => setUrl(event.target.value)} aria-label="Bridge WebSocket URL" />
+                    <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label></Menu>
             </div>
         </header>
         {snapshot.notice && <div className="notice-banner" data-modal-background role="alert" aria-hidden={modalOpen || undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}

@@ -125,6 +125,10 @@ The following behavior is required before the combined product is called version
 
 Prompt admission, stable first-response placement, per-thread scroll ownership, card folding, safe Markdown, bounded command output, controller eligibility, and reconnect hydration follow the native behavior documents. Visual geometry may be browser-native; the behavioral invariant may not silently change. Conversation paging pins each represented turn's complete-history root prompt as structural context outside the activity budget; steering prompts never become turn roots.
 
+The browser projects reusable colors and the brand icon from native `UiStyle` and the native SVG resource. Compact controls use Noto Sans at 10.667 px; conversation text and the prompt use 12 px with a 17 px line height. Desktop pane proportions, thread/group row heights, card borders, phase colors, disclosure/Copy glyphs, and the two-column basic settings follow the native presentation. Connection, grouping, token details, and additional settings use browser popovers with platform dismissal and focus behavior. Responsive drawers and coarse-pointer targets remain browser adaptations.
+
+Draft editing remains available offline and to observers; mutation eligibility still governs submission. Ordinary held typing, deletion, cursor movement, and selection belong to the textarea. Only submission Enter is intercepted, including suppression of repeated Enter; Shift+Enter and IME composition retain normal editing. The prompt grows from its compact 32 px editor to at most 20 text lines, including reflow after pane/window resizing, using the existing composer geometry observer.
+
 Projects and sections follow the [shared grouping behavior](../guides/thread-projects.md#page-overview). The browser replaces its global cursor with query-scoped pagers, bounded to two concurrent catalog reads. All issues separate active and archived queries; section order retains active-before-archived order. Filter changes retire old query identities before their responses can update the model. Group catalogs retain independent identity and causal revisions, including deletion, until the provider generation retires. Unsupported group methods fall back to the existing thread hierarchy and are not retried repeatedly in that provider connection. Section edits made by another frontend are discovered on explicit refresh, reconnect, or reopening the Threads drawer; the protocol has no invented section notification.
 
 A new-thread draft retains its project and section context. Creation sends the project in `thread/start`, then assigns the section. Section-assignment failure retains the created thread and admits its first prompt once; retry uses Assign section. Project description edits freshly read foreign metadata before replacing only `codexui.description`, with a controller/generation/identity check before the update. The protocol provides no compare-and-swap precondition.
@@ -172,7 +176,8 @@ These exclusions must not be represented by controls that appear functional. Add
 | JSON-RPC callbacks and connection snapshot | TypeScript frontend SDK |
 | Normalized threads, turns, items, plans, agents, requests, and telemetry | Web presentation model |
 | Exact thread-presentation identity, selected thread, settings drafts, card/tree folding, scroll anchors | Browser frontend session |
-| Inspector tab, focus, transient menus, and authored Composer form state | React application |
+| Inspector tab, focus, context menu, and authored Composer form state | React application |
+| Standard popover visibility, outside dismissal, Escape, and invoker focus return | Browser platform |
 
 State never appears in two owners in the same layer. Components receive typed projections and commands; they do not parse app-server methods or retain a second copy of normalized domain collections.
 

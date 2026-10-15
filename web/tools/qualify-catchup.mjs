@@ -39,7 +39,7 @@ export async function qualifyCatchup(devTools) {
             }
             this.sent.push(message);queueMicrotask(()=>this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:payload.id,result}}));
         };
-        notify("thread/started",{thread:threads.get("profile")});button("Refresh").click();
+        notify("thread/started",{thread:threads.get("profile")});document.querySelector(".thread-browser-menu > button").click();button("Refresh").click();
         await waitFor(()=>document.querySelectorAll(".browser-group").length>=3,"group catalogs");await frame();
         check(document.querySelector(".thread-list").textContent.includes("Empty section"),"empty section discoverable");
         check([...document.querySelectorAll(".thread-title")].filter(node=>node.textContent==="Profile thread").length===1,"thread not duplicated");
@@ -58,7 +58,7 @@ export async function qualifyCatchup(devTools) {
         set([...dialog.querySelectorAll("label")].find(label=>label.textContent.startsWith("Description")).querySelector("textarea"),"Updated description");
         button("Save",dialog).click();await waitFor(()=>!document.querySelector("dialog[open]"),"project saved");
         check(projects.get("p").metadata.foreign==="preserved"&&projects.get("p").metadata["codexui.description"]==="Updated description","foreign project metadata retained");
-        button("New section…").click();await waitFor(()=>document.querySelector("dialog[open]"),"section create dialog");
+        document.querySelector(".thread-browser-menu > button").click();button("New section…").click();await waitFor(()=>document.querySelector("dialog[open]"),"section create dialog");
         const sectionDialog=document.querySelector("dialog[open]");set(sectionDialog.querySelector("input"),"New empty section");button("Save",sectionDialog).click();
         await waitFor(()=>!document.querySelector("dialog[open]")&&document.querySelector(".thread-list").textContent.includes("New empty section"),"section created");
         const archive=document.querySelector('[aria-label="Thread archive filter"]');set(archive,"archived");
@@ -73,7 +73,7 @@ export async function qualifyCatchup(devTools) {
         button("New thread here…",document.querySelector(".thread-context-menu")).click();await waitFor(()=>document.querySelector(".modal-backdrop"),"grouped thread dialog");
         check(document.querySelector(".new-thread-dialog input").value==="/workspace/alpha","project root inherited inside section");
         button("Continue",document.querySelector(".modal-backdrop")).click();await frame();
-        const editor=document.querySelector('[aria-label="Message Codex"]');set(editor,"grouped prompt");button("Send ↑").click();
+        const editor=document.querySelector('[aria-label="Message Codex"]');set(editor,"grouped prompt");button("Send").click();
         await waitFor(()=>socket.sent.some(message=>message.payload?.method==="thread/section/move"),"section assignment after creation");await frame();
         const created=[...threads.values()].find(thread=>thread.id.startsWith("created-"));
         check(created.projectId==="p"&&created.section.id==="s","group context reaches provider");
@@ -115,6 +115,69 @@ export async function qualifyCatchup(devTools) {
         return {groups:true,metadata:true,search:true,archive:true,groupedCreation:true,tokens:true,timing:true,commandScroll:true,agents:true,attention:true,panes:true};
     })()`);
     assert.equal(Object.values(result).every(Boolean), true);
+    const setPrompt = async value => {
+        await devTools.evaluate(`(()=>{const e=document.querySelector('[aria-label="Message Codex"]');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(e,${JSON.stringify(value)});e.dispatchEvent(new Event("input",{bubbles:true}));e.focus();e.setSelectionRange(e.value.length,e.value.length);})()`);
+        await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    };
+    const promptState = () => devTools.evaluate(`(()=>{const e=document.querySelector('[aria-label="Message Codex"]');return {text:e.value,start:e.selectionStart,end:e.selectionEnd,height:e.clientHeight,content:e.scrollHeight,overflow:getComputedStyle(e).overflowY};})()`);
+    const key = async (key,code,number,text="",repeat=false,modifiers=0) => {
+        await devTools.call("Input.dispatchKeyEvent",{type:"keyDown",key,code,windowsVirtualKeyCode:number,...(text?{text,unmodifiedText:text}:{}),autoRepeat:repeat,modifiers});
+        await devTools.call("Input.dispatchKeyEvent",{type:"keyUp",key,code,windowsVirtualKeyCode:number,modifiers});
+    };
+    await setPrompt("xy");await key("a","KeyA",65,"a");for(let i=0;i<3;i++)await key("a","KeyA",65,"a",true);
+    assert.equal((await promptState()).text,"xyaaaa","ordinary repeated typing remains native editing");
+    for(let i=0;i<3;i++)await key("Backspace","Backspace",8,"",true);
+    assert.equal((await promptState()).text,"xya","repeated Backspace deletes text");
+    for(let i=0;i<3;i++)await key("ArrowLeft","ArrowLeft",37,"",true);
+    assert.equal((await promptState()).start,0,"repeated arrows move the caret");
+    for(let i=0;i<2;i++)await key("ArrowRight","ArrowRight",39,"",true,8);
+    assert.equal((await promptState()).end,2,"repeated Shift+arrow extends selection");
+    await setPrompt("line");await key("Enter","Enter",13,"\r",true,8);
+    assert.equal((await promptState()).text,"line\n","repeated Shift+Enter inserts a newline");
+    const wireBefore = await devTools.evaluate(`globalThis.codexuiCatchup.socket.sent.length`);
+    await key("Enter","Enter",13,"\r",true);
+    assert.equal(await devTools.evaluate(`globalThis.codexuiCatchup.socket.sent.length`),wireBefore,"repeated submit Enter does not send");
+    await devTools.call("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+    await setPrompt("a ".repeat(200));const beforeResize=await promptState();
+    await devTools.call("Emulation.setDeviceMetricsOverride",{width:360,height:900,deviceScaleFactor:1,mobile:false});
+    await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    const afterResize=await promptState();
+    assert.equal(afterResize.text,beforeResize.text,"resizing retains the exact draft");
+    assert(afterResize.height>=afterResize.content||afterResize.overflow==="auto","resized prompt never hides wrapped content");
+    assert(afterResize.height>beforeResize.height||afterResize.overflow==="auto","width changes invalidate prompt measurement");
+    await setPrompt("");await devTools.call("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+    result.promptKeyboard=true;result.promptResize=true;
+    await devTools.evaluate(`document.querySelector(".connection-menu > button").focus()`);await key("Enter","Enter",13,"\r");
+    await devTools.evaluate(`document.querySelector(".connection-control input").focus()`);
+    assert(await devTools.evaluate(`Boolean(document.querySelector(".connection-menu .menu-popover:popover-open"))`),"connection uses a native popover");
+    await key("Escape","Escape",27);
+    assert(await devTools.evaluate(`!document.querySelector(":popover-open")&&document.activeElement===document.querySelector(".connection-menu > button")`),"Escape closes the connection menu and returns focus");
+    await devTools.evaluate(`document.querySelector(".thread-browser-menu > button").click()`);
+    const menuBounds=await devTools.evaluate(`(()=>{const r=document.querySelector(":popover-open").getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom};})()`);
+    assert(menuBounds.left>=0&&menuBounds.top>=0&&menuBounds.right<=1280&&menuBounds.bottom<=900,"menu remains within the viewport");
+    await devTools.call("Input.dispatchMouseEvent",{type:"mousePressed",x:40,y:32,button:"left",clickCount:1});await devTools.call("Input.dispatchMouseEvent",{type:"mouseReleased",x:40,y:32,button:"left",clickCount:1});
+    assert(await devTools.evaluate(`!document.querySelector(":popover-open")`),"outside click dismisses a native menu");
+    await devTools.call("Emulation.setDeviceMetricsOverride",{width:360,height:900,deviceScaleFactor:1,mobile:false});
+    await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    await devTools.evaluate(`[...document.querySelectorAll(".responsive-pane-button")].find(button=>button.textContent.includes("Threads")).click()`);
+    await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    await devTools.evaluate(`document.querySelector("#thread-pane .thread-browser-menu > button").focus();document.querySelector("#thread-pane .thread-browser-menu > button").click();document.querySelector("#thread-pane .thread-browser-menu select").focus()`);
+    await key("Escape","Escape",27);
+    assert(await devTools.evaluate(`Boolean(document.querySelector("#thread-pane"))&&!document.querySelector(":popover-open")`),"first Escape closes the menu while retaining its drawer");
+    await key("Escape","Escape",27);
+    assert(await devTools.evaluate(`!document.querySelector("#thread-pane")`),"second Escape closes the drawer");
+    await devTools.call("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+    result.menus=true;
+    await devTools.evaluate(`(()=>{const {notify}=globalThis.codexuiCatchup;for(let i=0;i<200;i++)notify("thread/started",{thread:{id:"scroll-reference-"+i,name:"Scroll reference "+i,projectId:"p",section:{id:"s",name:"Review"},status:{type:"idle"}}});})()`);
+    await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    const treeScroll=await devTools.evaluate(`(()=>{const p=document.querySelector(".thread-pane"),l=document.querySelector(".thread-list"),pr=p.getBoundingClientRect(),lr=l.getBoundingClientRect();l.scrollTop=l.scrollHeight;return {layout:getComputedStyle(p).display,height:l.clientHeight,content:l.scrollHeight,bottom:lr.bottom,paneBottom:pr.bottom,scrolled:l.scrollTop};})()`);
+    assert.equal(treeScroll.layout,"flex","thread pane retains its shared flex layout");
+    assert(treeScroll.height>100&&treeScroll.content>treeScroll.height&&treeScroll.scrolled>0&&treeScroll.bottom<=treeScroll.paneBottom+1,"large thread catalogs scroll inside their bounded pane");
+    await devTools.evaluate(`(()=>{const {notify}=globalThis.codexuiCatchup;for(let i=0;i<200;i++)notify("thread/deleted",{threadId:"scroll-reference-"+i});document.querySelector(".thread-list").scrollTop=0;})()`);
+    await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    result.threadScroll=true;
+
+
     const metrics = async width => {
         await devTools.call("Emulation.setDeviceMetricsOverride", {width, height: 900, deviceScaleFactor: 1, mobile: false});
         await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
@@ -125,7 +188,7 @@ export async function qualifyCatchup(devTools) {
     const resize = await devTools.evaluate(`(async()=>{const pane=document.querySelector(".thread-pane"),center=document.querySelector(".conversation-pane");const before=pane.getBoundingClientRect().width;document.querySelector('[aria-label="Resize Threads"]').dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}));await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));return {before,after:pane.getBoundingClientRect().width,center:center.getBoundingClientRect().width,overflow:document.documentElement.scrollWidth-innerWidth};})()`);
     assert(resize.center >= 420 && resize.overflow === 0 && Math.abs(resize.after - resize.before - 10) <= 1, "pane resizing uses visible geometry after window shrink");
     await metrics(1280);
-    await devTools.evaluate(`(async()=>{const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));for(const [label,key,count] of [["Resize Threads","ArrowRight",9],["Resize Inspector","ArrowLeft",12]]){const handle=document.querySelector('[aria-label="'+label+'"]');handle.dispatchEvent(new KeyboardEvent("keydown",{key:"Home",bubbles:true}));await frame();for(let index=0;index<count;index++){handle.dispatchEvent(new KeyboardEvent("keydown",{key,bubbles:true}));await frame();}}})()`);
+    await devTools.evaluate(`(async()=>{const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));for(const [label,key,count] of [["Resize Threads","ArrowRight",10],["Resize Inspector","ArrowLeft",22]]){const handle=document.querySelector('[aria-label="'+label+'"]');handle.dispatchEvent(new KeyboardEvent("keydown",{key:"Home",bubbles:true}));await frame();for(let index=0;index<count;index++){handle.dispatchEvent(new KeyboardEvent("keydown",{key,bubbles:true}));await frame();}}})()`);
     const roleControls = await devTools.evaluate(`document.querySelectorAll(".top-actions > .subtle-button").length`);
     assert.equal(roleControls, 1, "one controller action in the production shell");
     if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
@@ -138,7 +201,7 @@ export async function qualifyCatchup(devTools) {
         await devTools.evaluate(`document.querySelector('.commandExecution [aria-label="Timing details"]').click()`);
         await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
         await capture("catchup-desktop.png");
-        await devTools.evaluate(`[...document.querySelectorAll("button")].find(button=>button.textContent.trim()==="New project…").click()`);
+        await devTools.evaluate(`document.querySelector(".thread-browser-menu > button").click();[...document.querySelectorAll("button")].find(button=>button.textContent.trim()==="New project…").click()`);
         await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
         await capture("catchup-project-dialog.png");
         await devTools.evaluate(`[...document.querySelectorAll("dialog button")].find(button=>button.textContent.trim()==="Cancel").click()`);

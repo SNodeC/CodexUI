@@ -230,7 +230,7 @@ const applicationProfileSetup = `(async()=>{
         "profile metadata resume");
     const resume=socket.sent.findLast(message=>message.kind==="appserver"&&message.payload.method==="thread/resume");
     await waitFor(()=>socket.pendingCatalogs.length===2,"deferred settings catalogs");
-    const settingsToggle=document.querySelector(".settings-toggle");settingsToggle.click();
+    const settingsToggle=document.querySelector(".additional-settings > button");settingsToggle.click();
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const grid=document.querySelector(".settings-grid");
     const selectFor=caption=>[...grid.querySelectorAll("label")].find(
@@ -315,7 +315,7 @@ const applicationProfileHydrate = `(async()=>{
 
 const applicationProfilePrepare = `(async()=>{
     const profile=globalThis.codexuiApplicationProfile;
-    document.querySelector(".settings-toggle").click();
+    document.querySelector(".additional-settings > button").click();
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const grid=document.querySelector(".settings-grid");if(!grid)throw new Error("Settings grid did not open");
     const controls=[...grid.querySelectorAll("select,input")];const options=[...grid.querySelectorAll("option")];
@@ -433,13 +433,13 @@ const applicationSettingsDomContract = `(async()=>{
     await setValue("Workspace","/authored/browser");
     await setValue("Access","danger-full-access");
     const fullAccessNetwork={value:controlFor("Network").value,disabled:controlFor("Network").disabled,
-        title:labelFor("Network").title};
+        title:labelFor("Network").title,color:getComputedStyle(controlFor("Network")).color,background:getComputedStyle(controlFor("Network")).backgroundColor};
     await setValue("Permission profile",":workspace");
     const profileSelected={value:controlFor("Permission profile").value,access:controlFor("Access").value,
         network:controlFor("Network").value};
     await setValue("Access","workspace-write");
     await setValue("Network","enabled");
-    const changedText=document.querySelector(".settings-toggle")?.textContent||"";
+    const changedText=document.querySelector(".additional-settings > button")?.textContent||"";
 
     profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"turn/completed",params:{
         threadId:"profile",turn:{id:"turn-79",status:"completed"}}}});
@@ -508,9 +508,9 @@ try {
     await setWidth(devTools, 760);
     await waitUntil(devTools, `document.querySelectorAll(".responsive-pane-button").length===2`, "760px drawer controls");
     assertTopBar(await devTools.evaluate(fullTopBarMeasurement), 760);
-    const focus = await devTools.evaluate(`(()=>{const input=document.querySelector(".connection-control input");input.focus();
+    const focus = await devTools.evaluate(`(()=>{const input=document.querySelector(".connection-control input");document.querySelector(".connection-menu > button").click();input.focus();
         const style=getComputedStyle(input);return [style.outlineStyle,style.outlineWidth,style.outlineColor]})()`);
-    assert.deepEqual(focus, ["solid", "2px", "rgb(111, 152, 232)"]);
+    assert.deepEqual(focus, ["solid", "2px", "rgb(84, 113, 166)"]);
 
     const opened = await devTools.evaluate(`(async()=>{[...document.querySelectorAll(".responsive-pane-button")]
         .find(button=>button.textContent.includes("Inspector")).click();await new Promise(done=>setTimeout(done,30));
@@ -667,7 +667,7 @@ try {
     assert.deepEqual(settingsDom.unsupportedStyle,
         {disabled: true, title: "The selected model does not support style choices"});
     assert.deepEqual(settingsDom.fullAccessNetwork,
-        {value: "enabled", disabled: true, title: "Full access already includes network access"});
+        {value: "enabled", disabled: true, title: "Full access already includes network access", color: "rgb(152, 162, 179)", background: "rgb(246, 248, 251)"});
     assert.deepEqual(settingsDom.profileSelected,
         {value: ":workspace", access: "default", network: "default"});
     assert.match(settingsDom.changedText, /12 changed/u);
