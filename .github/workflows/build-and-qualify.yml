@@ -25,13 +25,13 @@ jobs:
           ref: >-
             ${{ github.event_name == 'pull_request' &&
                 github.event.pull_request.head.sha || github.sha }}
-          path: CodexUI/codexui
+          path: CodexUI
 
       - name: Check out AISuite default-branch frontend SDK
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SNodeC/AISuite
-          path: AISuite-extraction/AISuite-final
+          path: AISuite
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -39,21 +39,33 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: |
-            AISuite-extraction/AISuite-final/packages/codex-frontend/package-lock.json
-            CodexUI/codexui/web/package-lock.json
+            AISuite/packages/codex-frontend/package-lock.json
+            CodexUI/web/package-lock.json
 
       - name: Test the frontend SDK
-        working-directory: AISuite-extraction/AISuite-final/packages/codex-frontend
+        working-directory: AISuite/packages/codex-frontend
         run: |
           npm ci
           npm test
-          npm pack --dry-run
+
+      - name: Install the frontend SDK without native AISuite libraries
+        working-directory: AISuite
+        run: |
+          cmake -S packages/codex-frontend -B _build/frontend-sdk \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/aisuite-sdk"
+          cmake --build _build/frontend-sdk
+          cmake --install _build/frontend-sdk
+
+      - name: Prepare the browser build from the installed SDK
+        working-directory: CodexUI
+        run: |
+          cmake -S web/cmake -B _build/frontend -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/aisuite-sdk"
+          cmake --build _build/frontend --target codexui-web-dependencies
 
       - name: Verify CodexWebUI on Node.js 22
-        working-directory: CodexUI/codexui
+        working-directory: CodexUI/_build/frontend/web
         run: |
-          npm ci --prefix web
-          npm test --prefix web
+          npm test
 
       - name: Select the qualified performance runtime
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -73,54 +85,55 @@ jobs:
           "$RUNNER_TEMP/codexui-browser/chrome-linux64/chrome" --version
 
       - name: Test CodexWebUI on the qualification runtime
-        working-directory: CodexUI/codexui
+        working-directory: CodexUI/_build/frontend/web
         run: |
-          npm ci --prefix web
-          npm test --prefix web
+          npm ci
+          npm test
 
       - name: Profile the presentation model
         id: web-model-profile
         if: ${{ !cancelled() }}
-        working-directory: CodexUI/codexui
-        run: npm run profile --prefix web
+        working-directory: CodexUI/_build/frontend/web
+        run: npm run profile
 
       - name: Build and verify the production browser artifact
         id: web-artifact
         if: ${{ !cancelled() }}
-        working-directory: CodexUI/codexui
+        working-directory: CodexUI/_build/frontend/web
         run: |
-          npm run build:app --prefix web
-          npm run verify:artifact --prefix web
+          npm run build:app
+          npm run verify:artifact
 
       - name: Qualify the production browser application
         id: web-browser
         if: ${{ !cancelled() && steps.web-artifact.outcome == 'success' }}
-        working-directory: CodexUI/codexui
-        run: npm run qualify:browser --prefix web
+        working-directory: CodexUI/_build/frontend/web
+        run: npm run qualify:browser
 
       - name: Capture failed web timing diagnostics
         if: ${{ !cancelled() && (steps.web-model-profile.outcome == 'failure' || steps.web-browser.outcome == 'failure') }}
-        working-directory: CodexUI/codexui
+        working-directory: CodexUI/_build/frontend/web
         run: |
           lscpu
           free -m
           mkdir -p _build/web-profiles
           # Profiled retries are diagnostic only; the mandatory gates above remain failed.
-          node --cpu-prof --cpu-prof-interval=100 --cpu-prof-dir=_build/web-profiles web/tools/profile-presentation.mjs || true
-          CODEXUI_BROWSER_CPU_PROFILE=_build/web-profiles/browser.cpuprofile node web/tools/qualify-browser.mjs || true
+          node --cpu-prof --cpu-prof-interval=100 --cpu-prof-dir=_build/web-profiles tools/profile-presentation.mjs || true
+          CODEXUI_BROWSER_CPU_PROFILE=_build/web-profiles/browser.cpuprofile node tools/qualify-browser.mjs || true
 
       - name: Upload failed web timing diagnostics
         if: ${{ !cancelled() && (steps.web-model-profile.outcome == 'failure' || steps.web-browser.outcome == 'failure') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-timing-diagnostics
-          path: CodexUI/codexui/_build/web-profiles
+          path: CodexUI/_build/frontend/web/_build/web-profiles
 
       - name: Stage and verify the CodexWebUI install
         if: ${{ !cancelled() && steps.web-artifact.outcome == 'success' }}
-        working-directory: CodexUI/codexui
+        working-directory: CodexUI/_build/frontend/web
         run: |
-          cmake -S web -B _build/web-package \
+          cmake -S "$GITHUB_WORKSPACE/CodexUI/web" -B _build/web-package \
+            -DCODEXUI_WEB_DIST_DIR="$PWD/app-dist" \
             -DCMAKE_INSTALL_PREFIX="$PWD/_stage/web"
           cmake --build _build/web-package --target codexui-web-artifact
           cmake --install _build/web-package --component CodexWebUI
@@ -131,5 +144,5 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: codexui-web
-          path: CodexUI/codexui/_stage/web/share/codexui/web
+          path: CodexUI/_build/frontend/web/_stage/web/share/codexui/web
           if-no-files-found: error
