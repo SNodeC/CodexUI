@@ -115,10 +115,10 @@ Wait for the provider to become ready. If you are an observer and no controller 
 
 ### Browser edition
 
-After [building the browser assets](docs/guides/build-from-source.md#browser-frontend), run this from the checkout root with AISuite's WebSocket support enabled and port **8080** free:
+After [building the browser assets](docs/guides/build-from-source.md#browser-frontend), replace the artifact path below with your browser build output. Run the installed bridge with WebSocket support enabled and port **8080** free; the current directory does not matter:
 
 ```sh
-codex-bridge --config-file /dev/null codex --bridge-web-root "$PWD/web/app-dist" \
+codex-bridge --config-file /dev/null codex --bridge-web-root /path/to/build/codex-web/web/app-dist \
   codex-bridge-websocket-ipv4 --disabled=false \
   local --host 127.0.0.1 --port 8080
 ```
