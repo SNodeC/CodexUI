@@ -1,0 +1,883 @@
+[
+  {
+    "id": "01-desktop-tabs",
+    "title": "Desktop workspace and server tabs",
+    "coverage": [
+      "22.2",
+      "22.3",
+      "22.4",
+      "22.6",
+      "22.7",
+      "session tabs",
+      "single-server workspace"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "02-follow-two",
+    "title": "Follow two sessions simultaneously",
+    "coverage": [
+      "simultaneous following",
+      "independent composers",
+      "independent visibility",
+      "independent roles"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "03-follow-four",
+    "title": "Follow four sessions and isolate a failed server",
+    "coverage": [
+      "more than two sessions",
+      "unreachable isolation",
+      "observer session",
+      "separate drafts"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "04-servers",
+    "title": "Server management and all connection states",
+    "coverage": [
+      "server name",
+      "human description",
+      "endpoint",
+      "connect/disconnect",
+      "unreachable",
+      "unsupported transport"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "05-empty-and-details",
+    "title": "Empty application and full server details",
+    "coverage": [
+      "empty startup",
+      "read-only server details",
+      "full endpoint",
+      "no fabricated timestamps"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "06-add-server",
+    "title": "Add a server with Unix, TCP or WebSocket",
+    "coverage": [
+      "new profile creation",
+      "Unix path",
+      "TCP host/port",
+      "WS path",
+      "description not LLM input"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "07-edit-remove",
+    "title": "Edit metadata, validate input and remove a server",
+    "coverage": [
+      "metadata edit",
+      "validation",
+      "remove confirmation",
+      "pending work warning",
+      "cancel preservation"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "08-connection-settings",
+    "title": "Existing connection dialog and session-scoped menu",
+    "coverage": [
+      "existing connection dialog",
+      "ConfigureConnection",
+      "TCP/Unix/WS",
+      "IPv6/TLS/RFCOMM",
+      "connection menu"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "09-roles-and-provider",
+    "title": "Transport, provider and ownership stay distinct",
+    "coverage": [
+      "controller",
+      "observer",
+      "claim/release",
+      "connecting",
+      "provider failure",
+      "unreachable"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "10-visibility",
+    "title": "Every hidden or collapsed region can be restored",
+    "coverage": [
+      "pane restoration",
+      "composer/settings restoration",
+      "filtered cards",
+      "collapsed cards",
+      "Reveal content"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "11-thread-browser",
+    "title": "Projects, sections, hierarchy and ungrouped threads",
+    "coverage": [
+      "22.3",
+      "thread grouping",
+      "draft rows",
+      "parent child",
+      "pagination",
+      "archived"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "12-thread-menus",
+    "title": "Search, sorting, context actions and result states",
+    "coverage": [
+      "search",
+      "sorting",
+      "manual order",
+      "all context actions",
+      "loading/error/end",
+      "draft lifecycle"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "13-group-dialogs",
+    "title": "Project and section create, edit and details",
+    "coverage": [
+      "project form",
+      "section icon/color",
+      "read-only metadata",
+      "shared section"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "14-group-order-delete",
+    "title": "Group membership, ordering and deletion",
+    "coverage": [
+      "project reorder",
+      "section reorder",
+      "assignment",
+      "group delete keeps threads"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "15-new-fork",
+    "title": "New thread and fork with options",
+    "coverage": [
+      "NewThreadDialog",
+      "workspace picker",
+      "name",
+      "base/developer instructions",
+      "ephemeral",
+      "fork options"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "16-thread-lifecycle",
+    "title": "Thread rename, delete, hydration and prompt recovery",
+    "coverage": [
+      "rename",
+      "delete",
+      "hydration",
+      "reload",
+      "failed prompt",
+      "uncertain disconnect recovery"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "17-all-card-families",
+    "title": "All conversation card families",
+    "coverage": [
+      "22.5",
+      "normal/steering/failed You",
+      "assistant update/final",
+      "reasoning",
+      "command",
+      "agent",
+      "files",
+      "plan",
+      "generic",
+      "images"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "18-card-anatomy",
+    "title": "Turn anatomy, disclosure, Copy, timing and Markdown",
+    "coverage": [
+      "22.4",
+      "turn owner",
+      "collapsed",
+      "copy feedback",
+      "focus",
+      "Markdown/table/code/link",
+      "timing tooltip"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "19-command-images",
+    "title": "Command output, file cards and image surfaces",
+    "coverage": [
+      "command empty/short/capped",
+      "follow-tail",
+      "file paths/counts",
+      "image ribbon",
+      "native system viewer",
+      "browser path fallback"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "20-composer",
+    "title": "Composer, attachments and every upcoming-turn setting",
+    "coverage": [
+      "22.6",
+      "all 13 settings",
+      "editor growth",
+      "Send/Steer/Stop",
+      "attachments",
+      "admission failure"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "21-pickers",
+    "title": "Native workspace and attachment pickers",
+    "coverage": [
+      "FileSelectionDialog",
+      "filesystem table",
+      "location/up/go",
+      "selected attachments",
+      "paste/drop/preparing/error",
+      "workspace picker"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "22-inspector-plan-agents",
+    "title": "Inspector Plan and Agents",
+    "coverage": [
+      "Plan structured statuses",
+      "text fallback",
+      "Agents disclosure/Copy/Markdown",
+      "child identity"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "23-changes-review",
+    "title": "Inspector Changes and modeless diff review",
+    "coverage": [
+      "repositories",
+      "hidden repository controls",
+      "unstaged/staged/HEAD",
+      "file status/counts",
+      "DiffViewer",
+      "copy/open review",
+      "truncation/binary"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "24-request-surfaces",
+    "title": "Pending requests, attention and resolution states",
+    "coverage": [
+      "request count",
+      "attention strip",
+      "Accept/Reject/Review",
+      "hidden-session routing",
+      "resolved/stale",
+      "single-flight/error"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "25-inspector-info",
+    "title": "Inspector Info State Protocol and Timing",
+    "coverage": [
+      "Info choices/Back",
+      "State",
+      "Protocol/log stats",
+      "Timing/exact UTC/local/raw units",
+      "missing values"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "26-approval-dialogs",
+    "title": "Command file-change and permission approvals",
+    "coverage": [
+      "typed command approval",
+      "file-change approval",
+      "permissions",
+      "disclosure",
+      "decision",
+      "Submit"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "27-input-mcp",
+    "title": "Question inputs and MCP elicitation",
+    "coverage": [
+      "multiple questions",
+      "checkbox/free text",
+      "secret fields",
+      "schema disclosure",
+      "MCP JSON",
+      "validation"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "28-legacy-capability",
+    "title": "Legacy approvals and unsupported capability requests",
+    "coverage": [
+      "legacy patch/command",
+      "dynamic tool failure",
+      "auth refresh",
+      "attestation",
+      "unsupported request"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "29-chrome-and-controls",
+    "title": "Application chrome menus tooltips notices and token details",
+    "coverage": [
+      "22.2",
+      "brand/footer/status",
+      "role",
+      "tokens/popover",
+      "tooltip",
+      "notices",
+      "five conversation preferences"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "30-motion-storyboard",
+    "title": "Accepted and inference phases for new and steering You cards",
+    "coverage": [
+      "accepted/inference triggers",
+      "new prompt",
+      "steering prompt",
+      "motion hierarchy",
+      "timing",
+      "reduced motion",
+      "waiting/terminal"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "31-appearance-tokens",
+    "title": "Perceptual colors borders corners and control states",
+    "coverage": [
+      "OKLCH tokens",
+      "border yes/no",
+      "width/color",
+      "corners",
+      "hover/focus/pressed/disabled",
+      "text contrast"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "32-dark-split",
+    "title": "Dark appearance and simultaneous following",
+    "coverage": [
+      "dark theme",
+      "semantic palette",
+      "simultaneous sessions"
+    ],
+    "theme": "dark",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "33-responsive",
+    "title": "Tablet narrow workspace and restored pane",
+    "coverage": [
+      "narrow layouts",
+      "tab wrapping",
+      "Threads/Inspector restoration",
+      "full visibility",
+      "return focus"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "34-empty-loading-errors",
+    "title": "Workspace empty loading failure and isolated runtime stop",
+    "coverage": [
+      "empty workspace",
+      "history loading",
+      "failure/retry",
+      "worker stop isolation",
+      "draft retention",
+      "other session streaming"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "35-browser-scope",
+    "title": "Browser frontend preserves its supported controls",
+    "coverage": [
+      "browser WS/WSS",
+      "observer",
+      "provider path",
+      "image metadata",
+      "native-only boundaries"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "36-long-content",
+    "title": "Long titles paths Unicode and complete timing recovery",
+    "coverage": [
+      "long values",
+      "Unicode",
+      "elision/tooltips",
+      "selectable full paths",
+      "clock fallback",
+      "exact timing/missing"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "37-request-unavailable",
+    "title": "Unavailable malformed and unsupported request states",
+    "coverage": [
+      "unsupported request",
+      "malformed questions",
+      "bounded request forms",
+      "resolved request",
+      "controller loss",
+      "retained input"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "38-sign-in",
+    "title": "Sign in through snode.c-idp for native and browser clients",
+    "coverage": [
+      "IdP login only",
+      "external system browser",
+      "web redirect",
+      "signed-out data privacy",
+      "authenticated vs authorized"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "39-idp-account-flows",
+    "title": "IdP-hosted credentials MFA registration and recovery",
+    "coverage": [
+      "IdP credential entry",
+      "TOTP",
+      "registration",
+      "password recovery",
+      "no local password store"
+    ],
+    "theme": "light",
+    "note": "Static handoff mockups \u00b7 representative IdP-owned pages \u00b7 no IdP redesign proposed"
+  },
+  {
+    "id": "40-account-menu",
+    "title": "Human account menu My access and account switching",
+    "coverage": [
+      "signed-in identity",
+      "My access",
+      "IdP account settings",
+      "switch account",
+      "signout",
+      "private drafts"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "41-users-directory",
+    "title": "Users and access administration for verified identities",
+    "coverage": [
+      "users directory",
+      "verified issuer subject",
+      "pending/active/suspended",
+      "grant/edit/revoke",
+      "IdP vs application accounts"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "42-user-details",
+    "title": "User details and effective resource access",
+    "coverage": [
+      "read-only IdP attributes",
+      "effective permissions",
+      "server/project/pane scope",
+      "suspend application only"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "43-role-templates",
+    "title": "One permission model with small role templates",
+    "coverage": [
+      "Viewer Operator Reviewer Server manager Access administrator",
+      "no automatic superuser",
+      "one policy authority",
+      "templates not second authority"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "44-all-section-access",
+    "title": "Access checks cover every application section",
+    "coverage": [
+      "all application pages",
+      "all Inspector tabs",
+      "all card families",
+      "settings",
+      "attachments",
+      "menus/hotkeys",
+      "metadata/Copy",
+      "all sections"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "45-server-access",
+    "title": "Per-server access management and permission change review",
+    "coverage": [
+      "server grant/edit/revoke",
+      "verified principal",
+      "scope",
+      "diagnostics",
+      "confirmation",
+      "no backend shutdown"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "46-project-section-access",
+    "title": "Projects shared sections and thread restrictions",
+    "coverage": [
+      "actual project/section graph",
+      "shared section",
+      "thread grant narrowing",
+      "inherit/no access",
+      "scope intersection"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "47-access-denied",
+    "title": "Restorable visibility is distinct from denied access",
+    "coverage": [
+      "visibility vs authorization",
+      "Restore all not bypass",
+      "readonly controls",
+      "diagnostic denial",
+      "no metadata leak"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "48-identity-runtime-roles",
+    "title": "Human permissions controller lease and model policy",
+    "coverage": [
+      "human roles vs controller",
+      "AND gate",
+      "Reviewer vs Operator",
+      "revocation",
+      "LLM sandbox separate"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "49-access-lifecycle",
+    "title": "Permission revocation signout and independent sessions",
+    "coverage": [
+      "revoke streams/queued work",
+      "clear denied data",
+      "no silent failover",
+      "independent workers",
+      "signout",
+      "expiry",
+      "same-principal recovery"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "50-login-failures",
+    "title": "IdP unavailable cancelled expired and failed login",
+    "coverage": [
+      "IdP outage",
+      "cancel",
+      "invalid credentials",
+      "callback expiry/state",
+      "no authentication bypass"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "51-policy-owner",
+    "title": "Current CodexUI policy owner and future IdP capability",
+    "coverage": [
+      "verified capability",
+      "current fallback",
+      "future IdP authority conditional",
+      "no duplicated ACL",
+      "not trusting requested scopes"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "52-access-responsive",
+    "title": "Account and access states at narrow widths",
+    "coverage": [
+      "narrow account controls",
+      "restricted pane",
+      "pending identity",
+      "full authorized restoration"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "53-delegation-guard",
+    "title": "Delegated administration and access change safeguards",
+    "coverage": [
+      "delegation ceiling",
+      "last admin protection",
+      "change review",
+      "atomic policy update",
+      "no first-user auto-admin"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "54-studio-focus",
+    "title": "Session Studio and a redesigned application hierarchy",
+    "coverage": [
+      "new recommended shell",
+      "global navigation rail",
+      "session dock",
+      "task canvas",
+      "same owned widgets",
+      "account context"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "55-studio-split",
+    "title": "Split workspaces with quieter session chrome",
+    "coverage": [
+      "simultaneous workspaces",
+      "per-session composer and Inspector",
+      "reduced repeated chrome",
+      "scoped controls"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "56-studio-grid",
+    "title": "Four-session canvas with independent activity and failure",
+    "coverage": [
+      "four simultaneous sessions",
+      "compact retained disclosures",
+      "unreachable isolation",
+      "per-tile restoration"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "57-studio-server-library",
+    "title": "A dedicated server library with descriptive profiles",
+    "coverage": [
+      "server library cards",
+      "human description",
+      "endpoint and status",
+      "add/open/details/connect",
+      "no fabricated metrics"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "58-studio-server-details",
+    "title": "Server details with scoped configuration and access",
+    "coverage": [
+      "profile details",
+      "metadata vs connection",
+      "existing Configure dialog",
+      "scope and runtime role separated"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "59-studio-project-navigation",
+    "title": "Project context changes the workspace frame not thread wiring",
+    "coverage": [
+      "project context",
+      "existing ThreadPane grouping/search/sort",
+      "same selected thread",
+      "no cross-server browser"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "60-studio-review",
+    "title": "A larger owned Inspector for review without changing the destination",
+    "coverage": [
+      "wide Inspector",
+      "changes diff and request entry",
+      "owning session always named",
+      "same Inspector controls"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "61-studio-reading",
+    "title": "Reading mode clears the surrounding layout and preserves every restore path",
+    "coverage": [
+      "reading width",
+      "hidden panels",
+      "same card renderer",
+      "persistent View and Restore all",
+      "retained composer"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "62-studio-access-center",
+    "title": "Users and access becomes a complete administration workspace",
+    "coverage": [
+      "administration information architecture",
+      "verified identity index",
+      "effective access",
+      "server/section grants",
+      "single authority"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "63-studio-sign-in",
+    "title": "A clear identity gateway before any private session content",
+    "coverage": [
+      "new signed-out composition",
+      "one IdP sign-in action",
+      "native external browser",
+      "no private data before access"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "64-studio-responsive",
+    "title": "The Studio hierarchy adapts to narrow screens with complete restoration",
+    "coverage": [
+      "narrow global navigation",
+      "session dock sheet",
+      "owning context",
+      "View menu",
+      "restoration",
+      "access gates"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "65-studio-dark",
+    "title": "Session Studio in dark appearance",
+    "coverage": [
+      "dark recommended shell",
+      "perceptual roles",
+      "same component placement",
+      "same session owner"
+    ],
+    "theme": "dark",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  },
+  {
+    "id": "66-studio-navigation",
+    "title": "The redesigned journeys and a single visible restoration entry point",
+    "coverage": [
+      "end-to-end UX",
+      "sign-in to canvas",
+      "multi-session layout",
+      "review ownership",
+      "View restoration",
+      "no new protocol actions"
+    ],
+    "theme": "light",
+    "note": "Static design mockup \u00b7 sample data \u00b7 controls are not interactive"
+  }
+]

@@ -1,0 +1,530 @@
+[
+  {
+    "id": "01-desktop-tabs",
+    "width": 1440,
+    "height": 1428.46875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "02-follow-two",
+    "width": 1440,
+    "height": 1244.46875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "03-follow-four",
+    "width": 1440,
+    "height": 1341.46875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "04-servers",
+    "width": 1440,
+    "height": 727.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "05-empty-and-details",
+    "width": 1440,
+    "height": 657.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "06-add-server",
+    "width": 1440,
+    "height": 744.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "07-edit-remove",
+    "width": 1440,
+    "height": 682.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "08-connection-settings",
+    "width": 1440,
+    "height": 892.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "09-roles-and-provider",
+    "width": 1440,
+    "height": 656.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "10-visibility",
+    "width": 1440,
+    "height": 543.578125,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "11-thread-browser",
+    "width": 1440,
+    "height": 784.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "12-thread-menus",
+    "width": 1440,
+    "height": 712.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "13-group-dialogs",
+    "width": 1440,
+    "height": 670.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "14-group-order-delete",
+    "width": 1440,
+    "height": 552.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "15-new-fork",
+    "width": 1440,
+    "height": 774.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "16-thread-lifecycle",
+    "width": 1440,
+    "height": 609.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "17-all-card-families",
+    "width": 1440,
+    "height": 760.578125,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "18-card-anatomy",
+    "width": 1440,
+    "height": 757.96875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "19-command-images",
+    "width": 1440,
+    "height": 630.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "20-composer",
+    "width": 1440,
+    "height": 888.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "21-pickers",
+    "width": 1440,
+    "height": 719.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "22-inspector-plan-agents",
+    "width": 1440,
+    "height": 595.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "23-changes-review",
+    "width": 1440,
+    "height": 633.671875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "24-request-surfaces",
+    "width": 1440,
+    "height": 545.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "25-inspector-info",
+    "width": 1440,
+    "height": 734.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "26-approval-dialogs",
+    "width": 1440,
+    "height": 688.671875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "27-input-mcp",
+    "width": 1440,
+    "height": 801.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "28-legacy-capability",
+    "width": 1440,
+    "height": 884.171875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "29-chrome-and-controls",
+    "width": 1440,
+    "height": 562.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "30-motion-storyboard",
+    "width": 1440,
+    "height": 794.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "31-appearance-tokens",
+    "width": 1440,
+    "height": 677.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "32-dark-split",
+    "width": 1440,
+    "height": 1244.46875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "33-responsive",
+    "width": 1440,
+    "height": 1024.96875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "34-empty-loading-errors",
+    "width": 1440,
+    "height": 787.078125,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "35-browser-scope",
+    "width": 1440,
+    "height": 535.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "36-long-content",
+    "width": 1440,
+    "height": 646.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "37-request-unavailable",
+    "width": 1440,
+    "height": 540.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "38-sign-in",
+    "width": 1440,
+    "height": 636.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "39-idp-account-flows",
+    "width": 1440,
+    "height": 951.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "40-account-menu",
+    "width": 1440,
+    "height": 1128.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "41-users-directory",
+    "width": 1440,
+    "height": 770.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "42-user-details",
+    "width": 1440,
+    "height": 733.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "43-role-templates",
+    "width": 1440,
+    "height": 635.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "44-all-section-access",
+    "width": 1440,
+    "height": 887.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "45-server-access",
+    "width": 1440,
+    "height": 733.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "46-project-section-access",
+    "width": 1440,
+    "height": 586.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "47-access-denied",
+    "width": 1440,
+    "height": 508.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "48-identity-runtime-roles",
+    "width": 1440,
+    "height": 486.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "49-access-lifecycle",
+    "width": 1440,
+    "height": 936.578125,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "50-login-failures",
+    "width": 1440,
+    "height": 824.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "51-policy-owner",
+    "width": 1440,
+    "height": 487.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "52-access-responsive",
+    "width": 1440,
+    "height": 649.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "53-delegation-guard",
+    "width": 1440,
+    "height": 659.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "54-studio-focus",
+    "width": 1440,
+    "height": 1170.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "55-studio-split",
+    "width": 1440,
+    "height": 1251.46875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "56-studio-grid",
+    "width": 1440,
+    "height": 1243.46875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "57-studio-server-library",
+    "width": 1440,
+    "height": 1058.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "58-studio-server-details",
+    "width": 1440,
+    "height": 1058.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "59-studio-project-navigation",
+    "width": 1440,
+    "height": 1341.96875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "60-studio-review",
+    "width": 1440,
+    "height": 1289.15625,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "61-studio-reading",
+    "width": 1440,
+    "height": 1249.15625,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "62-studio-access-center",
+    "width": 1440,
+    "height": 1058.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "63-studio-sign-in",
+    "width": 1440,
+    "height": 958.1875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "64-studio-responsive",
+    "width": 1440,
+    "height": 797.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "65-studio-dark",
+    "width": 1440,
+    "height": 1170.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  },
+  {
+    "id": "66-studio-navigation",
+    "width": 1440,
+    "height": 572.6875,
+    "scripts": 0,
+    "controls": 0,
+    "overflow": []
+  }
+]
