@@ -1,3 +1,4 @@
+<a id="banner"></a>
 <!-- snodec:begin header -->
 <a name="project-overview"></a>
 
@@ -9,7 +10,7 @@
 </p>
 
 <!-- snodec:begin organization -->
-<p><a href="https://github.com/SNodeC" title="SNode.C organization"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/nav/organization-dark.svg"><img align="right" src="docs/media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization" width="160" height="28"></picture></a><br clear="all"></p>
+<p><a href="https://github.com/VolkerChristian#banner" title="Volker Christian account"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="docs/media/nav/account-icon-dark.svg"><source media="(max-width: 640px)" srcset="docs/media/nav/account-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/media/nav/account-dark.svg"><img align="right" src="docs/media/nav/account-light.svg" alt="Volker Christian account" title="Volker Christian account"></picture></a><a href="https://github.com/SNodeC#banner" title="SNode.C organization"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="docs/media/nav/organization-icon-dark.svg"><source media="(max-width: 640px)" srcset="docs/media/nav/organization-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/media/nav/organization-dark.svg"><img align="right" src="docs/media/nav/organization-light.svg" alt="SNode.C organization" title="SNode.C organization"></picture></a><a href="#banner" title="CodexUI repository"><picture><source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="docs/media/nav/repository-icon-dark.svg"><source media="(max-width: 640px)" srcset="docs/media/nav/repository-icon-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/media/nav/repository-dark.svg"><img align="right" src="docs/media/nav/repository-light.svg" alt="CodexUI repository" title="CodexUI repository"></picture></a><br clear="all"></p>
 <!-- snodec:end organization -->
 
 # Codex(W)UI
@@ -26,13 +27,13 @@
 
 **Follow the work, not just the final answer.** Codex(W)UI offers two frontends: **CodexUI**, a native Qt desktop application, and **CodexWUI**, a browser application connecting over WebSocket. They bring conversations, commands, plans, approvals and file changes into a visual coding workspace.
 
-Built on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
+Built on [AISuite](https://github.com/SNodeC/AISuite#banner) and [SNode.C](https://github.com/SNodeC/snode.c#banner), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
 
 <!-- snodec:begin menu -->
 <p>
   <a href="#quick-start" title="Start"><img src="docs/media/menu/start.svg" alt="Start" width="160" height="28"></a>
   <a href="#install" title="Install"><img src="docs/media/menu/install.svg" alt="Install" width="160" height="28"></a>
-  <a href="docs/guides/build-from-source.md#page-overview" title="Build"><img src="docs/media/menu/build.svg" alt="Build" width="160" height="28"></a>
+  <a href="docs/guides/build-from-source.md#banner" title="Build"><img src="docs/media/menu/build.svg" alt="Build" width="160" height="28"></a>
   <a href="#first-run" title="Use"><img src="docs/media/menu/use.svg" alt="Use" width="160" height="28"></a>
   <a href="#configuration" title="Configure"><img src="docs/media/menu/configure.svg" alt="Configure" width="160" height="28"></a>
   <a href="#architecture" title="Architecture"><img src="docs/media/menu/architecture.svg" alt="Architecture" width="160" height="28"></a>
@@ -72,7 +73,7 @@ In the native threads panel, **projects contain the visual grouping; sections or
 
 To create a project or section, click the current grouping label—**Projects**, **Sections** or **Ungrouped**—above the thread list. Use a thread's context menu to assign its project and section. Creation and assignment require controller access and server support.
 
-Next: [read the grouping and lifecycle guide](docs/guides/thread-projects.md#page-overview).
+Next: [read the grouping and lifecycle guide](docs/guides/thread-projects.md#banner).
 
 ### Choose your frontend
 
@@ -98,7 +99,7 @@ Build [native Qt desktop](docs/guides/build-from-source.md#native-desktop) or [b
 
 ### Native desktop
 
-**You need:** the native build, a configured Codex executable available to the bridge user, and AISuite's `codex-bridge`. The bridge's generated protocol targets Codex 0.162.1; use the [AISuite entry page](https://github.com/SNodeC/AISuite#project-overview) to check compatibility before changing Codex versions.
+**You need:** the native build, a configured Codex executable available to the bridge user, and AISuite's `codex-bridge`. The bridge's generated protocol targets Codex 0.162.1; use the [AISuite entry page](https://github.com/SNodeC/AISuite#banner) to check compatibility before changing Codex versions.
 
 Start `codex-bridge --config-file /dev/null` as your own user in one terminal. In a second terminal, run from this checkout:
 
@@ -144,30 +145,30 @@ The bridge allows multiple frontends to follow the same app-server session, with
 
 On the native side, a SNode.C worker owns protocol processing and writes one shared `NodeGraph`; Qt projects that state into widgets. The browser uses AISuite's TypeScript SDK and its own presentation state. Neither frontend replaces app-server's persistent history or tool execution.
 
-For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/architecture/overview.md#page-overview).
+For the detailed state, threading and protocol boundaries, see the [architecture guide](docs/architecture/overview.md#banner).
 
 ## Documentation
 
-Manual CI builds and qualifies the desktop and browser editions, including shared verification and frontend SDK checks. See the organization [workflow graph](https://github.com/SNodeC/.github/blob/main/docs/workflow-graph.md#page-overview) for triggers and artifact boundaries.
+Manual CI builds and qualifies the desktop and browser editions, including shared verification and frontend SDK checks. See the organization [workflow graph](https://github.com/SNodeC/.github/blob/main/docs/workflow-graph.md#banner) for triggers and artifact boundaries.
 
-[Documentation index](docs/README.md#page-overview): guides, architecture, qualification and engineering records for CodexUI.
+[Documentation index](docs/README.md#banner): guides, architecture, qualification and engineering records for CodexUI.
 
 | Start here | Go deeper |
 | --- | --- |
-| [Using CodexUI](docs/guides/interaction-guide.md#page-overview) | [Native state and threading](docs/architecture/shared-node-graph.md#page-overview) |
-| [Projects and sections](docs/guides/thread-projects.md#page-overview) | [Architecture overview](docs/architecture/overview.md#page-overview) |
-| [Timestamps and durations](docs/architecture/timestamp-presentation.md#page-overview) | [Browser contract](docs/web/contract-1.0.md#page-overview) |
-| [Browser build and deployment](web/README.md#page-overview) | [Web qualification](docs/web/qualification.md#page-overview) · [Release process](docs/web/release-process.md#page-overview) |
+| [Using CodexUI](docs/guides/interaction-guide.md#banner) | [Native state and threading](docs/architecture/shared-node-graph.md#banner) |
+| [Projects and sections](docs/guides/thread-projects.md#banner) | [Architecture overview](docs/architecture/overview.md#banner) |
+| [Timestamps and durations](docs/architecture/timestamp-presentation.md#banner) | [Browser contract](docs/web/contract-1.0.md#banner) |
+| [Browser build and deployment](web/README.md#banner) | [Web qualification](docs/web/qualification.md#banner) · [Release process](docs/web/release-process.md#banner) |
 
 For bug reports, include the revision, Qt version, connection type and the smallest reproducible sequence. Remove credentials and private conversation content from logs and screenshots.
 
 ## Platforms
 
-The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web/contract-1.0.md#page-overview); they are not a promise of native/browser feature parity. Review the [known limitations](docs/guides/interaction-guide.md#known-limitations) before relying on approval handling or native performance.
+The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web/contract-1.0.md#banner); they are not a promise of native/browser feature parity. Review the [known limitations](docs/guides/interaction-guide.md#known-limitations) before relying on approval handling or native performance.
 
 ## Releases
 
-No GitHub release or shared binary-package distribution is published yet; the documented installation routes build from source. Future release notes belong on the [releases page](https://github.com/SNodeC/CodexUI/releases). The [web release process](docs/web/release-process.md#page-overview) describes development qualification, not a downloadable product release.
+No GitHub release or shared binary-package distribution is published yet; the documented installation routes build from source. Future release notes belong on the [releases page](https://github.com/SNodeC/CodexUI/releases). The [web release process](docs/web/release-process.md#banner) describes development qualification, not a downloadable product release.
 
 ## Contributing
 
@@ -178,7 +179,7 @@ No GitHub release or shared binary-package distribution is published yet; the do
 <!-- snodec:begin ecosystem -->
 ## Ecosystem
 
-Depends on [AISuite](https://github.com/SNodeC/AISuite#project-overview) and [SNode.C](https://github.com/SNodeC/snode.c#project-overview)
+Depends on [AISuite](https://github.com/SNodeC/AISuite#banner) and [SNode.C](https://github.com/SNodeC/snode.c#banner)
 <!-- snodec:end ecosystem -->
 
 <!-- snodec:begin footer -->
@@ -186,5 +187,5 @@ Choose either [MIT](LICENSE-MIT) or [LGPL-3.0-or-later](LICENSE-LGPL-3.0-or-late
 
 Built with [Qt](https://www.qt.io/). Codex(W)UI is an independent project; neither frontend is an official OpenAI application.
 
-Maintainer: [Volker Christian](https://github.com/VolkerChristian). [Organization](https://github.com/SNodeC) · [Contributing](#contributing) · [Security](https://github.com/SNodeC/.github/blob/main/SECURITY.md)
+Maintainer: [Volker Christian](https://github.com/VolkerChristian#banner). [Organization](https://github.com/SNodeC#banner) · [Contributing](#contributing) · [Security](https://github.com/SNodeC/.github/blob/main/SECURITY.md)
 <!-- snodec:end footer -->
