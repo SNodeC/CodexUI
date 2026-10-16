@@ -14,3 +14,13 @@ target_compile_definitions(
     codexmanager-test
     PRIVATE CODEXMANAGER_UI_EXECUTABLE="$<TARGET_FILE:codex-ui>"
 )
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME codexmanager-deletion
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/DeleteProfileDataTest.py
+)
+set_tests_properties(
+    codexmanager-deletion PROPERTIES TIMEOUT 30 ENVIRONMENT
+                                     "PYTHONDONTWRITEBYTECODE=1"
+)

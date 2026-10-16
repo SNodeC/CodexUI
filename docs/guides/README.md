@@ -14,4 +14,5 @@ Building CodexUI and using its native interface.
 - [Build and install Codex(W)UI from source](build-from-source.md#banner)
 - [Interaction guide](interaction-guide.md#banner)
 - [Native thread projects and sections](thread-projects.md#banner)
+- [CodexManager: profiles, authentication and deletion](profile-manager.md)
 <!-- snodec:end section-pages -->

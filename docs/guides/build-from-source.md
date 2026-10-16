@@ -14,6 +14,8 @@ The native build requires a C++20 toolchain, CMake 3.20+, Ninja, Qt 6.6+ Widgets
 
 Build [SNode.C](https://github.com/SNodeC/snode.c#banner) and [AISuite](https://github.com/SNodeC/AISuite#banner) from their default branches. AISuite must export `AISuite::OpenAICodex`. Running the application also requires a configured Codex app-server through `codex-bridge`.
 
+The native build also produces `codex-manager`. Building the manager tests requires a Python 3 interpreter. At runtime, managed profiles need a systemd user manager and `flock`, plus SSH for remote supervision; full data deletion requires Linux and Python 3.11+ on each target host. See the [profile-manager guide](profile-manager.md) for required bridge/client executables and deployment choices.
+
 ### Configure and build
 
 Clone the native checkout (Git selects the default branch), then replace the two installation prefixes below:
@@ -38,7 +40,7 @@ For installed SDK prerequisites and browser build instructions, see [Browser fro
 
 ### Install the build
 
-From the same checkout and build directory used for the native build, optionally install into `/usr/local` to add the executable, desktop entry and application icon. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
+From the same checkout and build directory used for the native build, optionally install into `/usr/local` to add both `codex-ui` and `codex-manager`, their desktop entries and application icons. For installation without administrator privileges, configure a writable `CMAKE_INSTALL_PREFIX` and omit `sudo`:
 
 ```sh
 sudo cmake --install build
@@ -46,7 +48,7 @@ sudo cmake --install build
 
 ### Verify the native installation
 
-Run `codex-ui --help` from the installed prefix to check executable and shared-library lookup, then follow [First run](../../README.md#first-run) for an interactive connection. In a source checkout, use `./build/codex-ui --help`. A help response is not proof of full desktop qualification.
+Run `codex-ui --help` from the installed prefix to check executable and shared-library lookup, then follow [First run](../../README.md#first-run) for an interactive connection. In a source checkout, use `./build/codex-ui --help`. Check `codex-manager --help` too (or `./build/codex-manager --help` before installation), then follow the [manager guide](profile-manager.md) to configure and authenticate a profile. A help response is not proof of full desktop qualification.
 
 ## Quality and development
 

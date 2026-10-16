@@ -5,9 +5,12 @@
 #include "manager/ProfileEditor.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDesktopServices>
+#include <QDialog>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -20,6 +23,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScrollArea>
@@ -56,9 +60,11 @@ namespace codexui::manager {
             ProfileCard(ProfileRuntime* runtime,
                         QWidget* parent,
                         std::function<void()> detail,
+                        std::function<void()> authentication,
                         std::function<void()> edit,
                         std::function<void()> stop,
-                        std::function<void()> remove)
+                        std::function<void()> remove,
+                        std::function<void()> deleteData)
                 : QFrame(parent)
                 , runtime_(runtime) {
                 const auto& p = runtime->profile();
@@ -92,12 +98,16 @@ namespace codexui::manager {
                 actions->addAction("Configure profile…", this, std::move(edit));
                 actions->addAction("Stop owned components…", this, std::move(stop));
                 actions->addSeparator();
-                actions->addAction("Remove registration…", this, std::move(remove));
+                actions->addAction("Remove from manager…", this, std::move(remove));
+                actions->addAction("Delete profile and its data…", this, std::move(deleteData));
                 menu->setMenu(actions);
                 row->addWidget(menu);
                 layout->addLayout(row);
                 state_ = UiStyle::makeLabel(runtime->status(), "body", this);
                 layout->addWidget(state_);
+                account_ = UiStyle::makeLabel({}, "meta", this);
+                layout->addWidget(account_);
+                layout->addWidget(button("Account / Sign in…", this, std::move(authentication)));
                 auto* description =
                     UiStyle::makeLabel(p.description.isEmpty() ? "An independent Codex environment" : p.description, "meta", this);
                 layout->addWidget(description);
@@ -115,6 +125,7 @@ namespace codexui::manager {
             }
             void update() {
                 state_->setText((runtime_->ready() ? "●  " : "○  ") + runtime_->status());
+                account_->setText(runtime_->accountStatus());
                 open_->setText(runtime_->ready()
                                    ? (runtime_->components().value("CodexUI").startsWith("Running") ? "Show CodexUI" : "Open CodexUI")
                                : runtime_->busy() ? "Working…"
@@ -125,6 +136,7 @@ namespace codexui::manager {
         private:
             ProfileRuntime* runtime_;
             QLabel* state_;
+            QLabel* account_;
             QPushButton* open_;
         };
     } // namespace
@@ -228,6 +240,9 @@ namespace codexui::manager {
             reflow();
         }));
         navigation->addStretch();
+        navigation->addWidget(button("Account / Sign in…", details, [this] {
+            showAuthentication(selected_);
+        }));
         navigation->addWidget(button("Configure…", details, [this] {
             createOrEdit(selected_);
         }));
@@ -435,6 +450,9 @@ namespace codexui::manager {
                     showProfile(id);
                 },
                 [this, id = p.id] {
+                    showAuthentication(id);
+                },
+                [this, id = p.id] {
                     createOrEdit(id);
                 },
                 [this, r] {
@@ -444,6 +462,9 @@ namespace codexui::manager {
                 },
                 [this, id = p.id] {
                     remove(id);
+                },
+                [this, id = p.id] {
+                    showDeletion(id);
                 });
             cards_.insert(p.id, card);
         }
@@ -488,7 +509,7 @@ namespace codexui::manager {
         for (auto* r : runtimes_) {
             ready += r->ready();
         }
-        summary_->setText(QString::number(profiles_.size()) + " profiles  ·  " + QString::number(ready) + " ready");
+        summary_->setText(QString::number(profiles_.size()) + " profiles  ·  " + QString::number(ready) + " connected");
     }
     void ManagerWindow::updateProfile(const QString& id) {
         if (auto* card = static_cast<ProfileCard*>(cards_.value(id))) {
@@ -498,10 +519,10 @@ namespace codexui::manager {
         for (auto* r : runtimes_) {
             ready += r->ready();
         }
-        summary_->setText(QString::number(profiles_.size()) + " profiles  ·  " + QString::number(ready) + " ready");
+        summary_->setText(QString::number(profiles_.size()) + " profiles  ·  " + QString::number(ready) + " connected");
         auto* r = runtime(id);
         if (id == selected_ && r) {
-            detailState_->setText(r->status());
+            detailState_->setText(r->status() + " · " + r->accountStatus());
             QStringList details;
             const auto components = r->components();
             for (auto it = components.cbegin(); it != components.cend(); ++it) {
@@ -546,6 +567,150 @@ namespace codexui::manager {
             updateProfile(id);
         }
     }
+    void ManagerWindow::showAuthentication(const QString& id) {
+        auto* r = runtime(id);
+        if (r) {
+            QDialog dialog(this);
+            dialog.setObjectName("profileAuthentication");
+            dialog.setWindowTitle("Account · " + r->profile().name);
+            dialog.resize(620, 580);
+            auto* layout = new QVBoxLayout(&dialog);
+            layout->setContentsMargins(24, 24, 24, 24);
+            layout->setSpacing(14);
+            const auto& p = r->profile();
+            const auto& host = p.provider.transport == "stdio" ? p.bridge : p.appServer;
+            layout->addWidget(UiStyle::makeLabel("Sign in to " + p.name, "panelHeader", &dialog));
+            layout->addWidget(
+                UiStyle::makeLabel("Credentials belong to the app-server on " + host.label() + "\n" + p.codexHome, "meta", &dialog));
+            auto* state = UiStyle::makeLabel({}, "body", &dialog);
+            state->setObjectName("accountStatus");
+            layout->addWidget(state);
+            auto* notice = UiStyle::makeLabel({}, "body", &dialog);
+            notice->setObjectName("authenticationNotice");
+            layout->addWidget(notice);
+            auto* method = new QComboBox(&dialog);
+            method->setAccessibleName("Sign-in method");
+            method->setObjectName("authenticationMethod");
+            method->addItem("ChatGPT · device code (local or remote)", "chatgptDeviceCode");
+            method->addItem("ChatGPT · browser callback on app-server host", "chatgpt");
+            method->addItem("OpenAI API key", "apiKey");
+            layout->addWidget(method);
+            auto* explanation = UiStyle::makeLabel({}, "meta", &dialog);
+            layout->addWidget(explanation);
+            auto* key = new QLineEdit(&dialog);
+            key->setEchoMode(QLineEdit::Password);
+            key->setFixedHeight(key->sizeHint().height());
+            key->setPlaceholderText("OpenAI API key");
+            key->setAccessibleName("OpenAI API key");
+            key->setObjectName("authenticationApiKey");
+            layout->addWidget(key);
+            auto* code = UiStyle::makeLabel({}, "panelHeader", &dialog);
+            code->setObjectName("authenticationCode");
+            code->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+            layout->addWidget(code);
+            auto* url = new QLineEdit(&dialog);
+            url->setReadOnly(true);
+            url->setFixedHeight(url->sizeHint().height());
+            url->setAccessibleName("Sign-in URL");
+            layout->addWidget(url);
+            auto* browserRow = new QHBoxLayout;
+            auto* browser = button("Open browser", &dialog, [r, &dialog] {
+                const QUrl target(r->loginUrl());
+                if (target.scheme() == "https" && !target.host().isEmpty()) {
+                    if (!QDesktopServices::openUrl(target)) {
+                        QMessageBox::information(&dialog, "Open sign-in page", "No browser could be opened. Copy the sign-in URL instead.");
+                    }
+                }
+            });
+            browserRow->addWidget(browser);
+            auto* copyUrl = button("Copy URL", &dialog, [r] {
+                QApplication::clipboard()->setText(r->loginUrl());
+            });
+            auto* copyCode = button("Copy code", &dialog, [r] {
+                QApplication::clipboard()->setText(r->loginCode());
+            });
+            browserRow->addWidget(copyUrl);
+            browserRow->addWidget(copyCode);
+            layout->addLayout(browserRow);
+            auto* actions = new QHBoxLayout;
+            auto* signIn = button("Sign in", &dialog, [r, method, key] {
+                r->signIn(method->currentData().toString(), key->text());
+                key->clear();
+            });
+            signIn->setObjectName("startAuthentication");
+            actions->addWidget(signIn);
+            auto* cancel = button("Cancel sign-in", &dialog, [r] {
+                r->cancelLogin();
+            });
+            cancel->setObjectName("cancelAuthentication");
+            actions->addWidget(cancel);
+            auto* logout = button("Sign out…", &dialog, [r, &dialog] {
+                if (QMessageBox::question(
+                        &dialog,
+                        "Sign out of this profile?",
+                        "Sign out on this profile's app-server? Other clients using the same Codex home will also lose this account.") ==
+                    QMessageBox::Yes) {
+                    r->signOut();
+                }
+            });
+            actions->addWidget(logout);
+            layout->addLayout(actions);
+            auto* connection = button("Start / connect backend", &dialog, [r] {
+                r->start(false);
+            });
+            layout->addWidget(connection);
+            layout->addWidget(button("Refresh account", &dialog, [r] {
+                r->refreshAccount();
+            }));
+            layout->addWidget(
+                UiStyle::makeLabel("Signed-in status does not verify quota or inference access. If this server does not support a "
+                                   "login method, choose another or use the commands in Details → Setup & startup.",
+                                   "meta",
+                                   &dialog));
+            layout->addWidget(
+                UiStyle::makeLabel("Closing this dialog leaves sign-in running. Use Cancel sign-in to stop it.", "meta", &dialog));
+            layout->addStretch();
+            auto* close = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+            connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            layout->addWidget(close);
+            const auto render = [=] {
+                state->setText(r->status() + "\n" + r->accountStatus());
+                notice->setText(r->authenticationMessage().isEmpty() && r->ready() && !r->authenticationAvailable() && !r->authenticating()
+                                    ? "In CodexUI, choose Release control before signing in here. Afterwards, choose Claim control to "
+                                      "continue. You can also close its window."
+                                    : r->authenticationMessage());
+                const bool api = method->currentData().toString() == "apiKey";
+                const bool callback = method->currentData().toString() == "chatgpt";
+                explanation->setText(
+                    api ? "The key is sent to this profile's app-server and stored there. Use a trusted, protected bridge connection."
+                    : callback ? "The browser callback must reach the app-server's localhost. For a remote server, open this URL there or "
+                                 "use device-code login."
+                               : "Open the verification page on this computer or another device, then enter the code shown below.");
+                key->setVisible(api);
+                method->setEnabled(!r->authenticating());
+                key->setEnabled(!r->authenticating());
+                signIn->setEnabled(r->authenticationAvailable() && (!api || !key->text().trimmed().isEmpty()));
+                cancel->setEnabled(r->authenticating());
+                logout->setEnabled(r->authenticationAvailable() && (r->accountState() == ProfileRuntime::AccountState::SignedIn ||
+                                                                    r->accountState() == ProfileRuntime::AccountState::Rejected));
+                connection->setEnabled(!r->ready() && !r->busy());
+                code->setText(r->loginCode());
+                code->setVisible(!r->loginCode().isEmpty());
+                url->setText(r->loginUrl());
+                url->setVisible(!r->loginUrl().isEmpty());
+                const QUrl target(r->loginUrl());
+                browser->setEnabled(target.scheme() == "https" && !target.host().isEmpty());
+                copyUrl->setEnabled(!r->loginUrl().isEmpty());
+                copyCode->setEnabled(!r->loginCode().isEmpty());
+            };
+            connect(r, &ProfileRuntime::changed, &dialog, render);
+            connect(method, &QComboBox::currentIndexChanged, &dialog, render);
+            connect(key, &QLineEdit::textChanged, &dialog, render);
+            connect(r, &QObject::destroyed, &dialog, &QDialog::reject);
+            render();
+            dialog.exec();
+        }
+    }
     void ManagerWindow::createOrEdit(const QString& id) {
         auto* r = runtime(id);
         if (r && (r->busy() || r->hasOwnedProcesses())) {
@@ -583,18 +748,105 @@ namespace codexui::manager {
                                              "Remove registration?",
                                              "Remove this profile from CodexManager? Its CODEX_HOME, conversations, authentication and "
                                              "external services will not be deleted.") == QMessageBox::Yes) {
-                auto next = profiles_;
-                next.erase(std::remove_if(next.begin(),
-                                          next.end(),
-                                          [&](const Profile& p) {
-                                              return p.id == id;
-                                          }),
-                           next.end());
-                if (persist(next)) {
-                    selected_.clear();
-                    pages_->setCurrentIndex(0);
-                }
+                forgetRegistration(id);
             }
+        }
+    }
+    void ManagerWindow::forgetRegistration(const QString& id) {
+        auto next = profiles_;
+        next.erase(std::remove_if(next.begin(),
+                                  next.end(),
+                                  [&](const Profile& p) {
+                                      return p.id == id;
+                                  }),
+                   next.end());
+        if (persist(next)) {
+            selected_.clear();
+            pages_->setCurrentIndex(0);
+        }
+    }
+    void ManagerWindow::showDeletion(const QString& id) {
+        auto* r = runtime(id);
+        if (r && !r->busy()) {
+            QDialog dialog(this);
+            dialog.setObjectName("deleteProfileDialog");
+            dialog.setWindowTitle("Delete profile and its data");
+            dialog.resize(720, 600);
+            auto* layout = new QVBoxLayout(&dialog);
+            auto* tabs = new QTabWidget(&dialog);
+            auto* preview = textView(tabs, "Deletion preview");
+            auto* manual = textView(tabs, "Manual instructions");
+            auto plan = DeletionPlan::forProfile(r->profile(), profiles_);
+            preview->setPlainText(plan.description());
+            manual->setPlainText(plan.manualInstructions());
+            layout->addWidget(tabs, 1);
+            auto* status = UiStyle::makeLabel("Checking ownership and shared directories…", "body", &dialog);
+            status->setWordWrap(true);
+            layout->addWidget(status);
+            auto* exclusive = new QCheckBox("I confirm this home is used exclusively by this profile", &dialog);
+            exclusive->setObjectName("deletionExclusive");
+            layout->addWidget(exclusive);
+            auto* label = new QLabel("Type the profile name to confirm: " + r->profile().name, &dialog);
+            label->setWordWrap(true);
+            layout->addWidget(label);
+            auto* name = new QLineEdit(&dialog);
+            name->setObjectName("deletionName");
+            name->setAccessibleName("Profile name confirmation");
+            label->setBuddy(name);
+            layout->addWidget(name);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+            auto* erase = buttons->addButton("Delete permanently", QDialogButtonBox::DestructiveRole);
+            erase->setObjectName("deletePermanently");
+            erase->setEnabled(false);
+            layout->addWidget(buttons);
+            bool inspected = false;
+            bool deleting = false;
+            const auto update = [&] {
+                erase->setEnabled(inspected && !deleting && plan.error.isEmpty() && exclusive->isChecked() &&
+                                  name->text() == r->profile().name);
+            };
+            connect(name, &QLineEdit::textChanged, &dialog, update);
+            connect(exclusive, &QCheckBox::toggled, &dialog, update);
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            QPointer<QDialog> guard(&dialog);
+            r->inspectDeletion(profiles_, [&, guard](DeletionPlan checked) {
+                if (guard) {
+                    plan = std::move(checked);
+                    inspected = true;
+                    status->setText(plan.error.isEmpty() ? "Ownership checks passed. This action cannot be undone." : plan.error);
+                    update();
+                }
+            });
+            connect(erase, &QPushButton::clicked, &dialog, [&] {
+                deleting = true;
+                update();
+                name->setEnabled(false);
+                exclusive->setEnabled(false);
+                status->setText("Stopping components and deleting data… You can close this dialog; cleanup continues in the manager.");
+                r->deleteData(plan);
+            });
+            // Queued delivery lets the runtime finish its operation before registry removal destroys it.
+            const auto completion = connect(
+                r,
+                &ProfileRuntime::deletionFinished,
+                this,
+                [this, id, guard](bool success, const QString& error) {
+                    if (guard) {
+                        guard->accept();
+                    }
+                    if (success) {
+                        forgetRegistration(id);
+                    } else {
+                        QMessageBox::warning(this, "Profile cleanup incomplete", error);
+                    }
+                },
+                static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::SingleShotConnection));
+            dialog.exec();
+            if (!deleting) {
+                disconnect(completion);
+            }
+        } else if (r) {
+            QMessageBox::information(this, "Profile is busy", "Finish the current operation before deleting this profile.");
         }
     }
     void ManagerWindow::importProfiles() {

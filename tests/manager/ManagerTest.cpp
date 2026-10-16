@@ -6,6 +6,7 @@
 #include "manager/ProfileRuntime.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -18,6 +19,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocalSocket>
+#include <QMenu>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QScopeGuard>
@@ -62,9 +65,80 @@ namespace {
                          "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"probe\"}\n"
                       << std::flush;
             int releases = 0;
+            bool signedIn = false;
+            QString loginId;
+            QString loginType;
+            const QString authMode = qEnvironmentVariable("CODEXMANAGER_AUTH_FIXTURE");
+            const auto emitPayload = [](const QJsonObject& payload) {
+                std::cout
+                    << QJsonDocument(QJsonObject{{"kind", "appserver"}, {"payload", payload}}).toJson(QJsonDocument::Compact).constData()
+                    << '\n'
+                    << std::flush;
+            };
             for (std::string line; std::getline(std::cin, line) && line != "quit";) {
-                if (line == "release") {
-                    std::cout << "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":null}\n" << std::flush;
+                if (line == "acquire") {
+                    std::cout << "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"probe\"}\n" << std::flush;
+                } else if (line.starts_with("raw ")) {
+                    const auto request = QJsonDocument::fromJson(QByteArray::fromStdString(line.substr(4))).object();
+                    const auto method = request.value("method").toString();
+                    const auto params = request.value("params").toObject();
+                    QJsonObject result;
+                    if (method == "account/read") {
+                        if (!loginId.isEmpty() && (authMode == "success" || authMode == "expired")) {
+                            signedIn = authMode == "success";
+                            emitPayload({{"method", "account/login/completed"},
+                                         {"params", QJsonObject{{"loginId", loginId}, {"success", signedIn}}}});
+                            loginId.clear();
+                        }
+                        result = {{"requiresOpenaiAuth", !authMode.isEmpty()},
+                                  {"account",
+                                   signedIn ? QJsonValue(QJsonObject{{"type", loginType == "apiKey" ? "apiKey" : "chatgpt"},
+                                                                     {"email", "fixture@example.test"},
+                                                                     {"planType", "plus"}})
+                                            : QJsonValue(QJsonValue::Null)}};
+                    } else if (method == "account/login/start") {
+                        loginType = params.value("type").toString();
+                        if (authMode == "error") {
+                            emitPayload({{"id", request.value("id")},
+                                         {"error", QJsonObject{{"code", -32602}, {"message", "secret must not be logged"}}}});
+                        } else if (authMode == "disconnect") {
+                            std::cout << "{\"kind\":\"client.connection\",\"event\":\"disconnected\"}\n" << std::flush;
+                        } else if (loginType == "apiKey") {
+                            signedIn = true;
+                            result = {{"type", "apiKey"}};
+                        } else {
+                            loginId = "fixture-login";
+                            if (authMode == "early") {
+                                signedIn = true;
+                                emitPayload({{"method", "account/login/completed"},
+                                             {"params", QJsonObject{{"loginId", loginId}, {"success", true}}}});
+                            }
+                            result = {{"type", loginType}, {"loginId", loginId}};
+                            if (loginType == "chatgpt") {
+                                result.insert("authUrl", "https://auth.openai.com/fixture-browser");
+                            } else {
+                                result.insert("verificationUrl", "https://auth.openai.com/codex/device");
+                                result.insert("userCode", "TEST-CODE");
+                            }
+                        }
+                    } else if (method == "account/login/cancel") {
+                        result = {{"status", "canceled"}};
+                        loginId.clear();
+                    } else if (method == "account/logout") {
+                        signedIn = false;
+                    }
+                    if (!(method == "account/login/start" && (authMode == "error" || authMode == "disconnect")) &&
+                        !(method == "account/read" && authMode == "read-timeout")) {
+                        emitPayload({{"id", request.value("id")}, {"result", result}});
+                        if (authMode == "unauthorized" && method == "account/login/start") {
+                            emitPayload(
+                                {{"method", "error"}, {"params", QJsonObject{{"error", QJsonObject{{"codexErrorInfo", "unauthorized"}}}}}});
+                        }
+                    }
+                } else if (line == "release") {
+                    std::cout << (authMode == "controller" ? "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"other-ui\"}\n"
+                                                           : "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":null}\n")
+                              << std::flush;
                     ++releases;
                     if (qEnvironmentVariableIsSet("CODEXMANAGER_RECLAIM_CONTROL")) {
                         if (releases >= 2) {
@@ -149,12 +223,351 @@ namespace {
             qunsetenv("CODEXMANAGER_FAIL_START");
             qunsetenv("CODEXMANAGER_FOREIGN_UNIT");
             qunsetenv("CODEXMANAGER_RECLAIM_CONTROL");
+            qunsetenv("CODEXMANAGER_AUTH_FIXTURE");
         }
     };
 } // namespace
 class ManagerTest final : public QObject {
     Q_OBJECT
 private slots:
+    void deletionRejectsSharedSettings() {
+        FixtureTools tools;
+        auto p = Profile::create("Owner");
+        p.codexHome = tools.dir.filePath(".codex-" + p.id.left(8));
+        auto other = Profile::create("Nested home");
+        other.codexHome = p.settingsDirectory() + "/other-home";
+        ProfileRuntime runtime(p);
+        std::optional<DeletionPlan> plan;
+        runtime.inspectDeletion({p, other}, [&](DeletionPlan checked) {
+            plan = std::move(checked);
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(plan.has_value(), 10000);
+        QVERIFY(plan->error.contains("shares or overlaps"));
+    }
+    void profileDeletion_data() {
+        QTest::addColumn<bool>("remote");
+        QTest::addColumn<bool>("foreign");
+        QTest::newRow("local") << false << false;
+        QTest::newRow("ssh") << true << false;
+        QTest::newRow("foreign-unit") << false << true;
+    }
+    void profileDeletion() {
+        QFETCH(bool, remote);
+        QFETCH(bool, foreign);
+        FixtureTools tools;
+        auto p = Profile::create("Delete fixture");
+        p.codexHome = tools.dir.filePath(".codex-" + p.id.left(8));
+        p.probeExecutable = tools.dir.filePath("probe");
+        if (remote) {
+            p.bridge.ownership = Ownership::Ssh;
+            p.bridge.sshTarget = "fixture-host";
+            p.frontend.transport = "ipv4";
+        }
+        QVERIFY(QDir().mkpath(p.codexHome));
+        writeFile(p.codexHome + "/conversation", "fixture data");
+        QVERIFY(QDir().mkpath(p.settingsDirectory()));
+        const auto cleanup = qScopeGuard([&] {
+            QDir(p.settingsDirectory()).removeRecursively();
+        });
+        writeFile(p.settingsDirectory() + "/settings", "fixture settings");
+        writeFile(tools.dir.filePath(p.unit("bridge")), "running");
+        if (foreign) {
+            qputenv("CODEXMANAGER_FOREIGN_UNIT", "1");
+        }
+        ProfileRuntime runtime(p);
+        std::optional<DeletionPlan> plan;
+        runtime.inspectDeletion({p}, [&](DeletionPlan result) {
+            plan = std::move(result);
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(plan.has_value(), 10000);
+        QVERIFY2(plan->error.isEmpty(), qPrintable(plan->error));
+        QSignalSpy finished(&runtime, &ProfileRuntime::deletionFinished);
+        runtime.deleteData(*plan);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QCOMPARE(finished.first().first().toBool(), !foreign);
+        QCOMPARE(QFileInfo::exists(p.codexHome + "/conversation"), foreign);
+        QCOMPARE(QFileInfo::exists(p.settingsDirectory()), foreign);
+        QCOMPARE(QFileInfo::exists(tools.dir.filePath(p.unit("bridge"))), foreign);
+    }
+    void deletionDialog_data() {
+        QTest::addColumn<bool>("confirm");
+        QTest::newRow("cancel") << false;
+        QTest::newRow("delete") << true;
+    }
+    void deletionDialog() {
+        QFETCH(bool, confirm);
+        FixtureTools tools;
+        auto p = Profile::create("Disposable profile");
+        p.codexHome = tools.dir.filePath(".codex-" + p.id.left(8));
+        QVERIFY(QDir().mkpath(p.codexHome));
+        writeFile(p.codexHome + "/data", "preserve until confirmed");
+        const auto path = tools.dir.filePath("profiles.json");
+        QString error;
+        QVERIFY(ProfileStore(path).save({p}, &error));
+        ManagerWindow window(path);
+        window.show();
+        auto* runtime = window.findChild<ProfileRuntime*>();
+        QVERIFY(runtime);
+        QTRY_VERIFY(!runtime->busy());
+        QAction* deletion = nullptr;
+        for (auto* action : window.findChildren<QAction*>()) {
+            if (action->text() == "Delete profile and its data…") {
+                deletion = action;
+            }
+        }
+        QVERIFY(deletion);
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            QPointer<QDialog> guard(dialog);
+            const auto close = qScopeGuard([guard] {
+                if (guard) {
+                    guard->reject();
+                }
+            });
+            auto* name = dialog->findChild<QLineEdit*>("deletionName");
+            auto* exclusive = dialog->findChild<QCheckBox*>("deletionExclusive");
+            auto* erase = dialog->findChild<QPushButton*>("deletePermanently");
+            QVERIFY(name && exclusive && erase);
+            QVERIFY(!erase->isEnabled());
+            name->setText(p.name);
+            QVERIFY(!erase->isEnabled());
+            exclusive->setChecked(true);
+            QTRY_VERIFY_WITH_TIMEOUT(erase->isEnabled(), 10000);
+            name->setText("wrong name");
+            QVERIFY(!erase->isEnabled());
+            name->setText(p.name);
+            for (auto* button : dialog->findChildren<QPushButton*>()) {
+                if (button->isVisible()) {
+                    QVERIFY(dialog->rect().contains(QRect(button->mapTo(dialog, QPoint{}), button->size())));
+                    QVERIFY(button->height() >= 24);
+                }
+            }
+            const auto evidence = qEnvironmentVariable("CODEXMANAGER_EVIDENCE_DIR");
+            if (!evidence.isEmpty()) {
+                QVERIFY(QDir().mkpath(evidence));
+                QVERIFY(dialog->grab().save(evidence + "/delete-profile.png"));
+            }
+            if (confirm) {
+                QTest::mouseClick(erase, Qt::LeftButton);
+            }
+        });
+        deletion->trigger();
+        QTRY_COMPARE_WITH_TIMEOUT(ProfileStore(path).load(&error).size(), confirm ? 0 : 1, 10000);
+        QCOMPARE(QFileInfo::exists(p.codexHome), !confirm);
+    }
+    void profileAuthentication_data() {
+        QTest::addColumn<QString>("method");
+        QTest::newRow("device-code") << "chatgptDeviceCode";
+        QTest::newRow("browser") << "chatgpt";
+        QTest::newRow("api-key") << "apiKey";
+    }
+    void profileAuthentication() {
+        QFETCH(QString, method);
+        FixtureTools tools;
+        qputenv("CODEXMANAGER_AUTH_FIXTURE", "success");
+        auto p = Profile::create("Authentication");
+        p.codexHome = tools.dir.filePath("home");
+        p.probeExecutable = tools.dir.filePath("probe");
+        ProfileRuntime first(p);
+        first.start();
+        QTRY_COMPARE(first.accountState(), ProfileRuntime::AccountState::SignedOut);
+        QTRY_VERIFY(first.authenticationAvailable());
+        QVERIFY(!first.components().value("CodexUI").startsWith("Running"));
+        auto secondProfile = p;
+        secondProfile.id = Profile::create().id;
+        secondProfile.codexHome = tools.dir.filePath("other-home");
+        ProfileRuntime second(secondProfile);
+        second.start(false);
+        QTRY_COMPARE(second.accountState(), ProfileRuntime::AccountState::SignedOut);
+        first.signIn(method, "sk-fixture-only-do-not-log");
+        if (method != "apiKey") {
+            QTRY_VERIFY(!first.loginUrl().isEmpty());
+            QCOMPARE(first.loginCode(), method == "chatgptDeviceCode" ? QString("TEST-CODE") : QString{});
+            first.refreshAccount();
+        }
+        QTRY_COMPARE(first.accountState(), ProfileRuntime::AccountState::SignedIn);
+        QTRY_VERIFY(first.authenticationAvailable());
+        QVERIFY(first.accountStatus().contains("fixture@example.test"));
+        QCOMPARE(second.accountState(), ProfileRuntime::AccountState::SignedOut);
+        QVERIFY(!first.logs().contains("sk-fixture"));
+        QVERIFY(!first.logs().contains("TEST-CODE"));
+        first.signOut();
+        QTRY_COMPARE(first.accountState(), ProfileRuntime::AccountState::SignedOut);
+        QTRY_VERIFY(first.authenticationAvailable());
+        first.stop();
+        second.stop();
+        QTRY_VERIFY(!first.busy() && !second.busy());
+    }
+    void authenticationFailuresAndCancellation_data() {
+        QTest::addColumn<QString>("mode");
+        for (const auto* mode : {"pending", "error", "disconnect", "controller", "expired", "early"}) {
+            QTest::newRow(mode) << QString(mode);
+        }
+    }
+    void authenticationFailuresAndCancellation() {
+        QFETCH(QString, mode);
+        FixtureTools tools;
+        qputenv("CODEXMANAGER_AUTH_FIXTURE", mode.toUtf8());
+        auto p = Profile::create();
+        p.bridge.ownership = Ownership::External;
+        p.probeExecutable = tools.dir.filePath("probe");
+        ProfileRuntime runtime(p);
+        runtime.start(false);
+        QTRY_COMPARE(runtime.accountState(), ProfileRuntime::AccountState::SignedOut);
+        QTRY_VERIFY(runtime.ready());
+        runtime.signIn("chatgptDeviceCode");
+        if (mode == "early") {
+            QTRY_VERIFY(!runtime.authenticating());
+            QTRY_COMPARE(runtime.accountState(), ProfileRuntime::AccountState::SignedIn);
+            QTRY_VERIFY(runtime.authenticationAvailable());
+        } else if (mode == "expired") {
+            QTRY_VERIFY(!runtime.loginCode().isEmpty());
+            runtime.refreshAccount();
+            QTRY_VERIFY(!runtime.authenticating());
+            QTRY_COMPARE(runtime.accountState(), ProfileRuntime::AccountState::SignedOut);
+            QVERIFY(runtime.authenticationMessage().contains("expired"));
+        } else if (mode == "pending") {
+            QTRY_VERIFY(!runtime.loginCode().isEmpty());
+            runtime.cancelLogin();
+            QTRY_VERIFY(!runtime.authenticating());
+            QTRY_VERIFY(runtime.authenticationAvailable());
+            QVERIFY(runtime.loginUrl().isEmpty());
+            QCOMPARE(runtime.accountState(), ProfileRuntime::AccountState::SignedOut);
+            // Cancel before the asynchronous claim/start response arrives as well.
+            runtime.signIn("chatgpt");
+            runtime.cancelLogin();
+            QTRY_VERIFY(!runtime.authenticating() && runtime.authenticationAvailable());
+        } else if (mode == "controller") {
+            QVERIFY(!runtime.authenticating());
+            QVERIFY(runtime.authenticationMessage().contains("control"));
+        } else if (mode == "disconnect") {
+            QTRY_VERIFY(!runtime.authenticating());
+            QCOMPARE(runtime.accountState(), ProfileRuntime::AccountState::Unknown);
+            QVERIFY(runtime.authenticationMessage().contains("unknown"));
+        } else {
+            QTRY_VERIFY(!runtime.authenticating());
+            QVERIFY(runtime.authenticationMessage().contains("rejected"));
+            QVERIFY(!runtime.logs().contains("secret"));
+        }
+        runtime.stop();
+        QTRY_VERIFY(!runtime.busy());
+    }
+    void accountReadTimeoutPreservesLogin() {
+        FixtureTools tools;
+        qputenv("CODEXMANAGER_AUTH_FIXTURE", "read-timeout");
+        auto p = Profile::create();
+        p.bridge.ownership = Ownership::External;
+        p.probeExecutable = tools.dir.filePath("probe");
+        ProfileRuntime runtime(p);
+        runtime.check();
+        QTRY_VERIFY(runtime.authenticationAvailable());
+        runtime.signIn("chatgptDeviceCode");
+        QTRY_COMPARE(runtime.loginCode(), QString("TEST-CODE"));
+        // Exercise the real public timeout contract, with the event loop still running.
+        QTest::qWait(31000);
+        runtime.refresh();
+        QVERIFY(runtime.authenticating());
+        QCOMPARE(runtime.loginCode(), QString("TEST-CODE"));
+        QCOMPARE(runtime.accountState(), ProfileRuntime::AccountState::Unknown);
+        runtime.cancelLogin();
+        QTRY_VERIFY(!runtime.authenticating());
+        runtime.stop();
+        QTRY_VERIFY(!runtime.busy());
+    }
+    void authenticationRejection() {
+        FixtureTools tools;
+        qputenv("CODEXMANAGER_AUTH_FIXTURE", "unauthorized");
+        auto p = Profile::create();
+        p.bridge.ownership = Ownership::External;
+        p.probeExecutable = tools.dir.filePath("probe");
+        ProfileRuntime runtime(p);
+        runtime.check();
+        QTRY_VERIFY(runtime.authenticationAvailable());
+        runtime.signIn("apiKey", "sk-fixture-only");
+        QTRY_COMPARE(runtime.accountState(), ProfileRuntime::AccountState::Rejected);
+        QVERIFY(runtime.accountStatus().contains("rejected"));
+        QTRY_VERIFY(runtime.authenticationAvailable());
+        runtime.stop();
+        QTRY_VERIFY(!runtime.busy());
+    }
+    void authenticationDialog_data() {
+        QTest::addColumn<int>("width");
+        QTest::newRow("narrow") << 520;
+        QTest::newRow("normal") << 680;
+    }
+    void authenticationDialog() {
+        QFETCH(int, width);
+        FixtureTools tools;
+        qputenv("CODEXMANAGER_AUTH_FIXTURE", "pending");
+        auto p = Profile::create("Remote research");
+        p.bridge.ownership = Ownership::External;
+        p.codexHome = "/srv/codex/research";
+        p.probeExecutable = tools.dir.filePath("probe");
+        QString error;
+        const auto path = tools.dir.filePath("profiles.json");
+        QVERIFY(ProfileStore(path).save({p}, &error));
+        ManagerWindow window(path);
+        window.show();
+        auto* runtime = window.findChild<ProfileRuntime*>();
+        QVERIFY(runtime);
+        runtime->check();
+        QTRY_COMPARE(runtime->accountState(), ProfileRuntime::AccountState::SignedOut);
+        const auto buttons = window.findChildren<QPushButton*>();
+        auto account = std::find_if(buttons.cbegin(), buttons.cend(), [](QPushButton* b) {
+            return b->isVisible() && b->text() == "Account / Sign in…";
+        });
+        QVERIFY(account != buttons.cend());
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            const auto close = qScopeGuard([dialog] {
+                dialog->reject();
+            });
+            dialog->resize(width, 650);
+            auto* method = dialog->findChild<QComboBox*>("authenticationMethod");
+            auto* start = dialog->findChild<QPushButton*>("startAuthentication");
+            auto* cancel = dialog->findChild<QPushButton*>("cancelAuthentication");
+            auto* key = dialog->findChild<QLineEdit*>("authenticationApiKey");
+            QVERIFY(method && start && cancel && key);
+            QCOMPARE(method->count(), 3);
+            method->setCurrentIndex(2);
+            QVERIFY(key->isVisible());
+            QCOMPARE(key->echoMode(), QLineEdit::Password);
+            QVERIFY(!start->isEnabled());
+            QTest::keyClicks(key, "fixture-key");
+            QVERIFY(start->isEnabled());
+            method->setCurrentIndex(0);
+            QTest::mouseClick(start, Qt::LeftButton);
+            QTRY_COMPARE(runtime->loginCode(), QString("TEST-CODE"));
+            QVERIFY(key->text().isEmpty());
+            auto* code = dialog->findChild<QLabel*>("authenticationCode");
+            QVERIFY(code && code->isVisible());
+            QCOMPARE(code->text(), QString("TEST-CODE"));
+            for (auto* field : dialog->findChildren<QLineEdit*>()) {
+                if (field->isVisible()) {
+                    QVERIFY(field->height() >= field->sizeHint().height());
+                }
+            }
+            for (auto* b : dialog->findChildren<QPushButton*>()) {
+                if (b->isVisible()) {
+                    const QRect geometry(b->mapTo(dialog, QPoint{}), b->size());
+                    QVERIFY2(dialog->rect().contains(geometry), qPrintable(b->text()));
+                    QVERIFY(b->height() >= 24);
+                }
+            }
+            const QString evidence = qEnvironmentVariable("CODEXMANAGER_EVIDENCE_DIR");
+            if (!evidence.isEmpty()) {
+                QDir().mkpath(evidence);
+                QVERIFY(dialog->grab().save(evidence + "/authentication-" + QString::number(width) + ".png"));
+            }
+            QTest::mouseClick(cancel, Qt::LeftButton);
+            QTRY_VERIFY(!runtime->authenticating());
+        });
+        QTest::mouseClick(*account, Qt::LeftButton);
+        runtime->stop();
+        QTRY_VERIFY(!runtime->busy());
+    }
     void profileStorageAndConflicts() {
         QTemporaryDir dir;
         Profile p = Profile::create("Primary");
@@ -567,6 +980,11 @@ private slots:
         QTRY_VERIFY2_WITH_TIMEOUT(
             one.ready() && two.ready(), qPrintable(one.status() + '\n' + one.logs() + '\n' + two.status() + '\n' + two.logs()), 12000);
         QTRY_VERIFY_WITH_TIMEOUT(!one.busy() && !two.busy(), 20000);
+        QTRY_COMPARE_WITH_TIMEOUT(one.accountState(), ProfileRuntime::AccountState::SignedOut, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(two.accountState(), ProfileRuntime::AccountState::SignedOut, 10000);
+        // Explicit browsing remains available without authenticating or sending inference.
+        one.openUi();
+        two.openUi();
         QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(a.runtimeSocket()) && QFileInfo::exists(b.runtimeSocket()), 20000);
         QLocalSocket first, second;
         first.connectToServer(a.runtimeSocket());
@@ -577,8 +995,18 @@ private slots:
         second.disconnectFromServer();
         one.openUi();
         QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 10000);
-        one.stop();
-        QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 20000);
+        std::optional<DeletionPlan> deletion;
+        one.inspectDeletion({a, b}, [&](DeletionPlan plan) {
+            deletion = std::move(plan);
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(deletion.has_value(), 10000);
+        QVERIFY2(deletion->error.isEmpty(), qPrintable(deletion->error));
+        QSignalSpy deleted(&one, &ProfileRuntime::deletionFinished);
+        one.deleteData(*deletion);
+        QTRY_COMPARE_WITH_TIMEOUT(deleted.size(), 1, 20000);
+        QVERIFY2(deleted.first().first().toBool(), qPrintable(deleted.first().last().toString()));
+        QVERIFY(!QFileInfo::exists(a.codexHome));
+        QVERIFY(!QFileInfo::exists(a.settingsDirectory()));
         QVERIFY(!one.hasOwnedProcesses());
         QVERIFY(two.ready());
         two.stop();

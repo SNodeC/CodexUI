@@ -202,12 +202,17 @@ namespace codexui::manager {
                   "verified host key.\n";
         result += "For unattended remote services, ensure the remote user service manager remains running after logout (ask the host "
                   "administrator about loginctl enable-linger).\n";
-        result += "Authentication must be configured on the app-server host using its selected Codex executable and CODEX_HOME. "
-                  "Credentials are not copied.\n\n";
+        result += "Use Account / Sign in in CodexManager after connecting the backend. Device-code login works for local and remote "
+                  "app-servers. Browser login requires the callback on the app-server host. Credentials remain with that app-server. "
+                  "Fallback commands below run on the app-server host with the selected CODEX_HOME.\n\n";
         Host appHost = p.provider.transport == "stdio" ? p.bridge : p.appServer;
         result += "APP-SERVER HOME — " + appHost.label() + "\n";
         result += Command{"mkdir", {"-p", "-m", "700", p.codexHome}, {}, {}}.shell() + "\n";
-        result += Command{p.appServerExecutable, {"login"}, {{"CODEX_HOME", p.codexHome}}, {}}.shell() + "\n\n";
+        for (const auto& args :
+             {QStringList{"login"}, QStringList{"login", "--device-auth"}, QStringList{"login", "status"}, QStringList{"logout"}}) {
+            result += Command{p.appServerExecutable, args, {{"CODEX_HOME", p.codexHome}}, {}}.shell() + "\n";
+        }
+        result += "Choose one login method; status checks the account, logout signs out.\n\n";
         if (p.provider.transport == "stdio") {
             result += "APP-SERVER: owned and started by the bridge over stdio. Do not start a second app-server for this profile.\n\n";
         }

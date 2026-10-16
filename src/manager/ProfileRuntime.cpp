@@ -63,6 +63,7 @@ namespace codexui::manager {
             if (!stopping_) {
                 readinessTimeout_.stop();
                 ready_ = false;
+                forgetAccount();
                 starting_ = false;
                 setStatus("Connection monitor stopped (" + QString::number(code) + ")");
             }
@@ -91,7 +92,7 @@ namespace codexui::manager {
         operation_.waitForFinished(1000);
     }
     bool ProfileRuntime::busy() const {
-        return starting_ || stopping_ || current_.has_value() || !operations_.isEmpty();
+        return deletion_.has_value() || login_.has_value() || starting_ || stopping_ || current_.has_value() || !operations_.isEmpty();
     }
     ProfileRuntime::State ProfileRuntime::serviceState(const Component& c, int code, const QString& output) {
         State result = State::Unknown;
@@ -175,8 +176,8 @@ namespace codexui::manager {
         log(message);
         setStatus(message);
     }
-    void ProfileRuntime::enqueue(Command c, std::function<void(int, QString)> done) {
-        operations_.enqueue({std::move(c), std::move(done)});
+    void ProfileRuntime::enqueue(Command c, std::function<void(int, QString)> done, int timeoutMs) {
+        operations_.enqueue({std::move(c), std::move(done), timeoutMs});
         runNext();
     }
     void ProfileRuntime::launch(const Component& c, std::function<void(int, QString)> done) {
@@ -200,7 +201,7 @@ namespace codexui::manager {
             }
             operation_.setProcessEnvironment(environment);
             operation_.setWorkingDirectory(current_->command.workingDirectory);
-            operationTimeout_.start();
+            operationTimeout_.start(current_->timeoutMs);
             operation_.start(current_->command.program, current_->command.arguments);
         }
     }
@@ -224,14 +225,26 @@ namespace codexui::manager {
         const auto& host = profile_.provider.transport == "stdio" ? profile_.bridge : profile_.appServer;
         if (host.ownership == Ownership::Local) {
             const bool existed = QDir(profile_.codexHome).exists();
-            result = QDir().mkpath(profile_.codexHome);
+            const QFileInfo homeInfo(profile_.codexHome);
+            result = existed || (QDir().mkpath(homeInfo.absolutePath()) && QDir().mkdir(profile_.codexHome));
             if (!result) {
                 fail("Cannot create CODEX_HOME: " + profile_.codexHome);
             } else {
                 if (!existed) {
                     QFile::setPermissions(profile_.codexHome, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+                    QFile owner(profile_.codexHome + "/.codexmanager-owner");
+                    const QByteArray identity = profile_.id.toUtf8() + '\n';
+                    result = owner.open(QIODevice::WriteOnly | QIODevice::NewOnly) && owner.write(identity) == identity.size();
+                    if (!result) {
+                        fail("Cannot record ownership of the new profile home.");
+                    }
                 }
-                if (profile_.shareInstructions) {
+                QFile owner(profile_.codexHome + "/.codexmanager-owner");
+                if (QFileInfo(owner).isFile() && owner.open(QIODevice::ReadOnly) && owner.read(128).startsWith("deleting:")) {
+                    result = false;
+                    fail("Profile deletion is incomplete. Retry deletion before starting this home.");
+                }
+                if (result && profile_.shareInstructions) {
                     const QString source = QDir::homePath() + "/.codex/AGENTS.md";
                     const QString target = profile_.codexHome + "/AGENTS.md";
                     if (!QFileInfo::exists(target) && QFileInfo::exists(source) && !QFile::link(source, target)) {
@@ -244,7 +257,7 @@ namespace codexui::manager {
         return result;
     }
     void ProfileRuntime::start(bool openUi) {
-        if (!starting_ && !stopping_) {
+        if (!starting_ && !stopping_ && !login_ && !deletion_) {
             const auto errors = profile_.errors();
             if (!errors.isEmpty()) {
                 fail(errors.join('\n'));
@@ -299,7 +312,7 @@ namespace codexui::manager {
         }
     }
     void ProfileRuntime::check() {
-        if (!starting_ && !stopping_) {
+        if (!starting_ && !stopping_ && !login_ && !deletion_) {
             openRequested_ = false;
             starting_ = true;
             beginProbe();
@@ -343,16 +356,34 @@ namespace codexui::manager {
             }
             const auto kind = message.value("kind").toString();
             if (kind == "bridge.connection" && message.value("event").toString() == "opened") {
+                forgetAccount();
                 probeConnectionId_ = message.value("connectionId").toString();
                 observer_ = message.value("role").toString() == "observer";
             } else if (kind == "bridge.controller") {
-                observer_ = !probeConnectionId_.isEmpty() && message.value("controllerConnectionId").toString() != probeConnectionId_;
+                controllerId_ = message.value("controllerConnectionId").toString();
+                observer_ = !probeConnectionId_.isEmpty() && controllerId_ != probeConnectionId_;
                 if (!observer_ && !probeConnectionId_.isEmpty()) {
-                    probe_.write("release\n");
-                    setStatus("Releasing diagnostic control…");
+                    if (login_ && login_->phase == LoginPhase::Claiming) {
+                        const bool logout = login_->parameters.isEmpty();
+                        login_->phase = logout ? LoginPhase::SigningOut : LoginPhase::Starting;
+                        accountRequest(logout ? "account/logout" : "account/login/start", login_->parameters);
+                        login_->parameters = {};
+                    } else if (!login_) {
+                        probe_.write("release\n");
+                        setStatus("Releasing diagnostic control…");
+                    }
+                } else if (login_ && !controllerId_.isEmpty()) {
+                    finishAuthentication(
+                        "Another frontend owns control. Use Release control in this profile's CodexUI, or close it, then retry.");
                 }
             } else if (kind == "bridge.provider") {
+                const bool wasReady = ready_;
                 ready_ = message.value("state").toString() == "ready";
+                if (!ready_) {
+                    forgetAccount();
+                } else if (!wasReady) {
+                    refreshAccount();
+                }
                 log("App-server protocol: " + message.value("state").toString());
                 if (!ready_) {
                     setStatus("Bridge connected · app-server " + message.value("state").toString());
@@ -360,12 +391,22 @@ namespace codexui::manager {
             } else if (kind == "client.connection") {
                 if (message.value("event").toString() == "disconnected") {
                     ready_ = false;
+                    forgetAccount();
                     setStatus("Bridge disconnected");
                 } else {
                     setStatus("Bridge connected · checking app-server…");
                 }
+            } else if (kind == "bridge.diagnostic" && login_ && message.value("connectionId").toString() == probeConnectionId_ &&
+                       message.value("code").toString().startsWith("controller-")) {
+                finishAuthentication("Bridge control could not be acquired. Use Release control in CodexUI, then retry.");
+            } else if (kind == "appserver") {
+                accountMessage(message.value("payload").toObject());
             } else if (kind == "client.error") {
-                log(message.value("message").toString());
+                if (login_) {
+                    finishAuthentication("Authentication request could not be delivered. Check the connection and retry.");
+                } else {
+                    log(message.value("message").toString());
+                }
             }
             updateReadiness();
         }
@@ -374,15 +415,20 @@ namespace codexui::manager {
         if (ready_ && observer_) {
             readinessTimeout_.stop();
             starting_ = false;
-            setStatus("Ready");
-            if (openRequested_) {
+            setStatus("Backend connected");
+            if (openRequested_ && !login_ && accountState_ != AccountState::Unknown) {
                 openRequested_ = false;
-                ensureUi();
+                if (accountState_ == AccountState::SignedOut) {
+                    authenticationMessage_ = "Sign in before sending prompts. You can still open CodexUI to browse.";
+                    emit changed();
+                } else {
+                    ensureUi();
+                }
             }
         }
     }
     void ProfileRuntime::openUi() {
-        if (ready_ && observer_) {
+        if (ready_ && observer_ && !login_ && !deletion_) {
             ensureUi();
         } else {
             start(true);
@@ -439,6 +485,7 @@ namespace codexui::manager {
             starting_ = false;
             openRequested_ = false;
             ready_ = false;
+            forgetAccount();
             operations_.clear();
             readinessTimeout_.stop();
             if (probe_.state() != QProcess::NotRunning) {
@@ -451,9 +498,16 @@ namespace codexui::manager {
     }
     void ProfileRuntime::stopComponent(int index) {
         if (index < 0) {
-            stopping_ = false;
+            stopping_ = deletion_.has_value();
             setStatus(hasOwnedProcesses() ? "Some owned components could not be stopped; check logs"
                                           : "Owned components stopped; external services unchanged");
+            if (deletion_) {
+                if (hasOwnedProcesses()) {
+                    finishDeletion("Owned services could not be verified stopped. No data deletion was started.");
+                } else {
+                    deleteTarget(0);
+                }
+            }
         } else {
             const auto c = ownedComponents()[index];
             enqueue(serviceCommand(c, "show"), [this, c, index](int code, const QString& out) {
@@ -477,6 +531,32 @@ namespace codexui::manager {
         }
     }
     void ProfileRuntime::refresh() {
+        bool timedOut = false;
+        for (auto it = accountRequests_.begin(); it != accountRequests_.end();) {
+            if (it->deadline.hasExpired()) {
+                if (it->method == "account/read") {
+                    accountState_ = AccountState::Unknown;
+                    if (!login_) {
+                        authenticationMessage_ = "Account status unavailable. Refresh to retry.";
+                    }
+                    emit changed();
+                } else {
+                    timedOut = true;
+                }
+                it = accountRequests_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (timedOut || (login_ && login_->deadline.hasExpired())) {
+            if (login_ && login_->phase == LoginPhase::Waiting) {
+                cancelLogin();
+            } else {
+                finishAuthentication("Account request timed out; its outcome is unknown. Refresh account status before retrying.");
+                accountState_ = AccountState::Unknown;
+                emit changed();
+            }
+        }
         if (!busy()) {
             for (const auto& c : ownedComponents()) {
                 enqueue(serviceCommand(c, "show"), [this, c](int code, const QString& output) {
@@ -492,5 +572,281 @@ namespace codexui::manager {
                 log(c.name + " journal:\n" + output);
             });
         }
+    }
+    QString ProfileRuntime::accountStatus() const {
+        QString result;
+        switch (accountState_) {
+            case AccountState::Unknown:
+                result = "Account status unknown";
+                break;
+            case AccountState::SignedOut:
+                result = "Sign-in required";
+                break;
+            case AccountState::SignedIn:
+                result = "Signed in · " + accountIdentity_;
+                break;
+            case AccountState::Rejected:
+                result = "Authentication rejected · sign in again";
+                break;
+            case AccountState::NotRequired:
+                result = "Provider does not require OpenAI sign-in";
+                break;
+        }
+        return result;
+    }
+    bool ProfileRuntime::authenticationAvailable() const {
+        return ready_ && !stopping_ && !login_ && controllerId_.isEmpty();
+    }
+    void ProfileRuntime::accountRequest(const QString& method, const QJsonObject& parameters) {
+        if (ready_ && !stopping_) {
+            const QString id = "manager-account-" + QString::number(++accountSequence_);
+            accountRequests_.insert(id, {method, QDeadlineTimer(30000)});
+            const QJsonObject request{{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", parameters}};
+            probe_.write("raw " + QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n');
+        }
+    }
+    void ProfileRuntime::refreshAccount() {
+        const bool pending = std::any_of(accountRequests_.cbegin(), accountRequests_.cend(), [](const AccountRequest& r) {
+            return r.method == "account/read";
+        });
+        if (!pending) {
+            accountRequest("account/read", {{"refreshToken", false}});
+        }
+    }
+    void ProfileRuntime::beginAuthentication(QJsonObject parameters) {
+        if (authenticationAvailable()) {
+            login_.emplace();
+            login_->parameters = std::move(parameters);
+            authenticationMessage_ = login_->parameters.isEmpty() ? "Signing out…" : "Starting sign-in…";
+            probe_.write("acquire\n");
+        } else {
+            authenticationMessage_ = ready_ ? "Use Release control in this profile's CodexUI, or close it before changing authentication."
+                                            : "Start or connect the profile before signing in.";
+        }
+        emit changed();
+    }
+    void ProfileRuntime::signIn(const QString& type, const QString& apiKey) {
+        if (type == "chatgpt" || type == "chatgptDeviceCode" || (type == "apiKey" && !apiKey.trimmed().isEmpty())) {
+            QJsonObject parameters{{"type", type}};
+            if (type == "apiKey") {
+                parameters.insert("apiKey", apiKey.trimmed());
+            }
+            beginAuthentication(std::move(parameters));
+        }
+    }
+    void ProfileRuntime::signOut() {
+        beginAuthentication({});
+    }
+    void ProfileRuntime::cancelLogin() {
+        if (login_) {
+            const bool cancelling = std::any_of(accountRequests_.cbegin(), accountRequests_.cend(), [](const AccountRequest& request) {
+                return request.method == "account/login/cancel";
+            });
+            if (!login_->id.isEmpty() && !cancelling) {
+                login_->phase = LoginPhase::Cancelling;
+                login_->deadline = QDeadlineTimer(30000);
+                accountRequest("account/login/cancel", {{"loginId", login_->id}});
+                authenticationMessage_ = "Cancelling sign-in…";
+            } else if (login_->phase == LoginPhase::Claiming) {
+                finishAuthentication("Sign-in cancelled.");
+            } else if (login_->phase == LoginPhase::Starting) {
+                login_->phase = LoginPhase::Cancelling;
+                authenticationMessage_ = "Waiting for the login ID to cancel sign-in…";
+            }
+            emit changed();
+        }
+    }
+    void ProfileRuntime::finishAuthentication(const QString& message) {
+        login_.reset();
+        for (auto it = accountRequests_.begin(); it != accountRequests_.end();) {
+            if (it->method != "account/read") {
+                it = accountRequests_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        authenticationMessage_ = message;
+        if (controllerId_ == probeConnectionId_ && !probeConnectionId_.isEmpty()) {
+            probe_.write("release\n");
+        }
+        emit changed();
+    }
+    void ProfileRuntime::forgetAccount() {
+        if (controllerId_ == probeConnectionId_ && !probeConnectionId_.isEmpty()) {
+            probe_.write("release\n");
+        }
+        if (login_) {
+            authenticationMessage_ = "Connection lost during authentication. Its outcome is unknown; reconnect and refresh account status.";
+        }
+        login_.reset();
+        accountRequests_.clear();
+        accountState_ = AccountState::Unknown;
+        accountIdentity_.clear();
+        controllerId_.clear();
+    }
+    void ProfileRuntime::accountMessage(const QJsonObject& message) {
+        const QString notification = message.value("method").toString();
+        const auto parameters = message.value("params").toObject();
+        const QString id = message.value("id").toString();
+        const auto found = accountRequests_.find(id);
+        if (found != accountRequests_.end()) {
+            const QString method = found->method;
+            accountRequests_.erase(found);
+            const auto result = message.value("result").toObject();
+            if (message.contains("error")) {
+                const int code = message.value("error").toObject().value("code").toInt();
+                const QString failure = "Account operation rejected (" + QString::number(code) +
+                                        "). Try another sign-in method or use Setup & startup on the app-server host.";
+                if (method == "account/read") {
+                    accountState_ = AccountState::Unknown;
+                    authenticationMessage_ = failure;
+                } else {
+                    finishAuthentication(failure);
+                    refreshAccount();
+                }
+            } else if (method == "account/read") {
+                const auto account = result.value("account").toObject();
+                if (!result.value("requiresOpenaiAuth").isBool()) {
+                    accountState_ = AccountState::Unknown;
+                    authenticationMessage_ = "App-server returned an unsupported account response.";
+                } else if (!account.isEmpty()) {
+                    accountState_ = AccountState::SignedIn;
+                    accountIdentity_ = account.value("email").toString(account.value("type").toString());
+                    const auto plan = account.value("planType").toString();
+                    if (!plan.isEmpty()) {
+                        accountIdentity_ += " · " + plan;
+                    }
+                } else {
+                    accountState_ = result.value("requiresOpenaiAuth").toBool() ? AccountState::SignedOut : AccountState::NotRequired;
+                    accountIdentity_.clear();
+                }
+            } else if (method == "account/login/start" && login_) {
+                if (result.value("type").toString() == "apiKey") {
+                    finishAuthentication("API key stored by the app-server. This does not verify quota or inference access.");
+                    refreshAccount();
+                } else {
+                    login_->id = result.value("loginId").toString();
+                    login_->url = result.value("authUrl").toString(result.value("verificationUrl").toString());
+                    login_->code = result.value("userCode").toString();
+                    if (login_->id.isEmpty() || login_->url.isEmpty()) {
+                        finishAuthentication("The app-server did not return a usable sign-in flow. Try another method.");
+                    } else if (login_->phase == LoginPhase::Cancelling) {
+                        cancelLogin();
+                    } else {
+                        login_->phase = LoginPhase::Waiting;
+                        login_->deadline = QDeadlineTimer(10 * 60 * 1000);
+                        authenticationMessage_ = "Waiting for you to complete sign-in in the browser…";
+                        if (!login_->completion.isEmpty()) {
+                            const QJsonObject completion = login_->completion;
+                            accountMessage(completion);
+                        }
+                    }
+                }
+            } else if (method == "account/login/cancel" || method == "account/logout") {
+                finishAuthentication(method == "account/logout" ? "Signed out." : "Sign-in cancelled; refreshing account status.");
+                refreshAccount();
+            }
+        } else if (notification == "account/updated") {
+            for (auto it = accountRequests_.begin(); it != accountRequests_.end();) {
+                if (it->method == "account/read") {
+                    it = accountRequests_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            refreshAccount();
+        } else if (notification == "account/login/completed" && login_ && login_->id.isEmpty()) {
+            login_->completion = message;
+        } else if (notification == "error") {
+            const auto info = parameters.value("error").toObject().value("codexErrorInfo");
+            bool rejected = info.toString() == "unauthorized";
+            const auto detail = info.toObject();
+            for (const auto& value : detail) {
+                rejected = rejected || value.toObject().value("httpStatusCode").toInt() == 401;
+            }
+            if (rejected) {
+                accountState_ = AccountState::Rejected;
+                authenticationMessage_ = "OpenAI rejected authentication. Sign in again for this profile.";
+                accountRequests_.clear();
+            }
+        } else if (notification == "account/login/completed" && login_ && !login_->id.isEmpty() &&
+                   parameters.value("loginId").toString() == login_->id) {
+            finishAuthentication(parameters.value("success").toBool()
+                                     ? "Sign-in completed."
+                                     : "Sign-in failed, expired, or was cancelled. Retry or choose another method.");
+            refreshAccount();
+        }
+        if (!id.isEmpty() || notification.startsWith("account/") || notification == "error") {
+            emit changed();
+        }
+    }
+    void ProfileRuntime::inspectDeletion(const QVector<Profile>& profiles, std::function<void(DeletionPlan)> done) {
+        inspectDeletionTarget(DeletionPlan::forProfile(profile_, profiles), 0, std::move(done));
+    }
+    void ProfileRuntime::inspectDeletionTarget(DeletionPlan plan, int index, std::function<void(DeletionPlan)> done) {
+        if (!plan.error.isEmpty() || index == plan.targets.size()) {
+            done(std::move(plan));
+        } else {
+            const auto command = plan.targets[index].command("inspect");
+            enqueue(command, [this, plan = std::move(plan), index, done = std::move(done)](int code, const QString& output) mutable {
+                const auto response = QJsonDocument::fromJson(output.toUtf8()).object();
+                if (code != 0 || !response.contains("token")) {
+                    plan.error = response.value("error").toString(output.isEmpty() ? "Cannot inspect the deletion target." : output);
+                } else {
+                    plan.targets[index].specification.insert("expected", response.value("token"));
+                }
+                inspectDeletionTarget(std::move(plan), index + 1, std::move(done));
+            });
+        }
+    }
+    void ProfileRuntime::deleteData(DeletionPlan plan) {
+        if (!deletion_ && !starting_ && !stopping_ && !login_) {
+            const auto current = DeletionPlan::forProfile(profile_, {});
+            bool matches = plan.profileId == profile_.id && plan.targets.size() == current.targets.size() && plan.error.isEmpty() &&
+                           current.error.isEmpty();
+            for (int i = 0; matches && i < plan.targets.size(); ++i) {
+                const auto& expected = plan.targets[i].specification;
+                const auto& actual = current.targets[i].specification;
+                matches = expected.value("path") == actual.value("path") && expected.value("kind") == actual.value("kind") &&
+                          expected.value("profile") == actual.value("profile") && expected.contains("expected") &&
+                          plan.targets[i].host.key() == current.targets[i].host.key();
+            }
+            if (matches) {
+                deletion_ = std::move(plan);
+                stop();
+            } else {
+                emit deletionFinished(false, "Deletion preview is no longer valid. Inspect and confirm the profile again.");
+            }
+        } else {
+            emit deletionFinished(false, "Finish the current profile operation before deleting it.");
+        }
+    }
+    void ProfileRuntime::deleteTarget(int index) {
+        if (index == deletion_->targets.size()) {
+            finishDeletion({});
+        } else {
+            const auto target = deletion_->targets[index];
+            setStatus("Deleting " + target.specification.value("path").toString() + " on " + target.host.label() + "…");
+            enqueue(
+                target.command("delete"),
+                [this, index](int code, const QString& output) {
+                    const auto response = QJsonDocument::fromJson(output.toUtf8()).object();
+                    if (code != 0 || !response.contains("deleted")) {
+                        finishDeletion(
+                            "Cleanup did not complete. The registration is retained; earlier targets or files may already be deleted. " +
+                            output);
+                    } else {
+                        log("Deleted " + response.value("deleted").toString());
+                        deleteTarget(index + 1);
+                    }
+                },
+                300000);
+        }
+    }
+    void ProfileRuntime::finishDeletion(const QString& error) {
+        deletion_.reset();
+        stopping_ = false;
+        setStatus(error.isEmpty() ? "Profile data deleted" : error);
+        emit deletionFinished(error.isEmpty(), error);
     }
 } // namespace codexui::manager

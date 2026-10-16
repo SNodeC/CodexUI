@@ -15,9 +15,20 @@ target_link_libraries(
 )
 
 add_library(
-    codexmanager-core STATIC Profile.cpp Profile.h LaunchPlan.cpp LaunchPlan.h
-                             ProfileRuntime.cpp ProfileRuntime.h
+    codexmanager-core STATIC
+    Profile.cpp
+    Profile.h
+    LaunchPlan.cpp
+    LaunchPlan.h
+    ProfileRuntime.cpp
+    ProfileRuntime.h
+    DeletionPlan.cpp
+    DeletionPlan.h
 )
+qt_add_resources(
+    codexmanager-core deletion PREFIX "/manager" FILES DeleteProfileData.py
+)
+
 target_compile_features(codexmanager-core PUBLIC cxx_std_20)
 target_include_directories(codexmanager-core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(

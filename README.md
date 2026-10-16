@@ -29,7 +29,7 @@
 
 Built on [AISuite](https://github.com/SNodeC/AISuite#banner) and [SNode.C](https://github.com/SNodeC/snode.c#banner), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
 
-[CodexManager](docs/guides/profile-manager.md) is the companion Qt profile manager, built as `codex-manager` alongside `codex-ui`. Configure independent homes, local/SSH/external ownership and connections, then start a separate CodexUI window for each profile.
+[CodexManager](docs/guides/profile-manager.md) is the companion Qt profile manager, built as `codex-manager` alongside `codex-ui`. Configure independent homes, local/SSH/external ownership and connections, then start a separate CodexUI window for each profile. Sign in through the manager using browser login, a device code or an API key; remove a registration or explicitly delete an exclusively owned profile and its data.
 
 <!-- snodec:begin menu -->
 <p>
@@ -85,7 +85,7 @@ Next: [read the grouping and lifecycle guide](docs/guides/thread-projects.md#ban
 | Connection | SNode.C transports | WebSocket |
 | Install | Desktop executable | Static web assets |
 
-**CodexUI** integrates with the Linux desktop for local workspaces, project/section organization and desktop file interaction. Installation provides `codex-ui`, a desktop entry and an icon. Available transports depend on the build.
+**CodexUI** integrates with the Linux desktop for local workspaces, project/section organization and desktop file interaction. Installation provides `codex-ui` and the companion `codex-manager`, with desktop entries and icons. Available transports depend on the build.
 
 **CodexWUI** (build/install component `CodexWebUI`) connects through AISuite's frontend SDK without installing the Qt application. `codex-bridge` serves the built web assets; no Node runtime is required.
 
@@ -98,6 +98,12 @@ Build [native Qt desktop](docs/guides/build-from-source.md#native-desktop) or [b
 ## First run
 
 <a id="3-connect-and-work"></a>
+
+### Managed native profiles
+
+Run the installed `codex-manager` (or `./build/codex-manager` with the build layout below), create a profile, and choose **Account / Sign in…** to authenticate its app-server. Use **Start & open** to launch its separate CodexUI window. Each profile has its own `CODEX_HOME`; multiple profiles can run concurrently on the same machine. Managed local/SSH services require a working systemd user manager, while externally managed components have explicit startup instructions.
+
+The profile action menu distinguishes **Remove from manager…**, which preserves data, from **Delete profile and its data…**, which previews exact directories, requires typed confirmation and protects default/shared homes. Full deletion requires Linux and Python 3.11+ on the target host. See [profiles, authentication and deletion](docs/guides/profile-manager.md) for prerequisites, ownership and remote deployment details.
 
 ### Native desktop
 
@@ -157,6 +163,7 @@ Manual CI builds and qualifies the desktop and browser editions, including share
 
 | Start here | Go deeper |
 | --- | --- |
+| [CodexManager profiles, sign-in and deletion](docs/guides/profile-manager.md) | [Manager requirements and ownership](docs/architecture/profile-manager-requirements.md) |
 | [Using CodexUI](docs/guides/interaction-guide.md#banner) | [Native state and threading](docs/architecture/shared-node-graph.md#banner) |
 | [Projects and sections](docs/guides/thread-projects.md#banner) | [Architecture overview](docs/architecture/overview.md#banner) |
 | [Timestamps and durations](docs/architecture/timestamp-presentation.md#banner) | [Browser contract](docs/web/contract-1.0.md#banner) |

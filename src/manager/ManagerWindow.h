@@ -29,7 +29,10 @@ namespace codexui::manager {
         void reflow();
         void createOrEdit(const QString& id = {});
         void remove(const QString& id);
+        void forgetRegistration(const QString& id);
+        void showDeletion(const QString& id);
         void showProfile(const QString& id);
+        void showAuthentication(const QString& id);
         void updateProfile(const QString& id);
         void updateLogs();
         bool persist(const QVector<Profile>& profiles);
