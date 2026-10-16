@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 3.20)
 
 project(CodexUI VERSION 1.0.0 LANGUAGES CXX)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(format)
+
 include(GNUInstallDirs)
 include(CTest)
 find_package(Threads REQUIRED)
@@ -38,7 +41,7 @@ find_package(
     snodec 2.0 CONFIG QUIET
     COMPONENTS net-rc-stream-legacy net-rc-stream-tls
 )
-find_package(Qt6 6.6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Widgets Network)
 # Package upgrades can preserve header timestamps. Keep all Qt consumers on the
 # same header version by making that version part of their compilation command.
 target_compile_definitions(
@@ -327,6 +330,9 @@ else()
 endif()
 
 configure_codexui_transports(codex-ui)
+
+add_subdirectory(src/manager)
+target_link_libraries(codex-ui PRIVATE codexui-profile-window)
 
 if(BUILD_TESTING)
     add_executable(

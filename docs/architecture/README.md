@@ -20,4 +20,5 @@ Architecture, internal contracts and design analyses of CodexUI.
 - [Shared node graph: writer, UI and projection readers](shared-node-graph.md#banner)
 - [App-server timestamp presentation](timestamp-presentation.md#banner)
 - [Native UI/UX internal API contract](ui-internal-api.md#banner)
+- [CodexManager requirements, topology and ownership](profile-manager-requirements.md)
 <!-- snodec:end section-pages -->

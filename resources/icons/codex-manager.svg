@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<title>CodexManager</title>
+<rect x="4" y="4" width="120" height="120" rx="28" fill="#eff5fe"/>
+<g fill="none" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+<rect x="23" y="26" width="37" height="32" rx="7" stroke="#5471a6"/>
+<rect x="70" y="26" width="35" height="32" rx="7" stroke="#7268a2"/>
+<rect x="23" y="73" width="37" height="32" rx="7" stroke="#138282"/>
+<path d="M76 89h23m-11-11v23" stroke="#5471a6"/>
+</g></svg>

@@ -35,6 +35,7 @@ Start with the [repository README](../README.md#quick-start) for a first working
 ## User guides and references
 
 - [Build and install from source](guides/build-from-source.md#banner)
+- [CodexManager: independent profiles, authentication and deletion](guides/profile-manager.md)
 - [Using CodexUI](guides/interaction-guide.md#banner)
 - [Projects and sections](guides/thread-projects.md#banner)
 - [Architecture overview](architecture/overview.md#banner)
@@ -47,6 +48,10 @@ Start with the [repository README](../README.md#quick-start) for a first working
 
 These documents describe implementation decisions, qualification scope or historical evidence; they are not prerequisites for first use and do not establish that current builds passed every check.
 
+- [CodexManager implementation qualification](qualification/codexmanager-2026-10-16.md)
+- [CodexManager authentication qualification](qualification/codexmanager-authentication-2026-10-16.md)
+- [CodexManager deletion qualification](qualification/codexmanager-deletion-2026-10-16.md)
+- [Profile manager requirements](architecture/profile-manager-requirements.md)
 - [Native state and threading](architecture/shared-node-graph.md#banner)
 - [Web qualification](web/qualification.md#banner)
 - [Interactive qualification inventory](qualification/native-test-suite.md#banner)

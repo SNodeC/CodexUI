@@ -8,6 +8,8 @@
 
 CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to an AISuite `codex-bridge` WebSocket endpoint with the `codex` subprotocol. It contains no web server, bridge router, controller authority, or persistent Codex state. Its build and browser qualification require Node.js 22 or newer and Chrome or Chromium. Set `CHROME_BIN` to its executable if it is outside the usual system paths.
 
+[CodexManager](../docs/guides/profile-manager.md) is the companion native Qt application for profile supervision, app-server sign-in and guarded profile deletion. It launches native CodexUI windows; the browser frontend continues to connect to a configured bridge WebSocket endpoint.
+
 ## Build workspace
 
 Follow the [browser build guide](../docs/guides/build-from-source.md#browser-frontend) for installed SDK discovery, isolated application build and release qualification. The AISuite checkout location is not a dependency.

@@ -13,4 +13,7 @@ The native interactive test suite and its recorded execution results.
 <!-- snodec:begin section-pages -->
 - [Native qualification execution record — 2026-09-27](native-results-2026-09-27.md#banner)
 - [CodexUI canonical interactive Xvfb test suite](native-test-suite.md#banner)
+- [CodexManager implementation qualification](codexmanager-2026-10-16.md)
+- [CodexManager authentication qualification](codexmanager-authentication-2026-10-16.md)
+- [CodexManager deletion qualification](codexmanager-deletion-2026-10-16.md)
 <!-- snodec:end section-pages -->
