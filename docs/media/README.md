@@ -6,3 +6,7 @@
 The image predates the final v110 scrolling correction and the CI-only QString compatibility fix; neither adds visible UI. Do not substitute the old dark UI review captures for the current native interface. For a new screenshot, use an isolated application and disposable data, inspect it for private information, and retain an honest capture description here.
 
 SVGs use embedded geometry, system-font fallbacks and fixed backgrounds. They have no remote resources, scripts or font downloads and work on light and dark GitHub pages. Assets are distributed under the repository's dual license.
+
+## CodexManager captures
+
+`codex-manager-overview.png`, `codex-manager-details.png` and `codex-manager-editor.png` are unmodified Qt widget captures from the isolated 2026-10-16 manager qualification at DPR 1.0, under Xvfb with the offscreen plugin. They use disposable profiles and simulated service-status helpers, contain no private conversation history, and are distinct from the real-service lifecycle qualification. The overview/details window is 1240 × 830; the editor is 780 × 700. See [the qualification record](../qualification/codexmanager-2026-10-16.md) for provenance and limits.

@@ -1,0 +1,714 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
+#include "codex/ui/ProfileWindow.h"
+#include "manager/LaunchPlan.h"
+#include "manager/ManagerWindow.h"
+#include "manager/ProfileEditor.h"
+#include "manager/ProfileRuntime.h"
+
+#include <QApplication>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QLabel>
+#include <QLineEdit>
+#include <QLocalSocket>
+#include <QProcess>
+#include <QPushButton>
+#include <QScopeGuard>
+#include <QSignalSpy>
+#include <QStandardPaths>
+#include <QTabWidget>
+#include <QTemporaryDir>
+#include <QThread>
+#include <QToolButton>
+#include <QtTest>
+#include <algorithm>
+#include <iostream>
+
+using namespace codexui::manager;
+namespace {
+    void writeFile(const QString& path, const QByteArray& data, bool executable = false) {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
+            qFatal("Cannot write fixture");
+        }
+        if (executable) {
+            f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        }
+    }
+    int fixture(const QStringList& arguments) {
+        const auto mode = arguments.value(2);
+        int result = 0;
+        if (arguments.contains("--show-config")) {
+            std::cout << "snodec.config.comment-meta\n";
+            result = 2;
+        } else if (arguments.contains("--help")) {
+            if (qEnvironmentVariableIsSet("CODEXMANAGER_SLOW_HELP")) {
+                QThread::msleep(200);
+            }
+            std::cout << "--listen\n";
+            for (const auto& t : frontendTransports()) {
+                std::cout << "codex-ui-" << t.toStdString() << "\ncodex-bridge-client-" << t.toStdString() << "\n";
+            }
+        } else if (mode == "probe") {
+            std::cout << "{\"kind\":\"bridge.connection\",\"event\":\"opened\",\"connectionId\":\"probe\",\"role\":\"controller\"}\n"
+                         "{\"kind\":\"bridge.provider\",\"state\":\"ready\"}\n"
+                         "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"probe\"}\n"
+                      << std::flush;
+            int releases = 0;
+            for (std::string line; std::getline(std::cin, line) && line != "quit";) {
+                if (line == "release") {
+                    std::cout << "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":null}\n" << std::flush;
+                    ++releases;
+                    if (qEnvironmentVariableIsSet("CODEXMANAGER_RECLAIM_CONTROL")) {
+                        if (releases >= 2) {
+                            writeFile(qEnvironmentVariable("CODEXMANAGER_FIXTURES") + "/releases", QByteArray::number(releases));
+                        }
+                        if (releases == 1) {
+                            std::cout << "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"probe\"}\n" << std::flush;
+                        }
+                    }
+                }
+            }
+        } else if (mode == "ssh") {
+            if (qEnvironmentVariableIsSet("CODEXMANAGER_FAIL_SSH")) {
+                result = 255;
+            } else {
+                QProcess process;
+                process.start("sh", {"-c", arguments.last()});
+                if (!process.waitForFinished(10000)) {
+                    result = 1;
+                } else {
+                    std::cout << process.readAllStandardOutput().constData();
+                    result = process.exitCode();
+                }
+            }
+        } else {
+            const auto root = qEnvironmentVariable("CODEXMANAGER_FIXTURES");
+            QString unit;
+            for (const auto& arg : arguments) {
+                if (arg.startsWith("--unit=")) {
+                    unit = arg.mid(7);
+                } else if (arg.startsWith("codexmanager-") && arg.endsWith(".service")) {
+                    unit = arg;
+                }
+            }
+            if (mode == "systemd-run") {
+                QFile f(root + "/starts");
+                if (!f.open(QIODevice::Append)) {
+                    qFatal("Cannot open fixture launch log");
+                }
+                f.write((unit + '\n').toUtf8());
+                if (qEnvironmentVariableIsSet("CODEXMANAGER_FAIL_START")) {
+                    result = 1;
+                } else {
+                    writeFile(root + '/' + unit, "running");
+                }
+            } else if (mode == "systemctl") {
+                if (arguments.contains("stop")) {
+                    QFile::remove(root + '/' + unit);
+                } else {
+                    const bool active = QFileInfo::exists(root + '/' + unit);
+                    std::cout << "ActiveState=" << (active ? "active" : "inactive") << "\nMainPID=" << (active ? 123 : 0)
+                              << "\nDescription="
+                              << (qEnvironmentVariableIsSet("CODEXMANAGER_FOREIGN_UNIT") ? "Someone else " : "CodexManager ")
+                              << unit.toStdString() << '\n';
+                    result = active ? 0 : 4;
+                }
+            } else if (mode == "journalctl") {
+                std::cout << "fixture log\n";
+            } else {
+                result = 1;
+            }
+        }
+        return result;
+    }
+    class FixtureTools {
+    public:
+        QTemporaryDir dir;
+        QByteArray oldPath = qgetenv("PATH");
+        FixtureTools() {
+            qputenv("CODEXMANAGER_FIXTURES", dir.path().toUtf8());
+            for (const auto& tool : {"systemd-run", "systemctl", "journalctl", "ssh", "probe", "codex-bridge", "codex-ui", "codex"}) {
+                const QString script =
+                    "#!/bin/sh\nexec " + quote(QCoreApplication::applicationFilePath()) + " --fixture " + quote(tool) + " \"$@\"\n";
+                writeFile(dir.filePath(tool), script.toUtf8(), true);
+            }
+            qputenv("PATH", dir.path().toUtf8() + ':' + oldPath);
+        }
+        ~FixtureTools() {
+            qputenv("PATH", oldPath);
+            qunsetenv("CODEXMANAGER_FIXTURES");
+            qunsetenv("CODEXMANAGER_FAIL_SSH");
+            qunsetenv("CODEXMANAGER_FAIL_START");
+            qunsetenv("CODEXMANAGER_FOREIGN_UNIT");
+            qunsetenv("CODEXMANAGER_RECLAIM_CONTROL");
+        }
+    };
+} // namespace
+class ManagerTest final : public QObject {
+    Q_OBJECT
+private slots:
+    void profileStorageAndConflicts() {
+        QTemporaryDir dir;
+        Profile p = Profile::create("Primary");
+        p.codexHome = dir.filePath("codex a");
+        p.bridge.environment.insert("LANG", "en_US.UTF-8");
+        ProfileStore store(dir.filePath("profiles.json"));
+        QString error;
+        QVERIFY2(store.save({p}, &error), qPrintable(error));
+        const auto loaded = store.load(&error);
+        QVERIFY(error.isEmpty());
+        QCOMPARE(loaded.size(), 1);
+        QCOMPARE(loaded.first().toJson(), p.toJson());
+        Profile collision = Profile::create("Different label");
+        collision.codexHome = p.codexHome;
+        QVERIFY(!collision.errors({p}).isEmpty());
+        QVERIFY(!store.save({p, collision}, &error));
+        QCOMPARE(store.load(&error).size(), 1);
+        QVERIFY(QDir().mkpath(p.codexHome));
+        QVERIFY(QFile::link(p.codexHome, dir.filePath("home-alias")));
+        collision.codexHome = dir.filePath("home-alias");
+        QVERIFY(!collision.errors({p}).isEmpty());
+        collision.codexHome = p.codexHome;
+        collision.codexHome += "-other";
+        collision.frontend.socketPath = p.frontend.socketPath;
+        QVERIFY(!collision.errors({p}).isEmpty());
+        auto networkA = Profile::create(), networkB = Profile::create();
+        networkA.frontend.transport = "ipv4";
+        networkB.frontend.transport = "websocket-ipv4";
+        networkB.frontend.bindHost = "127.0.0.2";
+        QVERIFY(networkB.errors({networkA}).isEmpty());
+        networkA.frontend.bindHost = "0.0.0.0";
+        QVERIFY(!networkB.errors({networkA}).isEmpty());
+        auto mixed = Profile::create();
+        mixed.provider.transport = "stdio";
+        mixed.appServer.ownership = Ownership::Ssh;
+        mixed.appServer.sshTarget = "unused-old-host";
+        QVERIFY(mixed.errors().isEmpty());
+        mixed.provider.transport = "unix";
+        QVERIFY(!mixed.errors().isEmpty());
+        mixed.provider.transport = "websocket-ipv4";
+        mixed.appServer = Host{};
+        QVERIFY(!mixed.errors().isEmpty());
+        mixed.appServer.ownership = Ownership::External;
+        QVERIFY(mixed.errors().isEmpty());
+        mixed.provider.transport = "unix";
+        mixed.appServer = Host{};
+        mixed.provider.socketPath = mixed.frontend.socketPath;
+        QVERIFY(!mixed.errors().isEmpty());
+        writeFile(store.filePath(), "{invalid}");
+        QVERIFY(store.load(&error).isEmpty());
+        QVERIFY(!error.isEmpty());
+    }
+    void deploymentMatrix() {
+        for (int scenario = 1; scenario <= 11; ++scenario) {
+            Profile p = Profile::create(QString::number(scenario));
+            const bool remoteBridge = scenario >= 8;
+            if (remoteBridge) {
+                p.bridge.ownership = Ownership::Ssh;
+                p.bridge.sshTarget = "bridge-host";
+            }
+            if (scenario == 2 || scenario == 4 || remoteBridge) {
+                p.frontend.transport = "ipv4";
+            }
+            if (scenario == 3 || scenario == 4 || scenario == 5 || scenario == 9) {
+                p.provider.transport = "unix";
+            }
+            if (scenario == 6 || scenario == 7 || scenario == 10 || scenario == 11) {
+                p.provider.transport = "websocket-ipv4";
+            }
+            if (scenario == 5 || scenario == 6) {
+                p.appServer.ownership = Ownership::External;
+            }
+            if (scenario == 7 || scenario >= 9) {
+                p.appServer.ownership = Ownership::Ssh;
+                p.appServer.sshTarget = scenario == 9 || scenario == 10 ? "bridge-host" : "app-host";
+            }
+            QVERIFY2(p.errors().isEmpty(), qPrintable(p.errors().join('\n')));
+            const auto plan = LaunchPlan::forProfile(p);
+            QCOMPARE(plan.backends.size(), p.provider.transport == "stdio" ? 1 : 2);
+            QVERIFY(plan.ui.command.arguments.contains("--config-file"));
+            QCOMPARE(plan.ui.command.environment.value("CODEXUI_PROFILE_ID"), p.id);
+            QVERIFY(plan.instructions(p).contains(p.codexHome));
+            for (const auto& c : plan.backends) {
+                const auto start = serviceStart(c);
+                QCOMPARE(start.program, c.host.sshTarget.isEmpty() ? QString("systemd-run") : QString("ssh"));
+                QVERIFY(start.shell().contains(p.id));
+                QVERIFY(serviceCommand(c, "stop").shell().contains(p.id));
+            }
+        }
+    }
+    void shellQuotingAndTransportSelection() {
+        QTemporaryDir dir;
+        const auto dangerous = dir.filePath("a'; touch SHOULD_NOT_EXIST; $(false)");
+        QProcess shell;
+        shell.start("sh", {"-c", Command{"printf", {"%s", dangerous}, {}, {}}.shell()});
+        QVERIFY(shell.waitForFinished());
+        QCOMPARE(QString::fromUtf8(shell.readAllStandardOutput()), dangerous);
+        QVERIFY(!QFileInfo::exists("SHOULD_NOT_EXIST"));
+        for (const auto& transport : frontendTransports()) {
+            auto p = Profile::create();
+            p.frontend.transport = transport;
+            const auto plan = LaunchPlan::forProfile(p);
+            QVERIFY(plan.ui.command.arguments.contains("codex-ui-" + transport));
+            QVERIFY(plan.probe.arguments.contains("codex-bridge-client-" + transport));
+            if (transport != "unix") {
+                QVERIFY(plan.ui.command.arguments.contains("--disabled=true"));
+            }
+        }
+    }
+    void independentHomesAndOwnedLifecycle() {
+        FixtureTools tools;
+        auto a = Profile::create("A");
+        a.codexHome = tools.dir.filePath("home-a");
+        a.probeExecutable = tools.dir.filePath("probe");
+        auto b = Profile::create("B");
+        b.codexHome = tools.dir.filePath("home-b");
+        b.probeExecutable = a.probeExecutable;
+        QVERIFY(b.errors({a}).isEmpty());
+        QVERIFY(a.unit("bridge") != b.unit("bridge"));
+        ProfileRuntime one(a), two(b);
+        one.start();
+        two.start();
+        QTRY_VERIFY_WITH_TIMEOUT(one.ready() && two.ready(), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!one.busy() && !two.busy(), 10000);
+        QTRY_VERIFY(one.components().value("CodexUI").startsWith("Running"));
+        QFile starts(tools.dir.filePath("starts"));
+        QVERIFY(starts.open(QIODevice::ReadOnly));
+        QCOMPARE(starts.readAll().count('\n'), 4);
+        starts.close();
+        one.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 10000);
+        QVERIFY(starts.open(QIODevice::ReadOnly));
+        QCOMPARE(starts.readAll().count('\n'), 4);
+        one.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 10000);
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath(a.unit("bridge"))));
+        QVERIFY(QFileInfo::exists(tools.dir.filePath(b.unit("bridge"))));
+        two.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!two.busy(), 10000);
+    }
+    void externalComponentsAndSshLoss() {
+        FixtureTools tools;
+        auto p = Profile::create("External");
+        p.bridge.ownership = Ownership::External;
+        p.provider.transport = "websocket-ipv4";
+        p.appServer.ownership = Ownership::External;
+        p.probeExecutable = tools.dir.filePath("probe");
+        p.codexHome = tools.dir.filePath("external-home");
+        ProfileRuntime external(p);
+        external.start(false);
+        QTRY_VERIFY_WITH_TIMEOUT(external.ready(), 10000);
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath("starts")));
+        QVERIFY(!QDir(p.codexHome).exists());
+        external.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!external.busy(), 10000);
+        p.bridge.ownership = Ownership::Ssh;
+        p.bridge.sshTarget = "remote";
+        p.frontend.transport = "ipv4";
+        qputenv("CODEXMANAGER_FAIL_SSH", "1");
+        ProfileRuntime remote(p);
+        remote.start(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!remote.busy(), 10000);
+        QVERIFY(remote.components().value("Bridge").contains("supervision unavailable"));
+        QVERIFY(remote.status().contains("SSH supervision unavailable"));
+    }
+    void monitorRemainsObserver() {
+        FixtureTools tools;
+        qputenv("CODEXMANAGER_RECLAIM_CONTROL", "1");
+        auto p = Profile::create();
+        p.bridge.ownership = Ownership::External;
+        p.probeExecutable = tools.dir.filePath("probe");
+        ProfileRuntime runtime(p);
+        runtime.start(false);
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.ready() && !runtime.busy(), 5000);
+        QFile file(tools.dir.filePath("releases"));
+        QTRY_VERIFY_WITH_TIMEOUT(file.exists(), 5000);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), QByteArray("2"));
+        runtime.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 5000);
+        QVERIFY(!runtime.ready());
+    }
+    void unixProviderOrderingRecoveryAndOwnership() {
+        FixtureTools tools;
+        auto p = Profile::create("Remote Unix");
+        p.codexHome = tools.dir.filePath("home");
+        p.bridge.ownership = Ownership::Ssh;
+        p.bridge.sshTarget = "host-b";
+        p.appServer.ownership = Ownership::Ssh;
+        p.appServer.sshTarget = "host-b";
+        p.provider.transport = "unix";
+        p.frontend.transport = "ipv4";
+        p.probeExecutable = tools.dir.filePath("probe");
+        {
+            ProfileRuntime runtime(p);
+            runtime.start(false);
+            QTRY_VERIFY_WITH_TIMEOUT(runtime.ready() && !runtime.busy(), 10000);
+            QFile f(tools.dir.filePath("starts"));
+            QVERIFY(f.open(QIODevice::ReadOnly));
+            QCOMPARE(f.readAll(), (p.unit("appserver") + '\n' + p.unit("bridge") + '\n').toUtf8());
+            qputenv("CODEXMANAGER_FAIL_SSH", "1");
+            runtime.refresh();
+            QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 10000);
+            QVERIFY(runtime.hasOwnedProcesses());
+            QVERIFY(runtime.components().value("Bridge").contains("unknown"));
+            qunsetenv("CODEXMANAGER_FAIL_SSH");
+            runtime.start(false);
+            QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy() && runtime.ready(), 10000);
+        }
+        ProfileRuntime adopted(p);
+        adopted.start(false);
+        QTRY_VERIFY_WITH_TIMEOUT(adopted.ready() && !adopted.busy(), 10000);
+        QFile f(tools.dir.filePath("starts"));
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll().count('\n'), 2);
+        qputenv("CODEXMANAGER_FOREIGN_UNIT", "1");
+        adopted.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!adopted.busy(), 10000);
+        QVERIFY(QFileInfo::exists(tools.dir.filePath(p.unit("bridge"))));
+        QVERIFY(adopted.components().value("Bridge").contains("conflict"));
+        qunsetenv("CODEXMANAGER_FOREIGN_UNIT");
+        adopted.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!adopted.busy(), 10000);
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("bridge"))));
+    }
+    void startupFailureAndCancellation() {
+        FixtureTools tools;
+        auto p = Profile::create();
+        p.codexHome = tools.dir.filePath("home");
+        p.probeExecutable = tools.dir.filePath("probe");
+        qputenv("CODEXMANAGER_FAIL_START", "1");
+        ProfileRuntime runtime(p);
+        runtime.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 10000);
+        QVERIFY(!runtime.ready());
+        QVERIFY(runtime.status().contains("Could not start"));
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("ui"))));
+        qunsetenv("CODEXMANAGER_FAIL_START");
+        runtime.start();
+        runtime.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 10000);
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("bridge"))));
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("ui"))));
+    }
+    void installedCommandConfigurations() {
+        QTemporaryDir dir;
+        const QString bridge = QStandardPaths::findExecutable("codex-bridge");
+        const QString probe = QStandardPaths::findExecutable("codex-bridge-client");
+        QVERIFY(!bridge.isEmpty());
+        QVERIFY(!probe.isEmpty());
+        const QString certificate = dir.filePath("certificate.pem");
+        writeFile(certificate, "configuration-only fixture\n");
+        for (const auto& transport : frontendTransports()) {
+            for (const auto& provider : {"stdio", "unix", "websocket-ipv4", "websocket-ipv6"}) {
+                auto p = Profile::create();
+                p.codexHome = dir.filePath("home");
+                p.bridgeExecutable = bridge;
+                p.probeExecutable = probe;
+                p.uiExecutable = CODEXMANAGER_UI_EXECUTABLE;
+                p.provider.transport = provider;
+                p.frontend.transport = transport;
+                if (transport.contains("ipv6")) {
+                    p.frontend.host = "::1";
+                    p.frontend.bindHost = "::1";
+                }
+                if (transport.startsWith("rfcomm")) {
+                    p.frontend.host = "00:00:00:00:00:00";
+                    p.frontend.bindHost = p.frontend.host;
+                }
+                p.frontend.certificate = certificate;
+                p.frontend.privateKey = certificate;
+                p.frontend.caCertificate = certificate;
+                const auto plan = LaunchPlan::forProfile(p);
+                QVector<Component> components{
+                    plan.backends.last(), plan.ui, {"Probe", Host{}, {}, {p.probeExecutable, plan.probe.arguments, {}, {}}}};
+                for (const auto& component : components) {
+                    const auto check = component.configurationCheck();
+                    QProcess process;
+                    auto env = QProcessEnvironment::systemEnvironment();
+                    env.insert("QT_QPA_PLATFORM", "offscreen");
+                    process.setProcessEnvironment(env);
+                    process.setProcessChannelMode(QProcess::MergedChannels);
+                    process.start(check.program, check.arguments);
+                    QVERIFY(process.waitForFinished(10000));
+                    const auto output = process.readAllStandardOutput();
+                    QVERIFY2(component.acceptsConfiguration(process.exitCode(), QString::fromUtf8(output)),
+                             qPrintable(transport + '/' + provider + '/' + component.name + ": " + QString::fromUtf8(output)));
+                }
+            }
+        }
+    }
+    void editorConfigurationAndCapabilities() {
+        FixtureTools tools;
+        auto p = Profile::create("Before");
+        p.codexHome = tools.dir.filePath("home");
+        ProfileEditor editor(p, {});
+        editor.show();
+        const auto combos = editor.findChildren<QComboBox*>();
+        auto frontend = std::find_if(combos.cbegin(), combos.cend(), [](QComboBox* combo) {
+            return combo->findData("rfcomm-tls") >= 0;
+        });
+        QVERIFY(frontend != combos.cend());
+        QTRY_VERIFY_WITH_TIMEOUT((*frontend)->isEnabled(), 5000);
+        auto fields = editor.findChildren<QLineEdit*>();
+        auto name = std::find_if(fields.cbegin(), fields.cend(), [](QLineEdit* field) {
+            return field->accessibleName() == "Name";
+        });
+        QVERIFY(name != fields.cend());
+        (*name)->setText("After & independent");
+        (*frontend)->setCurrentIndex((*frontend)->findData("websocket-ipv6"));
+        auto* buttons = editor.findChild<QDialogButtonBox*>();
+        QVERIFY(buttons);
+        QTest::mouseClick(buttons->button(QDialogButtonBox::Save), Qt::LeftButton);
+        QCOMPARE(editor.result(), int(QDialog::Accepted));
+        QCOMPARE(editor.profile().name, QString("After & independent"));
+        QCOMPARE(editor.profile().frontend.transport, QString("websocket-ipv6"));
+    }
+    void closeDuringDiscoveryAndSupervision() {
+        FixtureTools tools;
+        auto p = Profile::create();
+        p.codexHome = tools.dir.filePath("home");
+        qputenv("CODEXMANAGER_SLOW_HELP", "1");
+        {
+            ProfileEditor editor(p, {});
+            editor.show();
+            QTest::qWait(10);
+        }
+        qunsetenv("CODEXMANAGER_SLOW_HELP");
+        QString error;
+        const auto path = tools.dir.filePath("profiles.json");
+        QVERIFY(ProfileStore(path).save({p}, &error));
+        {
+            ManagerWindow window(path);
+            window.show();
+            const auto runtimes = window.findChildren<ProfileRuntime*>();
+            QCOMPARE(runtimes.size(), 1);
+            runtimes.first()->start(false);
+            QApplication::processEvents();
+        }
+        QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("bridge"))));
+    }
+    void profileWindowActivationAndIdentity() {
+        QTemporaryDir dir;
+        qputenv("CODEXUI_MANAGER_SOCKET", dir.filePath("window.sock").toUtf8());
+        qputenv("CODEXUI_PROFILE_NAME", "Example profile");
+        QWidget window;
+        window.setStyleSheet("QWidget { padding: 1px; }");
+        qputenv("CODEXUI_PROFILE_ACCENT", "#5471a6");
+        codexui::ProfileWindow first;
+        QCOMPARE(first.prepare(), 0);
+        QVERIFY(first.attach(window));
+        QCOMPARE(window.windowTitle(), QString("Example profile · CodexUI"));
+        QVERIFY(window.styleSheet().contains("padding: 1px"));
+        QVERIFY(window.styleSheet().contains("#5471a6"));
+        qunsetenv("CODEXUI_PROFILE_ACCENT");
+        codexui::ProfileWindow second;
+        QCOMPARE(second.prepare(), 1);
+        QTRY_VERIFY(window.isVisible());
+        qunsetenv("CODEXUI_MANAGER_SOCKET");
+        qunsetenv("CODEXUI_PROFILE_NAME");
+    }
+    void liveLocalProfiles() {
+        if (!qEnvironmentVariableIsSet("CODEXMANAGER_LIVE_QUALIFICATION")) {
+            QSKIP("Run explicitly with isolated real systemd services; see profile-manager qualification.");
+        }
+        QTemporaryDir dir;
+        auto a = Profile::create("Qualification stdio");
+        auto b = Profile::create("Qualification Unix");
+        a.codexHome = dir.filePath("home-a");
+        b.codexHome = dir.filePath("home-b");
+        b.provider.transport = "unix";
+        for (auto* p : {&a, &b}) {
+            p->bridgeExecutable = QStandardPaths::findExecutable("codex-bridge");
+            p->appServerExecutable = QStandardPaths::findExecutable("codex");
+            p->probeExecutable = QStandardPaths::findExecutable("codex-bridge-client");
+            p->uiExecutable = CODEXMANAGER_UI_EXECUTABLE;
+        }
+        ProfileRuntime one(a), two(b);
+        connect(&one, &ProfileRuntime::logAdded, this, [](const QString& line) {
+            qInfo().noquote() << "stdio:" << line;
+        });
+        connect(&two, &ProfileRuntime::logAdded, this, [](const QString& line) {
+            qInfo().noquote() << "unix:" << line;
+        });
+        connect(&one, &ProfileRuntime::changed, this, [&] {
+            qInfo().noquote() << "stdio state:" << one.status();
+        });
+        connect(&two, &ProfileRuntime::changed, this, [&] {
+            qInfo().noquote() << "unix state:" << two.status();
+        });
+        const auto cleanup = qScopeGuard([&] {
+            one.stop();
+            two.stop();
+            QElapsedTimer timer;
+            timer.start();
+            while ((one.busy() || two.busy()) && timer.elapsed() < 25000) {
+                QTest::qWait(20);
+            }
+            if (!one.hasOwnedProcesses() && !two.hasOwnedProcesses()) {
+                for (const auto& p : {a, b}) {
+                    for (const auto& socket : {p.frontend.socketPath, p.provider.socketPath, p.runtimeSocket()}) {
+                        QFile::remove(socket);
+                        QFile::remove(socket + ".lock");
+                    }
+                }
+            }
+        });
+        one.start();
+        two.start();
+        QTRY_VERIFY2_WITH_TIMEOUT(
+            one.ready() && two.ready(), qPrintable(one.status() + '\n' + one.logs() + '\n' + two.status() + '\n' + two.logs()), 12000);
+        QTRY_VERIFY_WITH_TIMEOUT(!one.busy() && !two.busy(), 20000);
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(a.runtimeSocket()) && QFileInfo::exists(b.runtimeSocket()), 20000);
+        QLocalSocket first, second;
+        first.connectToServer(a.runtimeSocket());
+        second.connectToServer(b.runtimeSocket());
+        QVERIFY(first.waitForConnected(1000));
+        QVERIFY(second.waitForConnected(1000));
+        first.disconnectFromServer();
+        second.disconnectFromServer();
+        one.openUi();
+        QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 10000);
+        one.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 20000);
+        QVERIFY(!one.hasOwnedProcesses());
+        QVERIFY(two.ready());
+        two.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!two.busy(), 20000);
+        QVERIFY(!two.hasOwnedProcesses());
+    }
+    void managerOverviewAndCreationDialog() {
+        FixtureTools tools;
+        Profile p = Profile::create("Research");
+        p.codexHome = tools.dir.filePath("home");
+        p.bridge.ownership = Ownership::External;
+        QString error;
+        const auto file = tools.dir.filePath("profiles.json");
+        QVERIFY(ProfileStore(file).save({p}, &error));
+        ManagerWindow window(file);
+        window.show();
+        QTest::qWait(30);
+        QVERIFY(window.isVisible());
+        const auto labels = window.findChildren<QLabel*>();
+        QVERIFY(std::any_of(labels.cbegin(), labels.cend(), [](QLabel* label) {
+            return label->text() == "Research";
+        }));
+        const auto buttons = window.findChildren<QPushButton*>();
+        auto it = std::find_if(buttons.cbegin(), buttons.cend(), [](QPushButton* b) {
+            return b->text().contains("New profile");
+        });
+        QVERIFY(it != buttons.cend());
+        QTimer::singleShot(30, [] {
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                dialog->reject();
+            }
+        });
+        QTest::mouseClick(*it, Qt::LeftButton);
+    }
+    void managerGeometryAndDetails_data() {
+        QTest::addColumn<int>("width");
+        QTest::newRow("narrow") << 740;
+        QTest::newRow("normal") << 1240;
+        QTest::newRow("wide") << 1600;
+    }
+    void managerGeometryAndDetails() {
+        QFETCH(int, width);
+        FixtureTools tools;
+        QVector<Profile> profiles;
+        for (const auto& name : {"Daily development", "Research & experiments", "Remote lab"}) {
+            auto p = Profile::create(name);
+            p.codexHome = tools.dir.filePath(p.id);
+            p.bridge.ownership = Ownership::External;
+            p.description = "An independent environment for focused work.";
+            p.accent = profiles.isEmpty() ? "blue" : profiles.size() == 1 ? "purple" : "teal";
+            profiles << p;
+        }
+        QString error;
+        const auto file = tools.dir.filePath("profiles.json");
+        QVERIFY(ProfileStore(file).save(profiles, &error));
+        ManagerWindow window(file);
+        window.resize(width, 830);
+        window.show();
+        QTest::qWait(50);
+        const QString evidence = qEnvironmentVariable("CODEXMANAGER_EVIDENCE_DIR");
+        const auto capture = [&](const QString& name) {
+            if (!evidence.isEmpty()) {
+                QDir().mkpath(evidence);
+                QVERIFY(window.grab().save(evidence + '/' + name + '-' + QString::number(width) + ".png"));
+            }
+        };
+        capture("overview");
+        const auto buttons = window.findChildren<QPushButton*>();
+        auto detail = std::find_if(buttons.cbegin(), buttons.cend(), [](QPushButton* b) {
+            return b->text() == "Details →";
+        });
+        QVERIFY(detail != buttons.cend());
+        QTest::mouseClick(*detail, Qt::LeftButton);
+        QTest::qWait(30);
+        auto* tabs = window.findChild<QTabWidget*>();
+        QVERIFY(tabs);
+        for (int index = 0; index < tabs->count(); ++index) {
+            tabs->setCurrentIndex(index);
+            QTest::qWait(10);
+            capture("detail-" + QString::number(index));
+        }
+        tabs->setCurrentIndex(0);
+        const auto toolsButtons = window.findChildren<QToolButton*>();
+        auto disclosure = std::find_if(toolsButtons.cbegin(), toolsButtons.cend(), [](QToolButton* b) {
+            return b->text() == "Technical details";
+        });
+        QVERIFY(disclosure != toolsButtons.cend());
+        QTest::mouseClick(*disclosure, Qt::LeftButton);
+        QTest::qWait(10);
+        capture("technical-expanded");
+        QTimer::singleShot(50, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (dialog) {
+                auto* editorTabs = dialog->findChild<QTabWidget*>();
+                if (editorTabs) {
+                    for (int i = 0; i < editorTabs->count(); ++i) {
+                        editorTabs->setCurrentIndex(i);
+                        QApplication::processEvents();
+                        if (!evidence.isEmpty()) {
+                            QVERIFY(
+                                dialog->grab().save(evidence + "/editor-" + QString::number(i) + '-' + QString::number(width) + ".png"));
+                        }
+                    }
+                }
+                dialog->reject();
+            }
+        });
+        auto add = std::find_if(buttons.cbegin(), buttons.cend(), [](QPushButton* b) {
+            return b->text().contains("New profile");
+        });
+        QVERIFY(add != buttons.cend());
+        QTest::mouseClick(*add, Qt::LeftButton);
+    }
+};
+int main(int argc, char** argv) {
+    QCoreApplication::setApplicationName("CodexManagerTest");
+    int result = 0;
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == "--fixture") {
+        QStringList args;
+        for (int i = 0; i < argc; ++i) {
+            args << QString::fromLocal8Bit(argv[i]);
+        }
+        result = fixture(args);
+    } else {
+        QTemporaryDir configuration;
+        qputenv("XDG_CONFIG_HOME", configuration.path().toUtf8());
+        QApplication app(argc, argv);
+        ManagerTest test;
+        result = QTest::qExec(&test, argc, argv);
+    }
+    return result;
+}
+#include "ManagerTest.moc"

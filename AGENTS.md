@@ -6,6 +6,14 @@ The global engineering instructions in `~/.codex/AGENTS.md` apply in full.
 
 [Canonical interactive Xvfb test suite and visual approval matrix](docs/qualification/native-test-suite.md#banner).
 
+## Profile manager requirements
+
+For profile-manager planning or implementation, follow [Codex Profile Manager requirements](docs/architecture/profile-manager-requirements.md). This specification includes local and remote ownership, the deployment matrix, SSH supervision, manual startup commands, and simultaneous app-servers on one host distinguished by `CODEX_HOME`. It records requirements, not authorization to implement production additions.
+
+## Workspace and tooling layout
+
+This canonical checkout uses the nested layout: approved persistent checkouts belong in `<parent>/checkouts/<task>` and persistent builds in `<parent>/build/codex/<configuration>`. Temporary build/check output belongs in `/tmp/codex/build/CodexUI/<task>`. Do not reuse the historical `build-qualification` directory for new work. The repository copies the shared formatting and analysis baseline; use explicit formatting targets or format only files changed by the current task.
+
 ## Markdown formatting
 
 - Write each prose paragraph on one physical source line. Do not manually wrap prose to a fixed column width; let the renderer wrap to the available width.
@@ -142,3 +150,5 @@ Before accepting a change:
   materialized card implementations.
 - The accepted remediation must converge on one authoritative visible-card renderer
   and must materially reduce production Qt code.
+
+The copied CMake formatting modules adapt discovery to `src/`, `tests/`, root and browser CMake files, excluding build, checkout, third-party and generated directories. Formatting stays explicit through `format`, `format-check-cxx` and `format-check-cmake`; ordinary compilation never rewrites sources. `src/codex/main.cpp` retains an include-order formatting exclusion because SNode.C declares `emit()` before Qt defines the `emit` macro.

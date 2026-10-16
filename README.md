@@ -29,6 +29,8 @@
 
 Built on [AISuite](https://github.com/SNodeC/AISuite#banner) and [SNode.C](https://github.com/SNodeC/snode.c#banner), both frontends connect through AISuite's `codex-bridge`. Codex app-server remains responsible for agent execution and persistent history; both applications give you the controls and visibility around it.
 
+[CodexManager](docs/guides/profile-manager.md) is the companion Qt profile manager, built as `codex-manager` alongside `codex-ui`. Configure independent homes, local/SSH/external ownership and connections, then start a separate CodexUI window for each profile.
+
 <!-- snodec:begin menu -->
 <p>
   <a href="#quick-start" title="Start"><img src="docs/media/menu/start.svg" alt="Start" width="160" height="28"></a>
