@@ -4822,11 +4822,10 @@ bool testMessageImagePresentation() {
   const QImage ribbonImage = ribbon ? ribbon->grab().toImage() : QImage{};
   result &= expect(ribbon && thumbnails.size() == 3 && thumbnail,
                    "the image ribbon owns all three thumbnail widgets");
-  result &=
-      expect(thumbnail && !thumbnailPixmap.isNull() &&
-                 thumbnailPixmap.width() <= 280 &&
-                 thumbnailPixmap.height() <= 180,
-             "the first image is available and canonically bounded");
+  result &= expect(thumbnail && !thumbnailPixmap.isNull() && thumbnailPixmap.deviceIndependentSize().width() <= 280 &&
+                       thumbnailPixmap.deviceIndependentSize().height() <= 180 &&
+                       qFuzzyCompare(thumbnailPixmap.devicePixelRatio(), thumbnail->devicePixelRatioF()),
+                   "the first image is available and canonically bounded");
   const bool thumbnailsCentered =
       ribbon && std::ranges::all_of(thumbnails, hasEvenVerticalGap);
   if (!thumbnailsCentered && ribbon) {
@@ -5301,6 +5300,315 @@ bool testSharedPresentationContract() {
   return passed;
 }
 } // namespace
+bool testSharedTurnRemovalContract() {
+    std::string path = CODEXUI_PRESENTATION_CONTRACT_PATH;
+    path.resize(path.find_last_of('/') + 1);
+    std::ifstream input(path + "turn-removal.json");
+    const auto fixture = nlohmann::json::parse(input, nullptr, false);
+    const bool fixtureValid = fixture.is_object() && fixture.value("schemaVersion", 0) == 1;
+    bool result = expect(fixtureValid, "shared removal contract is valid");
+    if (fixtureValid) {
+        for (const auto& entry : fixture.at("cases")) {
+            nodegraph::NodeGraph graph;
+            nodegraph::ProtocolUpdater updater(graph);
+            const std::string threadId = fixture.at("thread").at("id");
+            static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ServerNotification,
+                                             "thread/started",
+                                             {},
+                                             objectFromJson({{"thread", fixture.at("thread")}})}));
+            int serial = 0;
+            for (const auto& turn : fixture.at("thread").at("turns")) {
+                const nodegraph::ProtocolRequestId id("items-" + std::to_string(serial++));
+                const auto request = updater.apply({nodegraph::DecodedMessageKind::ClientRequest,
+                                                    "thread/items/list",
+                                                    id,
+                                                    objectFromJson({{"threadId", threadId}, {"turnId", turn.at("id")}})});
+                static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ClientResult,
+                                                 "thread/items/list",
+                                                 id,
+                                                 objectFromJson({{"data", nlohmann::json::array()}, {"nextCursor", "earlier-items"}}),
+                                                 request.primary}));
+                {
+                    auto read = graph.tryRead();
+                    const auto thread = read->find({nodegraph::NodeKind::Thread, threadId});
+                    read.reset();
+                    ui::NodeGraphUiAdapter adapter(graph);
+                    const auto partial = adapter.conversation(thread);
+                    if (partial) {
+                        for (const auto& section : partial->sections) {
+                            if (section.turnId == turn.at("id").get<std::string>()) {
+                                result &= expect(std::ranges::none_of(section.cards,
+                                                                      [](const auto& card) {
+                                                                          return card.turnOpening;
+                                                                      }),
+                                                 "partial user or rootless history never exposes a provisional turn opener");
+                            }
+                        }
+                    }
+                }
+                const nodegraph::ProtocolRequestId completeId("complete-" + std::to_string(serial));
+                const auto complete =
+                    updater.apply({nodegraph::DecodedMessageKind::ClientRequest,
+                                   "thread/items/list",
+                                   completeId,
+                                   objectFromJson({{"threadId", threadId}, {"turnId", turn.at("id")}, {"cursor", "earlier-items"}})});
+                static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ClientResult,
+                                                 "thread/items/list",
+                                                 completeId,
+                                                 objectFromJson({{"data", nlohmann::json::array()}, {"nextCursor", nullptr}}),
+                                                 complete.primary}));
+            }
+            nodegraph::NodeRef thread;
+            nodegraph::NodeRef retainedItem;
+            {
+                auto read = graph.tryRead();
+                thread = read->find({nodegraph::NodeKind::Thread, threadId});
+                retainedItem = read->find(nodegraph::scopedItemNodeId(nodegraph::scopedTurnNodeId(threadId, "t1"), "answer-1"));
+            }
+            const nodegraph::ProtocolRequestId cut("cut");
+            const auto request = updater.apply({nodegraph::DecodedMessageKind::ClientRequest,
+                                                "thread/revert",
+                                                cut,
+                                                objectFromJson({{"threadId", threadId}, {"beforeTurnId", entry.at("beforeTurnId")}})});
+            static_cast<void>(updater.apply(
+                {nodegraph::DecodedMessageKind::ClientResult,
+                 "thread/revert",
+                 cut,
+                 objectFromJson({{"thread", {{"id", threadId}, {"turns", nlohmann::json::array()}}}, {"turnsBackwardsCursor", "anchor"}}),
+                 request.primary}));
+            nlohmann::json listed = nlohmann::json::array();
+            for (const auto& turnId : entry.at("pageTurnIds")) {
+                for (const auto& source : fixture.at("thread").at("turns")) {
+                    if (source.at("id") == turnId) {
+                        auto summary = source;
+                        summary["items"] = nlohmann::json::array({source.at("items").front()});
+                        listed.push_back(std::move(summary));
+                    }
+                }
+            }
+            const nodegraph::ProtocolRequestId pageId("retained");
+            const auto page = updater.apply(
+                {nodegraph::DecodedMessageKind::ClientRequest,
+                 "thread/turns/list",
+                 pageId,
+                 objectFromJson({{"threadId", threadId}, {"cursor", "anchor"}, {"itemsView", "summary"}, {"sortDirection", "desc"}})});
+            static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ClientResult,
+                                             "thread/turns/list",
+                                             pageId,
+                                             objectFromJson({{"data", listed}, {"nextCursor", nullptr}}),
+                                             page.primary}));
+            ui::NodeGraphUiAdapter adapter(graph);
+            const auto snapshot = adapter.conversation(thread);
+            std::vector<std::string> order;
+            if (snapshot) {
+                for (const auto& section : snapshot->sections) {
+                    order.push_back(section.turnId);
+                    const auto openings = std::ranges::count_if(section.cards, [](const auto& card) {
+                        return card.turnOpening;
+                    });
+                    const std::size_t count = section.turnId == "t1" ? 3 : 2;
+                    result &= expect(section.cards.size() == count && openings == 1,
+                                     "shared removal retains complete item history and exactly one actual opener");
+                }
+            }
+            result &= expect(snapshot && order == entry.at("retainedTurnIds").get<std::vector<std::string>>(),
+                             "shared removal preserves retained prefix order across overlapping summary pages");
+            if (!order.empty()) {
+                auto read = graph.tryRead();
+                result &= expect(read->live(retainedItem), "shared removal keeps the exact earlier reading item identity");
+            }
+        }
+    }
+    if (fixtureValid) {
+        nodegraph::NodeGraph graph;
+        nodegraph::ProtocolUpdater updater(graph);
+        const std::string threadId = fixture.at("thread").at("id");
+        static_cast<void>(updater.apply(
+            {nodegraph::DecodedMessageKind::ServerNotification, "thread/started", {}, objectFromJson({{"thread", fixture.at("thread")}})}));
+        static_cast<void>(updater.apply(
+            {nodegraph::DecodedMessageKind::ServerNotification, "thread/reverted", {}, objectFromJson({{"threadId", threadId}})}));
+        const auto& external = fixture.at("external");
+        const nodegraph::ProtocolRequestId first("first-external");
+        const auto initial = updater.apply({nodegraph::DecodedMessageKind::ClientRequest,
+                                            "thread/turns/list",
+                                            first,
+                                            objectFromJson({{"threadId", threadId}, {"sortDirection", "desc"}, {"itemsView", "summary"}})});
+        static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ServerNotification,
+                                         "turn/started",
+                                         {},
+                                         objectFromJson({{"threadId", threadId}, {"turn", external.at("liveTurn")}})}));
+        static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ClientResult,
+                                         "thread/turns/list",
+                                         first,
+                                         objectFromJson(external.at("pages").at(0)),
+                                         initial.primary}));
+        {
+            auto read = graph.tryRead();
+            const auto thread = read->find({nodegraph::NodeKind::Thread, threadId});
+            result &= expect(nodegraph::boolFromValue(nodegraph::valueMember(*read->state(thread), "historyStale")),
+                             "external reload continues while new turns obscure the cut boundary");
+        }
+        const nodegraph::ProtocolRequestId second("second-external");
+        const auto older = updater.apply(
+            {nodegraph::DecodedMessageKind::ClientRequest,
+             "thread/turns/list",
+             second,
+             objectFromJson({{"threadId", threadId}, {"cursor", "older"}, {"sortDirection", "desc"}, {"itemsView", "summary"}})});
+        static_cast<void>(updater.apply({nodegraph::DecodedMessageKind::ClientResult,
+                                         "thread/turns/list",
+                                         second,
+                                         objectFromJson(external.at("pages").at(1)),
+                                         older.primary}));
+        auto read = graph.tryRead();
+        const auto thread = read->find({nodegraph::NodeKind::Thread, threadId});
+        std::vector<std::string> order;
+        for (const auto& turn : read->children(thread)) {
+            order.push_back(nodegraph::protocolCanonicalId(*read->state(turn), turn));
+        }
+        result &= expect(
+            order == external.at("retainedTurnIds").get<std::vector<std::string>>() &&
+                !nodegraph::valueMember(*read->state(thread), "historyStale") &&
+                !nodegraph::valueMember(*read->state(thread), "historyReload"),
+            "shared external reload removes only obsolete history, preserves intervening live turns, and retires its reconciliation state");
+    }
+    return result;
+}
+
+bool testTurnRemovalAnchors() {
+    bool result = true;
+    ConversationView view;
+    view.resize(720, 480);
+    view.show();
+    ConversationSnapshot snapshot;
+    snapshot.threadId = "removal-anchors";
+    for (int index = 0; index < 30; ++index) {
+        const std::string turn = "t" + std::to_string(index);
+        std::string markdown;
+        for (int line = 0; line < 10; ++line) {
+            markdown += "A **Markdown** paragraph with enough content to scroll.\n\n";
+        }
+        VisibleCardData card{AuthoritativeItemKey{snapshot.threadId, turn, "opening"},
+                             CardKind::UserMessage,
+                             snapshot.threadId,
+                             turn,
+                             "opening",
+                             UserMessageData{markdown, {}}};
+        card.turnOpening = true;
+        snapshot.sections.push_back({turn, turn, {card}, card.key});
+    }
+    static_cast<void>(view.reconcile(snapshot));
+    spin();
+    mouseWheelNotch(view, 120);
+    result &= expect(view.mode() == ConversationView::Mode::Paused, "real wheel input detaches the reading position before removal");
+    view.scrollTo(view.conversationModel()->index(10), QAbstractItemView::PositionAtTop);
+    spin();
+    const auto anchor = firstVisible(view);
+    snapshot.sections.resize(20);
+    static_cast<void>(view.reconcile(snapshot));
+    spin();
+    result &= expect(firstVisible(view) == anchor, "removing a later suffix preserves the exact surviving reading anchor and pixel offset");
+    view.scrollTo(view.conversationModel()->index(18), QAbstractItemView::PositionAtTop);
+    spin();
+    snapshot.sections.resize(5);
+    static_cast<void>(view.reconcile(snapshot));
+    spin();
+    result &= expect(view.conversationModel()->rowCount() == 5 && view.isAtBottom(),
+                     "a removed reading anchor clamps to the nearest surviving conversation position");
+    snapshot.sections.clear();
+    static_cast<void>(view.reconcile(snapshot));
+    spin();
+    result &=
+        expect(view.conversationModel()->rowCount() == 0 && view.materializedCardCount() == 0 && view.verticalScrollBar()->value() == 0,
+               "removing the first turn leaves a clean empty viewport");
+    return result;
+}
+
+bool testTurnMenuGeometryAndIdentity() {
+    bool result = true;
+    nodegraph::NodeGraph graph;
+    nodegraph::NodeRef target;
+    {
+        auto write = graph.write();
+        target = write.upsert({nodegraph::NodeKind::Item, "menu-source"});
+        static_cast<void>(write.finish());
+    }
+    const QFont originalFont = QApplication::font();
+    for (int variant = 0; variant < 4; ++variant) {
+        QFont font = originalFont;
+        if (variant >= 2) {
+            font.setPointSizeF(font.pointSizeF() * 1.5);
+        }
+        QApplication::setFont(font);
+        qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+        const int width = variant % 2 == 0 ? 360 : 800;
+        VisibleCardData data{AuthoritativeItemKey{"menu", "turn", "user"},
+                             CardKind::UserMessage,
+                             "menu",
+                             "turn",
+                             "user",
+                             UserMessageData{"A **Markdown** prompt that wraps at narrower widths.", {}}};
+        data.target = target;
+        data.turnOpening = true;
+        ConversationCard card(data, false);
+        card.resize(width, card.settleHeightForWidth(width));
+        card.show();
+        spin();
+        auto* menu = card.findChild<QToolButton*>(QStringLiteral("turnMenuButton"));
+        auto* header = card.findChild<QWidget*>(QStringLiteral("conversationCardHeader"));
+        const QRect before = header->geometry();
+        const int height = card.height();
+        const auto capture = [&](const QString& state) {
+            const QString evidence = qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR");
+            if (!evidence.isEmpty()) {
+                card.grab().save(evidence + QStringLiteral("/turn-card-") + QString::number(variant) + QStringLiteral("-") + state +
+                                 QStringLiteral("-dpr-") + qEnvironmentVariable("QT_SCALE_FACTOR") + QStringLiteral(".png"));
+            }
+        };
+        capture(QStringLiteral("normal"));
+        const QImage glyph = menu->grab().toImage();
+        menu->setText(QString{});
+        const QImage blank = menu->grab().toImage();
+        menu->setText(QStringLiteral("⋯"));
+        result &= expect(glyph != blank, "compact turn control actually paints its ellipsis at each font size and DPR");
+        nodegraph::NodeRef selected;
+        QObject::connect(&card, &ConversationCard::turnMenuRequested, &card, [&](nodegraph::NodeRef item, QPoint) {
+            selected = std::move(item);
+        });
+        menu->setFocus();
+        QEvent enter(QEvent::Enter);
+        QApplication::sendEvent(menu, &enter);
+        capture(QStringLiteral("focus-hover"));
+        menu->setDown(true);
+        capture(QStringLiteral("pressed"));
+        menu->setDown(false);
+        menu->click();
+        spin();
+        result &= expect(menu->isVisible() && selected == target && header->geometry() == before && card.height() == height,
+                         "turn action focus/hover/click preserves header geometry and exact semantic target");
+        menu->setEnabled(false);
+        spin();
+        capture(QStringLiteral("disabled"));
+        result &= expect(header->geometry() == before && card.height() == height, "disabled turn controls retain reserved geometry");
+        data.turnOpening = false;
+        static_cast<void>(card.applyPresentation(data));
+        spin();
+        result &= expect(menu->isHidden(), "steering and non-opening items have no turn menu");
+        {
+            auto write = graph.write();
+            data.target = write.upsert({nodegraph::NodeKind::Item, "recycled-menu-source"});
+            static_cast<void>(write.finish());
+        }
+        data.turnOpening = true;
+        static_cast<void>(card.applyPresentation(data));
+        menu->setEnabled(true);
+        menu->click();
+        result &= expect(selected == data.target, "a recycled card menu dispatches its new semantic target");
+    }
+    QApplication::setFont(originalFont);
+    qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+    return result;
+}
+
 } // namespace codexui::codex::middle
 
 int main(int argc, char **argv) {
@@ -5309,6 +5617,7 @@ int main(int argc, char **argv) {
   using namespace codexui::codex::middle;
   if (qEnvironmentVariableIsSet("CODEXUI_PRESENTATION_CONTRACT_TESTS")) {
     bool focused = testSharedPresentationContract();
+    focused &= testSharedTurnRemovalContract();
     focused &= testUserMessageLineBreakPresentation();
     focused &= testMarkdownSelectionPreservesAuthoredCharacters();
     focused &= testMarkdownSelectionGutter();
@@ -5346,6 +5655,9 @@ int main(int argc, char **argv) {
     return focused ? 0 : 1;
   }
   bool result = testSharedPresentationContract();
+  result &= testTurnMenuGeometryAndIdentity();
+  result &= testTurnRemovalAnchors();
+  result &= testSharedTurnRemovalContract();
   result &= testMarkdownLinksOpenExternally();
   result &= testPerceptuallyUniformPalette();
   result &= testApplicationStyleSheetContract();

@@ -264,6 +264,9 @@ std::string_view nodeActionDiagnosticSubject(nodegraph::NodeActionKind kind) {
         case Rename:
             subject = "thread/name/set";
             break;
+        case RevertTurn:
+            subject = "thread/revert";
+            break;
         case ChangeWorkspace:
             subject = "thread/settings/update";
             break;
@@ -1170,6 +1173,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   std::function<void()> hydrateProvider;
   std::function<void()> requestAccountUsage;
   std::function<void(std::string)> hydrateHistoricalChildren;
+  std::function<void(std::string)> refreshRevertedHistory;
 
   std::string expectedDisconnectReason;
   bool desiredConnected = connectBridge;
@@ -1323,61 +1327,57 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   registerServerRequest.template operator()<ApplyPatchApproval>();
   registerServerRequest.template operator()<ExecCommandApproval>();
 
-#define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)        \
-  sdk.on##OperationName([&hydrateHistoricalChildren, &pendingServerRequests,   \
-                         &requestAccountUsage, &refreshThreadGroups,           \
-                         &workerLogic](                                        \
-                            codex::generated::server_notifications::           \
-                                OperationName::Params &notification) {         \
-    nodegraph::NodeRef expected;                                               \
-    const bool resolved =                                                      \
-        std::string_view(                                                      \
-            codex::generated::server_notifications::OperationName::method) ==  \
-        "serverRequest/resolved";                                              \
-    if (resolved) {                                                            \
-      const auto id = requestIdMember(notification.getPayload(), "requestId"); \
-      if (id) {                                                                \
-        for (const auto &[node, pending] : pendingServerRequests) {            \
-          if (pending.requestId == *id &&                                      \
-              pending.generations == workerLogic.generations()) {              \
-            expected = node;                                                   \
-            break;                                                             \
-          }                                                                    \
-        }                                                                      \
-      }                                                                        \
-    }                                                                          \
-    if (resolved && !expected)                                                 \
-      return;                                                                  \
-    static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{     \
-        nodegraph::DecodedMessageKind::ServerNotification,                     \
-        std::string(                                                           \
-            codex::generated::server_notifications::OperationName::method),    \
-        std::nullopt,                                                          \
-        decodedObject(notification.getPayload()),                              \
-        expected,                                                              \
-        threadActivityAt(                                                      \
-            codex::generated::server_notifications::OperationName::method),    \
-        {},                                                                    \
-        {},                                                                    \
-        {}}));                                                                 \
-    constexpr std::string_view appliedMethod =                                 \
-        codex::generated::server_notifications::OperationName::method;         \
-    if constexpr (appliedMethod == "project/changed")                          \
-      if (refreshThreadGroups)                                                 \
-        refreshThreadGroups();                                                 \
-    if (requestAccountUsage && (appliedMethod == "turn/completed" ||           \
-                                appliedMethod == "account/updated"))           \
-      requestAccountUsage();                                                   \
-    if (hydrateHistoricalChildren && (appliedMethod == "item/started" ||       \
-                                      appliedMethod == "item/completed")) {    \
-      const std::string threadId =                                             \
-          jsonString(notification.getPayload(), "threadId");                   \
-      if (!threadId.empty())                                                   \
-        hydrateHistoricalChildren(threadId);                                   \
-    }                                                                          \
-    if (expected)                                                              \
-      pendingServerRequests.erase(expected);                                   \
-  });
+#define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)                                                                    \
+sdk.on##OperationName([&hydrateHistoricalChildren,                                                                                         \
+                       &refreshRevertedHistory,                                                                                            \
+                       &pendingServerRequests,                                                                                             \
+                       &requestAccountUsage,                                                                                               \
+                       &refreshThreadGroups,                                                                                               \
+                       &workerLogic](codex::generated::server_notifications::OperationName::Params& notification) {                        \
+    nodegraph::NodeRef expected;                                                                                                           \
+    const bool resolved = std::string_view(codex::generated::server_notifications::OperationName::method) == "serverRequest/resolved";     \
+    if (resolved) {                                                                                                                        \
+        const auto id = requestIdMember(notification.getPayload(), "requestId");                                                           \
+        if (id) {                                                                                                                          \
+            for (const auto& [node, pending] : pendingServerRequests) {                                                                    \
+                if (pending.requestId == *id && pending.generations == workerLogic.generations()) {                                        \
+                    expected = node;                                                                                                       \
+                    break;                                                                                                                 \
+                }                                                                                                                          \
+            }                                                                                                                              \
+        }                                                                                                                                  \
+    }                                                                                                                                      \
+    if (resolved && !expected)                                                                                                             \
+        return;                                                                                                                            \
+    static_cast<void>(workerLogic.applyDetailed(                                                                                           \
+        nodegraph::DecodedMessage{nodegraph::DecodedMessageKind::ServerNotification,                                                       \
+                                  std::string(codex::generated::server_notifications::OperationName::method),                              \
+                                  std::nullopt,                                                                                            \
+                                  decodedObject(notification.getPayload()),                                                                \
+                                  expected,                                                                                                \
+                                  threadActivityAt(codex::generated::server_notifications::OperationName::method),                         \
+                                  {},                                                                                                      \
+                                  {},                                                                                                      \
+                                  {}}));                                                                                                   \
+    constexpr std::string_view appliedMethod = codex::generated::server_notifications::OperationName::method;                              \
+    if constexpr (appliedMethod == "thread/reverted") {                                                                                    \
+        if (refreshRevertedHistory) {                                                                                                      \
+            refreshRevertedHistory(jsonString(notification.getPayload(), "threadId"));                                                     \
+        }                                                                                                                                  \
+    }                                                                                                                                      \
+    if constexpr (appliedMethod == "project/changed")                                                                                      \
+        if (refreshThreadGroups)                                                                                                           \
+            refreshThreadGroups();                                                                                                         \
+    if (requestAccountUsage && (appliedMethod == "turn/completed" || appliedMethod == "account/updated"))                                  \
+        requestAccountUsage();                                                                                                             \
+    if (hydrateHistoricalChildren && (appliedMethod == "item/started" || appliedMethod == "item/completed")) {                             \
+        const std::string threadId = jsonString(notification.getPayload(), "threadId");                                                    \
+        if (!threadId.empty())                                                                                                             \
+            hydrateHistoricalChildren(threadId);                                                                                           \
+    }                                                                                                                                      \
+    if (expected)                                                                                                                          \
+        pendingServerRequests.erase(expected);                                                                                             \
+});
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_REGISTER_SERVER_NOTIFICATION)
 #undef CODEXUI_REGISTER_SERVER_NOTIFICATION
 
@@ -1792,10 +1792,10 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
             const std::string method =
                 exactStringFromValue(valueMember(*state, "method"));
             if (state->status == nodegraph::NodeStatus::Pending &&
-                (method == "thread/read" || method == "thread/resume" ||
-                 method == "thread/turns/list")) {
-              pending = true;
-              break;
+                (method == "thread/read" || method == "thread/resume" || method == "thread/turns/list" ||
+                 (method == "thread/revert" && exactStringFromValue(valueMember(*state, "revertObserved")) != "result"))) {
+                pending = true;
+                break;
             }
           }
         }
@@ -2252,6 +2252,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   constexpr std::size_t MaximumItemHydrations = 8;
   std::function<void()> pumpHistoricalHydrations;
   std::function<void()> pumpItemHydrations;
+  std::function<void(nodegraph::NodeAction)> loadHistory;
   std::function<void(const nodegraph::NodeRef &, bool, bool)>
       startThreadHydration;
   std::function<void(const nodegraph::NodeRef &)> queueActiveAgentChildren;
@@ -2339,45 +2340,52 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                                                                       bool resumeSucceeded,
                                                                       RequestOutcome outcome,
                                                                       nodegraph::DecodedMessage decoded) mutable {
-                const std::vector<std::string> turnIds = outcome.ok ? turnIdsFromPage(decoded.payload) : std::vector<std::string>{};
-                const bool wasHistorical = pendingHistoricalHydrations.erase(thread) != 0;
-                const bool needsSettings = interactiveHydrations.erase(thread) != 0;
-                pendingHydrations.erase(thread);
-                if (!outcome.ok) {
-                    const std::string error = outcome.error.empty() ? "Thread hydration failed" : outcome.error;
-                    static_cast<void>(workerLogic.completeThreadHydration(std::move(decoded), thread, "failed", error));
-                    continuePromptAfterHydration(thread, error);
-                } else {
-                    static_cast<void>(workerLogic.completeThreadHydration(std::move(decoded), thread, "ready"));
-                    if (!currentThreadId(thread)) {
-                        continuePromptAfterHydration(thread, "The selected thread is no longer available");
+                const bool current = decoded.expectedNode && currentNodeState(decoded.expectedNode);
+                if (current) {
+                    const std::vector<std::string> turnIds = outcome.ok ? turnIdsFromPage(decoded.payload) : std::vector<std::string>{};
+                    const bool wasHistorical = pendingHistoricalHydrations.erase(thread) != 0;
+                    const bool needsSettings = interactiveHydrations.erase(thread) != 0;
+                    pendingHydrations.erase(thread);
+                    if (!outcome.ok) {
+                        const std::string error = outcome.error.empty() ? "Thread hydration failed" : outcome.error;
+                        static_cast<void>(workerLogic.completeThreadHydration(std::move(decoded), thread, "failed", error));
+                        continuePromptAfterHydration(thread, error);
                     } else {
-                        queueActiveAgentChildren(thread);
-                        // Selection can promote a background read or gain control while its page is pending.
-                        if (needsSettings && sdk.isController() && !resumeAttempted) {
-                            dispatchRequest<codex::generated::client_requests::ThreadResume>(
-                                sdk,
-                                nlohmann::json{{"threadId", id}, {"excludeTurns", true}},
-                                workerLogic,
-                                thread,
-                                [&, thread](RequestOutcome resumed) mutable {
-                                    if (resumed.stale) {
-                                        promptsWaitingForHydration.erase(thread);
-                                    } else {
-                                        if (!resumed.ok) {
-                                            showNotice(resumed.error.empty() ? "Thread settings refresh failed" : resumed.error);
-                                        }
-                                        continuePromptAfterHydration(thread, {}, resumed.ok);
-                                    }
-                                });
+                        static_cast<void>(workerLogic.completeThreadHydration(std::move(decoded), thread, "ready"));
+                        if (!currentThreadId(thread)) {
+                            continuePromptAfterHydration(thread, "The selected thread is no longer available");
                         } else {
-                            continuePromptAfterHydration(thread, {}, resumeSucceeded);
+                            queueActiveAgentChildren(thread);
+                            // Selection can promote a background read or gain control while its page is pending.
+                            if (needsSettings && sdk.isController() && !resumeAttempted) {
+                                dispatchRequest<codex::generated::client_requests::ThreadResume>(
+                                    sdk,
+                                    nlohmann::json{{"threadId", id}, {"excludeTurns", true}},
+                                    workerLogic,
+                                    thread,
+                                    [&, thread](RequestOutcome resumed) mutable {
+                                        if (resumed.stale) {
+                                            promptsWaitingForHydration.erase(thread);
+                                        } else {
+                                            if (!resumed.ok) {
+                                                showNotice(resumed.error.empty() ? "Thread settings refresh failed" : resumed.error);
+                                            }
+                                            continuePromptAfterHydration(thread, {}, resumed.ok);
+                                        }
+                                    });
+                            } else {
+                                continuePromptAfterHydration(thread, {}, resumeSucceeded);
+                            }
+                            queueItemHydrations(thread, id, turnIds);
+                            const auto state = currentNodeState(thread);
+                            if (state && boolFromValue(valueMember(*state, "historyStale"))) {
+                                loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
+                            }
                         }
-                        queueItemHydrations(thread, id, turnIds);
                     }
-                }
-                if (wasHistorical && pumpHistoricalHydrations) {
-                    pumpHistoricalHydrations();
+                    if (wasHistorical && pumpHistoricalHydrations) {
+                        pumpHistoricalHydrations();
+                    }
                 }
             };
             auto requestTurnPage = [&, thread, id = *threadId, historyReady, completeTurnPage](bool resumeAttempted,
@@ -2457,41 +2465,65 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       queueActiveAgentChildren(parent);
   };
 
-  const auto loadHistory = [&](nodegraph::NodeAction action) {
-    if (!action.target ||
-        action.target->id().kind != nodegraph::NodeKind::Thread) {
-      rejectNodeAction(action, "The selected thread is no longer available");
-      return;
-    }
-    const nodegraph::NodeRef thread = action.target;
-    const std::shared_ptr<const nodegraph::NodeState> state =
-        currentNodeState(thread);
-    const std::optional<std::string> threadId = currentThreadId(thread);
-    if (!state || !threadId) {
-      rejectNodeAction(action, "The selected thread is no longer available");
-      return;
-    }
-    if (conversationSnapshotPending(thread))
-      return;
-    const std::string cursor =
-        exactStringFromValue(valueMember(*state, "historyNextCursor"));
-    dispatchRequestHandled<codex::generated::client_requests::ThreadTurnsList>(
-        sdk, turnPageParameters(*threadId, cursor), workerLogic, thread,
-        [](const nodegraph::ProtocolRequestId &) {},
-        [&, thread, id = *threadId](RequestOutcome outcome,
-                                    nodegraph::DecodedMessage decoded) {
-          const std::vector<std::string> turnIds =
-              outcome.ok ? turnIdsFromPage(decoded.payload)
-                         : std::vector<std::string>{};
-          const nodegraph::NodeRef expected = decoded.expectedNode;
-          const nodegraph::WorkerApplyResult applied =
-              workerLogic.applyDetailed(std::move(decoded));
-          outcome.stale = expected && applied.primary != expected;
-          if (!outcome.stale && outcome.ok)
-            queueItemHydrations(thread, id, turnIds);
-          else if (!outcome.stale)
-            showNotice(outcome.error);
-        });
+  loadHistory = [&](nodegraph::NodeAction action) {
+      if (!action.target || action.target->id().kind != nodegraph::NodeKind::Thread) {
+          rejectNodeAction(action, "The selected thread is no longer available");
+          return;
+      }
+      const nodegraph::NodeRef thread = action.target;
+      const std::shared_ptr<const nodegraph::NodeState> state = currentNodeState(thread);
+      const std::optional<std::string> threadId = currentThreadId(thread);
+      if (!state || !threadId) {
+          rejectNodeAction(action, "The selected thread is no longer available");
+          return;
+      }
+      if (conversationSnapshotPending(thread))
+          return;
+      const std::string cursor = exactStringFromValue(valueMember(*state, "historyNextCursor"));
+      dispatchRequestHandled<codex::generated::client_requests::ThreadTurnsList>(
+          sdk,
+          turnPageParameters(*threadId, cursor),
+          workerLogic,
+          thread,
+          [](const nodegraph::ProtocolRequestId&) {
+          },
+          [&, thread, id = *threadId](RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
+              const std::vector<std::string> turnIds = outcome.ok ? turnIdsFromPage(decoded.payload) : std::vector<std::string>{};
+              const nodegraph::NodeRef expected = decoded.expectedNode;
+              const bool current = expected && currentNodeState(expected);
+              if (current) {
+                  static_cast<void>(
+                      workerLogic.completeThreadHydration(std::move(decoded), thread, outcome.ok ? "ready" : "failed", outcome.error));
+                  if (outcome.ok) {
+                      queueItemHydrations(thread, id, turnIds);
+                      const auto state = currentNodeState(thread);
+                      if (state && boolFromValue(valueMember(*state, "historyStale"))) {
+                          loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
+                      }
+                  } else {
+                      showNotice(outcome.error);
+                  }
+              }
+          });
+  };
+
+  refreshRevertedHistory = [&](std::string id) {
+      const auto thread = currentNode({nodegraph::NodeKind::Thread, std::move(id)});
+      const auto state = currentNodeState(thread);
+      bool ownRevert = false;
+      if (auto read = graph.tryRead()) {
+          for (const auto& operation : read->related(thread, nodegraph::RelationKind::PendingOperation)) {
+              ownRevert = ownRevert || exactStringFromValue(valueMember(*read->state(operation), "method")) == "thread/revert";
+          }
+      }
+      if (state && boolFromValue(valueMember(*state, "historyStale")) && !ownRevert && sdk.providerReady()) {
+          pendingHydrations.erase(thread);
+          interactiveHydrations.erase(thread);
+          std::erase_if(itemPageQueue, [&thread](const ItemPage& page) {
+              return page.thread == thread;
+          });
+          startThreadHydration(thread, false, true);
+      }
   };
 
   const auto resolveInteraction = [&](nodegraph::NodeAction action) {
@@ -2609,6 +2641,76 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     case LoadHistory:
       loadHistory(std::move(action));
       return;
+    case RevertTurn: {
+        std::string reason = "Thread state is busy; try again.";
+        nodegraph::NodeRef thread;
+        std::string before;
+        bool needsResume = false;
+        if (auto read = graph.tryRead()) {
+            reason = nodegraph::threadRevertUnavailable(*read, action.target);
+            if (reason.empty()) {
+                thread = read->parent(action.target);
+                before = nodegraph::protocolCanonicalId(*read->state(action.target), action.target);
+                needsResume = read->state(thread)->status == nodegraph::NodeStatus::NotLoaded;
+            }
+        }
+        if (!reason.empty()) {
+            rejectNodeAction(action, reason);
+        } else {
+            const auto revert = [&, action, thread, before] {
+                std::string unavailable = "Thread state is busy; try again.";
+                if (auto read = graph.tryRead()) {
+                    unavailable = nodegraph::threadRevertUnavailable(*read, action.target);
+                }
+                if (!unavailable.empty()) {
+                    rejectNodeAction(action, unavailable);
+                } else {
+                    std::erase_if(itemPageQueue, [&thread](const ItemPage& page) {
+                        return page.thread == thread;
+                    });
+                    dispatchRequest<codex::generated::client_requests::ThreadRevert>(
+                        sdk,
+                        {{"threadId", thread->id().canonical}, {"beforeTurnId", before}},
+                        workerLogic,
+                        thread,
+                        [&, thread](RequestOutcome outcome) {
+                            if (!outcome.stale) {
+                                if (outcome.ok) {
+                                    const auto state = currentNodeState(thread);
+                                    const std::string cursor =
+                                        state ? exactStringFromValue(valueMember(*state, "historyNextCursor")) : std::string{};
+                                    if (!cursor.empty()) {
+                                        loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
+                                    }
+                                } else {
+                                    refreshRevertedHistory(thread->id().canonical);
+                                    showNotice("History removal failed. Reload the thread if the connection was lost: " + outcome.error);
+                                }
+                            }
+                        });
+                }
+            };
+            if (needsResume) {
+                dispatchRequest<codex::generated::client_requests::ThreadResume>(
+                    sdk,
+                    {{"threadId", thread->id().canonical}, {"excludeTurns", true}},
+                    workerLogic,
+                    thread,
+                    [&, revert](RequestOutcome outcome) {
+                        if (!outcome.stale) {
+                            if (outcome.ok) {
+                                revert();
+                            } else {
+                                showNotice(outcome.error);
+                            }
+                        }
+                    });
+            } else {
+                revert();
+            }
+        }
+        return;
+    }
     case ChangeWorkspace: {
         std::string reason = "Thread state is busy; try again.";
         bool needsResume = false;
@@ -2687,9 +2789,18 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         const nodegraph::Value *value = valueMember(threadState->fields, name);
         return value && value->asBool() && *value->asBool();
       };
-      if (!threadState || stateFlag("local") || stateFlag("recoveryOnly")) {
-        rejectNodeAction(action, "The selected thread is no longer available");
-        return;
+      bool historyRemovalPending = true;
+      if (auto read = graph.tryRead()) {
+          historyRemovalPending =
+              std::ranges::any_of(read->related(action.target, nodegraph::RelationKind::PendingOperation), [&read](const auto& operation) {
+                  return exactStringFromValue(valueMember(*read->state(operation), "method")) == "thread/revert";
+              });
+      }
+      if (!threadState || stateFlag("local") || stateFlag("recoveryOnly") || historyRemovalPending) {
+          rejectNodeAction(action,
+                           historyRemovalPending ? "Wait for history removal to finish before changing this thread."
+                                                 : "The selected thread is no longer available");
+          return;
       }
       const bool archived = stateFlag("archived");
       if ((action.kind == Archive && archived) ||

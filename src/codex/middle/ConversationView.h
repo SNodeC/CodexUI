@@ -59,6 +59,9 @@ public:
   ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void()> action);
+  void setTurnMenuAction(std::function<void(nodegraph::NodeRef, QPoint)> action) {
+      turnMenuAction_ = std::move(action);
+  }
   void
   setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
   void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
@@ -318,6 +321,7 @@ private:
   std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
   std::function<void(QString, bool)> noticeAction_;
   std::function<void(nodegraph::NodeRef)> timingAction_;
+  std::function<void(nodegraph::NodeRef, QPoint)> turnMenuAction_;
   std::function<void(const std::string &, ReconciliationResult, bool)>
       reconciliationFinishedAction_;
 

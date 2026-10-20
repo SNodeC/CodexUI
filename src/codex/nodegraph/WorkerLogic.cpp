@@ -34,6 +34,38 @@ namespace codexui::nodegraph {
                     reason = "Thread context is loading; wait for app-server confirmation.";
                 } else if (method == "thread/settings/update") {
                     reason = "Workspace change pending app-server confirmation.";
+                } else if (method == "thread/revert") {
+                    reason = "Wait for history removal to finish before changing workspace.";
+                }
+            }
+        }
+        return reason;
+    }
+
+    std::string threadRevertUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& turn) {
+        std::string reason;
+        const NodeRef thread = turn && read.live(turn) && turn->id().kind == NodeKind::Turn ? read.parent(turn) : NodeRef{};
+        const auto state = thread ? read.state(thread) : nullptr;
+        const auto connection = read.find({NodeKind::Connection, "connection"});
+        if (!state || boolFromValue(valueMember(*state, "local")) || boolFromValue(valueMember(*state, "recoveryOnly")) ||
+            boolFromValue(valueMember(*read.state(turn), "local"))) {
+            reason = "The selected turn is no longer available.";
+        } else if (!connection || read.state(connection)->status != NodeStatus::Connected ||
+                   exactStringFromValue(valueMember(*read.state(connection), "providerState")) != "ready" ||
+                   exactStringFromValue(valueMember(*read.state(connection), "role")) != "controller") {
+            reason = "Removing turns requires a ready provider and controller access.";
+        } else if (boolFromValue(valueMember(*state, "ephemeral")) ||
+                   exactStringFromValue(valueMember(*state, "historyMode")) != "paginated") {
+            reason = "Only persistent threads with paginated history support removing turns.";
+        } else if (state->status == NodeStatus::Running || read.relatedCount(thread, RelationKind::ActiveTurn) != 0) {
+            reason = "Wait until the active turn completes before removing turns.";
+        } else if (exactStringFromValue(valueMember(*state, "hydrationState")) != "ready" ||
+                   boolFromValue(valueMember(*state, "historyStale")) || read.relatedCount(thread, RelationKind::PendingOperation) != 0) {
+            reason = "Wait for thread operations and history loading to finish.";
+        } else {
+            for (const NodeRef& prompt : read.related(thread, RelationKind::PendingPrompt)) {
+                if (read.state(prompt)->status != NodeStatus::Failed) {
+                    reason = "Wait for pending prompts to finish before removing turns.";
                 }
             }
         }
@@ -255,6 +287,21 @@ WorkerApplyResult WorkerLogic::applyDetailed(DecodedMessage message) {
     }
     AppliedMessage applied = updater_.applyInto(write, message);
     primary = std::move(applied.primary);
+    if (message.kind == DecodedMessageKind::ServerNotification && message.method == "thread/reverted") {
+        const NodeRef thread = write.find({NodeKind::Thread, objectString(message.payload, "threadId")});
+        for (const NodeRef& prompt : write.related(thread, RelationKind::PendingPrompt)) {
+            if (write.state(prompt)->status != NodeStatus::Failed) {
+                write.setField(prompt, "dispatchState", Value("failed"));
+                write.setField(prompt,
+                               "error",
+                               Value("Conversation history changed; review this preserved prompt before retrying. Its previous delivery "
+                                     "outcome may be unknown."));
+                write.setField(prompt, "requiresExplicitRecovery", Value(true));
+                write.setStatus(prompt, NodeStatus::Failed);
+                forgetPrompt(prompt);
+            }
+        }
+    }
     change = write.finish();
   }
   forgetRemoved(change);
@@ -438,6 +485,9 @@ ChannelSendStatus WorkerLogic::completeThreadHydration(DecodedMessage result,
           if (error.empty())
             error = "Thread hydration returned a mismatched thread";
         }
+      }
+      if (state == "ready" && boolFromValue(valueMember(*write.state(thread), "historyStale"))) {
+          state = "loading";
       }
       updateThreadHydration(write, thread, std::move(state), std::move(error));
     }
@@ -671,6 +721,15 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
                   : "Wait for this thread to finish loading before sending";
         }
       }
+    }
+
+    if (!invalidTarget && pending.thread) {
+        for (const NodeRef& operation : write.related(pending.thread, RelationKind::PendingOperation)) {
+            if (exactStringFromValue(valueMember(*write.state(operation), "method")) == "thread/revert") {
+                invalidTarget = true;
+                invalidTargetReason = "History removal is pending; wait before sending.";
+            }
+        }
     }
 
     if (invalidTarget) {

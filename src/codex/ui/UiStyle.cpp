@@ -341,11 +341,12 @@ QString applicationStyleSheet() {
             background: transparent;
             border-color: transparent;
         }
-        QToolButton#cardTimingButton {
+        QToolButton#cardTimingButton, QToolButton#turnMenuButton {
           color: %{secondary}; background: transparent;
           border-color: transparent; padding: 0; font-weight: 400;
         }
-        QToolButton#cardTimingButton:hover, QToolButton#cardTimingButton:focus {
+        QToolButton#cardTimingButton:hover, QToolButton#cardTimingButton:focus,
+        QToolButton#turnMenuButton:hover, QToolButton#turnMenuButton:focus {
           border-color: %{focusBorder};
         }
         QPushButton[kind="infoChoice"] {

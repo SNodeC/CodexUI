@@ -19,6 +19,8 @@ namespace codexui::nodegraph {
     // One application policy shared by worker admission and toolkit projections.
     [[nodiscard]] std::string threadWorkspaceChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread);
 
+    [[nodiscard]] std::string threadRevertUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& turn);
+
     struct WorkerGenerations final {
         std::uint64_t connection = 0;
         std::uint64_t provider = 0;

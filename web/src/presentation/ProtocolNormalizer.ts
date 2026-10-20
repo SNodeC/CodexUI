@@ -329,6 +329,9 @@ export class ProtocolNormalizer {
                     ...requestSequence,
                 };
                 authority = "merge";
+            } else if (action === "thread.revert") {
+                data = {...value, beforeTurnId: stringMember(context, "beforeTurnId"), ...requestSequence};
+                authority = "replace";
             } else if (action === "thread.read" || action === "thread.metadata") {
                 const candidate = member(value, "thread", {});
                 const thread = isObject(candidate) ? candidate : {};

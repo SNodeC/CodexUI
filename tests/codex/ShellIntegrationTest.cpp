@@ -6366,6 +6366,131 @@ void permissionRequestDisclosure() {
           "approved");
 }
 
+void turnRemovalConfirmationTargetsTheCapturedTurn(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+    ShellWidget shell(session);
+    const QFont originalFont = QApplication::font();
+    shell.setStyleSheet(UiStyle::applicationStyleSheet());
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    Value::Object item{{"id", "opening"},
+                       {"type", "userMessage"},
+                       {"content", Value::Array{Value::Object{{"type", "text"}, {"text", "Selected prompt"}}}}};
+    Value::Object turn{{"id", "selected"}, {"status", "completed"}, {"items", Value::Array{Value(item)}}};
+    Value::Object metadata{{"id", "turn-menu"},
+                           {"name", "Menu fixture"},
+                           {"historyMode", "paginated"},
+                           {"ephemeral", false},
+                           {"status", Value::Object{{"type", "idle"}}},
+                           {"turns", Value::Array{Value(turn)}}};
+    static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification, "thread/started", {}, {{"thread", Value(metadata)}}}));
+    markThreadReady(session, worker, "turn-menu");
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    require(spinUntil([&] {
+                return threadItem(list, "turn-menu");
+            }),
+            "turn-menu thread is visible");
+    require(selectThread(list, "turn-menu"), "turn-menu thread can be selected");
+    require(spinUntil([&] {
+                return shell.findChild<QToolButton*>(QStringLiteral("turnMenuButton"));
+            }),
+            "authoritative turn opener has a menu button");
+    applyThread(worker, "other-menu-thread", "Other selection");
+    markThreadReady(session, worker, "other-menu-thread");
+    spin();
+    static_cast<void>(takeQtMessages(channels));
+    for (int scenario = 0; scenario < 5; ++scenario) {
+        if (scenario == 1) {
+            shell.resize(1050, 700);
+            QFont enlarged = originalFont;
+            enlarged.setPointSizeF(enlarged.pointSizeF() * 1.5);
+            QApplication::setFont(enlarged);
+            shell.setStyleSheet(UiStyle::applicationStyleSheet());
+            spin();
+        }
+        auto* button = shell.findChild<QToolButton*>(QStringLiteral("turnMenuButton"));
+        bool confirmationSeen = false;
+        if (button) {
+            QTimer::singleShot(0, &shell, [&, scenario] {
+                auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+                require(menu && menu->actions().size() == 1 && menu->actions().front()->isEnabled(),
+                        "turn menu exposes one eligible removal action");
+                const QString evidence = qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR");
+                if (menu && scenario <= 1 && !evidence.isEmpty()) {
+                    const QString suffix = QString::number(scenario) + QStringLiteral("-dpr-") + qEnvironmentVariable("QT_SCALE_FACTOR") +
+                                           QStringLiteral(".png");
+                    shell.grab().save(evidence + QStringLiteral("/turn-shell-") + suffix);
+                    menu->grab().save(evidence + QStringLiteral("/turn-menu-") + suffix);
+                    menu->actions().front()->setEnabled(false);
+                    menu->grab().save(evidence + QStringLiteral("/turn-menu-disabled-") + suffix);
+                    menu->actions().front()->setEnabled(true);
+                }
+                QTimer::singleShot(0, &shell, [&, scenario] {
+                    auto* confirmation = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                    confirmationSeen = confirmation && confirmation->windowTitle() == "Remove conversation history?" &&
+                                       confirmation->text().contains("File changes and commands already performed will not be undone.") &&
+                                       confirmation->defaultButton()->text() == "Cancel";
+                    require(confirmationSeen, "confirmation discloses inclusive scope and defaults to Cancel");
+                    const QString evidence = qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR");
+                    if (confirmationSeen && scenario <= 1 && !evidence.isEmpty()) {
+                        confirmation->grab().save(evidence + QStringLiteral("/turn-removal-confirmation-") + QString::number(scenario) +
+                                                  QStringLiteral("-dpr-") + qEnvironmentVariable("QT_SCALE_FACTOR") +
+                                                  QStringLiteral(".png"));
+                    }
+                    if (confirmation) {
+                        if (scenario == 2) {
+                            require(selectThread(list, "other-menu-thread"),
+                                    "selection can change while confirmation retains its original target");
+                        } else if (scenario == 3) {
+                            static_cast<void>(worker.bridgeState("test-controller", "observer", "other", 1, "ready"));
+                        } else if (scenario == 4) {
+                            static_cast<void>(
+                                worker.apply({DecodedMessageKind::ServerNotification, "thread/deleted", {}, {{"threadId", "turn-menu"}}}));
+                        }
+                        for (auto* action : confirmation->buttons()) {
+                            if (action->text() == (scenario == 0 ? "Cancel" : "Remove turns")) {
+                                action->click();
+                            }
+                        }
+                    }
+                });
+                if (menu) {
+                    QKeyEvent activate(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                    menu->setActiveAction(menu->actions().front());
+                    QApplication::sendEvent(menu, &activate);
+                }
+            });
+            button->click();
+        }
+        const auto messages = takeQtMessages(channels);
+        std::vector<NodeAction> removals;
+        for (const auto& message : messages) {
+            if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::RevertTurn) {
+                removals.push_back(*action);
+            }
+        }
+        require(confirmationSeen && removals.size() == (scenario == 1 || scenario == 2 ? 1U : 0U),
+                "turn confirmation scenario " + std::to_string(scenario) +
+                    ": cancellation, changed selection, lost authority and retired targets preserve dispatch ownership");
+        if (!removals.empty()) {
+            require(removals.front().target->id() == scopedTurnNodeId("turn-menu", "selected"),
+                    "confirmed action retains the captured turn identity");
+        }
+        if (scenario == 2) {
+            require(selectThread(list, "turn-menu"), "original thread can be selected again after captured-target confirmation");
+            spin();
+        } else if (scenario == 3) {
+            static_cast<void>(worker.bridgeState("test-controller", "controller", "test-controller", 1, "ready"));
+            spin();
+        }
+    }
+    QApplication::setFont(originalFont);
+    qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -6376,6 +6501,7 @@ int main(int argc, char **argv) {
   core::SNodeC::init(argc, argv);
 
   using namespace codexui::codex;
+  turnRemovalConfirmationTargetsTheCapturedTurn(*configuration);
   tokenUsageUpdatesBothShellSurfaces(*configuration);
   workspaceActionsRetainPresentedAndTargetThreadOwnership(*configuration);
   timestampDetailsUseExistingShell(*configuration);

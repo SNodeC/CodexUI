@@ -14,7 +14,7 @@ import {ProtocolNormalizer} from "../presentation/ProtocolNormalizer.js";
 import {PromptCoordinator, indexAuthoritativeItems, localCardVisible, promptWithFileLinks} from "../conversation/PromptCoordinator.js";
 import type {AttachmentDraft, PromptDispatch, PromptRecoveryContext} from "../conversation/PromptCoordinator.js";
 import {DefaultAuthoritativeItemLimit, projectConversation} from "../conversation/ConversationProjection.js";
-import {PendingAnimationDelayMilliseconds} from "../conversation/MiddleTypes.js";
+import {PendingAnimationDelayMilliseconds, stableKey} from "../conversation/MiddleTypes.js";
 import type {ConversationSnapshot} from "../conversation/MiddleTypes.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 import {ConversationViewportState} from "./ConversationViewportState.js";
@@ -48,7 +48,7 @@ const actionMethods = {
     "threads.list": "thread/list", "thread.read": "thread/read", "thread.create": "thread/start",
     "thread.workspace": "thread/settings/update", "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
     "thread.turns.list": "thread/turns/list", "thread.items.list": "thread/items/list",
-    "thread.archive": "thread/archive", "thread.unarchive": "thread/unarchive", "thread.delete": "thread/delete",
+    "thread.revert": "thread/revert", "thread.archive": "thread/archive", "thread.unarchive": "thread/unarchive", "thread.delete": "thread/delete",
     "projects.list": "project/list", "project.read": "project/read", "project.create": "project/create",
     "project.update": "project/update", "project.move": "project/move", "project.delete": "project/delete",
     "sections.list": "threadSection/list", "section.create": "threadSection/create",
@@ -117,6 +117,7 @@ type ThreadPhase = "cold" | "hydrating" | "ready" | "resuming" | "failed";
 interface ThreadRuntimeState {
     phase: ThreadPhase;
     historyPageInFlight: boolean;
+    itemRequests: number;
     readonly seenHistoryCursors: Set<string>;
 }
 interface ItemPage {threadId: string; turnId: string; cursor: string; runtime: ThreadRuntimeState}
@@ -187,6 +188,9 @@ export class BrowserFrontendSession {
             const retiringRequest = stringMember(frame, "type") === "pending-request.removed"
                 && Object.hasOwn(scope, "requestId")
                 ? this.model.pendingRequestPresentations().get(JSON.stringify(scope.requestId)) : undefined;
+            const historyReplaced = frame.kind === "result" && frame.ok === true
+                && (frame.action === "thread.revert" || (frame.action === "thread.turns.list"
+                    && this.model.thread(stringMember(scope, "threadId"))?.raw.historyStale === true));
             const application = this.model.applyEvent(frame);
             if (application === "rejected") return;
             const threadId = stringMember(scope, "threadId");
@@ -199,6 +203,16 @@ export class BrowserFrontendSession {
             this.protocolFrames.push(retainedProtocolFrame(frame));
             if (this.protocolFrames.length > MaximumProtocolFrames) this.protocolFrames.shift();
             this.reconcilePromptsForFrame(frame);
+            if (historyReplaced) {
+                const index = indexAuthoritativeItems(threadId, this.model.thread(threadId));
+                this.prompts.retainHistoryAliases(threadId, index);
+                this.prompts.decorate(threadId, index);
+                const retained = new Set(index.ordered.map(item => stableKey(item.promptAlias?.key ?? item.key)));
+                for (const prompt of this.prompts.submissions(threadId)) {
+                    if (localCardVisible(prompt)) { retained.add(stableKey({kind: "prompt", submissionId: prompt.id})); }
+                }
+                this.viewportState.retainCards(threadId, this.threadVisualKey(threadId), retained);
+            }
             this.handlePresentationFrame(frame, application === "provider-reset",
                 application === "requests-reset" || application === "provider-reset", retiringRequest);
             if (threadId !== "" && stringMember(frame, "type") === "conversation.item.upsert")
@@ -309,7 +323,9 @@ export class BrowserFrontendSession {
         const connection = this.model.connection();
         return connection.connected && connection.providerState === "ready" && this.sdk.role === "controller"
             && (presentationKey === undefined
-                || this.matchesThreadPresentation(this.selectedThreadId, presentationKey));
+                || (this.matchesThreadPresentation(this.selectedThreadId, presentationKey)
+                    && !this.operationPending("thread.revert", this.selectedThreadId)
+                    && this.model.thread(this.selectedThreadId)?.raw.historyStale !== true));
     }
 
     selectThread(threadId: string, presentationKey?: string, refreshSettings = true): void {
@@ -446,6 +462,11 @@ export class BrowserFrontendSession {
 
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {},
         threadOptions: JsonObject = {}, presentationKey?: string): Promise<boolean> {
+        if (this.operationPending("thread.revert", this.selectedThreadId)
+            || this.model.thread(this.selectedThreadId)?.raw.historyStale === true) {
+            this.setNotice("History removal is pending; wait before sending.");
+            return false;
+        }
         if (prompt.trim() === "") return false;
         const canonicalPrompt = promptWithFileLinks(prompt, attachments);
         if (!this.canSubmit(presentationKey)) {
@@ -616,6 +637,48 @@ export class BrowserFrontendSession {
         void this.performUserOperation("thread.archive", archived ? "thread.unarchive" : "thread.archive",
             {threadId}, archived ? "Unarchive thread" : "Archive thread", presentationKey);
     }
+    revertUnavailable(threadId: string, turnId: string, presentationKey?: string,
+        expectedTurn: object | undefined = this.model.thread(threadId)?.turns.get(turnId), currentOperation?: object): string {
+        let reason = "";
+        const thread = this.model.thread(threadId);
+        const runtime = this.runtimeByThread.get(threadId);
+        if (!thread || !expectedTurn || thread.turns.get(turnId) !== expectedTurn
+            || !this.matchesThreadPresentation(threadId, presentationKey)) {
+            reason = "The selected turn is no longer available.";
+        } else if (!this.canSubmit()) {
+            reason = "Removing turns requires a ready provider and controller access.";
+        } else if (thread.raw.ephemeral === true || thread.raw.historyMode !== "paginated") {
+            reason = "Only persistent threads with paginated history support removing turns.";
+        } else if (thread.status.semantic === "running" || this.model.activeTurnId(threadId)) {
+            reason = "Wait until the active turn completes before removing turns.";
+        } else if (!runtime || runtime.phase !== "ready" || runtime.historyPageInFlight || runtime.itemRequests !== 0
+            || this.itemPageQueue.some(page => page.threadId === threadId && page.runtime === runtime)
+            || (thread.raw.historyStale === true && currentOperation === undefined)
+            || [...this.pendingUserOperations].some(([key, operation]) => key.endsWith(`:${this.threadVisualKey(threadId)}`) && operation !== currentOperation)) {
+            reason = "Wait for thread operations and history loading to finish.";
+        } else if (this.prompts.submissions(threadId).some(prompt => localCardVisible(prompt) && prompt.state !== "failed")) {
+            reason = "Wait for pending prompts to finish before removing turns.";
+        }
+        return reason;
+    }
+    removeTurns(threadId: string, turnId: string, presentationKey: string, expectedTurn: object): void {
+        const reason = this.revertUnavailable(threadId, turnId, presentationKey, expectedTurn);
+        if (reason !== "") {
+            this.setNotice(reason);
+        } else {
+            this.performUserOperation("thread.revert", "thread.revert", {threadId, beforeTurnId: turnId},
+                "History removal", presentationKey)?.then(response => {
+                if (response.ok && !response.stale) {
+                    this.runtimeByThread.delete(threadId);
+                    const runtime = this.threadRuntime(threadId);
+                    runtime.phase = "ready";
+                    const cursor = this.model.thread(threadId)?.historyNextCursor ?? "";
+                    if (cursor !== "") { this.loadMoreHistory(threadId, presentationKey); }
+                    this.publish();
+                }
+            });
+        }
+    }
     deleteThread(threadId: string, presentationKey?: string): void {
         void this.performUserOperation("thread.delete", "thread.delete", {threadId}, "Delete thread", presentationKey);
     }
@@ -656,7 +719,7 @@ export class BrowserFrontendSession {
     private threadRuntime(threadId: string): ThreadRuntimeState {
         let runtime = this.runtimeByThread.get(threadId);
         if (!runtime) {
-            runtime = {phase: "cold", historyPageInFlight: false, seenHistoryCursors: new Set()};
+            runtime = {phase: "cold", historyPageInFlight: false, itemRequests: 0, seenHistoryCursors: new Set()};
             this.runtimeByThread.set(threadId, runtime);
         }
         return runtime;
@@ -676,16 +739,19 @@ export class BrowserFrontendSession {
         for (const threadId of affectedThreads) {
             const runtime = this.runtimeByThread.get(threadId);
             if (runtime) runtime.phase = "cold";
-            for (const submission of this.prompts.submissions(threadId)) {
-                if (submission.state !== "queued" && submission.state !== "inFlight") continue;
-                const uncertain = submission.state === "inFlight";
-                this.prompts.fail(threadId, submission.id, uncertain
-                    ? "Provider changed before the turn was acknowledged; its outcome is unknown"
-                    : "Provider changed before this queued prompt was sent");
+            this.failPendingPrompts(threadId, "Provider changed");
+        }
+        this.runtimeByThread.clear();
+    }
+    private failPendingPrompts(threadId: string, context: string): void {
+        for (const submission of this.prompts.submissions(threadId)) {
+            if (submission.state === "queued" || submission.state === "inFlight") {
+                this.prompts.fail(threadId, submission.id, submission.state === "inFlight"
+                    ? `${context} before the turn was acknowledged; its outcome is unknown`
+                    : `${context} before this queued prompt was sent`);
                 this.cancelPendingAnimation(submission.id);
             }
         }
-        this.runtimeByThread.clear();
     }
     private retireProviderPresentations(): void {
         const retainedDraftId = this.newThreadDraft ? DraftThreadId : "";
@@ -767,12 +833,14 @@ export class BrowserFrontendSession {
             const page = this.itemPageQueue.shift()!;
             if (this.runtimeByThread.get(page.threadId) !== page.runtime || page.runtime.phase === "failed") continue;
             ++this.pendingItemPages;
+            ++page.runtime.itemRequests;
             void this.requestPromise("thread.items.list", {
                 threadId: page.threadId, turnId: page.turnId, limit: 80, sortDirection: "desc",
                 ...(page.cursor === "" ? {} : {cursor: page.cursor}),
             }, () => this.runtimeByThread.get(page.threadId) === page.runtime
                 && page.runtime.phase !== "failed").then(response => {
                 --this.pendingItemPages;
+                --page.runtime.itemRequests;
                 if (!response.stale && response.ok) {
                     const cursor = isObject(response.data) ? stringMember(response.data, "nextCursor") : "";
                     if (cursor !== "") this.itemPageQueue.push({...page, cursor});
@@ -819,6 +887,7 @@ export class BrowserFrontendSession {
             }
             this.queueTurnItems(threadId, response.data, runtime);
             this.queueActiveAgentChildren(threadId);
+            if (this.model.thread(threadId)?.raw.historyStale === true) { this.loadMoreHistory(threadId); }
             this.publish();
         });
     }
@@ -842,6 +911,7 @@ export class BrowserFrontendSession {
             }
             this.queueTurnItems(threadId, response.data, runtime);
             this.queueActiveAgentChildren(threadId);
+            if (this.model.thread(threadId)?.raw.historyStale === true) { this.loadMoreHistory(threadId); }
             this.publish();
         });
     }
@@ -1117,20 +1187,28 @@ export class BrowserFrontendSession {
         const targetKey = presentationKey ?? this.threadVisualKey(threadId);
         if (targetKey === "" || !this.matchesThreadPresentation(threadId, targetKey)) return undefined;
         const key = `${keyAction}:${targetKey}`;
-        if (this.pendingUserOperations.has(key)) return undefined;
+        if (this.pendingUserOperations.has(key) || this.operationPending("thread.revert", threadId)) return undefined;
         if (!this.canSubmit()) {
             this.setNotice(`${failureContext} is unavailable until Codex is ready and controlled.`);
             return undefined;
         }
-        const operationIdentity = {};
+        const operationIdentity: {revertObserved?: "result" | "notification"} = {};
         this.pendingUserOperations.set(key, operationIdentity);
+        if (keyAction === "thread.revert") {
+            const thread = this.model.thread(threadId);
+            if (thread) { thread.raw.historyStale = true; }
+        }
         this.publish();
-        const current = () => this.matchesThreadPresentation(threadId, targetKey);
-        const operation = keyAction === "thread.workspace" && this.model.thread(threadId)?.status.semantic === "notLoaded"
+        const expectedTurn = this.model.thread(threadId)?.turns.get(stringMember(parameters, "beforeTurnId"));
+        const current = () => this.matchesThreadPresentation(threadId, targetKey)
+            && (keyAction !== "thread.revert" || this.model.thread(threadId)?.turns.get(stringMember(parameters, "beforeTurnId")) === expectedTurn);
+        const operation = (keyAction === "thread.workspace" || keyAction === "thread.revert") && this.model.thread(threadId)?.status.semantic === "notLoaded"
             ? this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current).then(response => {
                 let result: OperationResponse | Promise<OperationResponse> = response;
                 if (response.ok && !response.stale) {
-                    const reason = this.workspaceChangeUnavailable(threadId, targetKey, operationIdentity);
+                    const reason = keyAction === "thread.revert"
+                        ? this.revertUnavailable(threadId, stringMember(parameters, "beforeTurnId"), targetKey, expectedTurn, operationIdentity)
+                        : this.workspaceChangeUnavailable(threadId, targetKey, operationIdentity);
                     result = reason === "" ? this.requestPromise(action, parameters, current)
                         : {ok: false, error: {message: reason}};
                 }
@@ -1138,13 +1216,32 @@ export class BrowserFrontendSession {
             })
             : this.requestPromise(action, parameters, current);
         void operation.then(response => {
+            const notificationReceived = operationIdentity.revertObserved === "notification";
+            if (keyAction === "thread.revert") {
+                if (response.ok && !notificationReceived) { operationIdentity.revertObserved = "result"; }
+                else if (!response.stale && !notificationReceived
+                    && member(response.error, "code") !== -32002 && member(response.error, "code") !== -32020) {
+                    const thread = this.model.thread(threadId);
+                    if (thread) { delete thread.raw.historyStale; }
+                }
+            }
             if (this.pendingUserOperations.get(key) === operationIdentity
-                && (!response.ok || keyAction !== "thread.workspace")) {
+                && (!response.ok || (keyAction !== "thread.workspace"
+                    && (keyAction !== "thread.revert" || notificationReceived)))) {
                 this.pendingUserOperations.delete(key);
             }
-            if (!response.ok && !response.stale)
-                this.setNotice(`${failureContext} failed: ${this.errorMessage(response)}`);
-            else this.schedulePublish();
+            if (!response.ok && !response.stale) {
+                const recovery = keyAction === "thread.revert" ? " Reload this thread before retrying if the connection was lost." : "";
+                this.setNotice(`${failureContext} failed: ${this.errorMessage(response)}${recovery}`);
+                if (keyAction === "thread.revert" && notificationReceived && this.providerReady()) {
+                    this.runtimeByThread.delete(threadId);
+                    const runtime = this.threadRuntime(threadId);
+                    runtime.phase = "ready";
+                    this.loadForkHistory(threadId, runtime);
+                }
+            } else {
+                this.schedulePublish();
+            }
         });
         return operation;
     }
@@ -1273,6 +1370,29 @@ export class BrowserFrontendSession {
             const settings = isObject(data.threadSettings) ? data.threadSettings : data;
             if (typeof settings.cwd === "string") {
                 this.pendingUserOperations.delete(`thread.workspace:${this.threadVisualKey(threadId)}`);
+            }
+        } else if (type === "thread.reverted") {
+            const threadId = stringMember(frame.scope, "threadId");
+            this.failPendingPrompts(threadId, "Conversation history changed");
+            const key = `thread.revert:${this.threadVisualKey(threadId)}`;
+            const own = this.pendingUserOperations.get(key) as {revertObserved?: "result" | "notification"} | undefined;
+            if (own) {
+                if (own.revertObserved === "result") {
+                    this.pendingUserOperations.delete(key);
+                    const thread = this.model.thread(threadId);
+                    if (thread) {
+                        delete thread.raw.historyStale;
+                        delete thread.raw.historyReload;
+                    }
+                } else {
+                    own.revertObserved = "notification";
+                    this.runtimeByThread.delete(threadId);
+                }
+            } else {
+                this.runtimeByThread.delete(threadId);
+                const runtime = this.threadRuntime(threadId);
+                runtime.phase = "ready";
+                this.loadForkHistory(threadId, runtime);
             }
         } else if (type === "thread.removed") {
             const scope = isObject(frame.scope) ? frame.scope : {};

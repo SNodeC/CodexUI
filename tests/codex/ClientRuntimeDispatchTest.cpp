@@ -3174,6 +3174,111 @@ void cachedSettingsRefreshDoesNotReloadHistory(UnixBridge& bridge, RunningRuntim
     }
 }
 
+void removingTurnsUsesOneAuthoritativeWireOperation(UnixBridge& bridge, RunningRuntime& runtime) {
+    const nlohmann::json metadata{
+        {"id", "revert-wire"}, {"historyMode", "paginated"}, {"ephemeral", false}, {"status", {{"type", "idle"}}}};
+    expect(bridge.appServerNotification("thread/started", {{"thread", metadata}}), "revert fixture reaches runtime");
+    const auto thread = findNode(runtime.graph(), {NodeKind::Thread, "revert-wire"});
+    expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Hydrate}),
+           "revert fixture is hydrated through public worker path");
+    const auto resume = bridge.receiveAppServer();
+    expect(resume && resume->value("method", "") == "thread/resume", "revert hydration resumes metadata");
+    if (resume) {
+        expect(bridge.reply(*resume, {{"thread", metadata}}), "revert metadata is returned");
+    }
+    const auto page = bridge.receiveAppServer();
+    expect(page && page->value("method", "") == "thread/turns/list", "revert hydration requests paginated turns");
+    nlohmann::json listed = nlohmann::json::array();
+    for (int index = 3; index >= 1; --index) {
+        listed.push_back({{"id", "t" + std::to_string(index)}, {"status", "completed"}, {"items", nlohmann::json::array()}});
+    }
+    if (page) {
+        expect(bridge.reply(*page, {{"data", listed}, {"nextCursor", nullptr}}), "three retained turns arrive");
+    }
+    for (int index = 0; index < 3; ++index) {
+        const auto items = bridge.receiveAppServer();
+        expect(items && items->value("method", "") == "thread/items/list", "turn items hydrate through bounded path");
+        if (items) {
+            expect(bridge.reply(*items, {{"data", nlohmann::json::array()}, {"nextCursor", nullptr}}), "item hydration completes");
+        }
+    }
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               return read && read->relatedCount(thread, RelationKind::PendingOperation) == 0;
+           }),
+           "all history work settles before removal");
+    const auto turn = findNode(runtime.graph(), scopedTurnNodeId("revert-wire", "t2"));
+    expect(sendAction(runtime.channels(), NodeAction{turn, NodeActionKind::RevertTurn}), "turn removal enters worker mailbox");
+    const auto request = bridge.receiveAppServer();
+    expect(request && request->value("method", "") == "thread/revert" &&
+               request->at("params") == nlohmann::json{{"threadId", "revert-wire"}, {"beforeTurnId", "t2"}},
+           "one inclusive request uses exact turn identity");
+    if (request) {
+        expect(sendAction(runtime.channels(), NodeAction{turn, NodeActionKind::RevertTurn}) && !bridge.receiveAppServer(100ms),
+               "duplicate removal is rejected at dispatch");
+        expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Delete}) && !bridge.receiveAppServer(100ms),
+               "thread deletion cannot race an admitted history removal");
+        NodeAction workspace{thread, NodeActionKind::ChangeWorkspace};
+        workspace.payload = {{"cwd", "/unused-during-removal"}};
+        expect(sendAction(runtime.channels(), std::move(workspace)) && !bridge.receiveAppServer(100ms),
+               "workspace context cannot change during history removal");
+        expect(bridge.reply(*request,
+                            {{"thread", metadata}, {"turnsBackwardsCursor", "retained-anchor"}, {"itemsBackwardsCursor", "items-anchor"}}),
+               "server confirms prefix and reload cursors");
+        const auto retained = bridge.receiveAppServer();
+        expect(retained && retained->value("method", "") == "thread/turns/list" &&
+                   retained->at("params").value("cursor", "") == "retained-anchor",
+               "retained history reload uses the exact server anchor");
+        expect(bridge.appServerNotification("thread/reverted", {{"threadId", "revert-wire"}}), "trailing notification is delivered");
+        if (retained) {
+            expect(bridge.reply(*retained, {{"data", nlohmann::json::array({listed.at(2)})}, {"nextCursor", nullptr}}),
+                   "retained prefix is returned");
+            const auto items = bridge.receiveAppServer();
+            expect(items && items->value("method", "") == "thread/items/list", "retained turn items reload");
+            if (items) {
+                expect(bridge.reply(*items, {{"data", nlohmann::json::array()}, {"nextCursor", nullptr}}), "retained items finish");
+            }
+        }
+        expect(waitUntil([&] {
+                   auto read = runtime.graph().tryRead();
+                   return read && read->childCount(thread) == 1 && read->relatedCount(thread, RelationKind::PendingOperation) == 0;
+               }),
+               "authoritative prefix survives and mutation settles");
+        expect(!bridge.receiveAppServer(100ms), "response and notification do not duplicate history refresh");
+    }
+    expect(bridge.appServerNotification("thread/status/changed", {{"threadId", "revert-wire"}, {"status", {{"type", "notLoaded"}}}}),
+           "a retained thread can become unloaded");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               return read && read->state(thread)->status == NodeStatus::NotLoaded;
+           }),
+           "unloaded status becomes authoritative before dispatch");
+    const auto retainedTurn = findNode(runtime.graph(), scopedTurnNodeId("revert-wire", "t1"));
+    expect(sendAction(runtime.channels(), NodeAction{retainedTurn, NodeActionKind::RevertTurn}),
+           "explicit removal of an unloaded thread is admitted");
+    const auto reload = bridge.receiveAppServer();
+    expect(reload && reload->value("method", "") == "thread/resume" && reload->at("params").value("excludeTurns", false),
+           "unloaded removal resumes metadata before dispatch");
+    if (reload) {
+        expect(bridge.reply(*reload, {{"thread", metadata}}), "unloaded target resumes successfully");
+    }
+    const auto rejected = bridge.receiveAppServer();
+    expect(rejected && rejected->value("method", "") == "thread/revert" && rejected->at("params").value("beforeTurnId", "") == "t1",
+           "resume revalidates the exact captured turn before removal");
+    if (rejected) {
+        expect(bridge.replyError(*rejected, -32000, "fixture rejection"), "ordinary removal rejection reaches worker");
+        expect(waitUntil([&] {
+                   auto read = runtime.graph().tryRead();
+                   return read && read->live(retainedTurn) && read->childCount(thread) == 1 &&
+                          read->relatedCount(thread, RelationKind::PendingOperation) == 0 &&
+                          !boolFromValue(valueMember(*read->state(thread), "historyStale"));
+               }),
+               "rejection retains history and retires only the failed operation");
+        expect(!bridge.receiveAppServer(100ms), "rejected removal is never automatically resent");
+    }
+    runtime.drainNotifications();
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -3198,6 +3303,7 @@ int main(int argc, char **argv) {
     codexui::codex::idleWorkerSleepsBetweenWakeRecoveryChecks(runtime);
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);
+    codexui::codex::removingTurnsUsesOneAuthoritativeWireOperation(bridge, runtime);
     codexui::codex::cachedSettingsRefreshDoesNotReloadHistory(bridge, runtime);
     codexui::codex::workspaceChangesUseAcknowledgedThreadContext(bridge, runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);

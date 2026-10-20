@@ -568,6 +568,7 @@ struct ShellWidget::Impl final {
   void renameThreadDialog(const nodegraph::NodeRef &thread);
   void changeWorkspaceDialog(const nodegraph::NodeRef& thread);
   void confirmDeleteThread(const nodegraph::NodeRef &thread);
+  void showTurnMenu(nodegraph::NodeRef item, QPoint position);
   [[nodiscard]] bool submitPrompt(QString prompt,
                                   std::vector<AttachmentDraft> attachments);
   void chooseAttachments();
@@ -851,6 +852,9 @@ void ShellWidget::Impl::connectUi() {
   };
   threadActions.timing = showTiming;
   middleRegion->conversation().setTimingAction(showTiming);
+  middleRegion->conversation().setTurnMenuAction([this](nodegraph::NodeRef item, QPoint position) {
+      showTurnMenu(std::move(item), position);
+  });
   threadActions.select = [this](const nodegraph::NodeRef &thread) {
     selectGraphThread(thread, ThreadSelectionOrigin::User);
   };
@@ -2201,6 +2205,11 @@ void ShellWidget::Impl::render(
           hydrationState != "failed" &&
           (state->status != nodegraph::NodeStatus::NotLoaded ||
            hydrationState == "ready");
+      for (const auto& operation : read->related(selected, nodegraph::RelationKind::PendingOperation)) {
+          if (exactStringFromValue(valueMember(*read->state(operation), "method")) == "thread/revert") {
+              values.threadAdmissionReady = false;
+          }
+      }
       values.lastActivityAt =
           signedIntegerFromValue(valueMember(*state, "lastActivityAt"));
       for (const std::string_view field :
@@ -2601,6 +2610,48 @@ void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {
     showNotice(QStringLiteral(
         "The rename was admitted after a worker wake-up failure; bounded "
         "fallback delivery is active."));
+}
+
+void ShellWidget::Impl::showTurnMenu(nodegraph::NodeRef item, QPoint position) {
+    nodegraph::NodeRef turn;
+    std::string reason = "Conversation state is busy; try again.";
+    if (auto read = session.nodeGraph().tryRead()) {
+        if (item && read->live(item)) {
+            turn = read->parent(item);
+        }
+        reason = nodegraph::threadRevertUnavailable(*read, turn);
+    }
+    QMenu menu(owner);
+    menu.setToolTipsVisible(true);
+    QAction* remove = menu.addAction(QStringLiteral("Remove this turn and all later turns…"));
+    remove->setEnabled(reason.empty());
+    remove->setToolTip(text(reason));
+    if (menu.exec(position) == remove && reason.empty()) {
+        QMessageBox confirmation(
+            QMessageBox::Warning,
+            QStringLiteral("Remove conversation history?"),
+            QStringLiteral("This will permanently remove the selected turn and every later turn from this conversation. Earlier turns will "
+                           "remain. File changes and commands already performed will not be undone."),
+            QMessageBox::NoButton,
+            owner);
+        auto* cancel = confirmation.addButton(QStringLiteral("Cancel"), QMessageBox::RejectRole);
+        auto* accepted = confirmation.addButton(QStringLiteral("Remove turns"), QMessageBox::DestructiveRole);
+        confirmation.setDefaultButton(cancel);
+        confirmation.setEscapeButton(cancel);
+        confirmation.exec();
+        if (confirmation.clickedButton() == accepted) {
+            reason = "Conversation state is busy; try again.";
+            if (auto read = session.nodeGraph().tryRead()) {
+                reason = nodegraph::threadRevertUnavailable(*read, turn);
+            }
+            if (reason.empty()) {
+                static_cast<void>(sendNodeAction({turn, nodegraph::NodeActionKind::RevertTurn, {}, {}, {}, {}},
+                                                 QStringLiteral("History removal was not admitted; try again.")));
+            } else {
+                showNotice(text(reason));
+            }
+        }
+    }
 }
 
 void ShellWidget::Impl::confirmDeleteThread(const nodegraph::NodeRef &thread) {

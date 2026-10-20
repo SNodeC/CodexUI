@@ -617,7 +617,7 @@ function ScrollableCode({text, className, label, state}: {text: string; classNam
 
 type ClipboardOutcome = "copied" | "unsupported" | "failed";
 
-export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false, times = [], onTiming, onRestore, commandScroll, outputScroll}: {times?: ProtocolTime[]; onTiming?: () => void; onRestore?: () => void; commandScroll?: {scrollTop: number; following: boolean}; outputScroll?: {scrollTop: number; following: boolean}; card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
+export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false, times = [], onTiming, onRestore, commandScroll, outputScroll, onTurnMenu}: {onTurnMenu?: (position: {x: number; y: number}, opener: HTMLButtonElement) => void; times?: ProtocolTime[]; onTiming?: () => void; onRestore?: () => void; commandScroll?: {scrollTop: number; following: boolean}; outputScroll?: {scrollTop: number; following: boolean}; card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
     const fallbackScroll = useRef({command: {scrollTop: 0, following: false}, output: {scrollTop: 0, following: true}});
     const [copyFeedback, setCopyFeedback] = useState<{text: string; failed: boolean}>();
     const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -681,7 +681,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const activeWork = isWorkingStatus(card.status);
     const delayedPending = card.kind === "localPrompt" && (card.payload as LocalPromptData).showPendingAnimation;
     return <article className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span>{onTiming && <button className="card-timing" title={timingDetails(times)} aria-label="Timing details" onClick={onTiming}>{timingSummary(times) || "—"}</button>}<span className="card-meta">{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span>{onTiming && <button className="card-timing" title={timingDetails(times)} aria-label="Timing details" onClick={onTiming}>{timingSummary(times) || "—"}</button>}<span className="card-meta">{card.turnOpening && onTurnMenu && <button aria-label="Turn actions" aria-haspopup="menu" onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); onTurnMenu({x: rect.right, y: rect.bottom}, event.currentTarget); }}>⋯</button>}{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
@@ -724,8 +724,62 @@ export function ThreadLoadingSurface({spinning}: {spinning: boolean}) {
     </div>;
 }
 
+interface TurnRemovalTarget {
+    threadId: string; turnId: string; presentationKey: string; turn: object;
+    position: {x: number; y: number}; stage: "menu" | "confirm"; cardKey: string; opener: HTMLButtonElement;
+}
+
+function TurnRemovalSurface({session, target, onClose, onConfirm}: {
+    session: BrowserFrontendSession; target: TurnRemovalTarget; onClose: () => void; onConfirm: () => void;
+}) {
+    const menu = useRef<HTMLDivElement>(null);
+    const dialog = useRef<HTMLDialogElement>(null);
+    useBrowserLayoutEffect(() => () => {
+        dialog.current?.close();
+        const opener = target.opener;
+        const sameCard = opener.isConnected && opener.closest<HTMLElement>("[data-card-key]")?.dataset.cardKey === target.cardKey;
+        const focus = sameCard ? opener : document.querySelector<HTMLElement>(".conversation-pane");
+        focus?.focus({preventScroll: true});
+    }, [target.opener, target.cardKey]);
+    const reason = session.revertUnavailable(target.threadId, target.turnId, target.presentationKey, target.turn);
+    useBrowserLayoutEffect(() => {
+        if (target.stage === "confirm") {
+            dialog.current?.showModal();
+            dialog.current?.querySelector<HTMLButtonElement>("button[data-cancel]")?.focus();
+        } else {
+            const element = menu.current;
+            if (element) {
+                element.style.left = `${Math.max(8, Math.min(target.position.x - element.offsetWidth, window.innerWidth - element.offsetWidth - 8))}px`;
+                element.style.top = `${Math.max(8, Math.min(target.position.y, window.innerHeight - element.offsetHeight - 8))}px`;
+                (element.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? element).focus({preventScroll: true});
+            }
+        }
+    }, [target.stage]);
+    useEffect(() => {
+        const dismiss = (event: PointerEvent) => {
+            if (target.stage === "menu" && !menu.current?.contains(event.target as Node)) { onClose(); }
+        };
+        document.addEventListener("pointerdown", dismiss);
+        return () => { document.removeEventListener("pointerdown", dismiss); };
+    }, [target.stage, onClose]);
+    return target.stage === "menu"
+        ? <div ref={menu} className="thread-context-menu" role="menu" aria-label="Turn actions" tabIndex={-1}
+            onKeyDown={event => { if (event.key === "Escape" || event.key === "Tab") { onClose(); } }}>
+            <button role="menuitem" className="danger" disabled={reason !== ""} title={reason} onClick={onConfirm}>Remove this turn and all later turns…</button>
+        </div>
+        : <dialog ref={dialog} className="new-thread-dialog" aria-labelledby="turn-removal-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+            <form onSubmit={event => { event.preventDefault(); session.removeTurns(target.threadId, target.turnId, target.presentationKey, target.turn); onClose(); }}>
+                <h2 id="turn-removal-title">Remove conversation history?</h2>
+                <p>This will permanently remove the selected turn and every later turn from this conversation. Earlier turns will remain. File changes and commands already performed will not be undone.</p>
+                {reason && <p className="dialog-error" role="status">{reason}</p>}
+                <footer><button type="button" data-cancel onClick={onClose}>Cancel</button><button type="submit" className="danger" disabled={reason !== ""}>Remove turns</button></footer>
+            </form>
+        </dialog>;
+}
+
 function Conversation({session, paneControls, onInspect, usage, onRequestWorkspace}: {session: BrowserFrontendSession; onRequestWorkspace: (target: ThreadPresentationTarget) => void; usage: TokenUsageText; paneControls?: ReactNode; onInspect: (view: "requests" | "timing", target?: TimingTarget) => void}) {
     const snapshot = session.getSnapshot();
+    const [turnRemoval, setTurnRemoval] = useState<TurnRemovalTarget>();
     const thread = session.model.thread(snapshot.selectedThreadId);
     const projectionId = snapshot.selectedThreadId;
     const presentationKey = session.threadVisualKey(projectionId);
@@ -890,11 +944,16 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
         return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} times={card.key.kind === "item" ? targetTimes(session.model, {threadId: card.threadId, turnId: card.turnId, itemId: card.itemId}) : []}
+            onTurnMenu={(position, opener) => {
+                const turn = session.model.thread(card.threadId)?.turns.get(card.turnId);
+                if (turn) { setTurnRemoval({threadId: card.threadId, turnId: card.turnId, presentationKey, turn, position, stage: "menu", cardKey: key, opener}); }
+            }}
             onTiming={() => onInspect("timing", {threadId: card.threadId, turnId: card.turnId, ...(card.itemId ? {itemId: card.itemId} : {})})}
             onRestore={() => { if (card.kind === "localPrompt") { const text = session.restorePrompt(projectionId, (card.payload as LocalPromptData).submissionId, presentationKey, prompt); if (text !== undefined) { setPrompt(text); queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message Codex']")?.focus()); } } }}
             {...(card.kind === "commandExecution" ? {commandScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:command`, false), outputScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:output`, true)} : {})} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
+        {turnRemoval && <TurnRemovalSurface session={session} target={turnRemoval} onClose={() => setTurnRemoval(undefined)} onConfirm={() => setTurnRemoval({...turnRemoval, stage: "confirm"})} />}
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">CONVERSATION</span>
             <div className="conversation-lockup"><div className="thread-heading-context"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
                 <button className="thread-workspace" disabled={!thread || session.workspaceChangeUnavailable(projectionId, presentationKey) !== ""} title={`${thread?.cwd || "Workspace not reported"}\n${session.workspaceChangeUnavailable(projectionId, presentationKey) || "Change workspace…"}`} aria-label={`Thread workspace: ${thread?.cwd || "Workspace not reported"}`} onClick={() => onRequestWorkspace({threadId: projectionId, presentationKey})}>{thread?.cwd || "Workspace not reported"}</button>

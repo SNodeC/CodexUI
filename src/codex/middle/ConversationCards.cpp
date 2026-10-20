@@ -1389,12 +1389,10 @@ public:
                                        next.kind == CardKind::UserMessage;
     const bool payloadChanged = current.payload != next.payload;
     const bool timingChanged = current.timing != next.timing;
-    const bool presentationChanged = becomingAuthoritative || payloadChanged ||
-                                     current.status != next.status;
-    const bool paintOnlyStatus =
-        !becomingAuthoritative && !payloadChanged &&
-        current.status != next.status &&
-        (next.kind == CardKind::Reasoning || next.kind == CardKind::Plan);
+    const bool openingChanged = current.turnOpening != next.turnOpening;
+    const bool presentationChanged = becomingAuthoritative || payloadChanged || openingChanged || current.status != next.status;
+    const bool paintOnlyStatus = !becomingAuthoritative && !payloadChanged && !openingChanged && current.status != next.status &&
+                                 (next.kind == CardKind::Reasoning || next.kind == CardKind::Plan);
     bool cappedCommandOutputOnly = false;
     bool commandLifecycleOnly = false;
     if (!becomingAuthoritative && output && output->isHeightCapped() &&
@@ -1454,8 +1452,9 @@ public:
         },
         next.payload);
     setActiveWork(cardHasActiveWork(next));
-    if (fileChangesBodyChanged)
-      refreshCopyPresentation();
+    if (fileChangesBodyChanged || openingChanged) {
+        refreshCopyPresentation();
+    }
     refreshFoldPresentation();
     presentation::setAccessibleNameIfChanged(*owner, title->text());
     const int nextNaturalHeight =
@@ -1803,8 +1802,25 @@ public:
   }
 
   void refreshCopyPresentation() {
-    setExplicitVisibility(copy, cardHasCopyContent(current));
-    refreshPhaseSpacing();
+      if (!turnMenu && current.turnOpening) {
+          turnMenu = new QToolButton(header);
+          turnMenu->setObjectName(QStringLiteral("turnMenuButton"));
+          turnMenu->setText(QStringLiteral("⋯"));
+          turnMenu->setAccessibleName(QStringLiteral("Turn actions"));
+          turnMenu->setToolTip(QStringLiteral("Turn actions"));
+          turnMenu->setAutoRaise(true);
+          turnMenu->setFocusPolicy(Qt::StrongFocus);
+          turnMenu->setFixedSize(presentation::CardHeaderMetrics::CopyControlWidth, presentation::CardHeaderMetrics::LineHeight);
+          QObject::connect(turnMenu, &QToolButton::clicked, owner, [this] {
+              emit this->owner->turnMenuRequested(current.target, turnMenu->mapToGlobal(QPoint(0, turnMenu->height())));
+          });
+          headerLayout->insertWidget(headerLayout->indexOf(copy), turnMenu, 0, Qt::AlignRight | Qt::AlignVCenter);
+      }
+      if (turnMenu) {
+          setExplicitVisibility(turnMenu, current.turnOpening);
+      }
+      setExplicitVisibility(copy, cardHasCopyContent(current));
+      refreshPhaseSpacing();
   }
 
   void refreshPhaseSpacing() {
@@ -2279,6 +2295,7 @@ public:
   TimingButton *timing = nullptr;
   QLabel *phase = nullptr;
   presentation::CopyButton *copy = nullptr;
+  QToolButton* turnMenu = nullptr;
   presentation::DisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
   QGridLayout *contentLayout = nullptr;

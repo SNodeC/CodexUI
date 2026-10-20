@@ -145,6 +145,7 @@ follows the bottom or is manually paused.
   selected thread or displayed conversation. That card retains its hover
   treatment until the non-blocking menu closes; dismissing the menu does not
   replay the closing click into another control.
+- The opening card of a turn has a **⋯** menu beside Copy. Choose **Remove this turn and all later turns…**, review the confirmation, and choose **Remove turns** to permanently remove that history. Earlier turns remain; file changes and commands already performed are not undone. This requires an idle, persistent thread with paginated history and controller access, with no pending prompts or conflicting thread operations. The menu belongs to the complete turn, including turns without a user message; steering messages do not repeat it.
 - Sending always targets the visibly selected thread. CodexUI validates the
   visible selection before dispatch and never creates a thread as an implicit
   fallback for missing or inconsistent selection state.
