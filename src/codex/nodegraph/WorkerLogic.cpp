@@ -12,6 +12,34 @@
 
 namespace codexui::nodegraph {
 
+    std::string threadWorkspaceChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread) {
+        std::string reason;
+        const auto connection = read.find({NodeKind::Connection, "connection"});
+        const auto state = thread && read.live(thread) ? read.state(thread) : nullptr;
+        if (!state || thread->id().kind != NodeKind::Thread || boolFromValue(valueMember(*state, "local")) ||
+            boolFromValue(valueMember(*state, "recoveryOnly"))) {
+            reason = "An existing thread is required.";
+        } else if (!connection || read.state(connection)->status != NodeStatus::Connected ||
+                   exactStringFromValue(valueMember(*read.state(connection), "providerState")) != "ready" ||
+                   exactStringFromValue(valueMember(*read.state(connection), "role")) != "controller") {
+            reason = "Workspace changes require a ready provider and controller access.";
+        } else if (state->status == NodeStatus::Running || read.relatedCount(thread, RelationKind::ActiveTurn) != 0) {
+            reason = "Wait until the active turn completes before changing workspace.";
+        } else if (exactStringFromValue(valueMember(*state, "hydrationState")) == "loading") {
+            reason = "Thread context is loading; wait for app-server confirmation.";
+        } else {
+            for (const auto& operation : read.related(thread, RelationKind::PendingOperation)) {
+                const std::string method = exactStringFromValue(valueMember(*read.state(operation), "method"));
+                if (method == "thread/resume") {
+                    reason = "Thread context is loading; wait for app-server confirmation.";
+                } else if (method == "thread/settings/update") {
+                    reason = "Workspace change pending app-server confirmation.";
+                }
+            }
+        }
+        return reason;
+    }
+
 ChannelSendStatus WorkerLogic::threadBrowserState(std::string key,
                                                   Value::Object fields) {
   auto write = graph_.write();

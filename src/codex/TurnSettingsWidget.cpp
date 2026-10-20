@@ -2,24 +2,19 @@
 
 #include "codex/TurnSettingsWidget.h"
 
-#include "codex/FileSelectionDialog.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QByteArray>
 #include <QComboBox>
-#include <QDir>
 #include <QFrame>
 #include <QGridLayout>
-#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QSignalBlocker>
-#include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidgetAction>
-
 #include <algorithm>
 #include <array>
 #include <initializer_list>
@@ -199,27 +194,11 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
             compactCombo("codexNetwork"),
             compactCombo("codexApproval"),
             compactCombo("codexReviewer"),
-            nullptr,
             compactCombo("codexPermissionProfile"),
             compactCombo("codexServiceTier"),
             compactCombo("codexSummary"),
             compactCombo("codexCollaboration")};
   combo(TurnSettingField::Model)->setEditable(true);
-  cwd = new QLineEdit;
-  cwd->setObjectName(QStringLiteral("codexWorkspace"));
-  cwd->setMinimumHeight(SettingControlHeight);
-  cwd->setPlaceholderText(QStringLiteral("Thread default workspace"));
-  auto *workspacePicker = new QWidget;
-  auto *workspaceLayout = new QHBoxLayout(workspacePicker);
-  workspaceLayout->setContentsMargins(0, 0, 0, 0);
-  workspaceLayout->setSpacing(6);
-  auto *browseWorkspace = new QToolButton;
-  browseWorkspace->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
-  browseWorkspace->setToolTip(QStringLiteral("Select workspace"));
-  browseWorkspace->setAccessibleName(QStringLiteral("Select workspace"));
-  browseWorkspace->setFixedSize(SettingControlHeight, SettingControlHeight);
-  workspaceLayout->addWidget(cwd, 1);
-  workspaceLayout->addWidget(browseWorkspace);
   more = new UiStyle::ChevronToolButton;
   more->setObjectName(QStringLiteral("codexMoreSettings"));
   more->setText(QStringLiteral("More"));
@@ -236,7 +215,7 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
              2);
   addSetting(root, QStringLiteral("Network"), combo(TurnSettingField::Network),
              0, 3);
-  addSetting(root, QStringLiteral("Workspace"), workspacePicker, 1, 0, cwd);
+  addSetting(root, QStringLiteral("Collaboration mode"), combo(TurnSettingField::Collaboration), 1, 0);
   addSetting(root, QStringLiteral("Approval"), combo(TurnSettingField::Approval),
              1, 1);
   addSetting(root, QStringLiteral("Style"), combo(TurnSettingField::Personality),
@@ -260,12 +239,21 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
              combo(TurnSettingField::ServiceTier), 1, 0);
   addSetting(moreLayout, QStringLiteral("Reasoning summary"),
              combo(TurnSettingField::Summary), 1, 1);
-  addSetting(moreLayout, QStringLiteral("Collaboration mode"),
-             combo(TurnSettingField::Collaboration), 2, 0, nullptr, 2);
-  auto *moreAction = new QWidgetAction(moreMenu);
+  auto* moreAction = new QWidgetAction(moreMenu);
   moreAction->setDefaultWidget(moreContents);
   moreMenu->addAction(moreAction);
   more->setMenu(moreMenu);
+  const std::array<QWidget*, 8> navigation{combo(TurnSettingField::Model),
+                                           combo(TurnSettingField::Effort),
+                                           combo(TurnSettingField::Sandbox),
+                                           combo(TurnSettingField::Network),
+                                           combo(TurnSettingField::Collaboration),
+                                           combo(TurnSettingField::Approval),
+                                           combo(TurnSettingField::Personality),
+                                           more};
+  for (std::size_t index = 1; index < navigation.size(); ++index) {
+      QWidget::setTabOrder(navigation[index - 1], navigation[index]);
+  }
 
   addChoices(combo(TurnSettingField::Sandbox),
              {{"Default (not reported)", DefaultTurnSetting},
@@ -295,30 +283,12 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
              {{"Code", DefaultTurnSetting}, {"Plan", "plan"}});
 
   for (std::size_t index = 0; index < combos.size(); ++index) {
-    if (!combos[index])
-      continue;
-    connect(combos[index], &QComboBox::currentIndexChanged, this,
-            [this, field = static_cast<TurnSettingField>(index)] {
-              markTouched(field);
-            });
+      connect(combos[index], &QComboBox::currentIndexChanged, this, [this, field = static_cast<TurnSettingField>(index)] {
+          markTouched(field);
+      });
   }
   connect(combo(TurnSettingField::Model)->lineEdit(), &QLineEdit::textEdited,
           this, [this] { markTouched(TurnSettingField::Model); });
-  connect(cwd, &QLineEdit::textEdited, this,
-          [this] { markTouched(TurnSettingField::Workspace); });
-  connect(browseWorkspace, &QToolButton::clicked, this, [this] {
-    const QString initialDirectory =
-        cwd->text().trimmed().isEmpty()
-            ? QDir::homePath()
-            : QDir::fromNativeSeparators(cwd->text().trimmed());
-    FileSelectionDialog dialog(FileSelectionDialog::Mode::Workspace,
-                               initialDirectory, {}, this);
-    if (dialog.exec() == QDialog::Accepted) {
-      cwd->setText(QDir::toNativeSeparators(dialog.selectedDirectory()));
-      settings.change(TurnSettingField::Workspace, utf8(cwd->text()));
-      refreshMoreIndicator();
-    }
-  });
 
   refreshModels();
   refreshPermissionProfiles();
@@ -342,20 +312,13 @@ void TurnSettingsWidget::setContext(TurnSettingsContext context) {
 void TurnSettingsWidget::markTouched(TurnSettingField field) {
   QComboBox *control = combo(field);
   QString selected;
-  if (field == TurnSettingField::Workspace)
-    selected = cwd->text();
-  else if (control->isEditable() &&
-           (control->currentIndex() < 0 ||
-            control->currentText() !=
-                control->itemText(control->currentIndex())))
-    selected = control->currentText().trimmed();
-  else
-    selected = control->currentData().toString();
+  if (control->isEditable() && (control->currentIndex() < 0 || control->currentText() != control->itemText(control->currentIndex()))) {
+      selected = control->currentText().trimmed();
+  } else {
+      selected = control->currentData().toString();
+  }
   settings.change(field, utf8(selected));
-  if (field == TurnSettingField::Workspace)
-    refreshMoreIndicator();
-  else
-    render();
+  render();
 }
 
 void TurnSettingsWidget::render() {
@@ -372,8 +335,6 @@ void TurnSettingsWidget::render() {
   selectValue(combo(TurnSettingField::PermissionProfile),
               profile,
               profile == DefaultTurnSetting ? QStringLiteral("Default (not reported)") : permissionProfileLabel(profile));
-  cwd->setText(
-      QDir::toNativeSeparators(text(values[TurnSettingField::Workspace])));
   refreshModelOptions();
   refreshAccessCompatibility();
   refreshMoreIndicator();
@@ -452,15 +413,12 @@ void TurnSettingsWidget::refreshAccessCompatibility() {
 }
 
 void TurnSettingsWidget::refreshMoreIndicator() {
-  const bool changed = settings.touched(TurnSettingField::PermissionProfile) ||
-                       settings.touched(TurnSettingField::Reviewer) ||
-                       settings.touched(TurnSettingField::ServiceTier) ||
-                       settings.touched(TurnSettingField::Summary) ||
-                       settings.touched(TurnSettingField::Collaboration);
-  const QString caption =
-      changed ? QStringLiteral("More •") : QStringLiteral("More");
-  if (more->text() != caption)
-    more->setText(caption);
+    const bool changed = settings.touched(TurnSettingField::PermissionProfile) || settings.touched(TurnSettingField::Reviewer) ||
+                         settings.touched(TurnSettingField::ServiceTier) || settings.touched(TurnSettingField::Summary);
+    const QString caption = changed ? QStringLiteral("More •") : QStringLiteral("More");
+    if (more->text() != caption) {
+        more->setText(caption);
+    }
 }
 
 } // namespace codexui::codex

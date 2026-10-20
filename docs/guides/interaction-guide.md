@@ -148,10 +148,9 @@ follows the bottom or is manually paused.
 - Sending always targets the visibly selected thread. CodexUI validates the
   visible selection before dispatch and never creates a thread as an implicit
   fallback for missing or inconsistent selection state.
-- A new thread is created only from an explicit New Thread intent. Its dialog
-  captures the workspace, optional name, instructions, and ephemeral state.
-  In the browser, the workspace is an app-server-local path entered as text;
-  browser file pickers cannot truthfully select an arbitrary server directory.
+- A new thread is created only from an explicit New Thread intent. Its dialog captures the workspace, optional name, instructions, and ephemeral state. Workspace paths are entered in the app-server filesystem context in both frontends. An unambiguous project root is inherited; multiple roots and standalone threads require an explicit choice. The inherited path can be overridden before creation. Sections currently have no workspace-default field.
+- An existing thread's confirmed workspace appears beside its title. Click the path or choose **Change workspace…** from that thread's context menu, including for an unselected thread. An unloaded target is resumed through a metadata-only request without selecting it or loading history. The action is unavailable during an active turn or without controller access. A pending request retains the confirmed path until app-server reports the change; failure leaves that path and composer drafts intact. Long paths are elided, with the full path in the tooltip, accessibility description and Copy action. Project or section reassignment does not change workspace.
+- Workspace is not an upcoming-turn setting. The second settings row starts with **Collaboration mode**, followed by Approval, Style and Additional. Collaboration mode is no longer in More; an unreported value remains distinct from Code mode. Unsent setting edits remain memory-only across thread switches.
 - `thread/start` does not accept the chosen display name, so creation retains
   that name as a local overlay while the draft ID is replaced by the
   authoritative thread ID, then sends `thread/name/set`. Blank, stale, or

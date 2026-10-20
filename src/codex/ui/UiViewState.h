@@ -83,6 +83,7 @@ struct ThreadListRow {
   nodegraph::NodeRef target;
   std::string title;
   std::string cwd;
+  std::string workspaceChangeUnavailable;
   UiStatus status;
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;

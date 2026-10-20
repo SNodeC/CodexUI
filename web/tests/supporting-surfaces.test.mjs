@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {lastActivityText} from "../dist/app/App.js";
+import {createElement} from "react";
+import {renderToStaticMarkup} from "react-dom/server";
+import {NewThreadDialog, lastActivityText} from "../dist/app/App.js";
 
 import {
     fixedSettingChoices, pendingRequestDetails, settingDraftFor, settingPresentation, turnSettingCatalog,
@@ -69,4 +71,26 @@ test("an unreported collaboration mode is an unavailable placeholder, distinct f
     const reported = settingDraftFor(new Map(), "code", {collaborationMode: {mode: "default"}}, catalog);
     assert.equal(reported.values.collaboration, "default");
     assert.equal(fixedSettingChoices("collaboration", "default").find(choice => choice.value === "default").label, "Code");
+});
+
+test("workspace options form supports explicit root choices and one deliberate change form", () => {
+    const callbacks = {onCancel() {}, onContinue() {}};
+    const rootChoices = ["/project/a", "/project/b"];
+    const creation = renderToStaticMarkup(createElement(NewThreadDialog, {
+        initialWorkspace: "", workspaceChoices: rootChoices, ...callbacks,
+    }));
+    assert.match(creation, /value=""/u);
+    for (const path of rootChoices) assert.ok(creation.includes(`value="${path}"`));
+    const change = renderToStaticMarkup(createElement(NewThreadDialog, {
+        purpose: "workspace", initialWorkspace: "/remote/old", initialDraft: {
+            workspace: "/remote/old", name: "Target B", baseInstructions: "", developerInstructions: "", ephemeral: false,
+        }, ...callbacks,
+    }));
+    assert.match(change, /Change workspace…/u);
+    assert.match(change, /Thread: Target B/u);
+    assert.match(change, /Current workspace/u);
+    assert.match(change, /Proposed workspace/u);
+    assert.doesNotMatch(change, /Temporary thread|Developer instructions|Base instructions/u);
+    const unknown = renderToStaticMarkup(createElement(NewThreadDialog, {purpose: "workspace", initialWorkspace: "", ...callbacks}));
+    assert.match(unknown, /Workspace not reported/u);
 });

@@ -1999,23 +1999,31 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
     }
   }
 
-  if (message.kind == DecodedMessageKind::ClientResult) {
-    DecodedMessage correlated = message;
-    const auto request = operationState->fields.find("requestPayload");
-    if (request != operationState->fields.end()) {
-      if (const Value::Object *requestObject = request->second.asObject()) {
-        for (const auto &[key, value] : *requestObject)
-          correlated.payload.try_emplace(key, value);
+  const auto* requestPayload = objectMember(operationState->fields, "requestPayload");
+  const Value* requestedCwd = requestPayload ? valueMember(*requestPayload, "cwd") : nullptr;
+  const bool awaitingWorkspace = message.kind == DecodedMessageKind::ClientResult && message.method == "thread/settings/update" &&
+                                 requestedCwd && requestedCwd->asString();
+  if (awaitingWorkspace) {
+      // The empty response acknowledges enqueueing only. Keep the existing
+      // operation until the authoritative settings notification arrives.
+      write.setStatus(operation, NodeStatus::Running);
+  } else if (message.kind == DecodedMessageKind::ClientResult) {
+      DecodedMessage correlated = message;
+      const auto request = operationState->fields.find("requestPayload");
+      if (request != operationState->fields.end()) {
+          if (const Value::Object* requestObject = request->second.asObject()) {
+              for (const auto& [key, value] : *requestObject)
+                  correlated.payload.try_emplace(key, value);
+          }
       }
-    }
-    applyGraphUpdate(write, correlated,
-                     write.fieldChangedRevision(operation, "requestPayload"));
+      applyGraphUpdate(write, correlated, write.fieldChangedRevision(operation, "requestPayload"));
   }
-  // Operations model only work that is currently pending. Results/errors are
-  // applied to current state and then the operation is retired in this same
-  // graph transaction; retaining terminal operations would be an event log.
-  if (write.find(operation->id()) == operation)
-    write.remove(operation);
+  // Workspace updates remain live until the settings event confirms application.
+  // Other results/errors retire their operation in this same transaction;
+  // terminal operations are never retained as an event log.
+  if (write.find(operation->id()) == operation && !awaitingWorkspace) {
+      write.remove(operation);
+  }
   return acceptedOperation;
 }
 
@@ -2944,8 +2952,19 @@ void ProtocolUpdater::applyGraphUpdate(
             objectMember(message.payload, "threadSettings")) {
       const bool changed =
           mergeThreadSettings(write, thread, *settings, write.revision() + 1);
-      if (advancesActivity)
-        *advancesActivity = changed;
+      if (const Value* cwd = valueMember(*settings, "cwd"); cwd && cwd->asString()) {
+          for (const auto& operation : write.related(thread, RelationKind::PendingOperation)) {
+              const auto operationState = write.state(operation);
+              if (exactStringFromValue(valueMember(*operationState, "method")) == "thread/settings/update") {
+                  // Controller changes are single-flight and active turns cannot
+                  // author competing cwd overrides. Notifications remain authoritative.
+                  write.remove(operation);
+              }
+          }
+      }
+      if (advancesActivity) {
+          *advancesActivity = changed;
+      }
     }
   }
 

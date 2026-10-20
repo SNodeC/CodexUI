@@ -2643,8 +2643,7 @@ bool settingsDraftLifetimeFollowsSemanticIncarnations() {
   const auto localContext = adapter.turnSettings(local);
   const auto promotedContext = adapter.turnSettings(promoted);
   const auto ordinaryContext = adapter.turnSettings(ordinary);
-  const auto draftContext =
-      adapter.turnSettings({}, "creation:new-draft", "/tmp");
+  const auto draftContext = adapter.turnSettings({}, "creation:new-draft");
   bool passed = true;
   passed &= require(localContext && localContext->identity == "creation:draft-a",
                     "local settings use their creation incarnation");
@@ -3078,21 +3077,17 @@ bool frontendPresentationContractIsShared() {
             prefix + "agent status");
   }
 
-  constexpr std::array SettingFields{
-      std::pair{std::string_view("model"), TurnSettingField::Model},
-      std::pair{std::string_view("effort"), TurnSettingField::Effort},
-      std::pair{std::string_view("personality"), TurnSettingField::Personality},
-      std::pair{std::string_view("sandbox"), TurnSettingField::Sandbox},
-      std::pair{std::string_view("network"), TurnSettingField::Network},
-      std::pair{std::string_view("approval"), TurnSettingField::Approval},
-      std::pair{std::string_view("reviewer"), TurnSettingField::Reviewer},
-      std::pair{std::string_view("cwd"), TurnSettingField::Workspace},
-      std::pair{std::string_view("permissionProfile"),
-                TurnSettingField::PermissionProfile},
-      std::pair{std::string_view("serviceTier"), TurnSettingField::ServiceTier},
-      std::pair{std::string_view("summary"), TurnSettingField::Summary},
-      std::pair{std::string_view("collaboration"),
-                TurnSettingField::Collaboration}};
+  constexpr std::array SettingFields{std::pair{std::string_view("model"), TurnSettingField::Model},
+                                     std::pair{std::string_view("effort"), TurnSettingField::Effort},
+                                     std::pair{std::string_view("personality"), TurnSettingField::Personality},
+                                     std::pair{std::string_view("sandbox"), TurnSettingField::Sandbox},
+                                     std::pair{std::string_view("network"), TurnSettingField::Network},
+                                     std::pair{std::string_view("approval"), TurnSettingField::Approval},
+                                     std::pair{std::string_view("reviewer"), TurnSettingField::Reviewer},
+                                     std::pair{std::string_view("permissionProfile"), TurnSettingField::PermissionProfile},
+                                     std::pair{std::string_view("serviceTier"), TurnSettingField::ServiceTier},
+                                     std::pair{std::string_view("summary"), TurnSettingField::Summary},
+                                     std::pair{std::string_view("collaboration"), TurnSettingField::Collaboration}};
   const auto settingField = [&](std::string_view name) {
     for (const auto &[candidate, field] : SettingFields)
       if (candidate == name)
@@ -3191,15 +3186,8 @@ bool frontendPresentationContractIsShared() {
     TurnSettingsPolicy policy;
     std::unordered_map<std::string, TurnSettingEpochs> observedAcknowledgements;
     const auto &newThread = entry.at("newThread");
-    const auto projectedNew =
-        adapter.turnSettings({}, newThread.at("key").get<std::string>(),
-                             newThread.at("cwd").get<std::string>());
-    check(projectedNew &&
-              projectedNew->identity ==
-                  newThread.at("key").get<std::string>() &&
-              projectedNew->canonical[TurnSettingField::Workspace] ==
-                  newThread.at("cwd").get<std::string>(),
-          "settings contract new-thread projection");
+    const auto projectedNew = adapter.turnSettings({}, newThread.at("key").get<std::string>());
+    check(projectedNew && projectedNew->identity == newThread.at("key").get<std::string>(), "settings contract new-thread projection");
 
     nodegraph::NodeRef selectedThread;
     std::string selectedId;
@@ -3427,6 +3415,69 @@ bool frontendPresentationContractIsShared() {
       check(!PendingRequestPolicy::responseForSubmission(
                 kind, raw, {choice.get<std::string>()}),
             prefix + "reject " + choice.get<std::string>());
+  }
+
+  for (const auto& entry : contract.at("workspaceChangeCases")) {
+      nodegraph::NodeGraph graph;
+      nodegraph::ProtocolUpdater updater(graph);
+      {
+          auto write = graph.write();
+          const auto connection = write.upsert({nodegraph::NodeKind::Connection, "connection"});
+          write.setStatus(connection, nodegraph::NodeStatus::Connected);
+          write.setField(connection, "role", "controller");
+          write.setField(connection, "providerState", "ready");
+          static_cast<void>(write.finish());
+      }
+      static_cast<void>(
+          updater.apply({nodegraph::DecodedMessageKind::ServerNotification,
+                         "thread/started",
+                         std::nullopt,
+                         objectFromJson(nlohmann::json{{"thread", {{"id", "workspace-target"}, {"cwd", entry.at("initial")}}}})}));
+      nodegraph::NodeRef target;
+      {
+          auto read = graph.tryRead();
+          target = read->find({nodegraph::NodeKind::Thread, "workspace-target"});
+      }
+      check(static_cast<bool>(target), "workspace fixture creates its exact canonical thread");
+      const nodegraph::ProtocolRequestId id("workspace-change");
+      nodegraph::DecodedMessage request{nodegraph::DecodedMessageKind::ClientRequest,
+                                        "thread/settings/update",
+                                        id,
+                                        objectFromJson(nlohmann::json{{"threadId", "workspace-target"}, {"cwd", entry.at("proposed")}})};
+      request.requestTarget = target;
+      const auto pending = updater.apply(std::move(request));
+      NodeGraphUiAdapter adapter(graph);
+      for (const auto& step : entry.at("steps")) {
+          const std::string kind = step.at("kind");
+          if (kind == "accepted" || kind == "failed") {
+              static_cast<void>(updater.apply(
+                  {kind == "accepted" ? nodegraph::DecodedMessageKind::ClientResult : nodegraph::DecodedMessageKind::ClientError,
+                   "thread/settings/update",
+                   id,
+                   {},
+                   pending.primary}));
+          } else {
+              const nlohmann::json settings =
+                  kind == "partial" ? nlohmann::json{{"model", "other"}} : nlohmann::json{{"cwd", step.at("cwd")}};
+              static_cast<void>(
+                  updater.apply({nodegraph::DecodedMessageKind::ServerNotification,
+                                 "thread/settings/updated",
+                                 std::nullopt,
+                                 objectFromJson(nlohmann::json{{"threadId", "workspace-target"}, {"threadSettings", settings}})}));
+          }
+          const auto row = adapter.threadRow(target);
+          check(row && row->cwd == step.at("cwd").get<std::string>(),
+                entry.at("id").get<std::string>() + ": workspace comes from authoritative metadata");
+          check(row && (row->workspaceChangeUnavailable.find("pending") != std::string::npos) == step.at("pending").get<bool>(),
+                entry.at("id").get<std::string>() + ": confirmation controls pending lifecycle");
+          const auto context = adapter.turnSettings(target);
+          TurnSettingsPolicy policy;
+          if (context) {
+              static_cast<void>(policy.setContext(*context));
+          }
+          check(context && !policy.startOptions(TurnSettingsScope::Turn).contains("cwd"),
+                entry.at("id").get<std::string>() + ": ordinary prompts have no workspace override");
+      }
   }
 
   NodeState typedAuthority;

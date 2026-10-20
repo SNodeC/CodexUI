@@ -12,14 +12,6 @@ constexpr std::size_t index(TurnSettingField field) noexcept {
   return static_cast<std::size_t>(field);
 }
 
-std::string trimmed(std::string_view value) {
-  const std::size_t first = value.find_first_not_of(" \t\r\n\f\v");
-  if (first == std::string_view::npos)
-    return {};
-  const std::size_t last = value.find_last_not_of(" \t\r\n\f\v");
-  return std::string(value.substr(first, last - first + 1));
-}
-
 void copyChoice(nlohmann::json &result, const TurnSettingsPolicy &policy,
                 TurnSettingField field, const char *name) {
   if (!policy.touched(field))
@@ -199,60 +191,44 @@ bool TurnSettingsPolicy::networkEnabled() const noexcept {
   return sandbox != DefaultTurnSetting && sandbox != "danger-full-access";
 }
 
-std::string TurnSettingsPolicy::workspace(std::string_view fallback) const {
-  const std::string selected = trimmed(values()[TurnSettingField::Workspace]);
-  return selected.empty() ? std::string(fallback) : selected;
-}
-
 nlohmann::json TurnSettingsPolicy::startOptions(TurnSettingsScope scope) const {
-  const bool turn = scope == TurnSettingsScope::Turn;
-  nlohmann::json result = nlohmann::json::object();
-  copyChoice(result, *this, TurnSettingField::Model, "model");
-  copyChoice(result, *this, TurnSettingField::Personality, "personality");
-  copyChoice(result, *this, TurnSettingField::Approval, "approvalPolicy");
-  copyChoice(result, *this, TurnSettingField::Reviewer, "approvalsReviewer");
-  copyChoice(result, *this, TurnSettingField::ServiceTier, "serviceTier");
-  if (turn) {
-    copyChoice(result, *this, TurnSettingField::Effort, "effort");
-    copyChoice(result, *this, TurnSettingField::Summary, "summary");
-  }
-  if (touched(TurnSettingField::Workspace)) {
-    const std::string cwd = trimmed(values()[TurnSettingField::Workspace]);
-    result["cwd"] = cwd.empty() ? nlohmann::json(nullptr) : nlohmann::json(cwd);
-  }
-  const std::string &profile = values()[TurnSettingField::PermissionProfile];
-  if (touched(TurnSettingField::PermissionProfile))
-    result["permissions"] = profile == DefaultTurnSetting
-                                ? nlohmann::json(nullptr)
-                                : nlohmann::json(profile);
-  if (profile == DefaultTurnSetting && turn &&
-      (touched(TurnSettingField::Sandbox) ||
-       touched(TurnSettingField::Network))) {
-    result["sandboxPolicy"] = sandboxPolicy(values());
-  } else if (profile == DefaultTurnSetting &&
-             touched(TurnSettingField::Sandbox)) {
-    const std::string &sandbox = values()[TurnSettingField::Sandbox];
-    result["sandbox"] = sandbox == DefaultTurnSetting || sandbox == "external"
-                            ? nlohmann::json(nullptr)
-                            : nlohmann::json(sandbox);
-  }
+    const bool turn = scope == TurnSettingsScope::Turn;
+    nlohmann::json result = nlohmann::json::object();
+    copyChoice(result, *this, TurnSettingField::Model, "model");
+    copyChoice(result, *this, TurnSettingField::Personality, "personality");
+    copyChoice(result, *this, TurnSettingField::Approval, "approvalPolicy");
+    copyChoice(result, *this, TurnSettingField::Reviewer, "approvalsReviewer");
+    copyChoice(result, *this, TurnSettingField::ServiceTier, "serviceTier");
+    if (turn) {
+        copyChoice(result, *this, TurnSettingField::Effort, "effort");
+        copyChoice(result, *this, TurnSettingField::Summary, "summary");
+    }
+    const std::string& profile = values()[TurnSettingField::PermissionProfile];
+    if (touched(TurnSettingField::PermissionProfile))
+        result["permissions"] = profile == DefaultTurnSetting ? nlohmann::json(nullptr) : nlohmann::json(profile);
+    if (profile == DefaultTurnSetting && turn && (touched(TurnSettingField::Sandbox) || touched(TurnSettingField::Network))) {
+        result["sandboxPolicy"] = sandboxPolicy(values());
+    } else if (profile == DefaultTurnSetting && touched(TurnSettingField::Sandbox)) {
+        const std::string& sandbox = values()[TurnSettingField::Sandbox];
+        result["sandbox"] = sandbox == DefaultTurnSetting || sandbox == "external" ? nlohmann::json(nullptr) : nlohmann::json(sandbox);
+    }
 
-  if (turn && touched(TurnSettingField::Collaboration)) {
-      std::string selected = values()[TurnSettingField::Model];
-      if (const TurnSettingModel* definition = selectedModel(); selected == DefaultTurnSetting && definition) {
-          selected = definition->choice.value;
-      }
-      if (!selected.empty() && selected != DefaultTurnSetting) {
-          const std::string& effort = values()[TurnSettingField::Effort];
-          result["collaborationMode"] = {
-              {"mode", values()[TurnSettingField::Collaboration]},
-              {"settings",
-               {{"model", selected},
-                {"developer_instructions", nullptr},
-                {"reasoning_effort", effort == DefaultTurnSetting ? nlohmann::json(nullptr) : nlohmann::json(effort)}}}};
-      }
-  }
-  return result;
+    if (turn && touched(TurnSettingField::Collaboration)) {
+        std::string selected = values()[TurnSettingField::Model];
+        if (const TurnSettingModel* definition = selectedModel(); selected == DefaultTurnSetting && definition) {
+            selected = definition->choice.value;
+        }
+        if (!selected.empty() && selected != DefaultTurnSetting) {
+            const std::string& effort = values()[TurnSettingField::Effort];
+            result["collaborationMode"] = {
+                {"mode", values()[TurnSettingField::Collaboration]},
+                {"settings",
+                 {{"model", selected},
+                  {"developer_instructions", nullptr},
+                  {"reasoning_effort", effort == DefaultTurnSetting ? nlohmann::json(nullptr) : nlohmann::json(effort)}}}};
+        }
+    }
+    return result;
 }
 
 void TurnSettingsPolicy::normalize(Draft &current) const {

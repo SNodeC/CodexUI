@@ -1123,7 +1123,6 @@
             ["network", "enabled"],
             ["approval", "on-request"],
             ["reviewer", "auto_review"],
-            ["cwd", "  /authored/work  "],
             ["permissionProfile", "default"],
             ["serviceTier", "flex"],
             ["summary", "detailed"],
@@ -1138,7 +1137,6 @@
               "network": "enabled",
               "approval": "on-request",
               "reviewer": "auto_review",
-              "cwd": "  /authored/work  ",
               "permissionProfile": "default",
               "serviceTier": "flex",
               "summary": "detailed",
@@ -1152,7 +1150,6 @@
               "network",
               "approval",
               "reviewer",
-              "cwd",
               "permissionProfile",
               "serviceTier",
               "summary",
@@ -1164,7 +1161,6 @@
               "approvalPolicy": "on-request",
               "approvalsReviewer": "auto_review",
               "serviceTier": "flex",
-              "cwd": "/authored/work",
               "permissions": null,
               "sandbox": "workspace-write"
             },
@@ -1176,7 +1172,6 @@
               "approvalsReviewer": "auto_review",
               "serviceTier": "flex",
               "summary": "detailed",
-              "cwd": "/authored/work",
               "permissions": null,
               "sandboxPolicy": {
                 "type": "workspaceWrite",
@@ -1556,6 +1551,110 @@
       ],
       "overallDetails": [
         "inputTokens coverage: 0/1 threads"
+      ]
+    }
+  ],
+  "workspaceChangeCases": [
+    {
+      "id": "accepted-is-not-confirmed",
+      "initial": "/old",
+      "proposed": "/new",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "partial",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/new",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "notification-before-response",
+      "initial": "/old",
+      "proposed": "/new",
+      "steps": [
+        {
+          "kind": "confirmed",
+          "cwd": "/new",
+          "pending": false
+        },
+        {
+          "kind": "accepted",
+          "cwd": "/new",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "failure-retains-workspace",
+      "initial": "/old",
+      "proposed": "/new",
+      "steps": [
+        {
+          "kind": "failed",
+          "cwd": "/old",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "unreported-workspace",
+      "initial": "",
+      "proposed": "/remote/not-on-frontend",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/remote/not-on-frontend",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "server-resolves-relative-workspace",
+      "initial": "/old",
+      "proposed": "relative",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/server/relative",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "long-unicode-workspace",
+      "initial": "/old",
+      "proposed": "/server/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/server/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/",
+          "pending": false
+        }
       ]
     }
   ]

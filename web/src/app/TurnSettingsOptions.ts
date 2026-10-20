@@ -4,7 +4,7 @@ import type {JsonObject, ThreadSettingStamp} from "../presentation/PresentationP
 
 export const DefaultSetting = "default";
 export const SettingFields = ["model", "effort", "personality", "sandbox", "network", "approval",
-    "reviewer", "cwd", "permissionProfile", "serviceTier", "summary", "collaboration"] as const;
+    "reviewer", "permissionProfile", "serviceTier", "summary", "collaboration"] as const;
 export type SettingField = typeof SettingFields[number];
 export type SettingValues = Record<SettingField, string>;
 export interface SettingChoice {value: string; label: string; description: string; disabled?: boolean}
@@ -74,7 +74,7 @@ function canonicalSettingValues(canonical: unknown): SettingValues {
             ? optional(value, "effort") : optional(value, "reasoningEffort"),
         personality: optional(value, "personality"), sandbox, network,
         approval: optional(value, "approvalPolicy"), reviewer: optional(value, "approvalsReviewer"),
-        cwd: stringMember(value, "cwd"), permissionProfile: profile || DefaultSetting,
+        permissionProfile: profile || DefaultSetting,
         serviceTier: optional(value, "serviceTier"), summary: optional(value, "summary"),
         collaboration: stringMember(value.collaborationMode, "mode"),
     };
@@ -263,7 +263,6 @@ function startOptions(draft: SettingDraft, turn: boolean, resolvedModel = ""): R
     copyChoice(result, draft, "reviewer", "approvalsReviewer");
     copyChoice(result, draft, "serviceTier", "serviceTier");
     if (turn) copyChoice(result, draft, "summary", "summary");
-    if (draft.touched.has("cwd")) result.cwd = draft.values.cwd.trim() || null;
     if (draft.touched.has("permissionProfile"))
         result.permissions = draft.values.permissionProfile === DefaultSetting ? null : draft.values.permissionProfile;
     if (draft.values.permissionProfile === DefaultSetting && turn

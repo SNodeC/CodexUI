@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+// SNode.C declares emit() before Qt defines its emit macro.
+// clang-format off
 #include <core/SNodeC.h>
 #include <utils/Config.h>
+// clang-format on
 
 #include "AccessibilityEventProbe.h"
 #include "codex/Configuration.h"
-#include "codex/FrontendSession.h"
 #include "codex/FileSelectionDialog.h"
+#include "codex/FrontendSession.h"
 #include "codex/NewThreadDialog.h"
-#include "codex/ThreadBrowser.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/ShellWidget.h"
+#include "codex/ThreadBrowser.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
@@ -25,6 +28,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -56,7 +60,6 @@
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
-
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -247,10 +250,11 @@ void tokenUsageUpdatesBothShellSurfaces(Configuration &configuration) {
   require(selectThread(list, "usage-a"), "usage test selects first thread");
   require(spinUntil([&] { return thread && thread->accessibleName() == "Tokens 100"; }),
           "selected usage appears in the message header");
-  auto *workspace = shell.findChild<QLineEdit *>(QStringLiteral("codexWorkspace"));
-  require(workspace && workspace->text() == "/tmp" &&
-              !shell.findChild<QLabel *>(QStringLiteral("conversationMetadata")),
-          "workspace remains in composer settings and leaves the message header");
+  auto* workspace = shell.findChild<QToolButton*>(QStringLiteral("conversationWorkspace"));
+  require(workspace && workspace->accessibleName() == "Thread workspace: /tmp" &&
+              !shell.findChild<QLineEdit*>(QStringLiteral("codexWorkspace")) &&
+              !shell.findChild<QLabel*>(QStringLiteral("workspaceBreadcrumb")),
+          "confirmed workspace appears beside the title and leaves turn settings");
   publish("usage-b", 400);
   require(spinUntil([&] {
     return overall->accessibleName() == "Overall tokens 500" &&
@@ -3140,6 +3144,178 @@ void connectionCapabilitiesRefreshOpenThreadActions(
     observerMenu->close();
 }
 
+void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+    ShellWidget shell(session);
+    shell.setStyleSheet(UiStyle::applicationStyleSheet());
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    applyThread(worker, "workspace-a", "Selected workspace thread");
+    applyThread(worker, "workspace-b", "Unselected workspace thread");
+    markThreadReady(session, worker, "workspace-a");
+    markThreadReady(session, worker, "workspace-b");
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    require(spinUntil([&] {
+                return threadItem(list, "workspace-a") && threadItem(list, "workspace-b");
+            }) &&
+                selectThread(list, "workspace-a"),
+            "workspace action fixture selects A");
+    auto* heading = shell.findChild<QToolButton*>(QStringLiteral("conversationWorkspace"));
+    auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
+    require(spinUntil([&] {
+                return heading && heading->isEnabled() && heading->accessibleName() == "Thread workspace: /tmp";
+            }),
+            "the presented thread exposes its confirmed workspace action");
+    require(editor != nullptr, "workspace fixture exposes the live composer draft");
+    if (editor) {
+        editor->setPlainText(QStringLiteral("unsent composer draft"));
+    }
+    bool dialogTargetCorrect = false;
+    const auto scheduleDialog = [&](QString target, QString proposed, bool cancel) {
+        QTimer::singleShot(0, &shell, [&, target, proposed, cancel] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            auto* input = dialog ? dialog->findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")) : nullptr;
+            dialogTargetCorrect = input && std::ranges::any_of(dialog->findChildren<QLabel*>(), [&](const QLabel* label) {
+                                      return label->text() == target;
+                                  });
+            if (input) {
+                input->setText(proposed);
+            }
+            if (dialog) {
+                if (cancel) {
+                    dialog->reject();
+                } else {
+                    for (auto* button : dialog->findChildren<QPushButton*>()) {
+                        if (button->text() == "Change workspace") {
+                            button->click();
+                        }
+                    }
+                }
+            }
+        });
+    };
+    static_cast<void>(takeQtMessages(channels));
+    if (heading && heading->isEnabled()) {
+        scheduleDialog("Selected workspace thread", "/cancelled", true);
+        heading->setFocus();
+        QKeyEvent press(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+        QKeyEvent release(QEvent::KeyRelease, Qt::Key_Space, Qt::NoModifier);
+        QApplication::sendEvent(heading, &press);
+        QApplication::sendEvent(heading, &release);
+    }
+    auto messages = takeQtMessages(channels);
+    require(dialogTargetCorrect && std::ranges::none_of(messages,
+                                                        [](const auto& message) {
+                                                            const auto* action = std::get_if<NodeAction>(&message);
+                                                            return action && action->kind == NodeActionKind::ChangeWorkspace;
+                                                        }),
+            "heading cancellation mutates neither workspace nor outgoing actions");
+    const QPoint point = list->visualItemRect(threadItem(list, "workspace-b")).center();
+    QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, point));
+    QPointer<QMenu> menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+    QAction* change = nullptr;
+    if (menu) {
+        for (auto* action : menu->actions()) {
+            if (action->text() == "Change workspace…") {
+                change = action;
+            }
+        }
+    }
+    require(change && change->isEnabled(), "an unselected thread exposes the same workspace action");
+    if (change && change->isEnabled()) {
+        scheduleDialog("Unselected workspace thread", "/remote/selected-explicitly", false);
+        change->trigger();
+    }
+    if (menu) {
+        menu->close();
+    }
+    messages = takeQtMessages(channels);
+    NodeRef target;
+    for (const auto& message : messages) {
+        if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::ChangeWorkspace) {
+            target = action->target;
+            require(exactStringFromValue(valueMember(action->payload, "cwd")) == "/remote/selected-explicitly",
+                    "proposed path is authored explicitly");
+        }
+    }
+    require(dialogTargetCorrect && target && target->id().canonical == "workspace-b" &&
+                heading->accessibleName() == "Thread workspace: /tmp" && (editor && editor->toPlainText() == "unsent composer draft"),
+            "context action targets B without selecting it or altering A's heading and composer");
+    if (target) {
+        const ProtocolRequestId id("workspace-ui");
+        DecodedMessage request{DecodedMessageKind::ClientRequest,
+                               "thread/settings/update",
+                               id,
+                               {{"threadId", "workspace-b"}, {"cwd", "/remote/selected-explicitly"}}};
+        request.requestTarget = target;
+        const auto operation = worker.applyDetailed(std::move(request));
+        static_cast<void>(worker.apply({DecodedMessageKind::ClientResult, "thread/settings/update", id, {}, operation.primary}));
+        require(selectThread(list, "workspace-b") && spinUntil([&] {
+                    return heading->toolTip().contains("pending") && !heading->isEnabled();
+                }),
+                "accepted change remains pending while showing the old confirmed workspace");
+        const int minimumBefore = shell.minimumSizeHint().width();
+        auto* conversation = shell.findChild<QWidget*>(QStringLiteral("conversationScroll"));
+        const QRect bodyBefore = conversation ? conversation->geometry() : QRect{};
+        const QString longPath = QStringLiteral("/remote/") + QStringLiteral("long-directory-α🙂/").repeated(40);
+        static_cast<void>(
+            worker.apply({DecodedMessageKind::ServerNotification,
+                          "thread/settings/updated",
+                          std::nullopt,
+                          {{"threadId", "workspace-b"}, {"threadSettings", Value::Object{{"cwd", longPath.toStdString()}}}}}));
+        require(spinUntil([&] {
+                    return heading->isEnabled() && heading->accessibleName().contains(longPath);
+                }),
+                "authoritative notification confirms the target workspace");
+        require(heading->toolTip().contains(longPath) && heading->text().size() < longPath.size() &&
+                    shell.minimumSizeHint().width() <= minimumBefore && heading->width() <= 300,
+                "long workspace paths elide without growing the window and remain accessible");
+        require(conversation && conversation->geometry() == bodyBefore, "workspace confirmation does not displace conversation content");
+        const QFont originalFont = shell.font();
+        const QString evidence = qEnvironmentVariable("CODEXUI_WORKSPACE_CAPTURE_DIR");
+        for (const int points : {10, 16}) {
+            QFont font = originalFont;
+            font.setPointSize(points);
+            shell.setFont(font);
+            for (const int width : {920, 1800}) {
+                shell.resize(width, 850);
+                spin(20);
+                require(heading->width() <= 300 && heading->mapTo(&shell, QPoint()).x() + heading->width() <= shell.width() &&
+                            heading->toolTip().contains(longPath),
+                        "long workspace remains bounded at narrow/wide widths and enlarged fonts");
+                if (!evidence.isEmpty()) {
+                    require(shell.grab().save(evidence + QStringLiteral("/workspace-%1-%2.png").arg(points).arg(width)),
+                            "workspace image is captured");
+                }
+            }
+        }
+        shell.setFont(originalFont);
+        shell.resize(1500, 850);
+        spin(20);
+        auto* copy = shell.findChild<QToolButton*>(QStringLiteral("copyThreadWorkspace"));
+        if (copy) {
+            copy->click();
+        }
+        require(copy && QApplication::clipboard()->text() == longPath, "shared Copy action retains the full confirmed path");
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "thread/status/changed",
+                                        std::nullopt,
+                                        {{"threadId", "workspace-b"}, {"status", Value::Object{{"type", "active"}}}}}));
+        require(spinUntil([&] {
+                    return !heading->isEnabled() && heading->toolTip().contains("active turn");
+                }),
+                "active execution disables changes with a clear explanation");
+    }
+    static_cast<void>(worker.bridgeState("test-observer", "observer", "test-controller", 1, "ready"));
+    require(spinUntil([&] {
+                return heading && !heading->isEnabled();
+            }),
+            "observer cannot mutate thread workspace");
+}
+
 void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -3910,237 +4086,222 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           "an exact selected-row removal does not reset the conversation");
 }
 
-void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration, bool grouped = false) {
-  FrontendSession session(configuration);
-  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
-  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
-  AnimationDurationStyle normalMotion(100);
-  ShellWidget shell(session);
-  shell.resize(1500, 850);
-  shell.show();
-  makeReady(worker);
-  if (grouped) {
-    {
-      auto write = FrontendSessionTestPeer::graph(session).write();
-      for (const std::string method : {"project/list", "threadSection/list"}) {
-        NodeState catalog;
-        catalog.fields = {{"loaded", Value(true)}, {"unsupported", Value(false)}};
-        static_cast<void>(write.upsert(
-            {NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}, std::move(catalog)));
-      }
-      static_cast<void>(write.finish());
+void optimisticDraftUsesOneTypedCreateAction(Configuration& configuration, bool grouped = false, bool multipleRoots = false) {
+    FrontendSession session(configuration);
+    ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+    AnimationDurationStyle normalMotion(100);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    if (grouped) {
+        {
+            auto write = FrontendSessionTestPeer::graph(session).write();
+            for (const std::string method : {"project/list", "threadSection/list"}) {
+                NodeState catalog;
+                catalog.fields = {{"loaded", Value(true)}, {"unsupported", Value(false)}};
+                static_cast<void>(
+                    write.upsert({NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}, std::move(catalog)));
+            }
+            static_cast<void>(write.finish());
+        }
+        for (const std::string method : {"project/list", "threadSection/list"}) {
+            const ProtocolRequestId id("group-draft-" + method);
+            const auto request = worker.applyDetailed({DecodedMessageKind::ClientRequest, method, id, {}});
+            Value::Array data;
+            if (method == "project/list")
+                data.emplace_back(Value::Object{
+                    {"id", Value("openwrt")}, {"name", Value("OpenWRT")}, {"roots", Value::Array{Value::Object{{"path", Value("/tmp")}}}}});
+            if (method == "project/list" && multipleRoots) {
+                data.front() =
+                    Value::Object{{"id", "openwrt"},
+                                  {"name", "OpenWRT"},
+                                  {"roots", Value::Array{Value::Object{{"path", "/tmp"}}, Value::Object{{"path", "/remote/second-root"}}}}};
+            }
+            static_cast<void>(
+                worker.apply({DecodedMessageKind::ClientResult, method, id, {{"data", Value(std::move(data))}}, request.primary}));
+        }
     }
-    for (const std::string method : {"project/list", "threadSection/list"}) {
-      const ProtocolRequestId id("group-draft-" + method);
-      const auto request = worker.applyDetailed(
-          {DecodedMessageKind::ClientRequest, method, id, {}});
-      Value::Array data;
-      if (method == "project/list")
-        data.emplace_back(Value::Object{{"id", Value("openwrt")}, {"name", Value("OpenWRT")},
-            {"roots", Value::Array{Value::Object{{"path", Value("/tmp")}}}}});
-      static_cast<void>(worker.apply({DecodedMessageKind::ClientResult, method, id,
-                                     {{"data", Value(std::move(data))}}, request.primary}));
+    spin(40);
+
+    const QString chosenName = QStringLiteral("Chosen UI name");
+    auto* newThread = shell.findChild<QPushButton*>(QStringLiteral("threadNewButton"));
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    if (list)
+        list->setStyle(&normalMotion);
+    bool inheritedCorrectly = false;
+    QTimer::singleShot(0, &shell, [&, chosenName] {
+        if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+            for (auto* label : dialog->findChildren<QLabel*>()) {
+                if (label->text() == "Workspace") {
+                    auto* workspace = qobject_cast<QLineEdit*>(label->buddy());
+                    inheritedCorrectly = workspace && workspace->text() == (grouped && !multipleRoots ? "/tmp" : "");
+                    if (!inheritedCorrectly) {
+                        std::cerr << "Creation defaults: grouped=" << grouped << " multipleRoots=" << multipleRoots
+                                  << " observed=" << (workspace ? workspace->text().toStdString() : "<missing>") << '\n';
+                    }
+                    if (workspace) {
+                        workspace->setText("/remote/explicit-creation-workspace");
+                    }
+                }
+            }
+            for (QLineEdit* editor : dialog->findChildren<QLineEdit*>()) {
+                if (editor->placeholderText() == QStringLiteral("Optional thread name")) {
+                    editor->setText(chosenName);
+                }
+            }
+            for (auto* button : dialog->findChildren<QPushButton*>()) {
+                if (button->text() == "Continue") {
+                    button->click();
+                }
+            }
+        }
+    });
+    require(newThread != nullptr, "the existing New thread control is available");
+    if (!newThread)
+        return;
+    if (grouped) {
+        QTreeWidgetItem* project = threadItem(list, "openwrt");
+        require(project != nullptr, "the OpenWRT project is visible before draft creation");
+        if (!project)
+            return;
+        QMetaObject::invokeMethod(
+            list, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, list->visualItemRect(project).center()));
+        QPointer<QMenu> menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        QAction* createHere = nullptr;
+        if (menu)
+            for (QAction* action : menu->actions())
+                if (action->text() == QStringLiteral("New thread here…"))
+                    createHere = action;
+        require(createHere && createHere->isEnabled(), "the project exposes New thread here");
+        if (!createHere)
+            return;
+        createHere->trigger();
+        if (menu)
+            menu->close();
+    } else {
+        newThread->click();
     }
-  }
-  spin(40);
+    require(inheritedCorrectly, "creation inherits one project root; standalone and multiple-root creation require an explicit choice");
+    spin(40);
 
-  const QString chosenName = QStringLiteral("Chosen UI name");
-  auto *newThread =
-      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
-  auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
-  if (list)
-    list->setStyle(&normalMotion);
-  QTimer::singleShot(0, &shell, [chosenName] {
-    if (auto *dialog =
-            qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
-      for (QLineEdit *editor : dialog->findChildren<QLineEdit *>()) {
-        if (editor->placeholderText() == QStringLiteral("Optional thread name"))
-          editor->setText(chosenName);
-      }
-      dialog->accept();
+    auto* approval = shell.findChild<QComboBox*>(QStringLiteral("codexApproval"));
+    if (approval)
+        approval->setCurrentIndex(approval->findData(QStringLiteral("never")));
+    QTreeWidgetItem* draft = threadItem(list, "draft:new-thread");
+    QTreeWidgetItem* const stableDraft = draft;
+    const auto staysInProject = [&] {
+        return !grouped || (stableDraft && stableDraft->parent() == threadItem(list, "openwrt"));
+    };
+    require(staysInProject(), "New thread here displays its draft inside OpenWRT immediately");
+    auto* threadAnimation = shell.findChild<QTimer*>(QStringLiteral("optimisticThreadAnimation"));
+    require(draft && list->currentItem() == draft && approval && approval->currentData() == QStringLiteral("never") &&
+                threadAccessibleText(list, draft, QAccessible::Name) == chosenName && threadAnimation && threadAnimation->isActive(),
+            "dialog Continue selects the named optimistic draft and starts its "
+            "animation before the first prompt");
+
+    static_cast<void>(worker.connectionSettings({{"selected", Value("unix")}, {"endpoint", Value("local")}}));
+    spin(40);
+    require(draft && list->currentItem() == draft && staysInProject(), "an unrelated shared-graph change preserves draft selection");
+
+    auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
+    const QString promptText = QStringLiteral("first exact draft prompt");
+    require(submit(editor, promptText), "the optimistic draft submits through the real composer");
+    std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+    RuntimeAction create;
+    std::size_t creates = 0;
+    for (QtToWorkerMessage& message : messages) {
+        if (auto* action = std::get_if<RuntimeAction>(&message); action && action->kind == RuntimeActionKind::CreateThread) {
+            create = std::move(*action);
+            ++creates;
+        }
     }
-  });
-  require(newThread != nullptr, "the existing New thread control is available");
-  if (!newThread)
-    return;
-  if (grouped) {
-    QTreeWidgetItem *project = threadItem(list, "openwrt");
-    require(project != nullptr, "the OpenWRT project is visible before draft creation");
-    if (!project)
-      return;
-    QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection,
-                             Q_ARG(QPoint, list->visualItemRect(project).center()));
-    QPointer<QMenu> menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-    QAction *createHere = nullptr;
-    if (menu)
-      for (QAction *action : menu->actions())
-        if (action->text() == QStringLiteral("New thread here…"))
-          createHere = action;
-    require(createHere && createHere->isEnabled(), "the project exposes New thread here");
-    if (!createHere)
-      return;
-    createHere->trigger();
-    if (menu)
-      menu->close();
-  } else {
-    newThread->click();
-  }
-  spin(40);
+    const auto threadStart = create.payload.find("threadStart");
+    const auto turnStart = create.payload.find("turnStart");
+    const Value::Object* threadOptions = threadStart == create.payload.end() ? nullptr : threadStart->second.asObject();
+    const Value::Object* turnOptions = turnStart == create.payload.end() ? nullptr : turnStart->second.asObject();
+    require(creates == 1 && create.promptText == promptText.toStdString() && threadOptions && turnOptions &&
+                exactStringFromValue(valueMember(*threadOptions, "cwd")) == "/remote/explicit-creation-workspace" &&
+                !turnOptions->contains("cwd") &&
+                (!grouped || (threadOptions->contains("projectId") && threadOptions->at("projectId").asString() &&
+                              *threadOptions->at("projectId").asString() == "openwrt")) &&
+                threadOptions->contains("approvalPolicy") && threadOptions->at("approvalPolicy").asString() &&
+                *threadOptions->at("approvalPolicy").asString() == "never" && turnOptions->contains("approvalPolicy") &&
+                turnOptions->at("approvalPolicy").asString() && *turnOptions->at("approvalPolicy").asString() == "never",
+            "the draft emits one typed CreateThread with exact authored start "
+            "options");
 
-  auto *approval =
-      shell.findChild<QComboBox *>(QStringLiteral("codexApproval"));
-  if (approval)
-    approval->setCurrentIndex(approval->findData(QStringLiteral("never")));
-  QTreeWidgetItem *draft = threadItem(list, "draft:new-thread");
-  QTreeWidgetItem *const stableDraft = draft;
-  const auto staysInProject = [&] {
-    return !grouped || (stableDraft && stableDraft->parent() == threadItem(list, "openwrt"));
-  };
-  require(staysInProject(), "New thread here displays its draft inside OpenWRT immediately");
-  auto *threadAnimation =
-      shell.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
-  require(draft && list->currentItem() == draft && approval &&
-              approval->currentData() == QStringLiteral("never") &&
-              threadAccessibleText(list, draft, QAccessible::Name) ==
-                  chosenName &&
-              threadAnimation && threadAnimation->isActive(),
-          "dialog Continue selects the named optimistic draft and starts its "
-          "animation before the first prompt");
+    PromptTransition transition = worker.admitFirstPrompt(std::move(create), std::nullopt, QDateTime::currentMSecsSinceEpoch());
+    require(transition.command && transition.command->kind == PromptCommandKind::CreateThread,
+            "worker admission creates the local thread/turn/prompt graph atomically");
+    spin(60);
+    const NodeRef graphDraft = transition.command ? transition.command->thread : NodeRef{};
+    require(graphDraft && list && list->currentItem() == stableDraft && staysInProject() && approval &&
+                approval->currentData() == QStringLiteral("never") &&
+                list->currentItem()->data(0, Qt::UserRole).toString().toStdString() == graphDraft->id().canonical &&
+                localPromptCard(shell, promptText.toStdString()) &&
+                threadAccessibleText(list, stableDraft, QAccessible::Name) == chosenName && threadAnimation->isActive(),
+            "the same optimistic row and chosen name hand off to the shared graph "
+            "draft without stopping its animation");
 
-  static_cast<void>(worker.connectionSettings(
-      {{"selected", Value("unix")}, {"endpoint", Value("local")}}));
-  spin(40);
-  require(draft && list->currentItem() == draft && staysInProject(),
-          "an unrelated shared-graph change preserves draft selection");
-
-  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
-      QStringLiteral("upcomingPromptEditor"));
-  const QString promptText = QStringLiteral("first exact draft prompt");
-  require(submit(editor, promptText),
-          "the optimistic draft submits through the real composer");
-  std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
-  RuntimeAction create;
-  std::size_t creates = 0;
-  for (QtToWorkerMessage &message : messages) {
-    if (auto *action = std::get_if<RuntimeAction>(&message);
-        action && action->kind == RuntimeActionKind::CreateThread) {
-      create = std::move(*action);
-      ++creates;
+    if (!transition.command)
+        return;
+    const NodeRef localPrompt = transition.command->localPrompt;
+    if (grouped) {
+        const ProtocolRequestId id("group-draft-thread-start");
+        const auto request =
+            worker.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", id, {{"projectId", Value("openwrt")}}});
+        static_cast<void>(worker.apply(
+            {DecodedMessageKind::ClientResult,
+             "thread/start",
+             id,
+             {{"thread",
+               Value::Object{{"id", Value("created-thread")}, {"projectId", Value("openwrt")}, {"name", Value(chosenName.toStdString())}}}},
+             request.primary}));
     }
-  }
-  const auto threadStart = create.payload.find("threadStart");
-  const auto turnStart = create.payload.find("turnStart");
-  const Value::Object *threadOptions = threadStart == create.payload.end()
-                                           ? nullptr
-                                           : threadStart->second.asObject();
-  const Value::Object *turnOptions = turnStart == create.payload.end()
-                                         ? nullptr
-                                         : turnStart->second.asObject();
-  require(creates == 1 && create.promptText == promptText.toStdString() &&
-              threadOptions && turnOptions &&
-              (!grouped || (threadOptions->contains("projectId") &&
-                            threadOptions->at("projectId").asString() &&
-                            *threadOptions->at("projectId").asString() == "openwrt")) &&
-              threadOptions->contains("approvalPolicy") &&
-              threadOptions->at("approvalPolicy").asString() &&
-              *threadOptions->at("approvalPolicy").asString() == "never" &&
-              turnOptions->contains("approvalPolicy") &&
-              turnOptions->at("approvalPolicy").asString() &&
-              *turnOptions->at("approvalPolicy").asString() == "never",
-          "the draft emits one typed CreateThread with exact authored start "
-          "options");
+    require(worker.attachCreatedThread(*transition.command, "created-thread") == ChannelSendStatus::Accepted,
+            "the worker attaches the accepted canonical thread exactly once");
+    require(spinUntil(
+                [&] {
+                    return threadItem(list, "created-thread") == stableDraft && staysInProject() && approval &&
+                           approval->currentData() == QStringLiteral("never") && list->currentItem() == stableDraft &&
+                           threadAccessibleText(list, stableDraft, QAccessible::Name) == chosenName && threadAnimation->isActive();
+                },
+                3000),
+            "the same graph-owned row and chosen name survive canonical "
+            "attachment with one continuous animation");
 
-  PromptTransition transition = worker.admitFirstPrompt(
-      std::move(create), std::nullopt, QDateTime::currentMSecsSinceEpoch());
-  require(
-      transition.command &&
-          transition.command->kind == PromptCommandKind::CreateThread,
-      "worker admission creates the local thread/turn/prompt graph atomically");
-  spin(60);
-  const NodeRef graphDraft =
-      transition.command ? transition.command->thread : NodeRef{};
-  require(
-      graphDraft && list && list->currentItem() == stableDraft && staysInProject() && approval &&
-          approval->currentData() == QStringLiteral("never") &&
-          list->currentItem()->data(0, Qt::UserRole).toString().toStdString() ==
-              graphDraft->id().canonical &&
-          localPromptCard(shell, promptText.toStdString()) &&
-          threadAccessibleText(list, stableDraft, QAccessible::Name) ==
-              chosenName &&
-          threadAnimation->isActive(),
-      "the same optimistic row and chosen name hand off to the shared graph "
-      "draft without stopping its animation");
-
-  if (!transition.command)
-    return;
-  const NodeRef localPrompt = transition.command->localPrompt;
-  if (grouped) {
-    const ProtocolRequestId id("group-draft-thread-start");
-    const auto request = worker.applyDetailed({DecodedMessageKind::ClientRequest,
-        "thread/start", id, {{"projectId", Value("openwrt")}}});
-    static_cast<void>(worker.apply({DecodedMessageKind::ClientResult, "thread/start", id,
-        {{"thread", Value::Object{{"id", Value("created-thread")},
-                                  {"projectId", Value("openwrt")},
-                                  {"name", Value(chosenName.toStdString())}}}}, request.primary}));
-  }
-  require(worker.attachCreatedThread(*transition.command, "created-thread") ==
-              ChannelSendStatus::Accepted,
-          "the worker attaches the accepted canonical thread exactly once");
-  require(spinUntil(
-              [&] {
-                return threadItem(list, "created-thread") == stableDraft && staysInProject() &&
-                       approval &&
-                       approval->currentData() == QStringLiteral("never") &&
-                       list->currentItem() == stableDraft &&
-                       threadAccessibleText(list, stableDraft,
-                                            QAccessible::Name) == chosenName &&
-                       threadAnimation->isActive();
-              },
-              3000),
-          "the same graph-owned row and chosen name survive canonical "
-          "attachment with one continuous animation");
-
-  static_cast<void>(
-      worker.completePrompt(localPrompt, true, {}, "created-turn"));
-  middle::ConversationCard *acceptedCard = nullptr;
-  QTimer *acceptedAnimation = nullptr;
-  require(spinUntil(
-              [&] {
-                acceptedCard = localPromptCard(shell, promptText.toStdString());
-                acceptedAnimation =
-                    acceptedCard ? acceptedCard->findChild<QTimer *>(
-                                       QStringLiteral("pendingAnimationTimer"))
-                                 : nullptr;
-                return threadItem(list, "created-thread") == stableDraft &&
-                       acceptedCard && acceptedAnimation &&
-                       acceptedAnimation->isActive() &&
-                       threadAnimation->isActive() &&
-                       threadAccessibleText(list, stableDraft,
-                                            QAccessible::Name) == chosenName;
-              },
-              3000),
-          "the exact prompt result updates the canonical row without "
-          "replacing its widget item or chosen name, and preserves pending "
-          "feedback");
-  static_cast<void>(worker.apply(
-      {DecodedMessageKind::ServerNotification,
-       "item/started",
-       std::nullopt,
-       {{"threadId", "created-thread"},
-        {"turnId", "created-turn"},
-        {"item", Value::Object{{"id", "created-user"},
-                               {"type", "userMessage"},
-                               {"text", promptText.toStdString()},
-                               {"clientId",
-                                transition.command->clientUserMessageId}}}}}));
-  require(
-      spinUntil([&] {
-        return acceptedCard && acceptedAnimation &&
-               acceptedCard->data().kind == middle::CardKind::UserMessage &&
-               !acceptedAnimation->isActive() && !threadAnimation->isActive() &&
-               threadItem(list, "created-thread") == stableDraft;
-      }),
-      "authoritative first prompt stops feedback while retaining both widgets");
+    static_cast<void>(worker.completePrompt(localPrompt, true, {}, "created-turn"));
+    middle::ConversationCard* acceptedCard = nullptr;
+    QTimer* acceptedAnimation = nullptr;
+    require(spinUntil(
+                [&] {
+                    acceptedCard = localPromptCard(shell, promptText.toStdString());
+                    acceptedAnimation = acceptedCard ? acceptedCard->findChild<QTimer*>(QStringLiteral("pendingAnimationTimer")) : nullptr;
+                    return threadItem(list, "created-thread") == stableDraft && acceptedCard && acceptedAnimation &&
+                           acceptedAnimation->isActive() && threadAnimation->isActive() &&
+                           threadAccessibleText(list, stableDraft, QAccessible::Name) == chosenName;
+                },
+                3000),
+            "the exact prompt result updates the canonical row without "
+            "replacing its widget item or chosen name, and preserves pending "
+            "feedback");
+    static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                    "item/started",
+                                    std::nullopt,
+                                    {{"threadId", "created-thread"},
+                                     {"turnId", "created-turn"},
+                                     {"item",
+                                      Value::Object{{"id", "created-user"},
+                                                    {"type", "userMessage"},
+                                                    {"text", promptText.toStdString()},
+                                                    {"clientId", transition.command->clientUserMessageId}}}}}));
+    require(spinUntil([&] {
+                return acceptedCard && acceptedAnimation && acceptedCard->data().kind == middle::CardKind::UserMessage &&
+                       !acceptedAnimation->isActive() && !threadAnimation->isActive() && threadItem(list, "created-thread") == stableDraft;
+            }),
+            "authoritative first prompt stops feedback while retaining both widgets");
 }
 
 void emptyOptimisticDraftIsAbandonedOnThreadSelection(
@@ -5876,8 +6037,14 @@ void dialogControlsHaveSemanticLabels() {
   for (auto mode : {FileSelectionDialog::Mode::Workspace,
                     FileSelectionDialog::Mode::Attachments}) {
     FileSelectionDialog dialog(mode, QDir::tempPath());
-    named(dialog.findChild<QTreeView *>(QStringLiteral("codexFileBrowser")),
-          QStringLiteral("Filesystem browser"), QAccessible::Tree);
+    if (mode == FileSelectionDialog::Mode::Workspace) {
+        named(dialog.findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")),
+              QStringLiteral("Proposed workspace"),
+              QAccessible::EditableText);
+        require(!dialog.findChild<QTreeView*>(), "app-server paths do not expose frontend filesystem browsing");
+    } else {
+        named(dialog.findChild<QTreeView*>(QStringLiteral("codexFileBrowser")), QStringLiteral("Filesystem browser"), QAccessible::Tree);
+    }
     if (mode == FileSelectionDialog::Mode::Attachments) {
       auto *list = dialog.findChild<QListWidget *>(QStringLiteral("codexAttachmentList"));
       named(list, QStringLiteral("Selected files"), QAccessible::List);
@@ -6125,6 +6292,7 @@ int main(int argc, char **argv) {
 
   using namespace codexui::codex;
   tokenUsageUpdatesBothShellSurfaces(*configuration);
+  workspaceActionsRetainPresentedAndTargetThreadOwnership(*configuration);
   timestampDetailsUseExistingShell(*configuration);
   graphNotificationsPrecedeRetirementRelease(*configuration);
   massRetirementIsSliced(*configuration);
@@ -6153,6 +6321,7 @@ int main(int argc, char **argv) {
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration, true);
+  optimisticDraftUsesOneTypedCreateAction(*configuration, true, true);
   emptyOptimisticDraftIsAbandonedOnThreadSelection(*configuration);
   contendedUserSelectionKeepsTheLatestVisibleRow(*configuration);
   secondNewThreadIsGuardedWhileCreationIsInFlight(*configuration);

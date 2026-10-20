@@ -251,35 +251,51 @@ std::string protocolErrorCode(const nlohmann::json &message) {
 }
 
 std::string_view nodeActionDiagnosticSubject(nodegraph::NodeActionKind kind) {
-  using enum nodegraph::NodeActionKind;
-  switch (kind) {
-  case Hydrate:
-  case Reload:
-    return "thread/turns/list";
-  case LoadHistory:
-    return "thread/turns/list";
-  case Rename:
-    return "thread/name/set";
-  case Fork:
-    return "thread/fork";
-  case Archive:
-    return "thread/archive";
-  case Unarchive:
-    return "thread/unarchive";
-  case Delete:
-    return "thread/delete";
-  case SubmitPrompt:
-    return "turn/start";
-  case InterruptTurn:
-    return "turn/interrupt";
-  case ResolveInteraction:
-    return "serverRequest/respond";
-  case PromptMaterialized:
-    return "local/prompt/materialized";
-  case UiDetached:
-    return "local/ui/detached";
-  }
-  return "local/node-action";
+    std::string_view subject = "local/node-action";
+    using enum nodegraph::NodeActionKind;
+    switch (kind) {
+        case Hydrate:
+        case Reload:
+            subject = "thread/turns/list";
+            break;
+        case LoadHistory:
+            subject = "thread/turns/list";
+            break;
+        case Rename:
+            subject = "thread/name/set";
+            break;
+        case ChangeWorkspace:
+            subject = "thread/settings/update";
+            break;
+        case Fork:
+            subject = "thread/fork";
+            break;
+        case Archive:
+            subject = "thread/archive";
+            break;
+        case Unarchive:
+            subject = "thread/unarchive";
+            break;
+        case Delete:
+            subject = "thread/delete";
+            break;
+        case SubmitPrompt:
+            subject = "turn/start";
+            break;
+        case InterruptTurn:
+            subject = "turn/interrupt";
+            break;
+        case ResolveInteraction:
+            subject = "serverRequest/respond";
+            break;
+        case PromptMaterialized:
+            subject = "local/prompt/materialized";
+            break;
+        case UiDetached:
+            subject = "local/ui/detached";
+            break;
+    }
+    return subject;
 }
 
 std::string_view
@@ -2593,6 +2609,61 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     case LoadHistory:
       loadHistory(std::move(action));
       return;
+    case ChangeWorkspace: {
+        std::string reason = "Thread state is busy; try again.";
+        bool needsResume = false;
+        if (auto read = graph.tryRead()) {
+            reason = nodegraph::threadWorkspaceChangeUnavailable(*read, action.target);
+            needsResume = reason.empty() && read->state(action.target)->status == nodegraph::NodeStatus::NotLoaded;
+        }
+        const std::string cwd = exactStringFromValue(valueMember(action.payload, "cwd"));
+        if (cwd.find_first_not_of(" \t\r\n") == std::string::npos) {
+            reason = "Enter the app-server workspace path.";
+        }
+        if (!reason.empty()) {
+            rejectNodeAction(action, reason);
+        } else {
+            const auto apply = [&, action, cwd] {
+                std::string unavailable = "Thread state is busy; try again.";
+                if (auto read = graph.tryRead()) {
+                    unavailable = nodegraph::threadWorkspaceChangeUnavailable(*read, action.target);
+                }
+                if (!unavailable.empty()) {
+                    rejectNodeAction(action, unavailable);
+                } else {
+                    dispatchRequest<codex::generated::client_requests::ThreadSettingsUpdate>(
+                        sdk,
+                        nlohmann::json{{"threadId", action.target->id().canonical}, {"cwd", cwd}},
+                        workerLogic,
+                        action.target,
+                        [&showNotice](RequestOutcome outcome) {
+                            if (!outcome.stale && !outcome.ok) {
+                                showNotice(outcome.error);
+                            }
+                        });
+                }
+            };
+            if (needsResume) {
+                dispatchRequest<codex::generated::client_requests::ThreadResume>(
+                    sdk,
+                    nlohmann::json{{"threadId", action.target->id().canonical}, {"excludeTurns", true}},
+                    workerLogic,
+                    action.target,
+                    [&, apply](RequestOutcome outcome) {
+                        if (!outcome.stale) {
+                            if (outcome.ok) {
+                                apply();
+                            } else {
+                                showNotice(outcome.error);
+                            }
+                        }
+                    });
+            } else {
+                apply();
+            }
+        }
+        break;
+    }
     case Rename:
     case Fork:
     case Archive:

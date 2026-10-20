@@ -2997,6 +2997,127 @@ void endpointReconfigurationUsesTheSelectedAddress(UnixBridge &bridge,
   }
 }
 
+void workspaceChangesUseAcknowledgedThreadContext(UnixBridge& bridge, RunningRuntime& runtime) {
+    expect(bridge.appServerNotification(
+               "thread/started",
+               {{"thread", {{"id", "workspace-wire"}, {"name", "Workspace wire"}, {"cwd", "/old"}, {"status", {{"type", "idle"}}}}}}),
+           "workspace fixture reaches the real runtime");
+    const NodeRef thread = findNode(runtime.graph(), {NodeKind::Thread, "workspace-wire"});
+    const auto workspace = [&] {
+        auto read = runtime.graph().tryRead();
+        std::string value;
+        if (read && read->live(thread)) {
+            value = exactStringFromValue(valueMember(*read->state(thread), "cwd"));
+        }
+        return value;
+    };
+    const auto change = [&](std::string path) {
+        NodeAction action{thread, NodeActionKind::ChangeWorkspace};
+        action.payload = {{"cwd", std::move(path)}, {"threadId", "decoy"}};
+        return sendAction(runtime.channels(), std::move(action));
+    };
+    expect(change("/remote/not-on-frontend"), "explicit workspace change enters the mailbox");
+    const auto request = bridge.receiveAppServer();
+    expect(request && request->value("method", "") == "thread/settings/update" &&
+               request->at("params") == nlohmann::json{{"threadId", "workspace-wire"}, {"cwd", "/remote/not-on-frontend"}},
+           "one supported request targets the exact thread and ignores payload decoys");
+    if (request) {
+        expect(change("/duplicate") && !bridge.receiveAppServer(100ms), "workspace changes are single-flight");
+        expect(bridge.reply(*request, nlohmann::json::object()), "enqueue acknowledgement is delivered");
+        std::this_thread::sleep_for(20ms);
+        expect(workspace() == "/old" && !operationRetired(runtime.graph(), request->at("id")),
+               "empty success never authors confirmed cwd and retains pending confirmation");
+        expect(change("/duplicate-after-accept") && !bridge.receiveAppServer(100ms),
+               "single-flight extends through authoritative confirmation");
+        expect(bridge.appServerNotification("thread/settings/updated",
+                                            {{"threadId", "workspace-wire"}, {"threadSettings", {{"cwd", "/remote/not-on-frontend"}}}}),
+               "authoritative workspace event is delivered");
+        expect(waitUntil([&] {
+                   return workspace() == "/remote/not-on-frontend" && operationRetired(runtime.graph(), request->at("id"));
+               }),
+               "notification confirms workspace and settles its operation");
+    }
+    expect(change("/failed"), "a settled workspace operation permits another explicit change");
+    const auto failed = bridge.receiveAppServer();
+    if (failed) {
+        expect(bridge.replyError(*failed, -32000, "workspace rejected"), "workspace error reaches runtime");
+        expect(waitUntil([&] {
+                   return operationRetired(runtime.graph(), failed->at("id"));
+               }) &&
+                   workspace() == "/remote/not-on-frontend",
+               "failure retains the confirmed path and retires only its operation");
+    }
+    expect(bridge.appServerNotification(
+               "thread/status/changed",
+               {{"threadId", "workspace-wire"}, {"status", {{"type", "active"}, {"activeFlags", nlohmann::json::array()}}}}),
+           "active execution context reaches runtime");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               return read && read->state(thread)->status == NodeStatus::Running;
+           }),
+           "active state is observed before admission");
+    expect(change("/during-active-turn") && !bridge.receiveAppServer(100ms), "worker rejects workspace changes during active execution");
+    expect(bridge.appServerNotification("thread/status/changed", {{"threadId", "workspace-wire"}, {"status", {{"type", "idle"}}}}),
+           "thread returns to idle");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               return read && read->state(thread)->status != NodeStatus::Running;
+           }),
+           "idle transition is observed");
+    expect(bridge.appServerNotification("thread/status/changed", {{"threadId", "workspace-wire"}, {"status", {{"type", "notLoaded"}}}}),
+           "an unselected unloaded thread is reported");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               return read && read->state(thread)->status == NodeStatus::NotLoaded;
+           }),
+           "unloaded context is observed before the change action");
+    expect(change("/cold-context"), "cold workspace action is admitted");
+    const auto resume = bridge.receiveAppServer();
+    expect(resume && resume->value("method", "") == "thread/resume" &&
+               resume->at("params") == nlohmann::json{{"threadId", "workspace-wire"}, {"excludeTurns", true}},
+           "cold workspace changes first resume metadata without authoring cwd or selecting the thread");
+    if (resume) {
+        expect(change("/duplicate-cold") && !bridge.receiveAppServer(100ms), "cold context loading is single-flight");
+        expect(bridge.reply(*resume,
+                            {{"thread", {{"id", "workspace-wire"}, {"cwd", "/remote/not-on-frontend"}, {"status", {{"type", "idle"}}}}}}),
+               "cold metadata resume completes");
+        const auto changed = bridge.receiveAppServer();
+        expect(changed && changed->value("method", "") == "thread/settings/update" &&
+                   changed->at("params") == nlohmann::json{{"threadId", "workspace-wire"}, {"cwd", "/cold-context"}},
+               "successful resume continues the exact targeted workspace operation without loading history");
+        if (changed) {
+            expect(bridge.reply(*changed, nlohmann::json::object()) &&
+                       bridge.appServerNotification("thread/settings/updated",
+                                                    {{"threadId", "workspace-wire"}, {"threadSettings", {{"cwd", "/cold-context"}}}}),
+                   "cold workspace change receives authoritative confirmation");
+            expect(waitUntil([&] {
+                       return workspace() == "/cold-context";
+                   }),
+                   "cold workspace is confirmed by app-server");
+        }
+    }
+    expect(change("/late"), "pending workspace request precedes thread deletion");
+    const auto late = bridge.receiveAppServer();
+    if (late) {
+        expect(bridge.appServerNotification("thread/deleted", {{"threadId", "workspace-wire"}}), "target deletion reaches runtime");
+        expect(waitUntil([&] {
+                   auto read = runtime.graph().tryRead();
+                   return read && !read->live(thread);
+               }),
+               "old exact thread identity retires");
+        expect(bridge.appServerNotification("thread/started", {{"thread", {{"id", "workspace-wire"}, {"cwd", "/replacement"}}}}),
+               "a fresh incarnation reuses the canonical id");
+        expect(bridge.reply(*late, nlohmann::json::object()), "late old success is delivered");
+        const NodeRef replacement = findNode(runtime.graph(), {NodeKind::Thread, "workspace-wire"});
+        expect(replacement && replacement != thread && waitUntil([&] {
+                   auto read = runtime.graph().tryRead();
+                   return read && exactStringFromValue(valueMember(*read->state(replacement), "cwd")) == "/replacement";
+               }),
+               "late workspace response cannot change the replacement thread");
+    }
+    runtime.drainNotifications();
+}
+
 void cachedSettingsRefreshDoesNotReloadHistory(UnixBridge& bridge, RunningRuntime& runtime) {
     const NodeRef thread = findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
     expect(static_cast<bool>(thread), "settings refresh targets the retained thread");
@@ -3078,6 +3199,7 @@ int main(int argc, char **argv) {
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);
     codexui::codex::cachedSettingsRefreshDoesNotReloadHistory(bridge, runtime);
+    codexui::codex::workspaceChangesUseAcknowledgedThreadContext(bridge, runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
     codexui::codex::remainingUiCommandFamiliesUseExactWirePaths(bridge,
                                                                 runtime);

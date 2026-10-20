@@ -51,170 +51,211 @@ QString readableSize(std::int64_t bytes) {
 
 } // namespace
 
-FileSelectionDialog::FileSelectionDialog(
-    Mode mode, QString initialDirectory,
-    std::vector<AttachmentDraft> initialAttachments, QWidget *parent)
-    : QDialog(parent), mode(mode) {
-  setModal(true);
-  setWindowTitle(mode == Mode::Workspace ? QStringLiteral("Select workspace")
-                                         : QStringLiteral("Attach files"));
-  resize(720, mode == Mode::Workspace ? 560 : 680);
-  setMinimumSize(560, 460);
+FileSelectionDialog::FileSelectionDialog(Mode mode,
+                                         QString initialDirectory,
+                                         std::vector<AttachmentDraft> initialAttachments,
+                                         QWidget* parent,
+                                         QString targetTitle,
+                                         QString confirmedWorkspace)
+    : QDialog(parent)
+    , mode(mode) {
+    setModal(true);
+    if (mode == Mode::Workspace) {
+        const QString heading = targetTitle.isEmpty() ? QStringLiteral("Select workspace") : QStringLiteral("Change workspace…");
+        setWindowTitle(heading);
+        setMinimumWidth(300);
+        resize(560, 240);
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(24, 22, 24, 20);
+        root->setSpacing(12);
+        root->addWidget(dialogLabel(heading, "heading"));
+        if (!targetTitle.isEmpty()) {
+            auto* target = dialogLabel(targetTitle, "body");
+            target->setTextFormat(Qt::PlainText);
+            target->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            target->setAccessibleName(QStringLiteral("Target thread: ") + targetTitle);
+            root->addWidget(target);
+            auto* current = new QLineEdit(confirmedWorkspace.isEmpty() ? QStringLiteral("Workspace not reported") : confirmedWorkspace);
+            current->setReadOnly(true);
+            current->setAccessibleName(QStringLiteral("Current workspace"));
+            current->setToolTip(confirmedWorkspace);
+            root->addWidget(current);
+        }
+        root->addWidget(dialogLabel(QStringLiteral("Enter a directory in the app-server filesystem."), "muted"));
+        location = new QLineEdit(std::move(initialDirectory));
+        location->setObjectName(QStringLiteral("codexWorkspaceDirectory"));
+        location->setAccessibleName(QStringLiteral("Proposed workspace"));
+        location->setPlaceholderText(QStringLiteral("App-server directory path"));
+        root->addWidget(location);
+        auto* footer = new QHBoxLayout;
+        footer->addStretch();
+        auto* cancel = new QPushButton(QStringLiteral("Cancel"));
+        acceptButton = new QPushButton(targetTitle.isEmpty() ? QStringLiteral("Select workspace") : QStringLiteral("Change workspace"));
+        acceptButton->setProperty("kind", "primary");
+        footer->addWidget(cancel);
+        footer->addWidget(acceptButton);
+        root->addLayout(footer);
+        connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+        connect(acceptButton, &QPushButton::clicked, this, [this] {
+            acceptSelection();
+        });
+        connect(location, &QLineEdit::textChanged, this, [this] {
+            updateActions();
+        });
+        connect(location, &QLineEdit::returnPressed, this, [this] {
+            acceptSelection();
+        });
+        updateActions();
+        location->setFocus();
+        location->selectAll();
+    } else {
+        setWindowTitle(QStringLiteral("Attach files"));
+        resize(720, 680);
+        setMinimumSize(560, 460);
 
-  auto *root = new QVBoxLayout(this);
-  root->setContentsMargins(24, 22, 24, 20);
-  root->setSpacing(14);
-  root->addWidget(dialogLabel(mode == Mode::Workspace
-                                  ? QStringLiteral("Select workspace")
-                                  : QStringLiteral("Attach files"),
-                              "heading"));
-  root->addWidget(dialogLabel(
-      mode == Mode::Workspace
-          ? QStringLiteral(
-                "Choose the directory Codex should use for the new thread.")
-          : QStringLiteral(
-                "Choose local files to include with the next message."),
-      "muted"));
+        auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(24, 22, 24, 20);
+        root->setSpacing(14);
+        root->addWidget(dialogLabel(QStringLiteral("Attach files"), "heading"));
+        root->addWidget(dialogLabel(QStringLiteral("Choose local files to include with the next message."), "muted"));
 
-  auto *locationRow = new QHBoxLayout;
-  locationRow->setSpacing(8);
-  auto *up = new QPushButton(QStringLiteral("Up"));
-  up->setProperty("kind", "subtle");
-  up->setFixedHeight(34);
-  location = new QLineEdit;
-  location->setAccessibleName(QStringLiteral("Current directory"));
-  auto *go = new QPushButton(QStringLiteral("Go"));
-  go->setFixedHeight(34);
-  locationRow->addWidget(up);
-  locationRow->addWidget(location, 1);
-  locationRow->addWidget(go);
-  root->addLayout(locationRow);
+        auto* locationRow = new QHBoxLayout;
+        locationRow->setSpacing(8);
+        auto* up = new QPushButton(QStringLiteral("Up"));
+        up->setProperty("kind", "subtle");
+        up->setFixedHeight(34);
+        location = new QLineEdit;
+        location->setAccessibleName(QStringLiteral("Current directory"));
+        auto* go = new QPushButton(QStringLiteral("Go"));
+        go->setFixedHeight(34);
+        locationRow->addWidget(up);
+        locationRow->addWidget(location, 1);
+        locationRow->addWidget(go);
+        root->addLayout(locationRow);
 
-  fileSystem = new QFileSystemModel(this);
-  fileSystem->setFilter(
-      mode == Mode::Workspace
-          ? QDir::AllDirs | QDir::NoDotAndDotDot | QDir::Drives
-          : QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Drives);
-  fileSystem->setRootPath(QStringLiteral("/"));
-  browser = new QTreeView;
-  browser->setObjectName(QStringLiteral("codexFileBrowser"));
-  browser->setAccessibleName(QStringLiteral("Filesystem browser"));
-  browser->setModel(fileSystem);
-  browser->setRootIsDecorated(false);
-  browser->setItemsExpandable(false);
-  browser->setSortingEnabled(true);
-  browser->sortByColumn(0, Qt::AscendingOrder);
-  browser->setSelectionBehavior(QAbstractItemView::SelectRows);
-  browser->setSelectionMode(mode == Mode::Workspace
-                                ? QAbstractItemView::SingleSelection
-                                : QAbstractItemView::ExtendedSelection);
-  browser->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
-  browser->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-  browser->header()->setStretchLastSection(false);
-  browser->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-  browser->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-  browser->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-  browser->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-  root->addWidget(browser, 1);
+        fileSystem = new QFileSystemModel(this);
+        fileSystem->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Drives);
+        fileSystem->setRootPath(QStringLiteral("/"));
+        browser = new QTreeView;
+        browser->setObjectName(QStringLiteral("codexFileBrowser"));
+        browser->setAccessibleName(QStringLiteral("Filesystem browser"));
+        browser->setModel(fileSystem);
+        browser->setRootIsDecorated(false);
+        browser->setItemsExpandable(false);
+        browser->setSortingEnabled(true);
+        browser->sortByColumn(0, Qt::AscendingOrder);
+        browser->setSelectionBehavior(QAbstractItemView::SelectRows);
+        browser->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        browser->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+        browser->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        browser->header()->setStretchLastSection(false);
+        browser->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        browser->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        browser->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        browser->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        root->addWidget(browser, 1);
 
-  if (mode == Mode::Attachments) {
-    auto *selectionHeader = new QHBoxLayout;
-    auto *selectionLabel =
-        dialogLabel(QStringLiteral("Selected files"), "title");
-    selectionHeader->addWidget(selectionLabel);
-    selectionHeader->addStretch();
-    addButton = new QPushButton(QStringLiteral("Add selected"));
-    addButton->setFixedHeight(30);
-    removeButton = new QPushButton(QStringLiteral("Remove"));
-    removeButton->setProperty("kind", "subtle");
-    removeButton->setFixedHeight(30);
-    selectionHeader->addWidget(addButton);
-    selectionHeader->addWidget(removeButton);
-    root->addLayout(selectionHeader);
+        auto* selectionHeader = new QHBoxLayout;
+        auto* selectionLabel = dialogLabel(QStringLiteral("Selected files"), "title");
+        selectionHeader->addWidget(selectionLabel);
+        selectionHeader->addStretch();
+        addButton = new QPushButton(QStringLiteral("Add selected"));
+        addButton->setFixedHeight(30);
+        removeButton = new QPushButton(QStringLiteral("Remove"));
+        removeButton->setProperty("kind", "subtle");
+        removeButton->setFixedHeight(30);
+        selectionHeader->addWidget(addButton);
+        selectionHeader->addWidget(removeButton);
+        root->addLayout(selectionHeader);
 
-    attachments = new QListWidget;
-    selectionLabel->setBuddy(attachments);
-    attachments->setAccessibleName(selectionLabel->text());
-    attachments->setObjectName(QStringLiteral("codexAttachmentList"));
-    attachments->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    attachments->setMaximumHeight(128);
-    root->addWidget(attachments);
-    for (const AttachmentDraft &attachment : initialAttachments) {
-      auto *item = new QListWidgetItem(
-          QStringLiteral("%1  |  %2")
-              .arg(text(attachment.name), readableSize(attachment.size)));
-      item->setData(Qt::UserRole, text(attachment.path));
-      item->setData(Qt::UserRole + 1, text(attachment.mimeType));
-      item->setData(Qt::UserRole + 2,
-                    QVariant::fromValue<qlonglong>(attachment.size));
-      item->setToolTip(text(attachment.path));
-      attachments->addItem(item);
-    }
-  }
+        attachments = new QListWidget;
+        selectionLabel->setBuddy(attachments);
+        attachments->setAccessibleName(selectionLabel->text());
+        attachments->setObjectName(QStringLiteral("codexAttachmentList"));
+        attachments->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        attachments->setMaximumHeight(128);
+        root->addWidget(attachments);
+        for (const AttachmentDraft& attachment : initialAttachments) {
+            auto* item = new QListWidgetItem(QStringLiteral("%1  |  %2").arg(text(attachment.name), readableSize(attachment.size)));
+            item->setData(Qt::UserRole, text(attachment.path));
+            item->setData(Qt::UserRole + 1, text(attachment.mimeType));
+            item->setData(Qt::UserRole + 2, QVariant::fromValue<qlonglong>(attachment.size));
+            item->setToolTip(text(attachment.path));
+            attachments->addItem(item);
+        }
 
-  errorLabel = dialogLabel({}, "meta");
-  errorLabel->setProperty("tone", "danger");
-  errorLabel->hide();
-  root->addWidget(errorLabel);
+        errorLabel = dialogLabel({}, "meta");
+        errorLabel->setProperty("tone", "danger");
+        errorLabel->hide();
+        root->addWidget(errorLabel);
 
-  auto *footer = new QHBoxLayout;
-  selectionSummary = dialogLabel({}, "meta");
-  footer->addWidget(selectionSummary);
-  footer->addStretch();
-  auto *cancel = new QPushButton(QStringLiteral("Cancel"));
-  cancel->setProperty("kind", "subtle");
-  cancel->setFixedHeight(34);
-  acceptButton = new QPushButton(mode == Mode::Workspace
-                                     ? QStringLiteral("Select workspace")
-                                     : QStringLiteral("Attach"));
-  acceptButton->setProperty("kind", "primary");
-  acceptButton->setFixedHeight(34);
-  footer->addWidget(cancel);
-  footer->addWidget(acceptButton);
-  root->addLayout(footer);
+        auto* footer = new QHBoxLayout;
+        selectionSummary = dialogLabel({}, "meta");
+        footer->addWidget(selectionSummary);
+        footer->addStretch();
+        auto* cancel = new QPushButton(QStringLiteral("Cancel"));
+        cancel->setProperty("kind", "subtle");
+        cancel->setFixedHeight(34);
+        acceptButton = new QPushButton(QStringLiteral("Attach"));
+        acceptButton->setProperty("kind", "primary");
+        acceptButton->setFixedHeight(34);
+        footer->addWidget(cancel);
+        footer->addWidget(acceptButton);
+        root->addLayout(footer);
 
-  connect(up, &QPushButton::clicked, this, [this] {
-    navigateTo(QFileInfo(currentDirectory).dir().absolutePath());
-  });
-  connect(go, &QPushButton::clicked, this, [this] { navigateFromLocation(); });
-  connect(location, &QLineEdit::returnPressed, this,
-          [this] { navigateFromLocation(); });
-  connect(browser, &QTreeView::doubleClicked, this,
-          [this](const QModelIndex &index) {
+        connect(up, &QPushButton::clicked, this, [this] {
+            navigateTo(QFileInfo(currentDirectory).dir().absolutePath());
+        });
+        connect(go, &QPushButton::clicked, this, [this] {
+            navigateFromLocation();
+        });
+        connect(location, &QLineEdit::returnPressed, this, [this] {
+            navigateFromLocation();
+        });
+        connect(browser, &QTreeView::doubleClicked, this, [this](const QModelIndex& index) {
             const QFileInfo info = fileSystem->fileInfo(index);
-            if (info.isDir())
-              navigateTo(info.absoluteFilePath());
-            else if (this->mode == Mode::Attachments)
-              addSelectedFiles();
-          });
-  connect(browser->selectionModel(), &QItemSelectionModel::selectionChanged,
-          this, [this] { updateActions(); });
-  if (addButton)
-    connect(addButton, &QPushButton::clicked, this,
-            [this] { addSelectedFiles(); });
-  if (removeButton)
-    connect(removeButton, &QPushButton::clicked, this,
-            [this] { removeSelectedFiles(); });
-  if (attachments)
-    connect(attachments, &QListWidget::itemSelectionChanged, this,
-            [this] { updateActions(); });
-  connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
-  connect(acceptButton, &QPushButton::clicked, this,
-          [this] { acceptSelection(); });
+            if (info.isDir()) {
+                navigateTo(info.absoluteFilePath());
+            } else {
+                addSelectedFiles();
+            }
+        });
+        connect(browser->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] {
+            updateActions();
+        });
+        connect(addButton, &QPushButton::clicked, this, [this] {
+            addSelectedFiles();
+        });
+        connect(removeButton, &QPushButton::clicked, this, [this] {
+            removeSelectedFiles();
+        });
+        connect(attachments, &QListWidget::itemSelectionChanged, this, [this] {
+            updateActions();
+        });
+        connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+        connect(acceptButton, &QPushButton::clicked, this, [this] {
+            acceptSelection();
+        });
 
-  if (initialDirectory.isEmpty() || !QFileInfo(initialDirectory).isDir())
-    initialDirectory = QDir::homePath();
-  navigateTo(std::move(initialDirectory));
+        if (initialDirectory.isEmpty() || !QFileInfo(initialDirectory).isDir()) {
+            initialDirectory = QDir::homePath();
+        }
+        navigateTo(std::move(initialDirectory));
+    }
 }
 
 QString FileSelectionDialog::selectedDirectory() const {
-  const QModelIndex index = browser->currentIndex();
-  if (index.isValid()) {
-    const QFileInfo info = fileSystem->fileInfo(index);
-    if (info.isDir())
-      return info.absoluteFilePath();
-  }
-  return currentDirectory;
+    QString result = mode == Mode::Workspace ? location->text().trimmed() : currentDirectory;
+    if (mode == Mode::Attachments) {
+        const QModelIndex index = browser->currentIndex();
+        if (index.isValid()) {
+            const QFileInfo info = fileSystem->fileInfo(index);
+            if (info.isDir()) {
+                result = info.absoluteFilePath();
+            }
+        }
+    }
+    return result;
 }
 
 std::vector<AttachmentDraft> FileSelectionDialog::selectedAttachments() const {
@@ -293,41 +334,31 @@ void FileSelectionDialog::removeSelectedFiles() {
 }
 
 void FileSelectionDialog::updateActions() {
-  if (mode == Mode::Workspace) {
-    selectionSummary->setText(QDir::toNativeSeparators(selectedDirectory()));
-    acceptButton->setEnabled(QFileInfo(selectedDirectory()).isDir());
-    return;
-  }
-  const int count = attachments ? attachments->count() : 0;
-  selectionSummary->setText(
-      count == 1 ? QStringLiteral("1 file selected")
-                 : QStringLiteral("%1 files selected").arg(count));
-  acceptButton->setEnabled(count > 0);
-  if (addButton) {
-    const QModelIndexList rows = browser->selectionModel()->selectedRows(0);
-    addButton->setEnabled(
-        std::any_of(rows.begin(), rows.end(), [this](const QModelIndex &index) {
-          return fileSystem->fileInfo(index).isFile();
+    if (mode == Mode::Workspace) {
+        acceptButton->setEnabled(!selectedDirectory().isEmpty());
+    } else {
+        const int count = attachments->count();
+        selectionSummary->setText(count == 1 ? QStringLiteral("1 file selected") : QStringLiteral("%1 files selected").arg(count));
+        acceptButton->setEnabled(count > 0);
+        const QModelIndexList rows = browser->selectionModel()->selectedRows(0);
+        addButton->setEnabled(std::any_of(rows.begin(), rows.end(), [this](const QModelIndex& index) {
+            return fileSystem->fileInfo(index).isFile();
         }));
-  }
-  if (removeButton)
-    removeButton->setEnabled(attachments &&
-                             !attachments->selectedItems().isEmpty());
+        removeButton->setEnabled(!attachments->selectedItems().isEmpty());
+    }
 }
 
 void FileSelectionDialog::acceptSelection() {
-  if (mode == Mode::Workspace && !QFileInfo(selectedDirectory()).isDir()) {
-    errorLabel->setText(QStringLiteral("Select an existing directory."));
-    errorLabel->show();
-    return;
-  }
-  if (mode == Mode::Attachments &&
-      (!attachments || attachments->count() == 0)) {
-    errorLabel->setText(QStringLiteral("Select at least one file."));
-    errorLabel->show();
-    return;
-  }
-  accept();
+    if (mode == Mode::Workspace) {
+        if (!selectedDirectory().isEmpty()) {
+            accept();
+        }
+    } else if (attachments && attachments->count() > 0) {
+        accept();
+    } else {
+        errorLabel->setText(QStringLiteral("Select at least one file."));
+        errorLabel->show();
+    }
 }
 
 } // namespace codexui::codex
