@@ -1218,6 +1218,11 @@ test("a queued prompt waits through controller loss and resumes after control re
 
     socket.receive({kind: "bridge.controller", controllerConnectionId: "role-transition"});
     await Promise.resolve();
+    const settings = requests(socket, "thread/resume").at(-1);
+    assert.notEqual(settings.payload.id, resume.payload.id, "regaining control owns a fresh settings request");
+    assert.equal(requests(socket, "turn/start").length, 0, "the queued prompt waits for current settings");
+    respond(socket, settings, {thread: {id: "role-thread", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wait for control");
     session.dispose();
 });
@@ -1486,5 +1491,95 @@ test("a rejected turn is terminal and never resubmitted automatically", async ()
     assert.equal(requests(socket, "turn/start").length, 1);
     assert.equal(requests(socket, "thread/resume").length, 1);
     assert.equal(session.prompts.submissions("recover-thread").at(-1).state, "failed");
+    session.dispose();
+});
+
+test("cached selection refreshes effective settings once without reloading history or discarding drafts", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "cached-settings");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "cached", status: {type: "idle"}}]});
+    session.selectThread("cached");
+    await completeControllerHydration(socket, {id: "cached", model: "old-model", status: {type: "idle"}});
+    const identity = session.threadVisualKey("cached");
+    const catalog = turnSettingCatalog({models: [], permissionProfiles: []});
+    let draft = changeSettingDraft(session.settingDrafts, identity, session.model.thread("cached").raw,
+        catalog, session.model.thread("cached").settingStamps, "approval", "never");
+    session.selectThread(""); session.selectThread("cached"); session.selectThread("cached");
+    assert.equal(requests(socket, "thread/resume").length, 2, "cached selection shares one settings refresh");
+    assert.equal(session.getSnapshot().selectedThreadLoading, false, "cached conversation remains visible");
+    const refresh = requests(socket, "thread/resume").at(-1);
+    assert.deepEqual(refresh.payload.params, {threadId: "cached", excludeTurns: true});
+    respond(socket, refresh, {thread: {id: "cached"}, model: "new-model", reasoningEffort: "high",
+        approvalPolicy: "on-request", sandbox: {type: "readOnly", networkAccess: true}});
+    await Promise.resolve(); await Promise.resolve();
+    const thread = session.model.thread("cached");
+    assert.equal(thread.raw.model, "new-model");
+    assert.equal(thread.raw.reasoningEffort, "high");
+    draft = settingDraftFor(session.settingDrafts, identity, thread.raw, catalog, thread.settingStamps);
+    assert.equal(draft.values.model, "new-model");
+    assert.equal(draft.values.approval, "never", "unsent edit survives authoritative settings refresh");
+    assert.deepEqual(settingPromptOptions(draft, catalog).turn, {approvalPolicy: "never"});
+    assert.equal(requests(socket, "thread/turns/list").length, 1);
+    assert.equal(requests(socket, "thread/items/list").length, 0);
+    session.dispose();
+});
+
+test("claiming controller refreshes an observer's retained selection without reading history again", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "claim-settings", "observer");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
+    session.selectThread("retained");
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 0);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "claim-settings"});
+    await Promise.resolve(); await Promise.resolve();
+    const refresh = requests(socket, "thread/resume").at(-1);
+    assert.ok(refresh, "controller acquisition refreshes already-ready thread settings");
+    respond(socket, refresh, {thread: {id: "retained"}, model: "confirmed-model", reasoningEffort: "low"});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("retained").raw.model, "confirmed-model");
+    assert.equal(requests(socket, "thread/turns/list").length, 1);
+    session.dispose();
+});
+
+test("failed settings refresh preserves cached history and reports the failure", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "failed-settings");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "cached-failure", status: {type: "idle"}}]});
+    session.selectThread("cached-failure");
+    await completeControllerHydration(socket, {id: "cached-failure", model: "last-confirmed", status: {type: "idle"}});
+    session.selectThread("cached-failure");
+    reject(socket, requests(socket, "thread/resume").at(-1), "settings unavailable");
+    await Promise.resolve(); await Promise.resolve(); await waitForPublish();
+    assert.equal(session.getSnapshot().selectedThreadLoading, false);
+    assert.match(session.getSnapshot().notice, /settings refresh failed/i);
+    assert.equal(session.model.thread("cached-failure").raw.model, "last-confirmed");
+    assert.equal(requests(socket, "thread/turns/list").length, 1);
+    session.dispose();
+});
+
+
+test("controller acquisition while history is pending refreshes settings before dispatch", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "pending-claim", "observer");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "pending-thread", status: {type: "idle"}}]});
+    session.selectThread("pending-thread");
+    const page = requests(socket, "thread/turns/list").at(-1);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "pending-claim"});
+    await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 0, "settings wait for the existing history transaction");
+    respond(socket, page, {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    const settings = requests(socket, "thread/resume").at(-1);
+    assert.ok(settings, "the selected observer read is promoted to controller settings refresh");
+    respond(socket, settings, {thread: {id: "pending-thread"}, model: "confirmed-after-claim"});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("pending-thread").raw.model, "confirmed-after-claim");
+    assert.equal(requests(socket, "thread/turns/list").length, 1, "promotion retains the original history page");
     session.dispose();
 });

@@ -312,7 +312,7 @@ export class BrowserFrontendSession {
                 || this.matchesThreadPresentation(this.selectedThreadId, presentationKey));
     }
 
-    selectThread(threadId: string, presentationKey?: string): void {
+    selectThread(threadId: string, presentationKey?: string, refreshSettings = true): void {
         if (!this.matchesThreadPresentation(threadId, presentationKey)) return;
         if (threadId === DraftThreadId && this.newThreadDraft) {
             this.selectedThreadId = DraftThreadId; this.publish(); return;
@@ -325,7 +325,9 @@ export class BrowserFrontendSession {
             this.newThreadDraft = undefined;
         }
         this.selectedThreadId = threadId;
-        if (threadId !== "") this.ensureThreadHydrated(threadId);
+        if (threadId !== "") {
+            this.ensureThreadHydrated(threadId, refreshSettings);
+        }
         this.publish();
     }
     beginNewThread(draft: NewThreadDraft = {
@@ -575,7 +577,8 @@ export class BrowserFrontendSession {
                 const runtime = this.threadRuntime(id);
                 runtime.phase = "ready";
                 if (requestedName !== "") this.renameThread(id, requestedName);
-                this.selectThread(id);
+                // The fork response already supplies current execution settings.
+                this.selectThread(id, undefined, false);
                 this.loadForkHistory(id, runtime);
             }
             else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");
@@ -661,44 +664,58 @@ export class BrowserFrontendSession {
         for (const identity of this.viewportState.retireExcept(retainedDraftId))
             this.settingDrafts.delete(identity);
     }
-    private ensureThreadHydrated(threadId: string): void {
+    private ensureThreadHydrated(threadId: string, refreshSettings = false): void {
         if (!this.providerReady() || threadId === "" || threadId === DraftThreadId) return;
         const runtime = this.threadRuntime(threadId);
-        if (runtime.phase !== "cold") return;
-        void this.hydrateThread(threadId, true);
+        if (runtime.phase === "cold" || (refreshSettings && runtime.phase === "ready")) {
+            void this.hydrateThread(threadId, true);
+        }
     }
     private async hydrateThread(threadId: string, interactive: boolean, forced = false): Promise<void> {
         if (!this.providerReady() || threadId === "") return;
         const runtime = this.threadRuntime(threadId);
         if (runtime.phase === "hydrating" || runtime.phase === "resuming" || runtime.historyPageInFlight) return;
-        if (!forced && runtime.phase !== "cold") return;
-        runtime.phase = "hydrating";
-        runtime.historyPageInFlight = true;
-        runtime.seenHistoryCursors.clear();
-        this.schedulePublish();
-        const current = () => this.runtimeByThread.get(threadId) === runtime && runtime.phase === "hydrating";
-        let resumeAttempted = false;
-        if (interactive && this.sdk.role === "controller") {
-            resumeAttempted = true;
-            const response = await this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current);
-            if (response.stale || !current()) return;
-            if (!response.ok) this.setNotice(`Thread settings refresh failed: ${this.errorMessage(response)}`);
-        }
-        const response = await this.requestTurnPage(threadId, "", runtime, current);
-        if (response.stale || !current()) return;
-        runtime.historyPageInFlight = false;
-        if (!response.ok) {
-            runtime.phase = "failed";
-            const message = `Thread history requires paginated app-server support: ${this.errorMessage(response)}`;
-            this.prompts.failQueued(threadId, message);
-            this.setNotice(message);
+        const historyReady = !forced && runtime.phase === "ready";
+        if (!forced && runtime.phase !== "cold" && !historyReady) {
             return;
         }
+        const phase = historyReady ? "resuming" : "hydrating";
+        runtime.phase = phase;
+        runtime.historyPageInFlight = !historyReady;
+        if (!historyReady) {
+            runtime.seenHistoryCursors.clear();
+        }
+        this.schedulePublish();
+        const current = () => this.runtimeByThread.get(threadId) === runtime && runtime.phase === phase;
+        let resumeSucceeded = false;
+        const resumeAttempted = interactive && this.sdk.role === "controller";
+        if (resumeAttempted) {
+            const response = await this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current);
+            if (response.stale || !current()) return;
+            resumeSucceeded = response.ok;
+            if (!response.ok) this.setNotice(`Thread settings refresh failed: ${this.errorMessage(response)}`);
+        }
+        if (!historyReady) {
+            const response = await this.requestTurnPage(threadId, "", runtime, current);
+            if (response.stale || !current()) return;
+            runtime.historyPageInFlight = false;
+            if (!response.ok) {
+                runtime.phase = "failed";
+                const message = `Thread history requires paginated app-server support: ${this.errorMessage(response)}`;
+                this.prompts.failQueued(threadId, message);
+                this.setNotice(message);
+                return;
+            }
+            this.queueTurnItems(threadId, response.data, runtime);
+            this.queueActiveAgentChildren(threadId);
+        }
         runtime.phase = "ready";
-        this.queueTurnItems(threadId, response.data, runtime);
-        this.queueActiveAgentChildren(threadId);
-        this.publish();
-        queueMicrotask(() => this.dispatchNextPrompt(threadId, resumeAttempted));
+        if ((interactive || this.selectedThreadId === threadId) && this.sdk.role === "controller" && !resumeAttempted) {
+            await this.hydrateThread(threadId, true);
+        } else {
+            this.publish();
+            queueMicrotask(() => this.dispatchNextPrompt(threadId, resumeSucceeded));
+        }
     }
     private requestTurnPage(threadId: string, cursor: string, runtime: ThreadRuntimeState,
         acceptResult: () => boolean = () => this.runtimeByThread.get(threadId) === runtime
@@ -1205,7 +1222,7 @@ export class BrowserFrontendSession {
         } else if (type === "connection.bridge" || type === "connection.controller") {
             if (this.providerReady()) queueMicrotask(() => {
                 if (this.selectedThreadId !== "" && this.selectedThreadId !== DraftThreadId)
-                    this.ensureThreadHydrated(this.selectedThreadId);
+                    this.ensureThreadHydrated(this.selectedThreadId, true);
                 this.dispatchQueuedPrompts();
             });
         } else if (type === "workspace.project.changed" || type === "thread.project.changed") {

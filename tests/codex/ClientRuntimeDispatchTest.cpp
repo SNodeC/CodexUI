@@ -2997,6 +2997,62 @@ void endpointReconfigurationUsesTheSelectedAddress(UnixBridge &bridge,
   }
 }
 
+void cachedSettingsRefreshDoesNotReloadHistory(UnixBridge& bridge, RunningRuntime& runtime) {
+    const NodeRef thread = findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
+    expect(static_cast<bool>(thread), "settings refresh targets the retained thread");
+    if (thread) {
+        {
+            auto write = runtime.graph().write();
+            const NodeRef connection = write.find({NodeKind::Connection, "connection"});
+            write.setField(thread, "hydrationState", Value("ready"));
+            write.setField(thread, "hydrationConnectionGeneration", *valueMember(*write.state(connection), "connectionGeneration"));
+            static_cast<void>(write.finish());
+        }
+        expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Hydrate}), "cached selection requests fresh settings");
+        const auto request = bridge.receiveAppServer();
+        expect(request && request->value("method", "") == "thread/resume" &&
+                   request->at("params") == nlohmann::json{{"threadId", "runtime-thread"}, {"excludeTurns", true}},
+               "cached selection sends a metadata-only resume without overrides");
+        expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Hydrate}), "repeated cached selection reaches admission");
+        expect(!bridge.receiveAppServer(100ms), "settings refresh is single-flight");
+        if (request) {
+            expect(bridge.reply(*request,
+                                {{"thread", {{"id", "runtime-thread"}}},
+                                 {"model", "restored-model"},
+                                 {"reasoningEffort", "high"},
+                                 {"approvalPolicy", "never"},
+                                 {"sandbox", {{"type", "readOnly"}, {"networkAccess", true}}}}),
+                   "app-server supplies effective settings for the retained thread");
+            expect(waitUntil([&] {
+                       auto read = runtime.graph().tryRead();
+                       bool restored = false;
+                       if (read) {
+                           const auto state = read->state(thread);
+                           restored = exactStringFromValue(valueMember(*state, "model")) == "restored-model" &&
+                                      exactStringFromValue(valueMember(*state, "reasoningEffort")) == "high" &&
+                                      exactStringFromValue(valueMember(*state, "approvalPolicy")) == "never" &&
+                                      exactStringFromValue(valueMember(*state, "hydrationState")) == "ready";
+                       }
+                       return restored;
+                   }),
+                   "resume settings replace retained values without invalidating history");
+        }
+        expect(!bridge.receiveAppServer(100ms), "settings refresh does not re-page turns or items");
+        expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Hydrate}), "a settled refresh can be retried");
+        const auto failed = bridge.receiveAppServer();
+        expect(failed && failed->value("method", "") == "thread/resume", "a subsequent selection owns a new settings refresh");
+        if (failed) {
+            expect(bridge.replyError(*failed, -32000, "settings unavailable"), "settings refresh failure is delivered");
+            expect(waitUntil([&] {
+                       return operationRetired(runtime.graph(), failed->at("id"));
+                   }),
+                   "failed settings refresh settles its operation");
+        }
+        expect(!bridge.receiveAppServer(100ms), "failed settings refresh does not reload usable history");
+        runtime.drainNotifications();
+    }
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -3021,6 +3077,7 @@ int main(int argc, char **argv) {
     codexui::codex::idleWorkerSleepsBetweenWakeRecoveryChecks(runtime);
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);
+    codexui::codex::cachedSettingsRefreshDoesNotReloadHistory(bridge, runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
     codexui::codex::remainingUiCommandFamiliesUseExactWirePaths(bridge,
                                                                 runtime);

@@ -2678,6 +2678,78 @@ void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
           "incoming conversation, matching heading, and no running spinner");
 }
 
+void cachedThreadSwitchCompletesWithoutProviderTraffic(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& graph = FrontendSessionTestPeer::graph(session);
+    ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(graph, channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    for (const std::string id : {"cached-a", "cached-b"}) {
+        applyThread(worker, id, id);
+        applyScrollableThreadContent(worker, id, id);
+        markThreadReady(session, worker, id);
+    }
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    auto* view = dynamic_cast<middle::ConversationView*>(shell.findChild<QWidget*>(QStringLiteral("conversationScroll")));
+    require(spinUntil([&] {
+                return threadItem(list, "cached-a") && threadItem(list, "cached-b");
+            }),
+            "cached-switch fixture exposes both hydrated threads");
+    auto* overlay = view ? view->findChild<QWidget*>(QStringLiteral("conversationStagingOverlay")) : nullptr;
+    const auto presented = [&](const std::string& id) {
+        return view && overlay && view->presentedThreadId() == id && !view->structuralStagingActive() && !overlay->isVisible();
+    };
+    bool complete = view && overlay;
+    for (const std::string id : {"cached-a", "cached-b"}) {
+        require(selectThread(list, id) && spinUntil([&] {
+                    return presented(id);
+                }),
+                "both conversations are displayed before their cached reselection");
+        DecodedMessage request{DecodedMessageKind::ClientRequest,
+                               "thread/items/list",
+                               ProtocolRequestId("cached-items-" + id),
+                               {{"threadId", Value(id)}, {"turnId", Value("scroll-turn-" + id)}}};
+        {
+            auto write = graph.write();
+            request.requestTarget = write.find({NodeKind::Thread, id});
+            write.setField(request.requestTarget, "historyHasMore", Value(true));
+            static_cast<void>(write.finish());
+        }
+        const NodeRef target = request.requestTarget;
+        static_cast<void>(worker.applyDetailed(std::move(request)));
+        ui::NodeGraphUiAdapter adapter(graph);
+        const auto info = adapter.conversationInfo(target);
+        require(info && info->readyForDisplay && info->historyRequestPending,
+                "cached readiness and pending background history coexist in authoritative state");
+    }
+    for (int round = 0; complete && round < 24; ++round) {
+        const std::string id = round % 2 == 0 ? "cached-a" : "cached-b";
+        list->setCurrentItem(threadItem(list, id));
+        if (round % 3 == 0) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+            list->setCurrentItem(threadItem(list, round % 2 == 0 ? "cached-b" : "cached-a"));
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+            list->setCurrentItem(threadItem(list, id));
+        }
+        static_cast<void>(takeQtMessages(channels));
+        complete = spinUntil(
+            [&] {
+                return presented(id);
+            },
+            2000);
+        require(complete, "cached reselection completes without a provider notification or lingering spinner");
+        const auto* loadMore = view->findChild<QPushButton*>(QStringLiteral("conversationLoadMore"));
+        require(loadMore && !loadMore->isEnabled(), "displaying cached history preserves the pending Load More guard");
+        if (!complete) {
+            std::cerr << "cached-switch round=" << round << " presented=" << (view ? view->presentedThreadId() : "none")
+                      << " stage=" << (view && view->structuralStagingActive()) << '\n';
+        }
+    }
+}
+
 void threadSwitchPreservesNestedInspectorPaging(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -2936,6 +3008,19 @@ void reloadAndReconnectHydrationStayExplicit(Configuration &configuration) {
   static_cast<void>(worker.threadHydration(original, "ready"));
   spin(30);
   static_cast<void>(takeQtMessages(channels));
+
+  static_cast<void>(worker.bridgeState("test-controller", "observer", "another-controller", 1, "ready", ""));
+  spin(40);
+  static_cast<void>(takeQtMessages(channels));
+  static_cast<void>(worker.bridgeState("test-controller", "controller", "test-controller", 1, "ready", ""));
+  spin(40);
+  const auto claimed = takeQtMessages(channels);
+  require(std::ranges::count_if(claimed,
+                                [original](const QtToWorkerMessage& message) {
+                                    const auto* action = std::get_if<NodeAction>(&message);
+                                    return action && action->kind == NodeActionKind::Hydrate && action->target == original;
+                                }) == 1,
+          "claiming control refreshes settings of the already-hydrated selected thread once");
 
   const QPoint menuPoint =
       list->visualItemRect(threadItem(list, "rehydrate-thread")).center();
@@ -6059,6 +6144,7 @@ int main(int argc, char **argv) {
   initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
   completedLiveAgentAppearsWithoutThreadReselection(*configuration);
   threadSwitchStagesTheCompleteReplacement(*configuration);
+  cachedThreadSwitchCompletesWithoutProviderTraffic(*configuration);
   threadSwitchPreservesNestedInspectorPaging(*configuration);
   inactiveThreadNeverReactivatesAStaleTurn(*configuration);
   reloadAndReconnectHydrationStayExplicit(*configuration);

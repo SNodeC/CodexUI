@@ -1025,16 +1025,7 @@
               "personalityEnabled": false
             },
             "threadOptions": {},
-            "turnOptions": {
-              "collaborationMode": {
-                "mode": "default",
-                "settings": {
-                  "model": "gpt-default",
-                  "developer_instructions": null,
-                  "reasoning_effort": "low"
-                }
-              }
-            }
+            "turnOptions": {}
           }
         },
         {
@@ -1119,15 +1110,7 @@
             "turnOptions": {
               "approvalPolicy": "untrusted",
               "permissions": null,
-              "sandboxPolicy": {"type": "dangerFullAccess"},
-              "collaborationMode": {
-                "mode": "default",
-                "settings": {
-                  "model": "gpt-default",
-                  "developer_instructions": null,
-                  "reasoning_effort": null
-                }
-              }
+              "sandboxPolicy": {"type": "dangerFullAccess"}
             }
           }
         },
@@ -1214,6 +1197,108 @@
           }
         },
         {"select": "settings-b", "expect": {"touched": ["effort"]}}
+      ]
+    },
+    {
+      "id": "reported-settings-are-not-authored-overrides",
+      "catalogs": {
+        "models": [
+          {
+            "model": "gpt-a",
+            "isDefault": true,
+            "supportedReasoningEfforts": [
+              {
+                "reasoningEffort": "low"
+              },
+              {
+                "reasoningEffort": "high"
+              }
+            ]
+          }
+        ],
+        "permissionProfiles": []
+      },
+      "threads": [
+        {"id": "unknown", "key": "unknown", "canonical": {"id": "unknown"}},
+        {
+          "id": "restored",
+          "key": "restored",
+          "canonical": {
+            "id": "restored",
+            "model": "gpt-a",
+            "reasoningEffort": "high",
+            "collaborationMode": {
+              "mode": "plan",
+              "settings": {
+                "model": "gpt-a",
+                "reasoning_effort": "high",
+                "developer_instructions": null
+              }
+            }
+          }
+        }
+      ],
+      "newThread": {
+        "key": "draft-restored",
+        "cwd": "/workspace"
+      },
+      "steps": [
+        {"select": "unknown", "expect": {"values": {"collaboration": ""}, "touched": [], "turnOptions": {}}},
+        {
+          "select": "restored",
+          "expect": {
+            "values": {
+              "model": "gpt-a",
+              "effort": "high",
+              "collaboration": "plan"
+            },
+            "touched": [],
+            "turnOptions": {}
+          }
+        },
+        {
+          "change": [
+            "effort",
+            "low"
+          ],
+          "expect": {
+            "turnOptions": {
+              "effort": "low"
+            }
+          }
+        },
+        {
+          "change": [
+            "model",
+            "gpt-a"
+          ],
+          "expect": {
+            "turnOptions": {
+              "model": "gpt-a",
+              "effort": "low"
+            }
+          }
+        },
+        {
+          "change": [
+            "collaboration",
+            "default"
+          ],
+          "expect": {
+            "turnOptions": {
+              "model": "gpt-a",
+              "effort": "low",
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "gpt-a",
+                  "developer_instructions": null,
+                  "reasoning_effort": "low"
+                }
+              }
+            }
+          }
+        }
       ]
     }
   ],

@@ -960,7 +960,7 @@ function Conversation({session, paneControls, onInspect, usage}: {session: Brows
 const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange}: {draft: SettingDraft;
     presentation: SettingPresentation; onChange: (field: SettingField, value: string) => void}) {
     const {values, touched} = draft;
-    const select = (label: string, field: SettingField, choices: SettingPresentation["models"], enabled = true, tooltip = "") => <label title={tooltip || undefined}><span>{label}</span><select value={values[field]} disabled={!enabled} onChange={event => onChange(field, event.target.value)}>{choices.map(choice => <option key={choice.value} value={choice.value} title={choice.description || undefined}>{choice.label}</option>)}</select></label>;
+    const select = (label: string, field: SettingField, choices: SettingPresentation["models"], enabled = true, tooltip = "") => <label title={tooltip || undefined}><span>{label}</span><select value={values[field]} disabled={!enabled} onChange={event => onChange(field, event.target.value)}>{choices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled} title={choice.description || undefined}>{choice.label}</option>)}</select></label>;
     return <div className="settings-panel" onWheel={event => event.preventDefault()}><div className="settings-grid">
             {select("Model", "model", presentation.models)}
             {select("Reasoning", "effort", presentation.efforts)}

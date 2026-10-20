@@ -1214,16 +1214,14 @@ void ShellWidget::Impl::startConversationSnapshot() {
     return;
   }
   const auto info = uiAdapter.conversationInfo(boundGraphThread);
-  if (!info || info->historyRequestPending) {
-    if (info)
-      middleRegion->conversation().setHistoryRequestPending(
-          boundGraphThread->id().canonical, info->historyRequestPending);
-    // A failed tryRead has no completion event to wake the pending projection.
-    requestConversationProjection(false);
-    return;
+  if (!info || (info->historyRequestPending && !info->readyForDisplay)) {
+      if (info)
+          middleRegion->conversation().setHistoryRequestPending(boundGraphThread->id().canonical, info->historyRequestPending);
+      // A failed tryRead has no completion event to wake the pending projection.
+      requestConversationProjection(false);
+      return;
   }
-  middleRegion->conversation().setHistoryRequestPending(
-      boundGraphThread->id().canonical, false);
+  middleRegion->conversation().setHistoryRequestPending(boundGraphThread->id().canonical, info->historyRequestPending);
   middleRegion->conversation().setProviderHasMore(
       boundGraphThread->id().canonical, info->providerHasMore);
   conversationProjectionInFlight = true;
@@ -1263,14 +1261,14 @@ void ShellWidget::Impl::startConversationSnapshot() {
               }
               const auto currentInfo =
                   uiAdapter.conversationInfo(requestedThread);
-              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta) ||
-                  !currentInfo || currentInfo->historyRequestPending) {
-                conversationProjectionRequested = true;
-                conversationFullProjectionRequested |= fullSnapshot;
-                QTimer::singleShot(
-                    GraphRetryDelayMilliseconds, owner,
-                    [this] { requestConversationProjection(false); });
-                return;
+              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta) || !currentInfo ||
+                  (currentInfo->historyRequestPending && !currentInfo->readyForDisplay)) {
+                  conversationProjectionRequested = true;
+                  conversationFullProjectionRequested |= fullSnapshot;
+                  QTimer::singleShot(GraphRetryDelayMilliseconds, owner, [this] {
+                      requestConversationProjection(false);
+                  });
+                  return;
               }
               if (conversationProjectionRequested) {
                 requestConversationProjection(false);
@@ -1978,8 +1976,9 @@ void ShellWidget::Impl::selectGraphThread(nodegraph::NodeRef thread,
   newThreadDraft.reset();
   selectedGraphThreadId = targetId;
   bindGraphPanes(thread);
-  if (origin == ThreadSelectionOrigin::User)
-    hydrateSelectedThreadIfNeeded(std::move(thread));
+  if (origin == ThreadSelectionOrigin::User) {
+      hydrateSelectedThreadIfNeeded(std::move(thread));
+  }
 }
 
 void ShellWidget::Impl::handleProtocolDiagnostic(
@@ -2293,6 +2292,9 @@ void ShellWidget::Impl::render(
         std::move(*settingsContext));
   }
 
+  if (values.canControl && renderedChrome && !renderedChrome->canControl && boundGraphThread && !values.recoveryOnly) {
+      hydrateSelectedThreadIfNeeded(boundGraphThread);
+  }
   const bool chromeChanged = !renderedChrome || *renderedChrome != values;
   if (!chromeChanged)
     return;

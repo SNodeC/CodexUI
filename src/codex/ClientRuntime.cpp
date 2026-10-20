@@ -2305,120 +2305,112 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                              bool force) {
     const std::optional<std::string> threadId = currentThreadId(thread);
     if (!threadId) {
-      if (interactive)
-        showNotice("The selected thread is no longer available");
-      return;
-    }
-    if (conversationSnapshotPending(thread) ||
-        (!force && hydrationReady(thread)))
-      return;
-    if (interactive)
-      interactiveHydrations.insert(thread);
-    pendingHydrations.insert(thread);
-    static_cast<void>(workerLogic.threadHydration(thread, "loading"));
-
-    const auto completeTurnPage =
-        [&, thread, id = *threadId](bool resumeAttempted, bool resumeSucceeded,
-                                    RequestOutcome outcome,
-                                    nodegraph::DecodedMessage decoded) mutable {
-          const std::vector<std::string> turnIds =
-              outcome.ok ? turnIdsFromPage(decoded.payload)
-                         : std::vector<std::string>{};
-          const bool wasHistorical =
-              pendingHistoricalHydrations.erase(thread) != 0;
-          const bool needsSettings = interactiveHydrations.erase(thread) != 0;
-          pendingHydrations.erase(thread);
-
-          if (!outcome.ok) {
-            const std::string error = outcome.error.empty()
-                                          ? "Thread hydration failed"
-                                          : outcome.error;
-            static_cast<void>(workerLogic.completeThreadHydration(
-                std::move(decoded), thread, "failed", error));
-            continuePromptAfterHydration(thread, error);
-            if (wasHistorical && pumpHistoricalHydrations)
-              pumpHistoricalHydrations();
-            return;
-          }
-          static_cast<void>(workerLogic.completeThreadHydration(
-              std::move(decoded), thread, "ready"));
-          if (!currentThreadId(thread)) {
-            continuePromptAfterHydration(
-                thread, "The selected thread is no longer available");
-            if (wasHistorical && pumpHistoricalHydrations)
-              pumpHistoricalHydrations();
-            return;
-          }
-          queueActiveAgentChildren(thread);
-          // Observers retain read-only thread hydration. Controller authority
-          // gates mutations and settings resume, not ordinary selection/read.
-          if (!needsSettings || !sdk.isController() || resumeAttempted) {
-            queueItemHydrations(thread, id, turnIds);
-            continuePromptAfterHydration(thread, {}, resumeSucceeded);
-            if (wasHistorical && pumpHistoricalHydrations)
-              pumpHistoricalHydrations();
-            return;
-          }
-          dispatchRequest<codex::generated::client_requests::ThreadResume>(
-              sdk, nlohmann::json{{"threadId", id}, {"excludeTurns", true}},
-              workerLogic, thread,
-              [&, thread](RequestOutcome resumeOutcome) mutable {
-                if (resumeOutcome.stale) {
-                  promptsWaitingForHydration.erase(thread);
-                  return;
+        if (interactive) {
+            showNotice("The selected thread is no longer available");
+        }
+    } else {
+        // Cached conversation history does not establish current execution settings.
+        const bool historyReady = !force && hydrationReady(thread);
+        if (interactive) {
+            interactiveHydrations.insert(thread);
+        }
+        if (!conversationSnapshotPending(thread) && (interactive || !historyReady)) {
+            pendingHydrations.insert(thread);
+            if (!historyReady) {
+                static_cast<void>(workerLogic.threadHydration(thread, "loading"));
+            }
+            const auto completeTurnPage = [&, thread, id = *threadId](bool resumeAttempted,
+                                                                      bool resumeSucceeded,
+                                                                      RequestOutcome outcome,
+                                                                      nodegraph::DecodedMessage decoded) mutable {
+                const std::vector<std::string> turnIds = outcome.ok ? turnIdsFromPage(decoded.payload) : std::vector<std::string>{};
+                const bool wasHistorical = pendingHistoricalHydrations.erase(thread) != 0;
+                const bool needsSettings = interactiveHydrations.erase(thread) != 0;
+                pendingHydrations.erase(thread);
+                if (!outcome.ok) {
+                    const std::string error = outcome.error.empty() ? "Thread hydration failed" : outcome.error;
+                    static_cast<void>(workerLogic.completeThreadHydration(std::move(decoded), thread, "failed", error));
+                    continuePromptAfterHydration(thread, error);
+                } else {
+                    static_cast<void>(workerLogic.completeThreadHydration(std::move(decoded), thread, "ready"));
+                    if (!currentThreadId(thread)) {
+                        continuePromptAfterHydration(thread, "The selected thread is no longer available");
+                    } else {
+                        queueActiveAgentChildren(thread);
+                        // Selection can promote a background read or gain control while its page is pending.
+                        if (needsSettings && sdk.isController() && !resumeAttempted) {
+                            dispatchRequest<codex::generated::client_requests::ThreadResume>(
+                                sdk,
+                                nlohmann::json{{"threadId", id}, {"excludeTurns", true}},
+                                workerLogic,
+                                thread,
+                                [&, thread](RequestOutcome resumed) mutable {
+                                    if (resumed.stale) {
+                                        promptsWaitingForHydration.erase(thread);
+                                    } else {
+                                        if (!resumed.ok) {
+                                            showNotice(resumed.error.empty() ? "Thread settings refresh failed" : resumed.error);
+                                        }
+                                        continuePromptAfterHydration(thread, {}, resumed.ok);
+                                    }
+                                });
+                        } else {
+                            continuePromptAfterHydration(thread, {}, resumeSucceeded);
+                        }
+                        queueItemHydrations(thread, id, turnIds);
+                    }
                 }
-                if (!resumeOutcome.ok)
-                  showNotice(resumeOutcome.error.empty()
-                                 ? "Thread settings refresh failed"
-                                 : resumeOutcome.error);
-                // A successful turn page is hydrated even when the
-                // controller-only settings resume fails. A later prompt to a
-                // provider-notLoaded thread performs its own metadata-only
-                // resume.
-                continuePromptAfterHydration(thread, {}, resumeOutcome.ok);
-              });
-          queueItemHydrations(thread, id, turnIds);
-          if (wasHistorical && pumpHistoricalHydrations)
-            pumpHistoricalHydrations();
-        };
-    auto requestTurnPage = [&, thread, id = *threadId,
-                            completeTurnPage](bool resumeAttempted,
-                                              bool resumeSucceeded) mutable {
-      dispatchRequestHandled<
-          codex::generated::client_requests::ThreadTurnsList>(
-          sdk, turnPageParameters(id), workerLogic, thread,
-          [](const nodegraph::ProtocolRequestId &) {},
-          [completeTurnPage = std::move(completeTurnPage), resumeAttempted,
-           resumeSucceeded](RequestOutcome outcome,
-                            nodegraph::DecodedMessage decoded) mutable {
-            completeTurnPage(resumeAttempted, resumeSucceeded,
-                             std::move(outcome), std::move(decoded));
-          });
-    };
-    if (!interactive || !sdk.isController()) {
-      requestTurnPage(false, false);
-      return;
+                if (wasHistorical && pumpHistoricalHydrations) {
+                    pumpHistoricalHydrations();
+                }
+            };
+            auto requestTurnPage = [&, thread, id = *threadId, historyReady, completeTurnPage](bool resumeAttempted,
+                                                                                               bool resumeSucceeded) mutable {
+                if (historyReady) {
+                    pendingHydrations.erase(thread);
+                    interactiveHydrations.erase(thread);
+                    continuePromptAfterHydration(thread, {}, resumeSucceeded);
+                } else {
+                    dispatchRequestHandled<codex::generated::client_requests::ThreadTurnsList>(
+                        sdk,
+                        turnPageParameters(id),
+                        workerLogic,
+                        thread,
+                        [](const nodegraph::ProtocolRequestId&) {
+                        },
+                        [completeTurnPage = std::move(completeTurnPage), resumeAttempted, resumeSucceeded](
+                            RequestOutcome outcome, nodegraph::DecodedMessage decoded) mutable {
+                            completeTurnPage(resumeAttempted, resumeSucceeded, std::move(outcome), std::move(decoded));
+                        });
+                }
+            };
+            if (!interactive || !sdk.isController()) {
+                requestTurnPage(false, false);
+            } else {
+                dispatchRequest<codex::generated::client_requests::ThreadResume>(
+                    sdk,
+                    nlohmann::json{{"threadId", *threadId}, {"excludeTurns", true}},
+                    workerLogic,
+                    thread,
+                    [&, thread, requestTurnPage = std::move(requestTurnPage)](RequestOutcome outcome) mutable {
+                        if (outcome.stale) {
+                            pendingHydrations.erase(thread);
+                            interactiveHydrations.erase(thread);
+                            const bool wasHistorical = pendingHistoricalHydrations.erase(thread) != 0;
+                            promptsWaitingForHydration.erase(thread);
+                            if (wasHistorical && pumpHistoricalHydrations) {
+                                pumpHistoricalHydrations();
+                            }
+                        } else {
+                            if (!outcome.ok) {
+                                showNotice(outcome.error.empty() ? "Thread settings refresh failed" : outcome.error);
+                            }
+                            requestTurnPage(true, outcome.ok);
+                        }
+                    });
+            }
+        }
     }
-    dispatchRequest<codex::generated::client_requests::ThreadResume>(
-        sdk, nlohmann::json{{"threadId", *threadId}, {"excludeTurns", true}},
-        workerLogic, thread,
-        [&, thread, requestTurnPage = std::move(requestTurnPage)](
-            RequestOutcome outcome) mutable {
-          if (outcome.stale) {
-            pendingHydrations.erase(thread);
-            interactiveHydrations.erase(thread);
-            const bool wasHistorical =
-                pendingHistoricalHydrations.erase(thread) != 0;
-            promptsWaitingForHydration.erase(thread);
-            if (wasHistorical && pumpHistoricalHydrations)
-              pumpHistoricalHydrations();
-            return;
-          }
-          if (!outcome.ok)
-            showNotice(outcome.error.empty() ? "Thread settings refresh failed"
-                                             : outcome.error);
-          requestTurnPage(true, outcome.ok);
-        });
   };
 
   pumpHistoricalHydrations = [&] {
@@ -2438,12 +2430,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     historicalHydrationPumpActive = false;
   };
 
-  const auto hydrateThread = [&](const nodegraph::NodeRef &thread,
-                                 bool force = false) {
-    if (!force && hydrationReady(thread))
-      return;
-    interactiveHydrations.insert(thread);
-    startThreadHydration(thread, true, force);
+  const auto hydrateThread = [&](const nodegraph::NodeRef& thread, bool force = false) {
+      startThreadHydration(thread, true, force);
   };
 
   hydrateHistoricalChildren = [&](std::string threadId) {

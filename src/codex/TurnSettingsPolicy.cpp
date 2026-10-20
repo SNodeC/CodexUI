@@ -237,22 +237,20 @@ nlohmann::json TurnSettingsPolicy::startOptions(TurnSettingsScope scope) const {
                             : nlohmann::json(sandbox);
   }
 
-  if (turn) {
-    std::string selected = values()[TurnSettingField::Model];
-    if (const TurnSettingModel *definition = selectedModel();
-        selected == DefaultTurnSetting && definition)
-      selected = definition->choice.value;
-    if (selected.empty() || selected == DefaultTurnSetting)
-      return result;
-    const std::string &effort = values()[TurnSettingField::Effort];
-    result["collaborationMode"] = {
-        {"mode", values()[TurnSettingField::Collaboration]},
-        {"settings",
-         {{"model", selected},
-          {"developer_instructions", nullptr},
-          {"reasoning_effort", effort == DefaultTurnSetting
-                                   ? nlohmann::json(nullptr)
-                                   : nlohmann::json(effort)}}}};
+  if (turn && touched(TurnSettingField::Collaboration)) {
+      std::string selected = values()[TurnSettingField::Model];
+      if (const TurnSettingModel* definition = selectedModel(); selected == DefaultTurnSetting && definition) {
+          selected = definition->choice.value;
+      }
+      if (!selected.empty() && selected != DefaultTurnSetting) {
+          const std::string& effort = values()[TurnSettingField::Effort];
+          result["collaborationMode"] = {
+              {"mode", values()[TurnSettingField::Collaboration]},
+              {"settings",
+               {{"model", selected},
+                {"developer_instructions", nullptr},
+                {"reasoning_effort", effort == DefaultTurnSetting ? nlohmann::json(nullptr) : nlohmann::json(effort)}}}};
+      }
   }
   return result;
 }

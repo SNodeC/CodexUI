@@ -485,12 +485,28 @@ bool turnSettingsAreStableAccessibleProjections() {
       completeAccessibleProjection && modelControl && network && personality &&
           approval && reviewer && permissionProfile && cwd && more,
       "turn settings expose one stable native control per setting");
-  result &= expect(
-      network && !network->isEnabled() &&
-          network->toolTip() ==
-              QStringLiteral("Full access already includes network access") &&
-          personality && !personality->isEnabled(),
-      "typed compatibility drives enabled state and guidance");
+  result &=
+      expect(network && !network->isEnabled() && network->toolTip() == QStringLiteral("Full access already includes network access") &&
+                 personality && !personality->isEnabled() &&
+                 personality->toolTip() == QStringLiteral("The selected model does not support style choices"),
+             "typed compatibility drives enabled state and guidance");
+  result &= expect(policy.startOptions(TurnSettingsScope::Turn).empty(),
+                   "reported settings and catalog defaults do not become outgoing overrides");
+  auto* effort = widget.findChild<QComboBox*>(QStringLiteral("codexEffort"));
+  result &= expect(effort && effort->currentText() == QStringLiteral("Default (not reported)") &&
+                       effort->toolTip().contains(QStringLiteral("not reported")),
+                   "unreported effective reasoning is explicit and accessible through its tooltip");
+  auto* collaboration = widget.findChild<QComboBox*>(QStringLiteral("codexCollaboration"));
+  result &=
+      expect(collaboration && collaboration->currentIndex() == -1 && collaboration->placeholderText() == QStringLiteral("Not reported"),
+             "missing collaboration is distinct from reported Code mode");
+  TurnSettingsContext codeMode = settings;
+  codeMode.canonical[TurnSettingField::Collaboration] = DefaultTurnSetting;
+  widget.setContext(codeMode);
+  result &= expect(collaboration && collaboration->currentText() == QStringLiteral("Code") &&
+                       policy.startOptions(TurnSettingsScope::Turn).empty(),
+                   "reported Code mode is displayed without becoming an authored override");
+  widget.setContext(settings);
   int projectionSignals = 0;
   for (QWidget *control : controls) {
     if (auto *combo = qobject_cast<QComboBox *>(control))
@@ -574,6 +590,10 @@ bool turnSettingsAreStableAccessibleProjections() {
   result &= expect(policy.startOptions(TurnSettingsScope::Turn)
                            .value("approvalPolicy", "") == "never",
                    "thread switching restores the draft by semantic identity");
+  const QString capturePath = qEnvironmentVariable("CODEXUI_SETTINGS_CAPTURE");
+  if (!capturePath.isEmpty()) {
+      result &= expect(widget.grab().save(capturePath), "turn-settings visual evidence is captured");
+  }
   return result;
 }
 

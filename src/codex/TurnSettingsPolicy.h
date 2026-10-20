@@ -44,6 +44,7 @@ struct TurnSettingValues final {
   TurnSettingValues() {
     fields.fill(std::string(DefaultTurnSetting));
     fields[static_cast<std::size_t>(TurnSettingField::Workspace)].clear();
+    fields[static_cast<std::size_t>(TurnSettingField::Collaboration)].clear();
   }
 
   [[nodiscard]] const std::string &operator[](TurnSettingField field) const {
