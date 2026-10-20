@@ -1262,8 +1262,8 @@ void ShellWidget::Impl::startConversationSnapshot() {
                   return;
               }
               if (conversationProjectionRequested) {
-                requestConversationProjection(false);
-                return;
+                  requestConversationProjection(fullSnapshot);
+                  return;
               }
 
               // A complete snapshot initializes or replaces authority. A

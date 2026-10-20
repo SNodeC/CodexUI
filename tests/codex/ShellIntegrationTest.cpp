@@ -2754,6 +2754,91 @@ void cachedThreadSwitchCompletesWithoutProviderTraffic(Configuration& configurat
     }
 }
 
+void cachedSelectionSurvivesAQueuedProjectionRetry(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& graph = FrontendSessionTestPeer::graph(session);
+    WorkerLogic worker(graph, FrontendSessionTestPeer::channels(session));
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    applyThread(worker, "retry-source", "Another conversation");
+    applyScrollableThreadContent(worker, "retry-source", "retry-source");
+    applyThread(worker, "retry-target", "Fix CI");
+    {
+        auto write = graph.write();
+        const auto target = write.find({NodeKind::Thread, "retry-target"});
+        const auto turn = write.upsert({NodeKind::Turn, "retry-target-turn"});
+        write.setParent(target, turn);
+        for (int index = 0; index < 8000; ++index) {
+            NodeState state;
+            state.fields = {{"type", "agentMessage"}, {"text", "Cached CI activity " + std::to_string(index)}};
+            const auto item = write.upsert({NodeKind::Item, "retry-target-item-" + std::to_string(index)}, std::move(state));
+            write.setParent(turn, item);
+        }
+        static_cast<void>(write.finish());
+    }
+    markThreadReady(session, worker, "retry-source");
+    markThreadReady(session, worker, "retry-target");
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    auto* view = dynamic_cast<middle::ConversationView*>(shell.findChild<QWidget*>(QStringLiteral("conversationScroll")));
+    const bool sourceReady = spinUntil([&] {
+                                 return threadItem(list, "retry-source") && threadItem(list, "retry-target");
+                             }) &&
+                             selectThread(list, "retry-source") && spinUntil([&] {
+                                 return view && view->presentedThreadId() == "retry-source" && !view->structuralStagingActive();
+                             });
+    require(sourceReady, "the queued-retry fixture starts from a presented conversation");
+    if (sourceReady) {
+        spin(100);
+        class CompletionContention final : public QObject {
+        public:
+            explicit CompletionContention(NodeGraph& graph, FrontendSession& session)
+                : graph(graph)
+                , session(session) {
+            }
+            bool intercepted = false;
+
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override {
+                if (watched == qApp && event->type() == QEvent::MetaCall && !intercepted) {
+                    intercepted = true;
+                    writer.emplace(graph.write());
+                    QTimer::singleShot(0, this, [this] {
+                        static_cast<void>(writer->finish());
+                        writer.reset();
+                        // A newer bind/rescan can start before the earlier completion's
+                        // eight-millisecond retry. That retry must retain full-snapshot intent.
+                        FrontendSessionTestPeer::deliverGraphChanged(session, {graph.publishedRevision(), {}, {}, true, {}, 0});
+                    });
+                }
+                return false;
+            }
+
+        private:
+            NodeGraph& graph;
+            FrontendSession& session;
+            std::optional<NodeGraph::WriteAccess> writer;
+        } contention(graph, session);
+        qApp->installEventFilter(&contention);
+        require(selectThread(list, "retry-target"), "the cached target is selected once");
+        const bool completed = spinUntil(
+            [&] {
+                return view->presentedThreadId() == "retry-target" && !view->structuralStagingActive() &&
+                       view->conversationModel()->rowCount() == 8000;
+            },
+            3000);
+        qApp->removeEventFilter(&contention);
+        require(contention.intercepted, "the display completion encountered graph contention before a queued retry");
+        require(completed,
+                "a superseded full projection retains its snapshot intent and displays without another reselect or provider response");
+        if (!completed) {
+            std::cerr << "queued retry presented=" << view->presentedThreadId() << " rows=" << view->conversationModel()->rowCount()
+                      << " staging=" << view->structuralStagingActive() << '\n';
+        }
+    }
+}
+
 void threadSwitchPreservesNestedInspectorPaging(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -6313,6 +6398,7 @@ int main(int argc, char **argv) {
   completedLiveAgentAppearsWithoutThreadReselection(*configuration);
   threadSwitchStagesTheCompleteReplacement(*configuration);
   cachedThreadSwitchCompletesWithoutProviderTraffic(*configuration);
+  cachedSelectionSurvivesAQueuedProjectionRetry(*configuration);
   threadSwitchPreservesNestedInspectorPaging(*configuration);
   inactiveThreadNeverReactivatesAStaleTurn(*configuration);
   reloadAndReconnectHydrationStayExplicit(*configuration);
