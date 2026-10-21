@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "codex/ui/ProfileWindow.h"
+#include "codex/ui/UiStyle.h"
 #include "manager/LaunchPlan.h"
 #include "manager/ManagerWindow.h"
 #include "manager/ProfileEditor.h"
@@ -7,6 +8,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -24,6 +26,8 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QScopeGuard>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTabWidget>
@@ -33,6 +37,7 @@
 #include <QtTest>
 #include <algorithm>
 #include <iostream>
+#include <memory>
 
 using namespace codexui::manager;
 namespace {
@@ -65,7 +70,7 @@ namespace {
                          "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"probe\"}\n"
                       << std::flush;
             int releases = 0;
-            bool signedIn = false;
+            bool signedIn = qEnvironmentVariable("CODEXMANAGER_AUTH_FIXTURE").startsWith("signed-in");
             QString loginId;
             QString loginType;
             const QString authMode = qEnvironmentVariable("CODEXMANAGER_AUTH_FIXTURE");
@@ -93,7 +98,9 @@ namespace {
                         result = {{"requiresOpenaiAuth", !authMode.isEmpty()},
                                   {"account",
                                    signedIn ? QJsonValue(QJsonObject{{"type", loginType == "apiKey" ? "apiKey" : "chatgpt"},
-                                                                     {"email", "fixture@example.test"},
+                                                                     {"email",
+                                                                      authMode.startsWith("signed-in") ? QString(110, 'x') + "@example.test"
+                                                                                                       : "fixture@example.test"},
                                                                      {"planType", "plus"}})
                                             : QJsonValue(QJsonValue::Null)}};
                     } else if (method == "account/login/start") {
@@ -136,8 +143,9 @@ namespace {
                         }
                     }
                 } else if (line == "release") {
-                    std::cout << (authMode == "controller" ? "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"other-ui\"}\n"
-                                                           : "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":null}\n")
+                    std::cout << (authMode.contains("controller")
+                                      ? "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":\"other-ui\"}\n"
+                                      : "{\"kind\":\"bridge.controller\",\"controllerConnectionId\":null}\n")
                               << std::flush;
                     ++releases;
                     if (qEnvironmentVariableIsSet("CODEXMANAGER_RECLAIM_CONTROL")) {
@@ -491,18 +499,37 @@ private slots:
         runtime.stop();
         QTRY_VERIFY(!runtime.busy());
     }
+    void wrappedLabelGeometry() {
+        for (const auto* kind : {"body", "meta", "panelHeader"}) {
+            std::unique_ptr<QLabel> label(
+                codexui::UiStyle::makeLabel("Long text that must wrap across several lines in a narrow area", kind));
+            QCOMPARE(label->hasHeightForWidth(), label->wordWrap());
+            if (label->wordWrap()) {
+                QVERIFY(label->heightForWidth(120) > label->heightForWidth(400));
+            }
+        }
+    }
     void authenticationDialog_data() {
         QTest::addColumn<int>("width");
-        QTest::newRow("narrow") << 520;
-        QTest::newRow("normal") << 680;
+        QTest::addColumn<int>("height");
+        QTest::addColumn<bool>("largeFont");
+        QTest::addColumn<QString>("mode");
+        for (const auto* mode : {"pending", "controller", "signed-in-controller", "signed-in-long", "disconnect"}) {
+            QTest::newRow(qPrintable(QString(mode) + "-normal")) << 680 << 580 << false << QString(mode);
+            QTest::newRow(qPrintable(QString(mode) + "-narrow")) << 480 << 420 << false << QString(mode);
+            QTest::newRow(qPrintable(QString(mode) + "-large-font")) << 520 << 440 << true << QString(mode);
+        }
     }
     void authenticationDialog() {
         QFETCH(int, width);
+        QFETCH(int, height);
+        QFETCH(bool, largeFont);
+        QFETCH(QString, mode);
         FixtureTools tools;
-        qputenv("CODEXMANAGER_AUTH_FIXTURE", "pending");
-        auto p = Profile::create("Remote research");
+        qputenv("CODEXMANAGER_AUTH_FIXTURE", mode.toUtf8());
+        auto p = Profile::create("Remote research with a long descriptive profile name");
         p.bridge.ownership = Ownership::External;
-        p.codexHome = "/srv/codex/research";
+        p.codexHome = "/srv/codex/" + QString(100, 'x') + "/research";
         p.probeExecutable = tools.dir.filePath("probe");
         QString error;
         const auto path = tools.dir.filePath("profiles.json");
@@ -512,7 +539,9 @@ private slots:
         auto* runtime = window.findChild<ProfileRuntime*>();
         QVERIFY(runtime);
         runtime->check();
-        QTRY_COMPARE(runtime->accountState(), ProfileRuntime::AccountState::SignedOut);
+        QTRY_COMPARE(runtime->accountState(),
+                     mode.startsWith("signed-in") ? ProfileRuntime::AccountState::SignedIn : ProfileRuntime::AccountState::SignedOut);
+        QTRY_VERIFY(runtime->ready());
         const auto buttons = window.findChildren<QPushButton*>();
         auto account = std::find_if(buttons.cbegin(), buttons.cend(), [](QPushButton* b) {
             return b->isVisible() && b->text() == "Account / Sign in…";
@@ -524,45 +553,169 @@ private slots:
             const auto close = qScopeGuard([dialog] {
                 dialog->reject();
             });
-            dialog->resize(width, 650);
+            if (largeFont) {
+                dialog->setStyleSheet("QLabel, QPushButton, QComboBox, QLineEdit { font-size: 18pt; }");
+            }
+            dialog->resize(width, height);
+            auto* area = dialog->findChild<QScrollArea*>();
             auto* method = dialog->findChild<QComboBox*>("authenticationMethod");
             auto* start = dialog->findChild<QPushButton*>("startAuthentication");
             auto* cancel = dialog->findChild<QPushButton*>("cancelAuthentication");
             auto* key = dialog->findChild<QLineEdit*>("authenticationApiKey");
-            QVERIFY(method && start && cancel && key);
+            auto* code = dialog->findChild<QLineEdit*>("authenticationCode");
+            auto* status = dialog->findChild<QLabel*>("accountStatus");
+            QVERIFY(area && method && start && cancel && key && code && status);
+            const auto checkGeometry = [&](const QString& stage) {
+                QApplication::processEvents();
+                QCOMPARE(dialog->width(), width);
+                QCOMPARE(dialog->height(), height);
+                QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
+                for (auto* label : area->findChildren<QLabel*>()) {
+                    if (label->isVisible() && !label->text().isEmpty()) {
+                        QVERIFY2(label->height() >= label->heightForWidth(label->width()), qPrintable(stage + ": " + label->text()));
+                        area->ensureWidgetVisible(label, 0, 0);
+                        QApplication::processEvents();
+                        QVERIFY2(area->viewport()->rect().contains(QRect(label->mapTo(area->viewport(), QPoint{}), label->size())),
+                                 qPrintable(stage + ": " + label->text()));
+                    }
+                }
+                for (auto* field : dialog->findChildren<QLineEdit*>()) {
+                    if (field->isVisible()) {
+                        QCOMPARE(field->height(), field->sizeHint().height());
+                        field->setFocus();
+                        QApplication::processEvents();
+                        const QRect target(field->mapTo(area->widget(), QPoint{}), field->size());
+                        area->ensureVisible(target.center().x(), target.center().y(), target.width() / 2 + 1, target.height() / 2 + 1);
+                        QApplication::processEvents();
+                        const QRect visible(field->mapTo(area->viewport(), QPoint{}), field->size());
+                        QVERIFY2(area->viewport()->rect().contains(visible),
+                                 qPrintable(stage + ": " + field->accessibleName() + " " + QString::number(visible.y()) + "/" +
+                                            QString::number(visible.height()) + " viewport " +
+                                            QString::number(area->viewport()->height())));
+                        if (field->isReadOnly()) {
+                            field->setFocus();
+                            QTest::keyClick(field, Qt::Key_A, Qt::ControlModifier);
+                            QTest::keyClick(field, Qt::Key_C, Qt::ControlModifier);
+                            QCOMPARE(QApplication::clipboard()->text(), field->text());
+                            QTest::keyClick(field, Qt::Key_Home);
+                            QCOMPARE(field->cursorPosition(), 0);
+                            QTest::keyClick(field, Qt::Key_End);
+                            QCOMPARE(field->cursorPosition(), field->text().size());
+                        }
+                    }
+                }
+                for (auto* button : dialog->findChildren<QPushButton*>()) {
+                    if (button->text() == "Start / connect backend") {
+                        QCOMPARE(button->isVisible(), !runtime->ready() && !runtime->authenticating());
+                    }
+                    if (button->isVisible()) {
+                        area->ensureWidgetVisible(button, 0, 0);
+                        QApplication::processEvents();
+                        const QRect geometry(button->mapTo(dialog, QPoint{}), button->size());
+                        QVERIFY2(dialog->rect().contains(geometry), qPrintable(stage + ": " + button->text()));
+                        QVERIFY(button->height() >= button->sizeHint().height());
+                        if (button->text() == "Refresh account") {
+                            QCOMPARE(button->isEnabled(), runtime->ready());
+                        } else if (button->text() == "Start / connect backend") {
+                            QVERIFY(!runtime->ready());
+                            QCOMPARE(button->isEnabled(), !runtime->busy());
+                        } else if (button->text() == "Sign out…") {
+                            QVERIFY(runtime->authenticationAvailable());
+                            QCOMPARE(runtime->accountState(), ProfileRuntime::AccountState::SignedIn);
+                            QVERIFY(button->isEnabled());
+                        } else if (button->text() == "Open browser") {
+                            QVERIFY(!runtime->loginUrl().isEmpty());
+                            QVERIFY(button->isEnabled());
+                        }
+                    }
+                }
+                const QString evidence = qEnvironmentVariable("CODEXMANAGER_EVIDENCE_DIR");
+                if (!evidence.isEmpty()) {
+                    QDir().mkpath(evidence);
+                    area->verticalScrollBar()->setValue(0);
+                    QVERIFY(dialog->grab().save(evidence + "/" + QString(QTest::currentDataTag()) + "-" + stage + ".png"));
+                }
+            };
             QCOMPARE(method->count(), 3);
-            method->setCurrentIndex(2);
-            QVERIFY(key->isVisible());
-            QCOMPARE(key->echoMode(), QLineEdit::Password);
-            QVERIFY(!start->isEnabled());
-            QTest::keyClicks(key, "fixture-key");
-            QVERIFY(start->isEnabled());
-            method->setCurrentIndex(0);
-            QTest::mouseClick(start, Qt::LeftButton);
-            QTRY_COMPARE(runtime->loginCode(), QString("TEST-CODE"));
-            QVERIFY(key->text().isEmpty());
-            auto* code = dialog->findChild<QLabel*>("authenticationCode");
-            QVERIFY(code && code->isVisible());
-            QCOMPARE(code->text(), QString("TEST-CODE"));
-            for (auto* field : dialog->findChildren<QLineEdit*>()) {
-                if (field->isVisible()) {
-                    QVERIFY(field->height() >= field->sizeHint().height());
+            QVERIFY(!cancel->isVisible());
+            QVERIFY(!code->isVisible());
+            for (auto* label : dialog->findChildren<QLabel*>()) {
+                QVERIFY(!label->text().contains("code shown below"));
+                QVERIFY(!label->text().startsWith("Sign in to"));
+            }
+            checkGeometry("initial");
+            if (mode.contains("controller")) {
+                QTRY_VERIFY(status->text().contains("Release control"));
+                QVERIFY(!start->isEnabled());
+                QVERIFY(!method->isEnabled());
+                checkGeometry("handoff");
+            } else if (mode.startsWith("signed-in")) {
+                QCOMPARE(start->text(), QString("Switch account"));
+                QVERIFY(start->isEnabled());
+                const auto fields = dialog->findChildren<QLineEdit*>();
+                auto identity = std::find_if(fields.cbegin(), fields.cend(), [](QLineEdit* field) {
+                    return field->accessibleName() == "Account status";
+                });
+                QVERIFY(identity != fields.cend());
+                QVERIFY((*identity)->text().contains(QString(110, 'x') + "@example.test"));
+                QVERIFY((*identity)->isReadOnly());
+                checkGeometry("signed-in");
+            } else {
+                method->setCurrentIndex(2);
+                QVERIFY(key->isVisible());
+                QCOMPARE(key->echoMode(), QLineEdit::Password);
+                QVERIFY(!start->isEnabled());
+                QTest::keyClicks(key, "fixture-key");
+                QVERIFY(start->isEnabled());
+                checkGeometry("api-key");
+                method->setCurrentIndex(0);
+                area->ensureWidgetVisible(start);
+                QTest::mouseClick(start, Qt::LeftButton);
+                if (mode == "disconnect") {
+                    QTRY_VERIFY(!runtime->ready());
+                    QVERIFY(!start->isVisible());
+                    QVERIFY(!code->isVisible());
+                    QVERIFY(!cancel->isVisible());
+                    checkGeometry("disconnected");
+                } else {
+                    QTRY_COMPARE(runtime->loginCode(), QString("TEST-CODE"));
+                    QVERIFY(key->text().isEmpty());
+                    QVERIFY(code->isVisible());
+                    QCOMPARE(code->text(), QString("TEST-CODE"));
+                    QVERIFY(!start->isVisible());
+                    QVERIFY(cancel->isVisible() && cancel->isEnabled());
+                    checkGeometry("device-code");
+                    area->ensureWidgetVisible(code);
+                    code->setFocus();
+                    QTest::keyClick(code, Qt::Key_A, Qt::ControlModifier);
+                    QTest::keyClick(code, Qt::Key_C, Qt::ControlModifier);
+                    QCOMPARE(QApplication::clipboard()->text(), QString("TEST-CODE"));
+                    area->ensureWidgetVisible(cancel);
+                    QTest::mouseClick(cancel, Qt::LeftButton);
+                    QTRY_VERIFY(!runtime->authenticating());
+                    QTRY_VERIFY(runtime->authenticationAvailable());
+                    QVERIFY(!code->isVisible());
+                    checkGeometry("cancelled");
+                    method->setCurrentIndex(1);
+                    area->ensureWidgetVisible(start);
+                    QTest::mouseClick(start, Qt::LeftButton);
+                    QTRY_VERIFY(!runtime->loginUrl().isEmpty());
+                    QVERIFY(runtime->loginCode().isEmpty());
+                    QVERIFY(!code->isVisible());
+                    checkGeometry("browser-callback");
+                    runtime->cancelLogin();
+                    QTRY_VERIFY(!runtime->authenticating());
+                    QTRY_VERIFY(runtime->authenticationAvailable());
+                    method->setCurrentIndex(2);
+                    QTest::keyClicks(key, "fixture-key");
+                    area->ensureWidgetVisible(start);
+                    QTest::mouseClick(start, Qt::LeftButton);
+                    QTRY_COMPARE(runtime->accountState(), ProfileRuntime::AccountState::SignedIn);
+                    QTRY_VERIFY(runtime->authenticationAvailable());
+                    QCOMPARE(start->text(), QString("Switch account"));
+                    checkGeometry("completed");
                 }
             }
-            for (auto* b : dialog->findChildren<QPushButton*>()) {
-                if (b->isVisible()) {
-                    const QRect geometry(b->mapTo(dialog, QPoint{}), b->size());
-                    QVERIFY2(dialog->rect().contains(geometry), qPrintable(b->text()));
-                    QVERIFY(b->height() >= 24);
-                }
-            }
-            const QString evidence = qEnvironmentVariable("CODEXMANAGER_EVIDENCE_DIR");
-            if (!evidence.isEmpty()) {
-                QDir().mkpath(evidence);
-                QVERIFY(dialog->grab().save(evidence + "/authentication-" + QString::number(width) + ".png"));
-            }
-            QTest::mouseClick(cancel, Qt::LeftButton);
-            QTRY_VERIFY(!runtime->authenticating());
         });
         QTest::mouseClick(*account, Qt::LeftButton);
         runtime->stop();
