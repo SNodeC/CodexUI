@@ -80,10 +80,10 @@ QLabel *makeLabel(QString value, const char *kind, QWidget *parent) {
   label->setProperty("kind", kind);
   label->setTextFormat(Qt::PlainText);
   const bool panelHeader = QLatin1StringView(kind) == QLatin1StringView("panelHeader");
-  label->setWordWrap(!panelHeader);
   label->setMinimumWidth(0);
   label->setSizePolicy(panelHeader ? QSizePolicy::Minimum : QSizePolicy::Ignored,
                        QSizePolicy::Preferred);
+  label->setWordWrap(!panelHeader);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse);
   return label;
 }
