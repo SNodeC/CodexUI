@@ -149,7 +149,7 @@ namespace codexui::manager {
         setWindowIcon(QIcon::fromTheme("codex-manager", style()->standardIcon(QStyle::SP_ComputerIcon)));
         setStyleSheet(
             UiStyle::applicationStyleSheet() +
-            QString("QMainWindow {background:%1;} QLineEdit {padding:9px; border:1px solid %2; border-radius:8px;} "
+            QString("QMainWindow {background:%1;} "
                     "QPushButton {padding:7px 13px; border:1px solid %2; border-radius:7px; background:%3; color:%4;} "
                     "QPushButton:hover {background:%5;} QPushButton:focus {border:2px solid %6;} "
                     "QPushButton#primaryButton {background:%6; color:%3; border-color:%6;} "
@@ -574,22 +574,32 @@ namespace codexui::manager {
             dialog.setObjectName("profileAuthentication");
             dialog.setWindowTitle("Account · " + r->profile().name);
             dialog.resize(620, 580);
-            auto* layout = new QVBoxLayout(&dialog);
+            auto* outer = new QVBoxLayout(&dialog);
+            auto* area = new QScrollArea(&dialog);
+            area->setWidgetResizable(true);
+            area->setFrameShape(QFrame::NoFrame);
+            area->setWidget(new QWidget(area));
+            auto* layout = new QVBoxLayout(area->widget());
+            outer->addWidget(area);
             layout->setContentsMargins(24, 24, 24, 24);
             layout->setSpacing(14);
             const auto& p = r->profile();
             const auto& host = p.provider.transport == "stdio" ? p.bridge : p.appServer;
-            layout->addWidget(UiStyle::makeLabel("Sign in to " + p.name, "panelHeader", &dialog));
-            layout->addWidget(
-                UiStyle::makeLabel("Credentials belong to the app-server on " + host.label() + "\n" + p.codexHome, "meta", &dialog));
+            layout->addWidget(UiStyle::makeLabel("Credentials belong to the app-server on " + host.label(), "meta", &dialog));
+            auto* home = new QLineEdit(p.codexHome, &dialog);
+            home->setReadOnly(true);
+            home->setAccessibleName("App-server CODEX_HOME");
+            layout->addWidget(home);
+            auto* account = new QLineEdit(&dialog);
+            account->setReadOnly(true);
+            account->setAccessibleName("Account status");
+            layout->addWidget(account);
             auto* state = UiStyle::makeLabel({}, "body", &dialog);
             state->setObjectName("accountStatus");
             layout->addWidget(state);
-            auto* notice = UiStyle::makeLabel({}, "body", &dialog);
-            notice->setObjectName("authenticationNotice");
-            layout->addWidget(notice);
             auto* method = new QComboBox(&dialog);
             method->setAccessibleName("Sign-in method");
+            method->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
             method->setObjectName("authenticationMethod");
             method->addItem("ChatGPT · device code (local or remote)", "chatgptDeviceCode");
             method->addItem("ChatGPT · browser callback on app-server host", "chatgpt");
@@ -599,21 +609,21 @@ namespace codexui::manager {
             layout->addWidget(explanation);
             auto* key = new QLineEdit(&dialog);
             key->setEchoMode(QLineEdit::Password);
-            key->setFixedHeight(key->sizeHint().height());
             key->setPlaceholderText("OpenAI API key");
             key->setAccessibleName("OpenAI API key");
             key->setObjectName("authenticationApiKey");
             layout->addWidget(key);
-            auto* code = UiStyle::makeLabel({}, "panelHeader", &dialog);
+            auto* code = new QLineEdit(&dialog);
+            code->setReadOnly(true);
+            code->setAccessibleName("Verification code");
+            code->setProperty("kind", "heading");
             code->setObjectName("authenticationCode");
-            code->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
             layout->addWidget(code);
             auto* url = new QLineEdit(&dialog);
             url->setReadOnly(true);
-            url->setFixedHeight(url->sizeHint().height());
             url->setAccessibleName("Sign-in URL");
             layout->addWidget(url);
-            auto* browserRow = new QHBoxLayout;
+            auto* actions = new QGridLayout;
             auto* browser = button("Open browser", &dialog, [r, &dialog] {
                 const QUrl target(r->loginUrl());
                 if (target.scheme() == "https" && !target.host().isEmpty()) {
@@ -622,28 +632,19 @@ namespace codexui::manager {
                     }
                 }
             });
-            browserRow->addWidget(browser);
-            auto* copyUrl = button("Copy URL", &dialog, [r] {
-                QApplication::clipboard()->setText(r->loginUrl());
-            });
-            auto* copyCode = button("Copy code", &dialog, [r] {
-                QApplication::clipboard()->setText(r->loginCode());
-            });
-            browserRow->addWidget(copyUrl);
-            browserRow->addWidget(copyCode);
-            layout->addLayout(browserRow);
-            auto* actions = new QHBoxLayout;
+            actions->addWidget(browser, 0, 0, 1, 2);
             auto* signIn = button("Sign in", &dialog, [r, method, key] {
                 r->signIn(method->currentData().toString(), key->text());
                 key->clear();
             });
             signIn->setObjectName("startAuthentication");
-            actions->addWidget(signIn);
+            actions->addWidget(signIn, 1, 0);
             auto* cancel = button("Cancel sign-in", &dialog, [r] {
                 r->cancelLogin();
             });
             cancel->setObjectName("cancelAuthentication");
-            actions->addWidget(cancel);
+            cancel->setToolTip("Closing this dialog leaves sign-in running. Use Cancel sign-in to stop it.");
+            actions->addWidget(cancel, 1, 0, 1, 2);
             auto* logout = button("Sign out…", &dialog, [r, &dialog] {
                 if (QMessageBox::question(
                         &dialog,
@@ -653,55 +654,54 @@ namespace codexui::manager {
                     r->signOut();
                 }
             });
-            actions->addWidget(logout);
+            actions->addWidget(logout, 1, 1);
             layout->addLayout(actions);
             auto* connection = button("Start / connect backend", &dialog, [r] {
                 r->start(false);
             });
             layout->addWidget(connection);
-            layout->addWidget(button("Refresh account", &dialog, [r] {
+            auto* refresh = button("Refresh account", &dialog, [r] {
                 r->refreshAccount();
-            }));
-            layout->addWidget(
-                UiStyle::makeLabel("Signed-in status does not verify quota or inference access. If this server does not support a "
-                                   "login method, choose another or use the commands in Details → Setup & startup.",
-                                   "meta",
-                                   &dialog));
-            layout->addWidget(
-                UiStyle::makeLabel("Closing this dialog leaves sign-in running. Use Cancel sign-in to stop it.", "meta", &dialog));
+            });
+            layout->addWidget(refresh);
+            refresh->setToolTip("Account status does not verify quota or access. CLI alternatives: Details → Setup & startup.");
             layout->addStretch();
             auto* close = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
             connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            layout->addWidget(close);
+            outer->addWidget(close);
             const auto render = [=] {
-                state->setText(r->status() + "\n" + r->accountStatus());
-                notice->setText(r->authenticationMessage().isEmpty() && r->ready() && !r->authenticationAvailable() && !r->authenticating()
+                account->setText(r->accountStatus());
+                state->setText(r->status() + "\n" +
+                               (r->ready() && !r->authenticationAvailable() && !r->authenticating()
                                     ? "In CodexUI, choose Release control before signing in here. Afterwards, choose Claim control to "
                                       "continue. You can also close its window."
-                                    : r->authenticationMessage());
+                                    : r->authenticationMessage()));
                 const bool api = method->currentData().toString() == "apiKey";
                 const bool callback = method->currentData().toString() == "chatgpt";
                 explanation->setText(
                     api ? "The key is sent to this profile's app-server and stored there. Use a trusted, protected bridge connection."
                     : callback ? "The browser callback must reach the app-server's localhost. For a remote server, open this URL there or "
                                  "use device-code login."
-                               : "Open the verification page on this computer or another device, then enter the code shown below.");
+                    : !r->loginCode().isEmpty() ? "Open the verification page, then enter the code shown below."
+                                                : "Choose a sign-in method to continue.");
                 key->setVisible(api);
-                method->setEnabled(!r->authenticating());
-                key->setEnabled(!r->authenticating());
+                method->setEnabled(r->authenticationAvailable());
+                key->setEnabled(r->authenticationAvailable());
                 signIn->setEnabled(r->authenticationAvailable() && (!api || !key->text().trimmed().isEmpty()));
-                cancel->setEnabled(r->authenticating());
-                logout->setEnabled(r->authenticationAvailable() && (r->accountState() == ProfileRuntime::AccountState::SignedIn ||
+                signIn->setVisible(!r->authenticating() && r->ready());
+                signIn->setText(r->accountState() == ProfileRuntime::AccountState::SignedIn ? "Switch account" : "Sign in");
+                cancel->setVisible(r->authenticating());
+                logout->setVisible(r->authenticationAvailable() && (r->accountState() == ProfileRuntime::AccountState::SignedIn ||
                                                                     r->accountState() == ProfileRuntime::AccountState::Rejected));
-                connection->setEnabled(!r->ready() && !r->busy());
+                connection->setVisible(!r->ready() && !r->authenticating());
+                connection->setEnabled(!r->busy());
+                refresh->setEnabled(r->ready());
                 code->setText(r->loginCode());
                 code->setVisible(!r->loginCode().isEmpty());
                 url->setText(r->loginUrl());
                 url->setVisible(!r->loginUrl().isEmpty());
                 const QUrl target(r->loginUrl());
-                browser->setEnabled(target.scheme() == "https" && !target.host().isEmpty());
-                copyUrl->setEnabled(!r->loginUrl().isEmpty());
-                copyCode->setEnabled(!r->loginCode().isEmpty());
+                browser->setVisible(target.scheme() == "https" && !target.host().isEmpty());
             };
             connect(r, &ProfileRuntime::changed, &dialog, render);
             connect(method, &QComboBox::currentIndexChanged, &dialog, render);
