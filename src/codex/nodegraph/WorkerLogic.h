@@ -16,12 +16,15 @@
 
 namespace codexui::nodegraph {
 
-struct WorkerGenerations final {
-  std::uint64_t connection = 0;
-  std::uint64_t provider = 0;
+    // One application policy shared by worker admission and toolkit projections.
+    [[nodiscard]] std::string threadWorkspaceChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread);
 
-  bool operator==(const WorkerGenerations &) const = default;
-};
+    struct WorkerGenerations final {
+        std::uint64_t connection = 0;
+        std::uint64_t provider = 0;
+
+        bool operator==(const WorkerGenerations&) const = default;
+    };
 
 struct WorkerApplyResult final {
   ChannelSendStatus status = ChannelSendStatus::Accepted;

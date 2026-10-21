@@ -46,7 +46,7 @@ function retainedProtocolFrame(frame: JsonObject): unknown {
 
 const actionMethods = {
     "threads.list": "thread/list", "thread.read": "thread/read", "thread.create": "thread/start",
-    "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
+    "thread.workspace": "thread/settings/update", "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
     "thread.turns.list": "thread/turns/list", "thread.items.list": "thread/items/list",
     "thread.archive": "thread/archive", "thread.unarchive": "thread/unarchive", "thread.delete": "thread/delete",
     "projects.list": "project/list", "project.read": "project/read", "project.create": "project/create",
@@ -312,7 +312,7 @@ export class BrowserFrontendSession {
                 || this.matchesThreadPresentation(this.selectedThreadId, presentationKey));
     }
 
-    selectThread(threadId: string, presentationKey?: string): void {
+    selectThread(threadId: string, presentationKey?: string, refreshSettings = true): void {
         if (!this.matchesThreadPresentation(threadId, presentationKey)) return;
         if (threadId === DraftThreadId && this.newThreadDraft) {
             this.selectedThreadId = DraftThreadId; this.publish(); return;
@@ -325,7 +325,9 @@ export class BrowserFrontendSession {
             this.newThreadDraft = undefined;
         }
         this.selectedThreadId = threadId;
-        if (threadId !== "") this.ensureThreadHydrated(threadId);
+        if (threadId !== "") {
+            this.ensureThreadHydrated(threadId, refreshSettings);
+        }
         this.publish();
     }
     beginNewThread(draft: NewThreadDraft = {
@@ -458,7 +460,7 @@ export class BrowserFrontendSession {
         const activeTurnId = destination === DraftThreadId ? undefined : this.model.activeTurnId(destination);
         const submissionId = this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
             activeTurnId, admittedAt, activeTurnId === undefined ? this.nextPromptActivityAt(admittedAt) : undefined,
-            (destination === DraftThreadId ? this.newThreadDraft : undefined) ?? {workspace: stringMember(threadOptions, "cwd") || thread?.cwd || "", name: "Recovered prompt",
+            (destination === DraftThreadId ? this.newThreadDraft : undefined) ?? {workspace: thread?.cwd || "", name: "Recovered prompt",
                 baseInstructions: stringMember(threadOptions, "baseInstructions"), developerInstructions: stringMember(threadOptions, "developerInstructions"), ephemeral: threadOptions.ephemeral === true,
                 ...(thread?.projectId ? {projectId: thread?.projectId} : {}),
                 ...(thread?.sectionId ? {sectionId: thread?.sectionId} : {})});
@@ -476,7 +478,7 @@ export class BrowserFrontendSession {
             if (threadDraft?.developerInstructions) createOptions.developerInstructions = threadDraft.developerInstructions;
             if (threadDraft?.ephemeral) createOptions.ephemeral = true;
             if (threadDraft?.projectId) createOptions.projectId = threadDraft.projectId;
-            if (threadDraft?.workspace && !Object.hasOwn(createOptions, "cwd")) createOptions.cwd = threadDraft.workspace;
+            if (threadDraft) { createOptions.cwd = threadDraft.workspace; }
             const created = await this.requestPromise("thread.create", createOptions);
             this.newThreadCreationInFlight = false;
             if (created.stale) {
@@ -532,8 +534,9 @@ export class BrowserFrontendSession {
         if (turnId) this.request("turn.interrupt", {threadId, turnId}, undefined,
             () => this.matchesThreadPresentation(threadId, targetKey));
     }
-    operationPending(action: string, threadId = "", presentationKey?: string): boolean {
-        return this.pendingUserOperations.has(`${action}:${presentationKey ?? this.threadVisualKey(threadId)}`);
+    operationPending(action: string, threadId = "", presentationKey?: string, currentOperation?: object): boolean {
+        const pending = this.pendingUserOperations.get(`${action}:${presentationKey ?? this.threadVisualKey(threadId)}`);
+        return pending !== undefined && pending !== currentOperation;
     }
     renameThread(threadId: string, name: string, presentationKey?: string): void {
         void this.performUserOperation("thread.rename", "thread.rename", {threadId, name}, "Rename thread", presentationKey);
@@ -544,6 +547,33 @@ export class BrowserFrontendSession {
     historyPagePending(threadId: string, presentationKey?: string): boolean {
         return this.matchesThreadPresentation(threadId, presentationKey)
             && this.runtimeByThread.get(threadId)?.historyPageInFlight === true;
+    }
+    workspaceChangeUnavailable(threadId: string, presentationKey?: string, currentOperation?: object): string {
+        const thread = this.model.thread(threadId);
+        let reason = "";
+        if (!thread || !this.matchesThreadPresentation(threadId, presentationKey)) {
+            reason = "An existing thread is required.";
+        } else if (!this.canSubmit()) {
+            reason = "Workspace changes require a ready provider and controller access.";
+        } else if (thread.status.semantic === "running" || this.model.activeTurnId(threadId) || this.prompts.hasInFlight(threadId)) {
+            reason = "Wait until the active turn completes before changing workspace.";
+        } else if (["hydrating", "resuming"].includes(this.runtimeByThread.get(threadId)?.phase ?? "")) {
+            reason = "Thread context is loading; wait for app-server confirmation.";
+        } else if (this.operationPending("thread.workspace", threadId, presentationKey, currentOperation)) {
+            reason = "Workspace change pending app-server confirmation.";
+        }
+        return reason;
+    }
+    changeWorkspace(threadId: string, workspace: string, presentationKey?: string): void {
+        const reason = this.workspaceChangeUnavailable(threadId, presentationKey);
+        if (reason !== "") {
+            this.setNotice(reason);
+        } else if (workspace.trim() === "") {
+            this.setNotice("Enter the app-server workspace path.");
+        } else if (workspace.trim() !== this.model.thread(threadId)?.cwd) {
+            void this.performUserOperation("thread.workspace", "thread.workspace", {threadId, cwd: workspace.trim()},
+                "Change workspace", presentationKey);
+        }
     }
     forkDraft(threadId: string): NewThreadDraft {
         const source = this.model.thread(threadId);
@@ -575,7 +605,8 @@ export class BrowserFrontendSession {
                 const runtime = this.threadRuntime(id);
                 runtime.phase = "ready";
                 if (requestedName !== "") this.renameThread(id, requestedName);
-                this.selectThread(id);
+                // The fork response already supplies current execution settings.
+                this.selectThread(id, undefined, false);
                 this.loadForkHistory(id, runtime);
             }
             else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");
@@ -661,44 +692,58 @@ export class BrowserFrontendSession {
         for (const identity of this.viewportState.retireExcept(retainedDraftId))
             this.settingDrafts.delete(identity);
     }
-    private ensureThreadHydrated(threadId: string): void {
+    private ensureThreadHydrated(threadId: string, refreshSettings = false): void {
         if (!this.providerReady() || threadId === "" || threadId === DraftThreadId) return;
         const runtime = this.threadRuntime(threadId);
-        if (runtime.phase !== "cold") return;
-        void this.hydrateThread(threadId, true);
+        if (runtime.phase === "cold" || (refreshSettings && runtime.phase === "ready")) {
+            void this.hydrateThread(threadId, true);
+        }
     }
     private async hydrateThread(threadId: string, interactive: boolean, forced = false): Promise<void> {
         if (!this.providerReady() || threadId === "") return;
         const runtime = this.threadRuntime(threadId);
         if (runtime.phase === "hydrating" || runtime.phase === "resuming" || runtime.historyPageInFlight) return;
-        if (!forced && runtime.phase !== "cold") return;
-        runtime.phase = "hydrating";
-        runtime.historyPageInFlight = true;
-        runtime.seenHistoryCursors.clear();
-        this.schedulePublish();
-        const current = () => this.runtimeByThread.get(threadId) === runtime && runtime.phase === "hydrating";
-        let resumeAttempted = false;
-        if (interactive && this.sdk.role === "controller") {
-            resumeAttempted = true;
-            const response = await this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current);
-            if (response.stale || !current()) return;
-            if (!response.ok) this.setNotice(`Thread settings refresh failed: ${this.errorMessage(response)}`);
-        }
-        const response = await this.requestTurnPage(threadId, "", runtime, current);
-        if (response.stale || !current()) return;
-        runtime.historyPageInFlight = false;
-        if (!response.ok) {
-            runtime.phase = "failed";
-            const message = `Thread history requires paginated app-server support: ${this.errorMessage(response)}`;
-            this.prompts.failQueued(threadId, message);
-            this.setNotice(message);
+        const historyReady = !forced && runtime.phase === "ready";
+        if (!forced && runtime.phase !== "cold" && !historyReady) {
             return;
         }
+        const phase = historyReady ? "resuming" : "hydrating";
+        runtime.phase = phase;
+        runtime.historyPageInFlight = !historyReady;
+        if (!historyReady) {
+            runtime.seenHistoryCursors.clear();
+        }
+        this.schedulePublish();
+        const current = () => this.runtimeByThread.get(threadId) === runtime && runtime.phase === phase;
+        let resumeSucceeded = false;
+        const resumeAttempted = interactive && this.sdk.role === "controller";
+        if (resumeAttempted) {
+            const response = await this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current);
+            if (response.stale || !current()) return;
+            resumeSucceeded = response.ok;
+            if (!response.ok) this.setNotice(`Thread settings refresh failed: ${this.errorMessage(response)}`);
+        }
+        if (!historyReady) {
+            const response = await this.requestTurnPage(threadId, "", runtime, current);
+            if (response.stale || !current()) return;
+            runtime.historyPageInFlight = false;
+            if (!response.ok) {
+                runtime.phase = "failed";
+                const message = `Thread history requires paginated app-server support: ${this.errorMessage(response)}`;
+                this.prompts.failQueued(threadId, message);
+                this.setNotice(message);
+                return;
+            }
+            this.queueTurnItems(threadId, response.data, runtime);
+            this.queueActiveAgentChildren(threadId);
+        }
         runtime.phase = "ready";
-        this.queueTurnItems(threadId, response.data, runtime);
-        this.queueActiveAgentChildren(threadId);
-        this.publish();
-        queueMicrotask(() => this.dispatchNextPrompt(threadId, resumeAttempted));
+        if ((interactive || this.selectedThreadId === threadId) && this.sdk.role === "controller" && !resumeAttempted) {
+            await this.hydrateThread(threadId, true);
+        } else {
+            this.publish();
+            queueMicrotask(() => this.dispatchNextPrompt(threadId, resumeSucceeded));
+        }
     }
     private requestTurnPage(threadId: string, cursor: string, runtime: ThreadRuntimeState,
         acceptResult: () => boolean = () => this.runtimeByThread.get(threadId) === runtime
@@ -1080,11 +1125,23 @@ export class BrowserFrontendSession {
         const operationIdentity = {};
         this.pendingUserOperations.set(key, operationIdentity);
         this.publish();
-        const operation = this.requestPromise(action, parameters,
-            () => this.matchesThreadPresentation(threadId, targetKey));
+        const current = () => this.matchesThreadPresentation(threadId, targetKey);
+        const operation = keyAction === "thread.workspace" && this.model.thread(threadId)?.status.semantic === "notLoaded"
+            ? this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current).then(response => {
+                let result: OperationResponse | Promise<OperationResponse> = response;
+                if (response.ok && !response.stale) {
+                    const reason = this.workspaceChangeUnavailable(threadId, targetKey, operationIdentity);
+                    result = reason === "" ? this.requestPromise(action, parameters, current)
+                        : {ok: false, error: {message: reason}};
+                }
+                return result;
+            })
+            : this.requestPromise(action, parameters, current);
         void operation.then(response => {
-            if (this.pendingUserOperations.get(key) === operationIdentity)
+            if (this.pendingUserOperations.get(key) === operationIdentity
+                && (!response.ok || keyAction !== "thread.workspace")) {
                 this.pendingUserOperations.delete(key);
+            }
             if (!response.ok && !response.stale)
                 this.setNotice(`${failureContext} failed: ${this.errorMessage(response)}`);
             else this.schedulePublish();
@@ -1205,12 +1262,18 @@ export class BrowserFrontendSession {
         } else if (type === "connection.bridge" || type === "connection.controller") {
             if (this.providerReady()) queueMicrotask(() => {
                 if (this.selectedThreadId !== "" && this.selectedThreadId !== DraftThreadId)
-                    this.ensureThreadHydrated(this.selectedThreadId);
+                    this.ensureThreadHydrated(this.selectedThreadId, true);
                 this.dispatchQueuedPrompts();
             });
         } else if (type === "workspace.project.changed" || type === "thread.project.changed") {
             this.refreshGroups();
             this.refreshBrowser();
+        } else if (type === "thread.settings.changed") {
+            const threadId = stringMember(frame.scope, "threadId");
+            const settings = isObject(data.threadSettings) ? data.threadSettings : data;
+            if (typeof settings.cwd === "string") {
+                this.pendingUserOperations.delete(`thread.workspace:${this.threadVisualKey(threadId)}`);
+            }
         } else if (type === "thread.removed") {
             const scope = isObject(frame.scope) ? frame.scope : {};
             const threadId = stringMember(scope, "threadId");

@@ -96,10 +96,8 @@ public:
   [[nodiscard]] std::optional<PendingRequestDescriptor>
   pendingRequest(const nodegraph::NodeRef &target, bool *busy = nullptr) const;
 
-  [[nodiscard]] std::optional<TurnSettingsContext>
-  turnSettings(const nodegraph::NodeRef &thread,
-               std::string_view draftIdentity = {},
-               std::string_view draftWorkspace = {}) const;
+  [[nodiscard]] std::optional<TurnSettingsContext> turnSettings(const nodegraph::NodeRef& thread,
+                                                                std::string_view draftIdentity = {}) const;
 
   [[nodiscard]] std::optional<InspectorSnapshot>
   inspector(const nodegraph::NodeRef &selectedThread,

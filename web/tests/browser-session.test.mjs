@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {readFileSync} from "node:fs";
 
 import {BrowserFrontendSession, DraftThreadId, suggestForkName} from "../dist/app/BrowserFrontendSession.js";
 import {cardKeys, changeSettingDraft, result, settingDraftFor, settingPromptOptions, stableKey,
@@ -571,8 +572,6 @@ test("new threads promote one draft identity into the authoritative row", async 
     const initialSettings = settingDraftFor(session.settingDrafts, draftKey, {cwd: "/workspace"}, settingCatalog);
     let authoredSettings = changeSettingDraft(session.settingDrafts, draftKey, {cwd: "/workspace"},
         settingCatalog, initialSettings.settingStamps, "approval", "never");
-    authoredSettings = changeSettingDraft(session.settingDrafts, draftKey, {cwd: "/workspace"},
-        settingCatalog, authoredSettings.settingStamps, "cwd", "/authored/workspace");
     assert.deepEqual(session.getSnapshot().newThreadDraft, {
         workspace: "/workspace", name: "", baseInstructions: "Base context",
         developerInstructions: "Developer context", ephemeral: true,
@@ -584,7 +583,7 @@ test("new threads promote one draft identity into the authoritative row", async 
     const create = requests(socket, "thread/start").at(-1);
     assert.ok(create);
     assert.deepEqual(create.payload.params, {
-        model: "gpt-current", approvalPolicy: "never", cwd: "/authored/workspace", baseInstructions: "Base context",
+        model: "gpt-current", approvalPolicy: "never", cwd: "/workspace", baseInstructions: "Base context",
         developerInstructions: "Developer context", ephemeral: true,
     });
     assert.equal(await session.submitPrompt("queued during creation", [], {effort: "must-not-steer"},
@@ -1218,6 +1217,11 @@ test("a queued prompt waits through controller loss and resumes after control re
 
     socket.receive({kind: "bridge.controller", controllerConnectionId: "role-transition"});
     await Promise.resolve();
+    const settings = requests(socket, "thread/resume").at(-1);
+    assert.notEqual(settings.payload.id, resume.payload.id, "regaining control owns a fresh settings request");
+    assert.equal(requests(socket, "turn/start").length, 0, "the queued prompt waits for current settings");
+    respond(socket, settings, {thread: {id: "role-thread", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wait for control");
     session.dispose();
 });
@@ -1486,5 +1490,244 @@ test("a rejected turn is terminal and never resubmitted automatically", async ()
     assert.equal(requests(socket, "turn/start").length, 1);
     assert.equal(requests(socket, "thread/resume").length, 1);
     assert.equal(session.prompts.submissions("recover-thread").at(-1).state, "failed");
+    session.dispose();
+});
+
+test("cached selection refreshes effective settings once without reloading history or discarding drafts", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "cached-settings");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "cached", status: {type: "idle"}}]});
+    session.selectThread("cached");
+    await completeControllerHydration(socket, {id: "cached", model: "old-model", status: {type: "idle"}});
+    const identity = session.threadVisualKey("cached");
+    const catalog = turnSettingCatalog({models: [], permissionProfiles: []});
+    let draft = changeSettingDraft(session.settingDrafts, identity, session.model.thread("cached").raw,
+        catalog, session.model.thread("cached").settingStamps, "approval", "never");
+    session.selectThread(""); session.selectThread("cached"); session.selectThread("cached");
+    assert.equal(requests(socket, "thread/resume").length, 2, "cached selection shares one settings refresh");
+    assert.equal(session.getSnapshot().selectedThreadLoading, false, "cached conversation remains visible");
+    const refresh = requests(socket, "thread/resume").at(-1);
+    assert.deepEqual(refresh.payload.params, {threadId: "cached", excludeTurns: true});
+    respond(socket, refresh, {thread: {id: "cached"}, model: "new-model", reasoningEffort: "high",
+        approvalPolicy: "on-request", sandbox: {type: "readOnly", networkAccess: true}});
+    await Promise.resolve(); await Promise.resolve();
+    const thread = session.model.thread("cached");
+    assert.equal(thread.raw.model, "new-model");
+    assert.equal(thread.raw.reasoningEffort, "high");
+    draft = settingDraftFor(session.settingDrafts, identity, thread.raw, catalog, thread.settingStamps);
+    assert.equal(draft.values.model, "new-model");
+    assert.equal(draft.values.approval, "never", "unsent edit survives authoritative settings refresh");
+    assert.deepEqual(settingPromptOptions(draft, catalog).turn, {approvalPolicy: "never"});
+    assert.equal(requests(socket, "thread/turns/list").length, 1);
+    assert.equal(requests(socket, "thread/items/list").length, 0);
+    session.dispose();
+});
+
+test("claiming controller refreshes an observer's retained selection without reading history again", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "claim-settings", "observer");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
+    session.selectThread("retained");
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 0);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "claim-settings"});
+    await Promise.resolve(); await Promise.resolve();
+    const refresh = requests(socket, "thread/resume").at(-1);
+    assert.ok(refresh, "controller acquisition refreshes already-ready thread settings");
+    respond(socket, refresh, {thread: {id: "retained"}, model: "confirmed-model", reasoningEffort: "low"});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("retained").raw.model, "confirmed-model");
+    assert.equal(requests(socket, "thread/turns/list").length, 1);
+    session.dispose();
+});
+
+test("failed settings refresh preserves cached history and reports the failure", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "failed-settings");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "cached-failure", status: {type: "idle"}}]});
+    session.selectThread("cached-failure");
+    await completeControllerHydration(socket, {id: "cached-failure", model: "last-confirmed", status: {type: "idle"}});
+    session.selectThread("cached-failure");
+    reject(socket, requests(socket, "thread/resume").at(-1), "settings unavailable");
+    await Promise.resolve(); await Promise.resolve(); await waitForPublish();
+    assert.equal(session.getSnapshot().selectedThreadLoading, false);
+    assert.match(session.getSnapshot().notice, /settings refresh failed/i);
+    assert.equal(session.model.thread("cached-failure").raw.model, "last-confirmed");
+    assert.equal(requests(socket, "thread/turns/list").length, 1);
+    session.dispose();
+});
+
+
+test("controller acquisition while history is pending refreshes settings before dispatch", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "pending-claim", "observer");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "pending-thread", status: {type: "idle"}}]});
+    session.selectThread("pending-thread");
+    const page = requests(socket, "thread/turns/list").at(-1);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "pending-claim"});
+    await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 0, "settings wait for the existing history transaction");
+    respond(socket, page, {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    const settings = requests(socket, "thread/resume").at(-1);
+    assert.ok(settings, "the selected observer read is promoted to controller settings refresh");
+    respond(socket, settings, {thread: {id: "pending-thread"}, model: "confirmed-after-claim"});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("pending-thread").raw.model, "confirmed-after-claim");
+    assert.equal(requests(socket, "thread/turns/list").length, 1, "promotion retains the original history page");
+    session.dispose();
+});
+
+const workspaceContract = JSON.parse(readFileSync(new URL("../../tests/fixtures/frontend-presentation.json", import.meta.url), "utf8"));
+for (const entry of workspaceContract.workspaceChangeCases) {
+    test(`workspace change contract: ${entry.id}`, async () => {
+        const socket = new FakeSocket();
+        const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+        session.connect(); socket.open(); await readyProvider(socket, entry.id);
+        socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {
+            id: "workspace-target", cwd: entry.initial, status: {type: "idle"}}}}));
+        const targetKey = session.threadVisualKey("workspace-target");
+        session.changeWorkspace("workspace-target", entry.proposed, targetKey);
+        const operation = requests(socket, "thread/settings/update").at(-1);
+        assert.ok(operation);
+        assert.deepEqual(operation.payload.params, {threadId: "workspace-target", cwd: entry.proposed.trim()});
+        assert.equal(session.model.thread("workspace-target").cwd, entry.initial);
+        session.changeWorkspace("workspace-target", "/duplicate", targetKey);
+        assert.equal(requests(socket, "thread/settings/update").length, 1);
+        for (const step of entry.steps) {
+            if (step.kind === "accepted") { respond(socket, operation, {}); }
+            else if (step.kind === "failed") { reject(socket, operation, "workspace unavailable"); }
+            else {
+                socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {
+                    threadId: "workspace-target", threadSettings: step.kind === "partial" ? {model: "other"} : {cwd: step.cwd}}}));
+            }
+            await Promise.resolve(); await Promise.resolve();
+            assert.equal(session.model.thread("workspace-target").cwd, step.cwd);
+            assert.equal(session.operationPending("thread.workspace", "workspace-target", targetKey), step.pending);
+            assert.equal(session.getSnapshot().selectedThreadId, "", "an unselected target stays unselected");
+            const catalog = turnSettingCatalog({models: [], permissionProfiles: []});
+            const draft = settingDraftFor(session.settingDrafts, targetKey, session.model.thread("workspace-target").raw, catalog);
+            assert.equal(Object.hasOwn(settingPromptOptions(draft, catalog).turn, "cwd"), false);
+        }
+        session.dispose();
+    });
+}
+
+test("workspace updates preserve the selected thread's settings and composer lifetime", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "workspace-targeting");
+    for (const id of ["a", "b"]) socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id, name: `Thread ${id}`, cwd: `/workspace/${id}`, status: {type: "idle"}}}}));
+    session.selectThread("a");
+    await completeControllerHydration(socket, {id: "a", cwd: "/workspace/a", status: {type: "idle"}});
+    const catalog = turnSettingCatalog({models: [], permissionProfiles: []});
+    const key = session.threadVisualKey("a");
+    const initial = settingDraftFor(session.settingDrafts, key, session.model.thread("a").raw, catalog);
+    changeSettingDraft(session.settingDrafts, key, session.model.thread("a").raw, catalog, initial.settingStamps, "approval", "never");
+    const composer = session.composerVisualKey();
+    const target = session.threadVisualKey("b");
+    session.changeWorkspace("b", "/remote/b", target);
+    const change = requests(socket, "thread/settings/update").at(-1);
+    assert.deepEqual(change.payload.params, {threadId: "b", cwd: "/remote/b"});
+    respond(socket, change, {});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("b").cwd, "/workspace/b");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {threadId: "b", threadSettings: {cwd: "/remote/b"}}}));
+    assert.equal(session.getSnapshot().selectedThreadId, "a");
+    assert.equal(session.composerVisualKey(), composer);
+    assert.equal(session.settingDrafts.get(key).values.approval, "never");
+    assert.equal(session.settingDrafts.get(key).touched.has("approval"), true);
+    assert.equal(session.model.thread("a").cwd, "/workspace/a");
+    assert.equal(await session.submitPrompt("ordinary prompt", [], settingPromptOptions(session.settingDrafts.get(key), catalog).turn), true);
+    await Promise.resolve();
+    const start = requests(socket, "turn/start").at(-1);
+    assert.ok(start);
+    assert.equal(Object.hasOwn(start.payload.params, "cwd"), false);
+    session.dispose();
+});
+
+for (const retirement of ["deletion", "provider"]) test(`workspace response after ${retirement} is inert`, async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, `workspace-${retirement}`);
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {id: "target", cwd: "/old"}}}));
+    const key = session.threadVisualKey("target");
+    session.changeWorkspace("target", "/late", key);
+    const request = requests(socket, "thread/settings/update").at(-1);
+    assert.ok(request);
+    if (retirement === "deletion") {
+        socket.receive(appserver({jsonrpc: "2.0", method: "thread/deleted", params: {threadId: "target"}}));
+    } else { socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2}); }
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {id: "target", cwd: "/replacement"}}}));
+    const replacement = session.threadVisualKey("target");
+    assert.notEqual(replacement, key);
+    respond(socket, request, {});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("target").cwd, "/replacement");
+    assert.equal(session.operationPending("thread.workspace", "target", replacement), false);
+    session.dispose();
+});
+
+test("workspace action revalidates controller access, active turns and nonempty paths", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "workspace-permissions", "observer");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {id: "target", cwd: "/old"}}}));
+    session.changeWorkspace("target", "/observer");
+    assert.equal(requests(socket, "thread/settings/update").length, 0);
+    assert.match(session.workspaceChangeUnavailable("target"), /controller/u);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "workspace-permissions"});
+    await Promise.resolve();
+    session.changeWorkspace("target", " ");
+    assert.equal(requests(socket, "thread/settings/update").length, 0);
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/status/changed", params: {threadId: "target", status: {type: "active", activeFlags: []}}}));
+    session.changeWorkspace("target", "/during-execution");
+    assert.match(session.workspaceChangeUnavailable("target"), /active turn/u);
+    assert.equal(requests(socket, "thread/settings/update").length, 0);
+    session.dispose();
+});
+
+for (const outcome of ["success", "failure", "active", "stale"]) test(`unloaded workspace context: ${outcome}`, async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, `cold-workspace-${outcome}`);
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
+        thread: {id: "cold", cwd: "/old", status: {type: "notLoaded"}}}}));
+    const key = session.threadVisualKey("cold");
+    session.changeWorkspace("cold", "/new", key);
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume);
+    assert.deepEqual(resume.payload.params, {threadId: "cold", excludeTurns: true});
+    assert.equal(requests(socket, "thread/settings/update").length, 0);
+    session.changeWorkspace("cold", "/duplicate", key);
+    assert.equal(requests(socket, "thread/resume").length, 1);
+    if (outcome === "failure") { reject(socket, resume, "cold resume failed"); }
+    else {
+        if (outcome === "stale") {
+            socket.receive(appserver({jsonrpc: "2.0", method: "thread/deleted", params: {threadId: "cold"}}));
+            socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {id: "cold", cwd: "/replacement"}}}));
+        }
+        respond(socket, resume, {thread: {id: "cold", cwd: "/old", status: {type: outcome === "active" ? "active" : "idle"}}});
+    }
+    for (let turn = 0; turn < 8; ++turn) { await Promise.resolve(); }
+    if (outcome === "success") {
+        const change = requests(socket, "thread/settings/update").at(-1);
+        assert.ok(change);
+        assert.deepEqual(change.payload.params, {threadId: "cold", cwd: "/new"});
+        respond(socket, change, {});
+        socket.receive(appserver({jsonrpc: "2.0", method: "thread/settings/updated", params: {threadId: "cold", threadSettings: {cwd: "/new"}}}));
+        assert.equal(session.model.thread("cold").cwd, "/new");
+    } else {
+        assert.equal(requests(socket, "thread/settings/update").length, 0);
+        assert.equal(session.model.thread("cold").cwd, outcome === "stale" ? "/replacement" : "/old");
+    }
+    assert.equal(requests(socket, "thread/turns/list").length, 0);
+    assert.equal(session.getSnapshot().selectedThreadId, "");
     session.dispose();
 });

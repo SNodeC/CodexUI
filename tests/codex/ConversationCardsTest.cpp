@@ -508,18 +508,12 @@ bool testApplicationStyleSheetContract() {
   const auto token = [](const char *value) {
     return QString::fromLatin1(value);
   };
-  const std::array<QString, 17> componentRules{
-      QStringLiteral(
-          "QFrame#topBar { background: %1; border-bottom: 1px solid %2; }")
-          .arg(token(codexui::UiStyle::panel),
-               token(codexui::UiStyle::divider)),
-      QStringLiteral("QLabel#workspaceBreadcrumb { color: %1; font-weight: "
-                     "500; }")
-          .arg(token(codexui::UiStyle::secondary)),
+  const std::array<QString, 16> componentRules{
+      QStringLiteral("QFrame#topBar { background: %1; border-bottom: 1px solid %2; }")
+          .arg(token(codexui::UiStyle::panel), token(codexui::UiStyle::divider)),
       QStringLiteral("QFrame#customStatusBar { background: %1; border-top: "
                      "1px solid %2; }")
-          .arg(token(codexui::UiStyle::raised),
-               token(codexui::UiStyle::divider)),
+          .arg(token(codexui::UiStyle::raised), token(codexui::UiStyle::divider)),
       QStringLiteral("QFrame[kind=\"statusDot\"] { background: %1; "
                      "border-radius: 5px; }")
           .arg(token(codexui::UiStyle::placeholder)),
@@ -538,32 +532,25 @@ bool testApplicationStyleSheetContract() {
       QStringLiteral("QPlainTextEdit#upcomingPromptEditor { background: "
                      "transparent; color: %1; border: 0; padding: 3px 2px; }")
           .arg(token(codexui::UiStyle::primary)),
-      QStringLiteral("QFrame#conversation { background: %1; }")
-          .arg(token(codexui::UiStyle::appBackground)),
+      QStringLiteral("QFrame#conversation { background: %1; }").arg(token(codexui::UiStyle::appBackground)),
       QStringLiteral("QFrame#attachmentFileBox { background: %1; border: 1px "
                      "solid %2; border-radius: 6px; }")
-          .arg(token(codexui::UiStyle::panel),
-               token(codexui::UiStyle::divider)),
-      QStringLiteral(
-          "QTextBrowser#markdownTextView, "
-          "QPlainTextEdit#fileChangesList { background: transparent; "
-          "border: 0; padding: 0; margin: 0; }"),
+          .arg(token(codexui::UiStyle::panel), token(codexui::UiStyle::divider)),
+      QStringLiteral("QTextBrowser#markdownTextView, "
+                     "QPlainTextEdit#fileChangesList { background: transparent; "
+                     "border: 0; padding: 0; margin: 0; }"),
       QStringLiteral("QScrollArea#messageImages { background: %1; border: 1px "
                      "solid %2; border-radius: 6px; }")
-          .arg(token(codexui::UiStyle::codeSurface),
-               token(codexui::UiStyle::divider)),
-      QStringLiteral("QWidget#messageImageStrip { background: %1; }")
-          .arg(token(codexui::UiStyle::codeSurface)),
+          .arg(token(codexui::UiStyle::codeSurface), token(codexui::UiStyle::divider)),
+      QStringLiteral("QWidget#messageImageStrip { background: %1; }").arg(token(codexui::UiStyle::codeSurface)),
       QStringLiteral("QTextEdit#commandOutputView { background: %1; color: %2; "
                      "border-radius: 6px; padding: %3px %4px; }")
-          .arg(token(codexui::UiStyle::codeSurface),
-               token(codexui::UiStyle::codeText))
+          .arg(token(codexui::UiStyle::codeSurface), token(codexui::UiStyle::codeText))
           .arg(codexui::UiStyle::commandOutputVerticalPadding)
           .arg(codexui::UiStyle::commandOutputHorizontalPadding),
       QStringLiteral("QTextEdit#commandTextView { background: %1; border: 1px "
                      "solid %2; border-radius: 6px; }")
-          .arg(token(codexui::UiStyle::raised),
-               token(codexui::UiStyle::divider)),
+          .arg(token(codexui::UiStyle::raised), token(codexui::UiStyle::divider)),
       QStringLiteral("QFrame#pendingPromptCard { background: transparent; "
                      "border: 1px solid transparent; border-radius: 8px; }"),
   };

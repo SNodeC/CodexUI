@@ -21,6 +21,10 @@ namespace codexui::UiStyle { class TokenUsageLabel; }
 
 namespace codexui::codex::middle {
 
+    namespace presentation {
+        class CopyButton;
+    }
+
 class ComposerPane;
 class ConversationView;
 class InspectorPane;
@@ -42,6 +46,7 @@ public:
   void setThreadHeading(QString title, const ui::TokenUsageText &usage,
                         QString trailingMetadata = {}, QString state = {},
                         QString stateTone = {});
+  void setThreadWorkspace(QString path, QString unavailable, std::function<void()> action);
   void showNotice(QString message, bool error = true);
   void showSidebar(bool visible);
   void showInspector(bool visible);
@@ -72,6 +77,10 @@ private:
   ThreadPane *threadPane = nullptr;
   QFrame *conversationRegion = nullptr;
   QLabel *conversationTitle = nullptr;
+  QToolButton* conversationWorkspace = nullptr;
+  presentation::CopyButton* workspaceCopy = nullptr;
+  QString workspacePath;
+  std::function<void()> workspaceAction;
   UiStyle::TokenUsageLabel *conversationTokens = nullptr;
   QLabel *conversationState = nullptr;
   QToolButton *reasoningVisibility = nullptr;

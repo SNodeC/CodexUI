@@ -53,19 +53,20 @@ struct Attachment final {
 };
 
 enum class NodeActionKind : std::uint8_t {
-  Hydrate,
-  Reload,
-  LoadHistory,
-  Rename,
-  Fork,
-  Archive,
-  Unarchive,
-  Delete,
-  SubmitPrompt,
-  InterruptTurn,
-  ResolveInteraction,
-  PromptMaterialized,
-  UiDetached,
+    Hydrate,
+    Reload,
+    LoadHistory,
+    Rename,
+    ChangeWorkspace,
+    Fork,
+    Archive,
+    Unarchive,
+    Delete,
+    SubmitPrompt,
+    InterruptTurn,
+    ResolveInteraction,
+    PromptMaterialized,
+    UiDetached,
 };
 
 // Only newly authored data crosses from Qt. Existing protocol-derived state is

@@ -129,6 +129,7 @@ public:
   nodegraph::NodeRef target;
   std::string title;
   std::string cwd;
+  std::string workspaceChangeUnavailable;
   UiStatus status;
   std::optional<std::int64_t> createdAt;
   ProtocolTimes timing;
@@ -1592,45 +1593,37 @@ void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
   const bool group = item->kind != ui::ThreadRowKind::Thread;
   const std::string id = item->id;
   if (group) {
-    menu->addAction(
-            QStringLiteral("New thread here…"), this,
-            [this, projectId = item->projectId, sectionId = item->sectionId] {
-              const auto found =
-                  std::ranges::find(projects, projectId, &ui::ThreadGroup::id);
-              std::string cwd;
-              if (found != projects.end()) {
-                const auto roots =
-                    found->fields.value("roots", nlohmann::json::array());
-                if (!roots.empty())
-                  cwd = roots.front().value("path", "");
-              }
-              if (canControl && actions.newGroupedThread)
-                actions.newGroupedThread(projectId, sectionId, cwd);
-            })
-        ->setEnabled(canControl);
-    if (!id.empty()) {
-      menu->addAction(QStringLiteral("Details…"), this,
-                      [this, project, id] { editGroup(project, id, true); });
-      menu->addAction(QStringLiteral("Edit…"), this,
-                      [this, project, id] {
-                        if (canControl)
-                          editGroup(project, id);
+      menu->addAction(QStringLiteral("New thread here…"),
+                      this,
+                      [this, projectId = item->projectId, sectionId = item->sectionId] {
+                          if (canControl && actions.newGroupedThread) {
+                              actions.newGroupedThread(projectId, sectionId);
+                          }
                       })
           ->setEnabled(canControl);
-      menu->addAction(
-              QStringLiteral("Delete group…"), this,
-              [this, project, id] {
-                if (canControl && actions.manage &&
-                    QMessageBox::question(
-                        this, QStringLiteral("Delete group"),
-                        QStringLiteral("Delete this group? Its threads will be "
-                                       "retained, not deleted.")) ==
-                        QMessageBox::Yes)
-                  actions.manage(project ? DeleteProject : DeleteSection,
-                                 {{project ? "projectId" : "sectionId", id}});
-              })
-          ->setEnabled(canControl);
-    }
+      if (!id.empty()) {
+          menu->addAction(QStringLiteral("Details…"), this, [this, project, id] {
+              editGroup(project, id, true);
+          });
+          menu->addAction(QStringLiteral("Edit…"),
+                          this,
+                          [this, project, id] {
+                              if (canControl)
+                                  editGroup(project, id);
+                          })
+              ->setEnabled(canControl);
+          menu->addAction(QStringLiteral("Delete group…"),
+                          this,
+                          [this, project, id] {
+                              if (canControl && actions.manage &&
+                                  QMessageBox::question(this,
+                                                        QStringLiteral("Delete group"),
+                                                        QStringLiteral("Delete this group? Its threads will be "
+                                                                       "retained, not deleted.")) == QMessageBox::Yes)
+                                  actions.manage(project ? DeleteProject : DeleteSection, {{project ? "projectId" : "sectionId", id}});
+                          })
+              ->setEnabled(canControl);
+      }
     if (project && !id.empty()) {
       auto *before = menu->addMenu(QStringLiteral("Move project before"));
       before->setEnabled(canControl);
@@ -1721,6 +1714,7 @@ bool ThreadPane::applyItemPresentation(
   assign(item->target, row.target);
   assign(item->title, row.title);
   assign(item->cwd, row.cwd);
+  assign(item->workspaceChangeUnavailable, row.workspaceChangeUnavailable);
   assign(item->status, row.status);
   assign(item->createdAt, row.createdAt);
   assign(item->timing, row.timing);
@@ -2353,6 +2347,9 @@ void ThreadPane::showContextMenu(const QPoint &position) {
   };
   QAction *reload = addAction(QStringLiteral("Reload"), &Actions::reload);
   addAction(QStringLiteral("Timing details"), &Actions::timing);
+  QAction* workspace = addAction(QStringLiteral("Change workspace…"), &Actions::changeWorkspace);
+  workspace->setEnabled(canControl && target && item->workspaceChangeUnavailable.empty());
+  workspace->setToolTip(target ? text(item->workspaceChangeUnavailable) : QStringLiteral("An existing thread is required."));
   QAction *rename = addAction(QStringLiteral("Rename"), &Actions::rename);
   QAction *fork = addAction(QStringLiteral("Quick fork"), &Actions::fork);
   QAction *forkWithOptions = addAction(QStringLiteral("Fork with options…"),

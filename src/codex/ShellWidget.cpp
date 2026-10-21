@@ -16,6 +16,7 @@
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/MiddleRegionWidget.h"
 #include "codex/middle/ThreadPane.h"
+#include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/BrandMark.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
@@ -35,21 +36,20 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
-#include <QPushButton>
 #include <QPointer>
+#include <QPushButton>
 #include <QScopedValueRollback>
 #include <QSizePolicy>
 #include <QStringList>
 #include <QStyle>
 #include <QTabWidget>
-#include <QTimer>
 #include <QThreadPool>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
-
 #include <algorithm>
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -404,6 +404,7 @@ struct ShellChromeValues final {
   std::string providerState;
   std::string selectedTransport;
   std::string workspace;
+  std::string workspaceChangeUnavailable;
   std::string title;
   ui::TokenUsageSnapshot tokenUsage;
   UiStatus status;
@@ -537,8 +538,7 @@ struct ShellWidget::Impl final {
                          ThreadSelectionOrigin origin,
                          std::uint64_t graphSerial = 0);
   void render(const ui::PendingRequestsSummary *requests = nullptr);
-  void renderStatus(const ShellChromeValues &values,
-                    bool updateWorkspace = true);
+  void renderStatus(const ShellChromeValues& values);
   void showNotice(QString message, bool error = true);
   [[nodiscard]] bool sendNodeAction(nodegraph::NodeAction action,
                                     QString rejection);
@@ -559,14 +559,14 @@ struct ShellWidget::Impl final {
   [[nodiscard]] std::optional<ui::ThreadListSnapshot>
   threadSnapshot(std::uint64_t *revision = nullptr);
   void beginThreadDraft(NewThreadDraft draft);
-  void beginNewThreadDialog(std::string project = {}, std::string section = {},
-                            std::string workspace = {});
+  void beginNewThreadDialog(std::string project = {}, std::string section = {});
   [[nodiscard]] std::optional<NewThreadDraft>
   suggestedForkDraft(const nodegraph::NodeRef &thread) const;
   void forkThread(const nodegraph::NodeRef &thread, NewThreadDraft draft,
                   bool includeOptions);
   void beginForkThreadDialog(const nodegraph::NodeRef &thread);
   void renameThreadDialog(const nodegraph::NodeRef &thread);
+  void changeWorkspaceDialog(const nodegraph::NodeRef& thread);
   void confirmDeleteThread(const nodegraph::NodeRef &thread);
   [[nodiscard]] bool submitPrompt(QString prompt,
                                   std::vector<AttachmentDraft> attachments);
@@ -639,8 +639,7 @@ struct ShellWidget::Impl final {
   middle::MiddleRegionWidget *middleRegion = nullptr;
   QPushButton *restoreSidebarButton = nullptr;
   QPushButton *restoreInspectorButton = nullptr;
-  QLabel *workspaceBreadcrumb = nullptr;
-  QPushButton *requestButton = nullptr;
+  QPushButton* requestButton = nullptr;
   QToolButton *connectionButton = nullptr;
   QAction *connectAction = nullptr;
   QAction *disconnectAction = nullptr;
@@ -671,12 +670,6 @@ void ShellWidget::Impl::buildUi() {
   restoreSidebarButton->hide();
   topLayout->addSpacing(12);
   topLayout->addWidget(restoreSidebarButton);
-  topLayout->addSpacing(18);
-  workspaceBreadcrumb = makeLabel(QStringLiteral("No workspace"), "muted");
-  workspaceBreadcrumb->setObjectName(QStringLiteral("workspaceBreadcrumb"));
-  workspaceBreadcrumb->setWordWrap(false);
-  workspaceBreadcrumb->setMaximumWidth(280);
-  topLayout->addWidget(workspaceBreadcrumb);
   topLayout->addStretch();
 
   restoreInspectorButton = new QPushButton(QStringLiteral("Show inspector"));
@@ -819,11 +812,9 @@ void ShellWidget::Impl::buildUi() {
 void ShellWidget::Impl::connectUi() {
   middle::ThreadPane::Actions threadActions;
   threadActions.newThread = [this] { beginNewThreadDialog(); };
-  threadActions.newGroupedThread =
-      [this](std::string project, std::string section, std::string cwd) {
-        beginNewThreadDialog(std::move(project), std::move(section),
-                             std::move(cwd));
-      };
+  threadActions.newGroupedThread = [this](std::string project, std::string section) {
+      beginNewThreadDialog(std::move(project), std::move(section));
+  };
   threadActions.browserChanged = [this] {
     pendingThreadPane = true;
     schedulePaneCommit();
@@ -863,14 +854,14 @@ void ShellWidget::Impl::connectUi() {
   threadActions.select = [this](const nodegraph::NodeRef &thread) {
     selectGraphThread(thread, ThreadSelectionOrigin::User);
   };
-  threadActions.reload = [this](const nodegraph::NodeRef &thread) {
-    if (!thread)
-      return;
-    nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Reload,
-                                 {}, {}, {}, {}};
-    static_cast<void>(sendNodeAction(
-        std::move(action),
-        QStringLiteral("Thread reload was not admitted; try again.")));
+  threadActions.reload = [this](const nodegraph::NodeRef& thread) {
+      if (!thread)
+          return;
+      nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Reload, {}, {}, {}, {}};
+      static_cast<void>(sendNodeAction(std::move(action), QStringLiteral("Thread reload was not admitted; try again.")));
+  };
+  threadActions.changeWorkspace = [this](const nodegraph::NodeRef& thread) {
+      changeWorkspaceDialog(thread);
   };
   threadActions.rename = [this](const nodegraph::NodeRef &thread) {
     if (thread)
@@ -1214,16 +1205,14 @@ void ShellWidget::Impl::startConversationSnapshot() {
     return;
   }
   const auto info = uiAdapter.conversationInfo(boundGraphThread);
-  if (!info || info->historyRequestPending) {
-    if (info)
-      middleRegion->conversation().setHistoryRequestPending(
-          boundGraphThread->id().canonical, info->historyRequestPending);
-    // A failed tryRead has no completion event to wake the pending projection.
-    requestConversationProjection(false);
-    return;
+  if (!info || (info->historyRequestPending && !info->readyForDisplay)) {
+      if (info)
+          middleRegion->conversation().setHistoryRequestPending(boundGraphThread->id().canonical, info->historyRequestPending);
+      // A failed tryRead has no completion event to wake the pending projection.
+      requestConversationProjection(false);
+      return;
   }
-  middleRegion->conversation().setHistoryRequestPending(
-      boundGraphThread->id().canonical, false);
+  middleRegion->conversation().setHistoryRequestPending(boundGraphThread->id().canonical, info->historyRequestPending);
   middleRegion->conversation().setProviderHasMore(
       boundGraphThread->id().canonical, info->providerHasMore);
   conversationProjectionInFlight = true;
@@ -1263,18 +1252,18 @@ void ShellWidget::Impl::startConversationSnapshot() {
               }
               const auto currentInfo =
                   uiAdapter.conversationInfo(requestedThread);
-              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta) ||
-                  !currentInfo || currentInfo->historyRequestPending) {
-                conversationProjectionRequested = true;
-                conversationFullProjectionRequested |= fullSnapshot;
-                QTimer::singleShot(
-                    GraphRetryDelayMilliseconds, owner,
-                    [this] { requestConversationProjection(false); });
-                return;
+              if ((fullSnapshot && !snapshot) || (!fullSnapshot && !delta) || !currentInfo ||
+                  (currentInfo->historyRequestPending && !currentInfo->readyForDisplay)) {
+                  conversationProjectionRequested = true;
+                  conversationFullProjectionRequested |= fullSnapshot;
+                  QTimer::singleShot(GraphRetryDelayMilliseconds, owner, [this] {
+                      requestConversationProjection(false);
+                  });
+                  return;
               }
               if (conversationProjectionRequested) {
-                requestConversationProjection(false);
-                return;
+                  requestConversationProjection(fullSnapshot);
+                  return;
               }
 
               // A complete snapshot initializes or replaces authority. A
@@ -1978,8 +1967,9 @@ void ShellWidget::Impl::selectGraphThread(nodegraph::NodeRef thread,
   newThreadDraft.reset();
   selectedGraphThreadId = targetId;
   bindGraphPanes(thread);
-  if (origin == ThreadSelectionOrigin::User)
-    hydrateSelectedThreadIfNeeded(std::move(thread));
+  if (origin == ThreadSelectionOrigin::User) {
+      hydrateSelectedThreadIfNeeded(std::move(thread));
+  }
 }
 
 void ShellWidget::Impl::handleProtocolDiagnostic(
@@ -2197,11 +2187,7 @@ void ShellWidget::Impl::render(
       if (values.title.empty())
         values.title = "Untitled thread";
       values.workspace = exactStringFromValue(valueMember(*state, "cwd"));
-      if (values.workspace.empty())
-        values.workspace =
-            exactStringFromValue(valueMember(*state, "workspace"));
-      if (values.workspace.empty())
-        values.workspace = "No workspace";
+      values.workspaceChangeUnavailable = nodegraph::threadWorkspaceChangeUnavailable(*read, selected);
       values.status = statusFromState(*state);
       values.recoveryOnly = boolFromValue(valueMember(*state, "recoveryOnly"));
       const std::string hydrationState =
@@ -2280,10 +2266,7 @@ void ShellWidget::Impl::render(
         newThreadDraft || !creationDraftCorrelation.empty()
             ? ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation)
             : std::string{};
-    const std::string draftWorkspace =
-        newThreadDraft ? utf8(newThreadDraft->workspace) : std::string{};
-    auto settingsContext =
-        uiAdapter.turnSettings(boundGraphThread, draftIdentity, draftWorkspace);
+    auto settingsContext = uiAdapter.turnSettings(boundGraphThread, draftIdentity);
     if (!settingsContext) {
       pendingChrome = true;
       schedulePaneCommit();
@@ -2293,6 +2276,9 @@ void ShellWidget::Impl::render(
         std::move(*settingsContext));
   }
 
+  if (values.canControl && renderedChrome && !renderedChrome->canControl && boundGraphThread && !values.recoveryOnly) {
+      hydrateSelectedThreadIfNeeded(boundGraphThread);
+  }
   const bool chromeChanged = !renderedChrome || *renderedChrome != values;
   if (!chromeChanged)
     return;
@@ -2322,11 +2308,15 @@ void ShellWidget::Impl::render(
           QString::fromLatin1(statusToneValue.data(), statusToneValue.size());
       middleRegion->setThreadHeading(text(values.title), values.tokenUsage.thread,
                                      activity, status, tone);
+      middleRegion->setThreadWorkspace(text(values.workspace), text(values.workspaceChangeUnavailable), [this, target = boundGraphThread] {
+          changeWorkspaceDialog(target);
+      });
     } else {
       middleRegion->setThreadHeading(text(values.title), values.tokenUsage.thread);
+      middleRegion->setThreadWorkspace(text(values.workspace), QStringLiteral("Create a thread before changing its workspace."), {});
     }
   }
-  renderStatus(values, !replacementHydrating);
+  renderStatus(values);
   overallTokens->setUsage(text(values.tokenUsage.overall.summary),
                           text(values.tokenUsage.overall.details));
   renderedChrome = values;
@@ -2335,99 +2325,73 @@ void ShellWidget::Impl::render(
                      static_cast<qulonglong>(shellRenderCommits));
 }
 
-void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
-                                     bool updateWorkspace) {
-  const QString connectionText = status.selectedTransport.empty()
-                                     ? QStringLiteral("Connection")
-                                     : text(status.selectedTransport);
-  if (connectionButton->text() != connectionText)
-    connectionButton->setText(connectionText);
-  const QString connectionTip = status.retrying ? QStringLiteral("Disconnected, retrying")
-      : status.connected ? QStringLiteral("Connected bridge transport")
-                         : QStringLiteral("Disconnected bridge transport");
-  if (connectionButton->toolTip() != connectionTip)
-    connectionButton->setToolTip(connectionTip);
-  connectAction->setEnabled(!status.connected);
-  disconnectAction->setEnabled(status.connected);
-  reconnectAction->setEnabled(status.connected);
-  const QString controllerText = status.role == "controller"
-                                     ? QStringLiteral("Release control")
-                                     : QStringLiteral("Claim control");
-  if (controllerButton->text() != controllerText)
-    controllerButton->setText(controllerText);
-  controllerButton->setEnabled(status.connected);
+void ShellWidget::Impl::renderStatus(const ShellChromeValues& status) {
+    const QString connectionText = status.selectedTransport.empty() ? QStringLiteral("Connection") : text(status.selectedTransport);
+    if (connectionButton->text() != connectionText)
+        connectionButton->setText(connectionText);
+    const QString connectionTip = status.retrying    ? QStringLiteral("Disconnected, retrying")
+                                  : status.connected ? QStringLiteral("Connected bridge transport")
+                                                     : QStringLiteral("Disconnected bridge transport");
+    if (connectionButton->toolTip() != connectionTip)
+        connectionButton->setToolTip(connectionTip);
+    connectAction->setEnabled(!status.connected);
+    disconnectAction->setEnabled(status.connected);
+    reconnectAction->setEnabled(status.connected);
+    const QString controllerText = status.role == "controller" ? QStringLiteral("Release control") : QStringLiteral("Claim control");
+    if (controllerButton->text() != controllerText)
+        controllerButton->setText(controllerText);
+    controllerButton->setEnabled(status.connected);
 
-  const QString requestText =
-      QStringLiteral("Requests (%1)")
-          .arg(static_cast<qulonglong>(status.totalPending));
-  if (requestButton->text() != requestText)
-    requestButton->setText(requestText);
-  requestButton->setVisible(status.totalPending != 0);
-  PendingRequestControls controls;
-  if (status.attention) {
-    const PendingRequestDescriptor &request = *status.attention;
-    const bool replacesTarget =
-        !renderedChrome || !renderedChrome->attention ||
-        renderedChrome->attention->target != request.target;
-    controls = PendingRequestPolicy::controls(request);
-    QString requestDetail = text(PendingRequestPolicy::detail(request));
-    const QString requestStatus = text(PendingRequestPolicy::status(request));
-    if (!requestStatus.isEmpty())
-      requestDetail += QStringLiteral("  |  ") + requestStatus;
-    middleRegion->composer().setAttentionRequest(
-        text(PendingRequestPolicy::title(request.kind)),
-        std::move(requestDetail), controls.positive.has_value(),
-        controls.positive ? text(controls.positive->label) : QString{},
-        controls.negative.has_value(),
-        controls.negative ? text(controls.negative->label) : QString{},
-        replacesTarget);
-  }
-  middleRegion->composer().setAttentionVisible(status.attention.has_value());
-  middleRegion->composer().setAttentionActionEnabled(
-      controls.directEnabled && controls.positive,
-      controls.directEnabled && controls.negative, controls.reviewEnabled);
+    const QString requestText = QStringLiteral("Requests (%1)").arg(static_cast<qulonglong>(status.totalPending));
+    if (requestButton->text() != requestText)
+        requestButton->setText(requestText);
+    requestButton->setVisible(status.totalPending != 0);
+    PendingRequestControls controls;
+    if (status.attention) {
+        const PendingRequestDescriptor& request = *status.attention;
+        const bool replacesTarget = !renderedChrome || !renderedChrome->attention || renderedChrome->attention->target != request.target;
+        controls = PendingRequestPolicy::controls(request);
+        QString requestDetail = text(PendingRequestPolicy::detail(request));
+        const QString requestStatus = text(PendingRequestPolicy::status(request));
+        if (!requestStatus.isEmpty())
+            requestDetail += QStringLiteral("  |  ") + requestStatus;
+        middleRegion->composer().setAttentionRequest(text(PendingRequestPolicy::title(request.kind)),
+                                                     std::move(requestDetail),
+                                                     controls.positive.has_value(),
+                                                     controls.positive ? text(controls.positive->label) : QString{},
+                                                     controls.negative.has_value(),
+                                                     controls.negative ? text(controls.negative->label) : QString{},
+                                                     replacesTarget);
+    }
+    middleRegion->composer().setAttentionVisible(status.attention.has_value());
+    middleRegion->composer().setAttentionActionEnabled(
+        controls.directEnabled && controls.positive, controls.directEnabled && controls.negative, controls.reviewEnabled);
 
-  QString globalStatus = QStringLiteral("Ready");
-  QString globalTone = QStringLiteral("success");
-  if (status.retrying) {
-    globalStatus = QStringLiteral("Reconnecting");
-    globalTone = QStringLiteral("warning");
-  } else if (!status.connected) {
-    globalStatus = QStringLiteral("Offline");
-    globalTone = QStringLiteral("danger");
-  } else if (status.providerState != "ready") {
-    globalStatus = status.providerState.empty()
-                       ? QStringLiteral("Waiting for provider")
-                       : QStringLiteral("Provider unavailable");
-    globalTone = status.providerState.empty() ? QStringLiteral("warning")
-                                              : QStringLiteral("danger");
-  } else if (status.totalPending != 0) {
-    globalStatus = QStringLiteral("Attention required");
-    globalTone = QStringLiteral("warning");
-  }
-  setStatusTone(globalStatusDot, globalTone, globalStatusLabel);
-  setStatusLabelText(globalStatusLabel, globalStatus);
-  globalStatusLabel->setToolTip(connectionText + QStringLiteral(": ") + connectionTip);
-  globalStatusDot->setToolTip(globalStatusLabel->toolTip());
+    QString globalStatus = QStringLiteral("Ready");
+    QString globalTone = QStringLiteral("success");
+    if (status.retrying) {
+        globalStatus = QStringLiteral("Reconnecting");
+        globalTone = QStringLiteral("warning");
+    } else if (!status.connected) {
+        globalStatus = QStringLiteral("Offline");
+        globalTone = QStringLiteral("danger");
+    } else if (status.providerState != "ready") {
+        globalStatus = status.providerState.empty() ? QStringLiteral("Waiting for provider") : QStringLiteral("Provider unavailable");
+        globalTone = status.providerState.empty() ? QStringLiteral("warning") : QStringLiteral("danger");
+    } else if (status.totalPending != 0) {
+        globalStatus = QStringLiteral("Attention required");
+        globalTone = QStringLiteral("warning");
+    }
+    setStatusTone(globalStatusDot, globalTone, globalStatusLabel);
+    setStatusLabelText(globalStatusLabel, globalStatus);
+    globalStatusLabel->setToolTip(connectionText + QStringLiteral(": ") + connectionTip);
+    globalStatusDot->setToolTip(globalStatusLabel->toolTip());
 
-  if (updateWorkspace) {
-    const QString workspace = text(status.workspace);
-    if (workspaceBreadcrumb->toolTip() != workspace)
-      workspaceBreadcrumb->setToolTip(workspace);
-    const QString displayedWorkspace =
-        workspaceBreadcrumb->fontMetrics().elidedText(
-            workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth());
-    if (workspaceBreadcrumb->text() != displayedWorkspace)
-      workspaceBreadcrumb->setText(displayedWorkspace);
-  }
-
-  middleRegion->composer().setActiveTurn(status.activeTurn);
-  middleRegion->composer().setCanSubmit(
-      status.canControl && (boundGraphThread || newThreadDraft) &&
-      (status.activeTurn || status.threadAdmissionReady));
-  middleRegion->composer().setSettingsEnabled(
-      status.canControl && status.threadAdmissionReady &&
-      (boundGraphThread || newThreadDraft) && !status.activeTurn);
+    middleRegion->composer().setActiveTurn(status.activeTurn);
+    middleRegion->composer().setCanSubmit(status.canControl && (boundGraphThread || newThreadDraft) &&
+                                          (status.activeTurn || status.threadAdmissionReady));
+    middleRegion->composer().setSettingsEnabled(status.canControl && status.threadAdmissionReady && (boundGraphThread || newThreadDraft) &&
+                                                !status.activeTurn);
 }
 
 std::optional<ui::ThreadListSnapshot>
@@ -2457,31 +2421,50 @@ void ShellWidget::Impl::beginThreadDraft(NewThreadDraft draft) {
     middleRegion->threads().refresh(*threads);
 }
 
-void ShellWidget::Impl::beginNewThreadDialog(std::string project,
-                                             std::string section,
-                                             std::string workspace) {
-  if (!creationDraftCorrelation.empty()) {
-    showNotice(QStringLiteral("A new-thread draft is already active. Select "
-                              "another thread to abandon it before starting "
-                              "another."),
-               false);
-    return;
-  }
-  const QString fallback = QDir::currentPath();
-  const QString initial =
-      workspace.empty()
-          ? text(middleRegion->composer().turnSettings().workspace(
-                utf8(fallback)))
-          : text(workspace);
-  NewThreadDialog dialog(initial, owner);
-  if (dialog.exec() != QDialog::Accepted)
-    return;
-  NewThreadDraft draft = dialog.draft();
-  draft.projectId = std::move(project);
-  draft.sectionId = std::move(section);
-  beginThreadDraft(std::move(draft));
-  middleRegion->composer().clearDraft();
-  middleRegion->composer().promptEditor()->setFocus();
+void ShellWidget::Impl::changeWorkspaceDialog(const nodegraph::NodeRef& thread) {
+    const auto row = uiAdapter.threadRow(thread);
+    if (!row || !row->workspaceChangeUnavailable.empty()) {
+        showNotice(row ? text(row->workspaceChangeUnavailable) : QStringLiteral("Thread state is unavailable."));
+    } else {
+        FileSelectionDialog dialog(FileSelectionDialog::Mode::Workspace, text(row->cwd), {}, owner, text(row->title), text(row->cwd));
+        if (dialog.exec() == QDialog::Accepted && dialog.selectedDirectory() != text(row->cwd)) {
+            nodegraph::NodeAction action{
+                thread, nodegraph::NodeActionKind::ChangeWorkspace, {}, {}, {{"cwd", utf8(dialog.selectedDirectory())}}, {}};
+            static_cast<void>(sendNodeAction(std::move(action), QStringLiteral("Workspace change was not admitted; try again.")));
+        }
+    }
+}
+
+void ShellWidget::Impl::beginNewThreadDialog(std::string project, std::string section) {
+    if (!creationDraftCorrelation.empty()) {
+        showNotice(QStringLiteral("A new-thread draft is already active. Select another thread to abandon it before starting another."),
+                   false);
+    } else {
+        QStringList choices;
+        if (!project.empty()) {
+            if (const auto snapshot = threadSnapshot()) {
+                const auto found = std::ranges::find(snapshot->projects, project, &ui::ThreadGroup::id);
+                if (found != snapshot->projects.end()) {
+                    for (const auto& root : found->fields.value("roots", nlohmann::json::array())) {
+                        if (root.is_object() && root.contains("path") && root["path"].is_string()) {
+                            choices.push_back(text(root["path"].get<std::string>()));
+                        }
+                    }
+                }
+            }
+        }
+        NewThreadDraft initial;
+        initial.workspace = choices.size() == 1 ? choices.front() : QString{};
+        NewThreadDialog dialog(initial, NewThreadDialog::Purpose::Create, owner, choices);
+        if (dialog.exec() == QDialog::Accepted) {
+            NewThreadDraft draft = dialog.draft();
+            draft.projectId = std::move(project);
+            draft.sectionId = std::move(section);
+            beginThreadDraft(std::move(draft));
+            middleRegion->composer().clearDraft();
+            middleRegion->composer().promptEditor()->setFocus();
+        }
+    }
 }
 
 std::optional<NewThreadDraft>
@@ -2718,14 +2701,11 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
         std::move(action),
         QStringLiteral("Your message was not sent; the worker queue is full."));
   } else if (visibleDraft && newThreadDraft) {
-    auto settingsContext = uiAdapter.turnSettings(
-        {}, ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation),
-        utf8(newThreadDraft->workspace));
-    if (!settingsContext) {
-      showNotice(QStringLiteral(
-          "Thread settings are busy. Your message was not sent; try again."));
-      return false;
-    }
+      auto settingsContext = uiAdapter.turnSettings({}, ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation));
+      if (!settingsContext) {
+          showNotice(QStringLiteral("Thread settings are busy. Your message was not sent; try again."));
+          return false;
+      }
     middleRegion->composer().setTurnSettingsContext(
         std::move(*settingsContext));
     nodegraph::RuntimeAction action;
@@ -2735,8 +2715,7 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
     action.attachments = std::move(ownedAttachments);
     nodegraph::Value::Object threadStart =
         objectFromJson(settings.startOptions(TurnSettingsScope::Thread));
-    threadStart.insert_or_assign("cwd",
-                                 settings.workspace(utf8(QDir::currentPath())));
+    threadStart.insert_or_assign("cwd", utf8(newThreadDraft->workspace));
     if (!newThreadDraft->projectId.empty())
       threadStart.insert_or_assign("projectId", newThreadDraft->projectId);
     if (!newThreadDraft->sectionId.empty())
@@ -2770,13 +2749,10 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
 }
 
 void ShellWidget::Impl::chooseAttachments() {
-  const QString initial =
-      text(middleRegion->composer().turnSettings().workspace(
-          utf8(QDir::currentPath())));
-  FileSelectionDialog dialog(FileSelectionDialog::Mode::Attachments, initial,
-                             middleRegion->composer().attachments(), owner);
-  if (dialog.exec() == QDialog::Accepted)
-    middleRegion->composer().setAttachments(dialog.selectedAttachments());
+    const QString initial = QDir::currentPath();
+    FileSelectionDialog dialog(FileSelectionDialog::Mode::Attachments, initial, middleRegion->composer().attachments(), owner);
+    if (dialog.exec() == QDialog::Accepted)
+        middleRegion->composer().setAttachments(dialog.selectedAttachments());
 }
 
 void ShellWidget::Impl::recoverPrompt(const nodegraph::NodeRef &prompt) {
@@ -2816,11 +2792,7 @@ void ShellWidget::Impl::recoverPrompt(const nodegraph::NodeRef &prompt) {
   const std::string recoveredWorkspace =
       threadStart ? exactStringFromValue(valueMember(*threadStart, "cwd"))
                   : std::string{};
-  draft.workspace =
-      recoveredWorkspace.empty()
-          ? text(middleRegion->composer().turnSettings().workspace(
-                utf8(QDir::currentPath())))
-          : text(recoveredWorkspace);
+  draft.workspace = text(recoveredWorkspace);
   const std::string requestedName =
       exactStringFromValue(valueMember(*state, "requestedName"));
   draft.name = requestedName.empty() ? QStringLiteral("Recovered prompt")

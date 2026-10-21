@@ -12,7 +12,6 @@ button { color: inherit; }
 .brand-mark { display: block; flex: none; width: 36px; height: 36px; }
 .brand b { font-size: 26px; font-weight: 700; line-height: 1; letter-spacing: 0; }
 .brand small { color: var(--text-secondary); font-size: 10.667px; }
-.workspace-breadcrumb { min-width: 0; max-width: 280px; color: var(--text-secondary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .top-actions { display: flex; align-items: center; min-width: 0; gap: 10px; margin-left: auto; }
 .subtle-button, .connection-control button, .load-more { border: 1px solid var(--divider); background: var(--panel); border-radius: 8px; padding: 7px 11px; cursor: pointer; }
 .connection-control { display: flex; align-items: center; gap: 6px; }
@@ -62,6 +61,11 @@ h1, h2, h3, p { margin: 0; }
 .conversation-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 10px; margin: 14px 10px 0; padding: 0 14px 8px; border-bottom: 1px solid var(--divider); }
 .conversation-title { display: contents; }
 .conversation-lockup { grid-column: 1 / -1; grid-row: 2; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px; border-top: 1px solid var(--divider); padding-top: 8px; }
+.thread-heading-context { display: flex; align-items: baseline; min-width: 0; gap: 8px; }
+.thread-heading-context h1 { flex: 1 1 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.thread-workspace { flex: 1 1 0; min-width: 0; max-width: 300px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; border: 0; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; }
+.thread-workspace-copy { flex: none; width: 24px; height: 24px; padding: 3px; border: 0; background: transparent; color: var(--text-secondary); }
+.thread-workspace-copy svg { width: 16px; height: 16px; }
 .conversation-heading h1 { grid-column: 1; min-width: 0; margin: 0; font-size: 16px; font-weight: 600; }
 .conversation-heading p { grid-column: 1 / -1; min-width: 0; margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
 .conversation-heading .conversation-activity { display: inline; color: var(--text-primary); white-space: normal; text-align: right; }
@@ -187,7 +191,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     .app-shell { grid-template-rows: auto minmax(0, 1fr) auto; }
     .top-bar { flex-wrap: wrap; gap: 7px 10px; padding: 8px 10px; }
     .brand { min-width: 0; }
-    .workspace-breadcrumb { flex: 1 1 120px; }
     .top-actions { order: 3; flex: 1 0 100%; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
     .connection-control { flex: 1 1 230px; min-width: 0; }
     .connection-control input { flex: 1 1 110px; width: auto; min-width: 0; }

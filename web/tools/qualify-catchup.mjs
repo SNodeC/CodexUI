@@ -67,16 +67,29 @@ export async function qualifyCatchup(devTools) {
         set(archive,"active");const search=document.querySelector('[aria-label="Search thread titles"]');set(search,"No match");
         search.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));await frame();
         check(document.querySelectorAll(".thread-row").length===0,"search filters across retained entities");set(search,"");await frame();
+        // Standalone creation must never silently inherit the selected thread path.
+        document.querySelector(".new-thread-button").click();await frame();
+        check(document.querySelector(".new-thread-dialog input").value==="","standalone workspace requires an explicit choice");
+        button("Cancel",document.querySelector(".new-thread-dialog")).click();await frame();
+        // Multiple project roots have no authoritative default.
+        projects.get("p").roots.push({path:"/workspace/beta"});notify("project/changed",{projectId:"p",changeType:"updated"});await frame();
+        const multipleSection=[...document.querySelectorAll(".browser-group.nested-section")].find(group=>group.textContent.includes("Review"));
+        multipleSection.querySelector(":scope > header .group-menu-trigger").click();await frame();
+        button("New thread here…",document.querySelector(".thread-context-menu")).click();await frame();
+        check(document.querySelector(".new-thread-dialog input").value===""&&document.querySelectorAll("#workspace-roots option").length===2,"multiple roots require an explicit root choice");
+        button("Cancel",document.querySelector(".new-thread-dialog")).click();await frame();
+        projects.get("p").roots.pop();notify("project/changed",{projectId:"p",changeType:"updated"});await frame();
         // Grouped draft inherits both project workspace and section identity.
         const nested=[...document.querySelectorAll(".browser-group.nested-section")].find(group=>group.textContent.includes("Review"));
         nested.querySelector(":scope > header .group-menu-trigger").click();await frame();
         button("New thread here…",document.querySelector(".thread-context-menu")).click();await waitFor(()=>document.querySelector(".modal-backdrop"),"grouped thread dialog");
         check(document.querySelector(".new-thread-dialog input").value==="/workspace/alpha","project root inherited inside section");
+        set(document.querySelector(".new-thread-dialog input"),"/workspace/explicit-override");await frame();
         button("Continue",document.querySelector(".modal-backdrop")).click();await frame();
         const editor=document.querySelector('[aria-label="Message Codex"]');set(editor,"grouped prompt");button("Send").click();
         await waitFor(()=>socket.sent.some(message=>message.payload?.method==="thread/section/move"),"section assignment after creation");await frame();
         const created=[...threads.values()].find(thread=>thread.id.startsWith("created-"));
-        check(created.projectId==="p"&&created.section.id==="s","group context reaches provider");
+        check(created.projectId==="p"&&created.section.id==="s"&&created.cwd==="/workspace/explicit-override","group context and deliberate workspace override reach provider");
         // Live token and timing facts are projected through the production application.
         notify("thread/tokenUsage/updated",{threadId:created.id,tokenUsage:{total:{totalTokens:1200,inputTokens:1000,outputTokens:200},last:{totalTokens:50},modelContextWindow:1000}});
         notify("turn/started",{threadId:created.id,turn:{id:"visible-turn",status:"inProgress",startedAt:100}});
@@ -146,6 +159,7 @@ export async function qualifyCatchup(devTools) {
     assert(afterResize.height>=afterResize.content||afterResize.overflow==="auto","resized prompt never hides wrapped content");
     assert(afterResize.height>beforeResize.height||afterResize.overflow==="auto","width changes invalidate prompt measurement");
     await setPrompt("");await devTools.call("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+    await devTools.evaluate(`(async()=>{for(let attempt=0;attempt<200&&!document.querySelector(".thread-pane .thread-browser-menu > button");attempt++){await new Promise(done=>requestAnimationFrame(done));}if(!document.querySelector(".thread-pane .thread-browser-menu > button"))throw new Error("Desktop thread pane did not return after restoring 1280px width");})()`);
     result.promptKeyboard=true;result.promptResize=true;
     await devTools.evaluate(`document.querySelector(".connection-menu > button").focus()`);await key("Enter","Enter",13,"\r");
     await devTools.evaluate(`document.querySelector(".connection-control input").focus()`);

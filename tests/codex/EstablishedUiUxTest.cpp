@@ -15,21 +15,22 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDragEnterEvent>
-#include <QDragMoveEvent>
 #include <QDragLeaveEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
-#include <QImage>
-#include <QHelpEvent>
 #include <QFocusEvent>
-#include <QCursor>
+#include <QHelpEvent>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPushButton>
@@ -42,7 +43,6 @@
 #include <QTreeWidget>
 #include <QUrl>
 #include <QWheelEvent>
-
 #include <algorithm>
 #include <array>
 #include <iostream>
@@ -436,19 +436,17 @@ bool turnSettingsAreStableAccessibleProjections() {
   widget.show();
   QCoreApplication::processEvents();
 
-  constexpr std::array<std::pair<const char *, const char *>, 12>
-      settingControls{{{"Model", "codexModel"},
-                       {"Reasoning", "codexEffort"},
-                       {"Style", "codexPersonality"},
-                       {"Access", "codexSandbox"},
-                       {"Network", "codexNetwork"},
-                       {"Approval", "codexApproval"},
-                       {"Approval reviewer", "codexReviewer"},
-                       {"Workspace", "codexWorkspace"},
-                       {"Permission profile", "codexPermissionProfile"},
-                       {"Service tier", "codexServiceTier"},
-                       {"Reasoning summary", "codexSummary"},
-                       {"Collaboration mode", "codexCollaboration"}}};
+  constexpr std::array<std::pair<const char*, const char*>, 11> settingControls{{{"Model", "codexModel"},
+                                                                                 {"Reasoning", "codexEffort"},
+                                                                                 {"Style", "codexPersonality"},
+                                                                                 {"Access", "codexSandbox"},
+                                                                                 {"Network", "codexNetwork"},
+                                                                                 {"Approval", "codexApproval"},
+                                                                                 {"Approval reviewer", "codexReviewer"},
+                                                                                 {"Permission profile", "codexPermissionProfile"},
+                                                                                 {"Service tier", "codexServiceTier"},
+                                                                                 {"Reasoning summary", "codexSummary"},
+                                                                                 {"Collaboration mode", "codexCollaboration"}}};
   std::array<QWidget *, settingControls.size()> controls{};
   std::array<QRect, settingControls.size()> controlGeometry{};
   for (std::size_t index = 0; index < settingControls.size(); ++index) {
@@ -463,8 +461,7 @@ bool turnSettingsAreStableAccessibleProjections() {
       widget.findChild<QComboBox *>(QStringLiteral("codexPersonality"));
   auto *approval = qobject_cast<QComboBox *>(controls[5]);
   auto *reviewer = qobject_cast<QComboBox *>(controls[6]);
-  auto *permissionProfile = qobject_cast<QComboBox *>(controls[8]);
-  auto *cwd = qobject_cast<QLineEdit *>(controls[7]);
+  auto* permissionProfile = qobject_cast<QComboBox*>(controls[7]);
   auto *more =
       widget.findChild<QToolButton *>(QStringLiteral("codexMoreSettings"));
   const auto labelBuddy = [&widget](const QString &caption) -> QWidget * {
@@ -481,24 +478,52 @@ bool turnSettingsAreStableAccessibleProjections() {
         controls[index]->accessibleName() == caption &&
         labelBuddy(caption) == controls[index];
   }
-  bool result = expect(
-      completeAccessibleProjection && modelControl && network && personality &&
-          approval && reviewer && permissionProfile && cwd && more,
-      "turn settings expose one stable native control per setting");
-  result &= expect(
-      network && !network->isEnabled() &&
-          network->toolTip() ==
-              QStringLiteral("Full access already includes network access") &&
-          personality && !personality->isEnabled(),
-      "typed compatibility drives enabled state and guidance");
+  bool result = expect(completeAccessibleProjection && modelControl && network && personality && approval && reviewer &&
+                           permissionProfile && more && !widget.findChild<QLineEdit*>(QStringLiteral("codexWorkspace")),
+                       "turn settings expose one stable native control per setting");
+  result &=
+      expect(network && !network->isEnabled() && network->toolTip() == QStringLiteral("Full access already includes network access") &&
+                 personality && !personality->isEnabled() &&
+                 personality->toolTip() == QStringLiteral("The selected model does not support style choices"),
+             "typed compatibility drives enabled state and guidance");
+  result &= expect(policy.startOptions(TurnSettingsScope::Turn).empty(),
+                   "reported settings and catalog defaults do not become outgoing overrides");
+  auto* effort = widget.findChild<QComboBox*>(QStringLiteral("codexEffort"));
+  result &= expect(effort && effort->currentText() == QStringLiteral("Default (not reported)") &&
+                       effort->toolTip().contains(QStringLiteral("not reported")),
+                   "unreported effective reasoning is explicit and accessible through its tooltip");
+  auto* collaboration = widget.findChild<QComboBox*>(QStringLiteral("codexCollaboration"));
+  result &=
+      expect(collaboration && collaboration->currentIndex() == -1 && collaboration->placeholderText() == QStringLiteral("Not reported"),
+             "missing collaboration is distinct from reported Code mode");
+  result &= expect(collaboration && more && !more->menu()->isAncestorOf(collaboration) &&
+                       collaboration->mapTo(&widget, QPoint()).y() == approval->mapTo(&widget, QPoint()).y() &&
+                       collaboration->mapTo(&widget, QPoint()).x() == modelControl->mapTo(&widget, QPoint()).x(),
+                   "Collaboration occupies row two column one and has no second popup implementation");
+  TurnSettingsContext tabContext = settings;
+  tabContext.canonical[TurnSettingField::Sandbox] = "read-only";
+  widget.setContext(tabContext);
+  widget.activateWindow();
+  network->setFocus();
+  QKeyEvent tab(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+  QApplication::sendEvent(network, &tab);
+  result &= expect(collaboration->hasFocus(), "Tab moves from Network to Collaboration mode");
+  QApplication::sendEvent(collaboration, &tab);
+  result &= expect(approval->hasFocus(), "Tab moves from Collaboration mode to Approval");
+  widget.setContext(settings);
+  TurnSettingsContext codeMode = settings;
+  codeMode.canonical[TurnSettingField::Collaboration] = DefaultTurnSetting;
+  widget.setContext(codeMode);
+  result &= expect(collaboration && collaboration->currentText() == QStringLiteral("Code") &&
+                       policy.startOptions(TurnSettingsScope::Turn).empty(),
+                   "reported Code mode is displayed without becoming an authored override");
+  widget.setContext(settings);
   int projectionSignals = 0;
   for (QWidget *control : controls) {
     if (auto *combo = qobject_cast<QComboBox *>(control))
       QObject::connect(combo, &QComboBox::currentIndexChanged, &widget,
                        [&projectionSignals] { ++projectionSignals; });
   }
-  QObject::connect(cwd, &QLineEdit::textEdited, &widget,
-                   [&projectionSignals] { ++projectionSignals; });
   TurnSettingsContext signalUpdate = settings;
   signalUpdate.canonical[TurnSettingField::Approval] = "on-request";
   widget.setContext(signalUpdate);
@@ -574,6 +599,10 @@ bool turnSettingsAreStableAccessibleProjections() {
   result &= expect(policy.startOptions(TurnSettingsScope::Turn)
                            .value("approvalPolicy", "") == "never",
                    "thread switching restores the draft by semantic identity");
+  const QString capturePath = qEnvironmentVariable("CODEXUI_SETTINGS_CAPTURE");
+  if (!capturePath.isEmpty()) {
+      result &= expect(widget.grab().save(capturePath), "turn-settings visual evidence is captured");
+  }
   return result;
 }
 

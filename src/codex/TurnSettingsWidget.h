@@ -36,8 +36,7 @@ private:
 
   TurnSettingsPolicy &settings;
   std::array<QComboBox *, TurnSettingFieldCount> combos{};
-  QLineEdit *cwd = nullptr;
-  QToolButton *more = nullptr;
+  QToolButton* more = nullptr;
 };
 
 } // namespace codexui::codex

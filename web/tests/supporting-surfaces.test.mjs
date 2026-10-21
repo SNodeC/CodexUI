@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {lastActivityText} from "../dist/app/App.js";
+import {createElement} from "react";
+import {renderToStaticMarkup} from "react-dom/server";
+import {NewThreadDialog, lastActivityText} from "../dist/app/App.js";
 
 import {
     fixedSettingChoices, pendingRequestDetails, settingDraftFor, settingPresentation, turnSettingCatalog,
@@ -24,7 +26,7 @@ test("built-in permission profiles have user-facing labels", () => {
     ]}});
     const draft = settingDraftFor(new Map(), "thread", {}, catalog);
     assert.deepEqual(settingPresentation(draft, catalog).permissionProfiles.map(choice => choice.label),
-        ["Thread default", "Workspace", "Read only", "Full access", "team-managed"]);
+        ["Default (not reported)", "Workspace", "Read only", "Full access", "team-managed"]);
 });
 
 test("fixed setting projections retain unknown current values", () => {
@@ -44,4 +46,51 @@ test("pending-request disclosure is bounded and suppresses unknown fields", () =
         {path: "permissions / fileSystem / write / 1", value: "/tmp/<literal>"},
         {path: "permissions / network / enabled", value: "Yes"},
     ], "request disclosure retains reviewable fields without exposing unknown protocol content");
+});
+
+
+test("catalog defaults are not presented as effective thread settings", () => {
+    const catalog = turnSettingCatalog({models: [{model: "gpt-default", isDefault: true,
+        defaultReasoningEffort: "high", defaultServiceTier: "fast"}], permissionProfiles: []});
+    const draft = settingDraftFor(new Map(), "thread", {}, catalog);
+    const presentation = settingPresentation(draft, catalog);
+    for (const choices of [presentation.efforts, presentation.serviceTiers]) {
+        assert.equal(choices[0].label, "Default (not reported)");
+        assert.match(choices[0].description, /effective value was not reported/);
+    }
+});
+
+
+test("an unreported collaboration mode is an unavailable placeholder, distinct from Code", () => {
+    const catalog = turnSettingCatalog({models: [], permissionProfiles: []});
+    const draft = settingDraftFor(new Map(), "unknown", {}, catalog);
+    assert.equal(draft.values.collaboration, "");
+    assert.deepEqual(fixedSettingChoices("collaboration", "")[0], {
+        value: "", label: "Not reported", description: "Not reported by app-server", disabled: true,
+    });
+    const reported = settingDraftFor(new Map(), "code", {collaborationMode: {mode: "default"}}, catalog);
+    assert.equal(reported.values.collaboration, "default");
+    assert.equal(fixedSettingChoices("collaboration", "default").find(choice => choice.value === "default").label, "Code");
+});
+
+test("workspace options form supports explicit root choices and one deliberate change form", () => {
+    const callbacks = {onCancel() {}, onContinue() {}};
+    const rootChoices = ["/project/a", "/project/b"];
+    const creation = renderToStaticMarkup(createElement(NewThreadDialog, {
+        initialWorkspace: "", workspaceChoices: rootChoices, ...callbacks,
+    }));
+    assert.match(creation, /value=""/u);
+    for (const path of rootChoices) assert.ok(creation.includes(`value="${path}"`));
+    const change = renderToStaticMarkup(createElement(NewThreadDialog, {
+        purpose: "workspace", initialWorkspace: "/remote/old", initialDraft: {
+            workspace: "/remote/old", name: "Target B", baseInstructions: "", developerInstructions: "", ephemeral: false,
+        }, ...callbacks,
+    }));
+    assert.match(change, /Change workspace…/u);
+    assert.match(change, /Thread: Target B/u);
+    assert.match(change, /Current workspace/u);
+    assert.match(change, /Proposed workspace/u);
+    assert.doesNotMatch(change, /Temporary thread|Developer instructions|Base instructions/u);
+    const unknown = renderToStaticMarkup(createElement(NewThreadDialog, {purpose: "workspace", initialWorkspace: "", ...callbacks}));
+    assert.match(unknown, /Workspace not reported/u);
 });

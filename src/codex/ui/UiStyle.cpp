@@ -250,7 +250,6 @@ QString applicationStyleSheet() {
         }
         QMainWindow, QWidget#applicationShell { background: %{appBackground}; }
         QFrame#topBar { background: %{panel}; border-bottom: 1px solid %{divider}; }
-        QLabel#workspaceBreadcrumb { color: %{secondary}; font-weight: 500; }
         QFrame#customStatusBar { background: %{raised}; border-top: 1px solid %{divider}; }
         QFrame[kind="statusDot"] { background: %{placeholder}; border-radius: 5px; }
         QFrame[kind="statusDot"][tone="active"] { background: %{statusActive}; }

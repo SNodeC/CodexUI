@@ -4,10 +4,10 @@ import type {JsonObject, ThreadSettingStamp} from "../presentation/PresentationP
 
 export const DefaultSetting = "default";
 export const SettingFields = ["model", "effort", "personality", "sandbox", "network", "approval",
-    "reviewer", "cwd", "permissionProfile", "serviceTier", "summary", "collaboration"] as const;
+    "reviewer", "permissionProfile", "serviceTier", "summary", "collaboration"] as const;
 export type SettingField = typeof SettingFields[number];
 export type SettingValues = Record<SettingField, string>;
-export interface SettingChoice {value: string; label: string; description: string}
+export interface SettingChoice {value: string; label: string; description: string; disabled?: boolean}
 export interface SettingDraft {
     values: SettingValues;
     touched: Set<SettingField>;
@@ -22,7 +22,7 @@ export interface SettingPresentation {
     personalityDisabledReason: string;
 }
 
-const DefaultChoice: SettingChoice = {value: DefaultSetting, label: "Thread default", description: ""};
+const DefaultChoice: SettingChoice = {value: DefaultSetting, label: "Default (not reported)", description: "The effective value was not reported by app-server. No override will be sent unless you edit this setting."};
 const FixedChoices: Partial<Record<SettingField, readonly SettingChoice[]>> = {
     sandbox: [DefaultChoice, {label: "Workspace", value: "workspace-write", description: ""}, {label: "Read only", value: "read-only", description: ""}, {label: "Full access", value: "danger-full-access", description: ""}, {label: "External", value: "external", description: ""}],
     network: [DefaultChoice, {label: "Restricted", value: "restricted", description: ""}, {label: "Enabled", value: "enabled", description: ""}],
@@ -30,7 +30,8 @@ const FixedChoices: Partial<Record<SettingField, readonly SettingChoice[]>> = {
     personality: [DefaultChoice, {label: "None", value: "none", description: ""}, {label: "Friendly", value: "friendly", description: ""}, {label: "Pragmatic", value: "pragmatic", description: ""}],
     reviewer: [DefaultChoice, {label: "User", value: "user", description: ""}, {label: "Auto review", value: "auto_review", description: ""}, {label: "Guardian", value: "guardian_subagent", description: ""}],
     summary: [DefaultChoice, {label: "Auto", value: "auto", description: ""}, {label: "Concise", value: "concise", description: ""}, {label: "Detailed", value: "detailed", description: ""}, {label: "None", value: "none", description: ""}],
-    collaboration: [{label: "Code", value: DefaultSetting, description: ""}, {label: "Plan", value: "plan", description: ""}],
+    collaboration: [{label: "Not reported", value: "", description: "Not reported by app-server", disabled: true},
+        {label: "Code", value: DefaultSetting, description: ""}, {label: "Plan", value: "plan", description: ""}],
 };
 
 export interface ModelDefinition {
@@ -73,9 +74,9 @@ function canonicalSettingValues(canonical: unknown): SettingValues {
             ? optional(value, "effort") : optional(value, "reasoningEffort"),
         personality: optional(value, "personality"), sandbox, network,
         approval: optional(value, "approvalPolicy"), reviewer: optional(value, "approvalsReviewer"),
-        cwd: stringMember(value, "cwd"), permissionProfile: profile || DefaultSetting,
+        permissionProfile: profile || DefaultSetting,
         serviceTier: optional(value, "serviceTier"), summary: optional(value, "summary"),
-        collaboration: stringMember(value.collaborationMode, "mode") || "default",
+        collaboration: stringMember(value.collaborationMode, "mode"),
     };
 }
 
@@ -224,15 +225,13 @@ export function fixedSettingChoices(field: SettingField, current: string): reado
 export function settingPresentation(draft: SettingDraft, catalog: SettingCatalog): SettingPresentation {
     const definition = selectedModel(draft.values, catalog.models);
     const efforts = definition?.reasoningEfforts ?? [];
-    const defaultEffort = definition?.defaultReasoningEffort;
-    const defaultTier = definition?.defaultServiceTier;
     return {
         models: withCurrent([DefaultChoice, ...catalog.models.map(model => model.choice)], draft.values.model),
-        efforts: withCurrent([{...DefaultChoice, label: defaultEffort ? `${humanize(defaultEffort)} - default` : DefaultChoice.label},
+        efforts: withCurrent([DefaultChoice,
             ...efforts.map(value => ({value, label: humanize(value), description: ""}))], draft.values.effort),
         permissionProfiles: withCurrent([DefaultChoice, ...catalog.permissionProfiles], draft.values.permissionProfile,
             permissionProfileLabel(draft.values.permissionProfile)),
-        serviceTiers: withCurrent([{...DefaultChoice, label: defaultTier ? `Thread default (${defaultTier})` : DefaultChoice.label},
+        serviceTiers: withCurrent([DefaultChoice,
             ...(definition?.serviceTiers.map(choice => ({...choice,
                 label: choice.label || humanize(choice.value)})) ?? [])], draft.values.serviceTier,
             humanize(draft.values.serviceTier)),
@@ -264,7 +263,6 @@ function startOptions(draft: SettingDraft, turn: boolean, resolvedModel = ""): R
     copyChoice(result, draft, "reviewer", "approvalsReviewer");
     copyChoice(result, draft, "serviceTier", "serviceTier");
     if (turn) copyChoice(result, draft, "summary", "summary");
-    if (draft.touched.has("cwd")) result.cwd = draft.values.cwd.trim() || null;
     if (draft.touched.has("permissionProfile"))
         result.permissions = draft.values.permissionProfile === DefaultSetting ? null : draft.values.permissionProfile;
     if (draft.values.permissionProfile === DefaultSetting && turn
@@ -272,9 +270,11 @@ function startOptions(draft: SettingDraft, turn: boolean, resolvedModel = ""): R
         result.sandboxPolicy = sandboxPolicy(draft.values);
     else if (draft.values.permissionProfile === DefaultSetting && draft.touched.has("sandbox"))
         result.sandbox = [DefaultSetting, "external"].includes(draft.values.sandbox) ? null : draft.values.sandbox;
-    if (turn && resolvedModel !== "" && resolvedModel !== DefaultSetting) result.collaborationMode = {mode: draft.values.collaboration,
-        settings: {model: resolvedModel, developer_instructions: null,
-            reasoning_effort: draft.values.effort === DefaultSetting ? null : draft.values.effort}};
+    if (turn && draft.touched.has("collaboration") && resolvedModel !== "" && resolvedModel !== DefaultSetting) {
+        result.collaborationMode = {mode: draft.values.collaboration,
+            settings: {model: resolvedModel, developer_instructions: null,
+                reasoning_effort: draft.values.effort === DefaultSetting ? null : draft.values.effort}};
+    }
     return result;
 }
 

@@ -233,7 +233,8 @@ for (const entry of contract.turnSettingsCases) {
         const drafts = new Map();
         const newThread = settingDraftFor(drafts, entry.newThread.key, {cwd: entry.newThread.cwd}, catalog);
         await context.test("new-thread projection", () => {
-            assert.equal(newThread.values.cwd, entry.newThread.cwd);
+            assert.equal(Object.hasOwn(newThread.values, "cwd"), false);
+            assert.equal(Object.hasOwn(settingPromptOptions(newThread, catalog).thread, "cwd"), false);
             assert.deepEqual([...newThread.touched], []);
         });
 

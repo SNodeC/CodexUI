@@ -4,7 +4,9 @@
 #define CODEXUI_CODEX_NEWTHREADDIALOG_H
 
 #include "codex/ui/UiStyle.h"
+
 #include <QString>
+#include <QStringList>
 #include <string>
 
 class QCheckBox;
@@ -29,8 +31,7 @@ public:
   enum class Purpose { Create, Fork };
 
   explicit NewThreadDialog(QString initialWorkspace, QWidget *parent = nullptr);
-  NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose,
-                  QWidget *parent = nullptr);
+  NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose, QWidget* parent = nullptr, QStringList workspaceChoices = {});
 
   [[nodiscard]] NewThreadDraft draft() const;
 

@@ -4,6 +4,7 @@
 
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/ThreadPane.h"
@@ -29,7 +30,6 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
-
 #include <algorithm>
 #include <array>
 #include <utility>
@@ -259,7 +259,26 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationState->setSizePolicy(QSizePolicy::Minimum,
                                    QSizePolicy::Preferred);
   conversationTokens->setAlignment(Qt::AlignRight | Qt::AlignTop);
-  threadHeading->addWidget(conversationTitle, 1);
+  threadHeading->addWidget(conversationTitle, 2);
+  conversationWorkspace = new QToolButton;
+  conversationWorkspace->setObjectName(QStringLiteral("conversationWorkspace"));
+  conversationWorkspace->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  conversationWorkspace->setMinimumWidth(0);
+  conversationWorkspace->setMaximumWidth(300);
+  conversationWorkspace->setAutoRaise(true);
+  conversationWorkspace->installEventFilter(this);
+  threadHeading->addWidget(conversationWorkspace, 1);
+  workspaceCopy = new presentation::CopyButton(QStringLiteral("Copy thread workspace"));
+  workspaceCopy->setObjectName(QStringLiteral("copyThreadWorkspace"));
+  threadHeading->addWidget(workspaceCopy);
+  connect(conversationWorkspace, &QToolButton::clicked, this, [this] {
+      if (workspaceAction) {
+          workspaceAction();
+      }
+  });
+  connect(workspaceCopy, &QToolButton::clicked, this, [this] {
+      workspaceCopy->copyText(workspacePath, false);
+  });
   threadHeading->addWidget(conversationState);
   contentLayout->addLayout(threadHeading);
   contentLayout->addWidget(conversationTokens);
@@ -376,6 +395,12 @@ bool MiddleRegionWidget::eventFilter(QObject *watched, QEvent *event) {
   if (watched == conversationTitle && event->type() == QEvent::Resize)
     conversationTitle->setText(conversationTitle->fontMetrics().elidedText(
         conversationTitle->toolTip(), Qt::ElideRight, conversationTitle->width()));
+  if (watched == conversationWorkspace && event->type() == QEvent::Resize) {
+      conversationWorkspace->setText(conversationWorkspace->fontMetrics().elidedText(
+          workspacePath.isEmpty() ? QStringLiteral("Workspace not reported") : workspacePath,
+          Qt::ElideMiddle,
+          std::max(0, conversationWorkspace->width() - 12)));
+  }
   const bool splitterHandle =
       watched == splitter->handle(1) || watched == splitter->handle(2);
   if (splitterHandle && event) {
@@ -404,6 +429,20 @@ void MiddleRegionWidget::setThreadHeading(QString title, const ui::TokenUsageTex
   conversationState->setText(state);
   conversationState->setProperty("tone", stateTone);
   presentation::setLabelTone(*conversationState, stateTone.toStdString());
+}
+
+void MiddleRegionWidget::setThreadWorkspace(QString path, QString unavailable, std::function<void()> action) {
+    workspacePath = std::move(path);
+    workspaceAction = std::move(action);
+    const QString display = workspacePath.isEmpty() ? QStringLiteral("Workspace not reported") : workspacePath;
+    conversationWorkspace->setText(
+        conversationWorkspace->fontMetrics().elidedText(display, Qt::ElideMiddle, std::max(0, conversationWorkspace->width() - 12)));
+    conversationWorkspace->setToolTip(display + QStringLiteral("\n") +
+                                      (unavailable.isEmpty() ? QStringLiteral("Change workspace…") : unavailable));
+    conversationWorkspace->setAccessibleName(QStringLiteral("Thread workspace: ") + display);
+    conversationWorkspace->setAccessibleDescription(unavailable.isEmpty() ? QStringLiteral("Change workspace…") : unavailable);
+    conversationWorkspace->setEnabled(unavailable.isEmpty() && static_cast<bool>(workspaceAction));
+    workspaceCopy->setEnabled(!workspacePath.isEmpty());
 }
 
 void MiddleRegionWidget::showNotice(QString message, bool error) {

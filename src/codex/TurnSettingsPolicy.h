@@ -19,19 +19,18 @@ namespace codexui::codex {
 inline constexpr char DefaultTurnSetting[] = "default";
 
 enum class TurnSettingField : std::uint8_t {
-  Model,
-  Effort,
-  Personality,
-  Sandbox,
-  Network,
-  Approval,
-  Reviewer,
-  Workspace,
-  PermissionProfile,
-  ServiceTier,
-  Summary,
-  Collaboration,
-  Count,
+    Model,
+    Effort,
+    Personality,
+    Sandbox,
+    Network,
+    Approval,
+    Reviewer,
+    PermissionProfile,
+    ServiceTier,
+    Summary,
+    Collaboration,
+    Count,
 };
 
 inline constexpr std::size_t TurnSettingFieldCount =
@@ -43,7 +42,7 @@ using TurnSettingEpochs = std::array<std::uint64_t, TurnSettingFieldCount>;
 struct TurnSettingValues final {
   TurnSettingValues() {
     fields.fill(std::string(DefaultTurnSetting));
-    fields[static_cast<std::size_t>(TurnSettingField::Workspace)].clear();
+    fields[static_cast<std::size_t>(TurnSettingField::Collaboration)].clear();
   }
 
   [[nodiscard]] const std::string &operator[](TurnSettingField field) const {
@@ -114,10 +113,9 @@ public:
   [[nodiscard]] bool personalityEnabled() const noexcept;
   [[nodiscard]] bool networkEnabled() const noexcept;
 
-  [[nodiscard]] std::string workspace(std::string_view fallback) const;
   [[nodiscard]] nlohmann::json startOptions(TurnSettingsScope scope) const;
 
-private:
+  private:
   struct Draft final {
     TurnSettingValues values;
     TurnSettingMask touched;

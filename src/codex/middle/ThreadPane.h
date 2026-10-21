@@ -44,6 +44,7 @@ public:
     ThreadAction select;
     ThreadAction reload;
     ThreadAction rename;
+    ThreadAction changeWorkspace;
     ThreadAction fork;
     ThreadAction forkWithOptions;
     ThreadAction toggleArchive;
@@ -53,7 +54,7 @@ public:
     std::function<void()> refreshGroups;
     std::function<void(nlohmann::json)> browse;
     std::function<void(nodegraph::RuntimeActionKind, nlohmann::json)> manage;
-    std::function<void(std::string, std::string, std::string)> newGroupedThread;
+    std::function<void(std::string, std::string)> newGroupedThread;
   };
 
   explicit ThreadPane(QWidget *parent = nullptr);

@@ -615,7 +615,7 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
   int changes = 0;
   std::vector<nlohmann::json> queries;
   std::vector<std::pair<RuntimeActionKind, nlohmann::json>> mutations;
-  std::optional<std::array<std::string, 3>> newThreadContext;
+  std::optional<std::array<std::string, 2>> newThreadContext;
   middle::ThreadPane::Actions actions;
   actions.select = [&](const auto &node) { selected = node; };
   actions.browserChanged = [&] { ++changes; };
@@ -625,10 +625,8 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
   actions.manage = [&](auto kind, nlohmann::json parameters) {
     mutations.emplace_back(kind, std::move(parameters));
   };
-  actions.newGroupedThread = [&](std::string project, std::string section,
-                                 std::string cwd) {
-    newThreadContext =
-        std::array{std::move(project), std::move(section), std::move(cwd)};
+  actions.newGroupedThread = [&](std::string project, std::string section) {
+      newThreadContext = std::array{std::move(project), std::move(section)};
   };
   pane.setActions(std::move(actions));
   auto snapshot = adapter.threads(child, nullptr, &pane.browserOptions());
@@ -936,13 +934,9 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
             action->trigger();
         menu->close();
       }
-    passed &= require(
-        newThreadContext ==
-            std::optional(std::array{
-                project ? id : std::string{}, project ? std::string{} : id,
-                project ? std::string("/workspace/new") : std::string{}}),
-        "an empty group can start a thread with its authoritative group "
-        "context");
+    passed &= require(newThreadContext == std::optional(std::array{project ? id : std::string{}, project ? std::string{} : id}),
+                      "an empty group passes project and section identity to thread creation, "
+                      "which owns workspace selection");
     if (!project) {
       for (const bool assign : {true, false}) {
         {

@@ -24,9 +24,12 @@ class FileSelectionDialog final : public QDialog {
 public:
   enum class Mode { Workspace, Attachments };
 
-  explicit FileSelectionDialog(Mode mode, QString initialDirectory,
+  explicit FileSelectionDialog(Mode mode,
+                               QString initialDirectory,
                                std::vector<AttachmentDraft> attachments = {},
-                               QWidget *parent = nullptr);
+                               QWidget* parent = nullptr,
+                               QString targetTitle = {},
+                               QString confirmedWorkspace = {});
 
   [[nodiscard]] QString selectedDirectory() const;
   [[nodiscard]] std::vector<AttachmentDraft> selectedAttachments() const;

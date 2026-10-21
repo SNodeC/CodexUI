@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {qualifyCatchup} from "./qualify-catchup.mjs";
 import {spawn} from "node:child_process";
 import {constants as fsConstants} from "node:fs";
-import {access, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
+import {access, mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
 import {createServer} from "node:http";
 import {tmpdir} from "node:os";
 import {dirname, extname, join, resolve, sep} from "node:path";
@@ -178,7 +178,7 @@ const applicationProfileSetup = `(async()=>{
             this.pendingCatalogs=[];this.turnPages=0;this.itemPages=0;this.deliveredItems=0;
             globalThis.codexuiProfileSocket=this;queueMicrotask(()=>{this.readyState=1;this.onopen?.();});}
         send(data){const message=JSON.parse(data);this.sent.push(message);const payload=message.kind==="appserver"?message.payload:null;
-            if(!payload?.method||payload.method==="thread/resume")return;
+            if(!payload?.method||payload.method==="thread/resume"||payload.method==="thread/settings/update")return;
             if(payload.method==="thread/read")throw new Error("Profile hydration must use pagination");
             if(payload.method==="thread/turns/list"||payload.method==="thread/items/list"){
                 this.historyPage(payload);
@@ -411,7 +411,7 @@ const applicationSettingsDomContract = `(async()=>{
         Object.getOwnPropertyDescriptor(prototype,"value").set.call(control,value);
         control.dispatchEvent(new Event(control instanceof HTMLSelectElement?"change":"input",{bubbles:true}));
         await frame();return controlFor(caption);};
-    const captions=["Model","Reasoning","Access","Network","Workspace","Approval","Style",
+    const captions=["Model","Reasoning","Access","Network","Approval","Style",
         "Approval reviewer","Permission profile","Service tier","Reasoning summary","Collaboration mode"];
     const labelsAssociated=captions.every(caption=>{const label=labelFor(caption);const control=controlFor(caption);
         return Boolean(label&&control&&label.control===control);});
@@ -430,7 +430,6 @@ const applicationSettingsDomContract = `(async()=>{
     await setValue("Service tier","fast");
     await setValue("Reasoning summary","concise");
     await setValue("Collaboration mode","plan");
-    await setValue("Workspace","/authored/browser");
     await setValue("Access","danger-full-access");
     const fullAccessNetwork={value:controlFor("Network").value,disabled:controlFor("Network").disabled,
         title:labelFor("Network").title,color:getComputedStyle(controlFor("Network")).color,background:getComputedStyle(controlFor("Network")).backgroundColor};
@@ -454,6 +453,55 @@ const applicationSettingsDomContract = `(async()=>{
     const request=profile.socket.sent.filter(message=>message.kind==="appserver"&&message.payload.method==="turn/start").at(-1);
     return {labelsAssociated,modelDescription,profileDescription,unknownApproval,unsupportedStyle,
         fullAccessNetwork,profileSelected,changedText,params:request.payload.params};
+})()`;
+
+const workspaceDomContract = `(async()=>{
+    const socket=globalThis.codexuiApplicationProfile.socket;
+    const frame=()=>new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const notify=(method,params)=>socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method,params}});
+    const requests=()=>socket.sent.filter(message=>message.payload?.method==="thread/settings/update");
+    const inputValue=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,value);
+        input.dispatchEvent(new Event("input",{bubbles:true}));};
+    const heading=()=>document.querySelector(".thread-workspace");
+    const activeDisabled=heading().disabled;
+    notify("turn/completed",{threadId:"profile",turn:{id:"turn-79",status:"completed"}});
+    notify("thread/status/changed",{threadId:"profile",status:{type:"idle"}});await frame();
+    const initial=heading().textContent;
+    const editor=document.querySelector(".composer textarea");
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(editor,"retained workspace draft");
+    editor.dispatchEvent(new Event("input",{bubbles:true}));await frame();
+    heading().click();await frame();
+    let dialog=document.querySelector(".new-thread-dialog");
+    const currentVisible=dialog?.textContent.includes("Current workspace")&&dialog?.textContent.includes("Proposed workspace");
+    dialog?.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));await frame();
+    const cancelled=requests().length===0&&!document.querySelector(".new-thread-dialog");
+    heading().click();await frame();dialog=document.querySelector(".new-thread-dialog");
+    inputValue(dialog.querySelector('input:not([readonly])'),"/remote/"+"long-directory-α/".repeat(30));await frame();
+    dialog.querySelector("form").requestSubmit();await frame();
+    const change=requests().at(-1);
+    socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:change.payload.id,result:{}}});await frame();
+    const pending=heading().disabled&&heading().textContent===initial&&heading().title.includes("pending");
+    notify("thread/settings/updated",{threadId:"profile",threadSettings:{cwd:change.payload.params.cwd}});await frame();
+    const confirmed=!heading().disabled&&heading().title.startsWith(change.payload.params.cwd)&&heading().scrollWidth>heading().clientWidth;
+    notify("thread/started",{thread:{id:"workspace-other",name:"Workspace B",cwd:"/other",status:{type:"idle"}}});await frame();
+    const row=[...document.querySelectorAll('[role="treeitem"]')].find(row=>row.getAttribute("aria-label")?.includes("Workspace B"));
+    row?.querySelector(".thread-menu-trigger")?.click();await frame();
+    const menu=document.querySelector('[role="menu"]');
+    [...menu.querySelectorAll("button")].find(button=>button.textContent==="Change workspace…")?.click();await frame();
+    dialog=document.querySelector(".new-thread-dialog");
+    const exactTarget=dialog?.textContent.includes("Thread: Workspace B");
+    inputValue(dialog.querySelector('input:not([readonly])'),"/other-proposed");await frame();
+    dialog.querySelector("form").requestSubmit();await frame();
+    const other=requests().at(-1);
+    socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:other.payload.id,error:{code:-32000,message:"workspace denied"}}});await frame();
+    const failure=document.querySelector('[role="alert"]')?.textContent.includes("workspace denied");
+    const ownership=other.payload.params.threadId==="workspace-other"&&heading().title.startsWith(change.payload.params.cwd)
+        &&editor.value==="retained workspace draft";
+    const grid=document.querySelector(".settings-grid");
+    const labels=[...grid.querySelectorAll(":scope > label")].map(label=>label.querySelector("span")?.textContent);
+    const moved=labels[4]==="Collaboration mode"&&!labels.includes("Workspace")&&!document.querySelector(".workspace-breadcrumb")
+        &&![...document.querySelectorAll(".additional-settings label")].some(label=>label.textContent.includes("Collaboration mode"));
+    return {activeDisabled,currentVisible,cancelled,pending,confirmed,exactTarget,failure,ownership,moved};
 })()`;
 
 const fullTopBarMeasurement = `(()=>{
@@ -596,7 +644,7 @@ try {
         `10k App hydration caused ${hydratePerformance.layouts} layouts and ${hydratePerformance.styleRecalculations} style passes`);
 
     const prepareResult = await devTools.evaluate(applicationProfilePrepare);
-    assert.equal(prepareResult.settingsControls, 12);
+    assert.equal(prepareResult.settingsControls, 11);
     const beforeIdle = await performanceSnapshot(devTools);
     // This is the measured idle interval, not a warm-up: do not drive browser work to observe inactivity.
     await wait(1000 / 30);
@@ -659,6 +707,33 @@ try {
     assert(detachedResult.anchorStable && detachedResult.anchorTopDelta <= 1 && detachedResult.sourceGrowth === 2_700,
         `paused anchor moved ${detachedResult.anchorTopDelta}px across an above-anchor stream update`);
 
+    const workspaceDom = await devTools.evaluate(workspaceDomContract);
+    assert.deepEqual(workspaceDom, {activeDisabled: true, currentVisible: true, cancelled: true,
+        pending: true, confirmed: true, exactTarget: true, failure: true, ownership: true, moved: true});
+    const workspaceGeometry = [];
+    if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
+        await mkdir(process.env.CODEXUI_BROWSER_SCREENSHOTS, {recursive: true});
+    }
+    for (const dpr of [1, 1.25, 1.5, 2]) {
+        for (const width of [360, 760, 1280]) {
+            await devTools.call("Emulation.setDeviceMetricsOverride", {width, height: 900, deviceScaleFactor: dpr, mobile: false});
+            await waitUntil(devTools, `innerWidth===${width}`, "workspace viewport");
+            for (const font of ["", "20px"]) {
+                await devTools.evaluate(`(async()=>{document.querySelector(".thread-heading-context").style.fontSize=${JSON.stringify(font)};await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));})()`);
+                const geometry = await devTools.evaluate(`(()=>{const path=document.querySelector(".thread-workspace"),r=path.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth-innerWidth,left:r.left,right:r.right,width:r.width,fullPath:path.title.startsWith("/remote/")};})()`);
+                assert.equal(geometry.overflow, 0, `long workspace overflow at DPR ${dpr}, ${width}px, font ${font}`);
+                assert(geometry.fullPath && geometry.left >= 0 && geometry.right <= width && geometry.width <= 300,
+                    "workspace preserves full accessible path within bounded visible geometry");
+                workspaceGeometry.push({dpr, width, font: font || "normal", ...geometry});
+                if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
+                    const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+                    await writeFile(join(process.env.CODEXUI_BROWSER_SCREENSHOTS, `workspace-${dpr}-${width}-${font || "normal"}.png`), Buffer.from(screenshot.data, "base64"));
+                }
+            }
+        }
+    }
+    await devTools.evaluate(`document.querySelector(".thread-heading-context").style.fontSize=""`);
+    await setWidth(devTools, 1280);
     const settingsDom = await devTools.evaluate(applicationSettingsDomContract);
     assert.equal(settingsDom.labelsAssociated, true, "every settings control has one visible label association");
     assert.deepEqual({model: settingsDom.modelDescription, profile: settingsDom.profileDescription},
@@ -670,14 +745,14 @@ try {
         {value: "enabled", disabled: true, title: "Full access already includes network access", color: "rgb(152, 162, 179)", background: "rgb(246, 248, 251)"});
     assert.deepEqual(settingsDom.profileSelected,
         {value: ":workspace", access: "default", network: "default"});
-    assert.match(settingsDom.changedText, /12 changed/u);
+    assert.match(settingsDom.changedText, /11 changed/u);
     const {threadId, clientUserMessageId, input, ...settingsParams} = settingsDom.params;
     assert.equal(threadId, "profile");
     assert.equal(typeof clientUserMessageId, "string");
     assert.deepEqual(input, [{type: "text", text: "settings DOM contract", text_elements: []}]);
     assert.deepEqual(settingsParams, {
         model: "gpt-a", effort: "low", personality: "friendly", approvalPolicy: "never",
-        approvalsReviewer: "auto_review", serviceTier: "fast", summary: "concise", cwd: "/authored/browser",
+        approvalsReviewer: "auto_review", serviceTier: "fast", summary: "concise",
         permissions: null,
         sandboxPolicy: {type: "workspaceWrite", writableRoots: [], networkAccess: true,
             excludeTmpdirEnvVar: false, excludeSlashTmp: false},
@@ -686,7 +761,7 @@ try {
     });
 
     const catchup = await qualifyCatchup(devTools);
-    console.log(JSON.stringify({catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    console.log(JSON.stringify({workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

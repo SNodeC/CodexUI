@@ -7,10 +7,10 @@
 #include "codex/ThreadBrowser.h"
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/WorkerLogic.h"
 
 #include <QLocale>
 #include <QStringList>
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -1431,6 +1431,7 @@ projectThreadRow(nodegraph::NodeGraph::ReadAccess &read,
   if (row.title.empty())
     row.title = row.id.substr(0, std::min<std::size_t>(12, row.id.size()));
   row.cwd = scalarTextFromValue(valueMember(*state, "cwd"));
+  row.workspaceChangeUnavailable = nodegraph::threadWorkspaceChangeUnavailable(read, thread);
   row.status = statusFromState(*state);
   row.createdAt = timestamp("createdAt");
   row.updatedAt = timestamp("updatedAt");
@@ -2264,112 +2265,78 @@ NodeGraphUiAdapter::pendingRequest(const nodegraph::NodeRef &target,
   return projectPendingRequest(*read, target, canControlRequests(*read));
 }
 
-std::optional<TurnSettingsContext>
-NodeGraphUiAdapter::turnSettings(const nodegraph::NodeRef &thread,
-                                 std::string_view draftIdentity,
-                                 std::string_view draftWorkspace) const {
-  if (!graph_)
-    return std::nullopt;
-  auto read = graph_->tryRead();
-  if (!read)
-    return std::nullopt;
+std::optional<TurnSettingsContext> NodeGraphUiAdapter::turnSettings(const nodegraph::NodeRef& thread,
+                                                                    std::string_view draftIdentity) const {
+    if (!graph_)
+        return std::nullopt;
+    auto read = graph_->tryRead();
+    if (!read)
+        return std::nullopt;
 
-  TurnSettingsContext result;
-  result.models = settingModels(*read);
-  result.permissionProfiles = settingPermissionProfiles(*read);
-  if (const nodegraph::NodeRef connection =
-          read->find({nodegraph::NodeKind::Connection, "connection"}))
-    result.providerAuthorityRevision =
-        nodegraph::unsignedIntegerFromValue(
-            valueMember(*read->state(connection), "providerAuthorityRevision"))
-            .value_or(0);
-  if (!thread) {
-    result.identity = std::string(draftIdentity);
-    result.canonical[TurnSettingField::Workspace] = std::string(draftWorkspace);
+    TurnSettingsContext result;
+    result.models = settingModels(*read);
+    result.permissionProfiles = settingPermissionProfiles(*read);
+    if (const nodegraph::NodeRef connection = read->find({nodegraph::NodeKind::Connection, "connection"}))
+        result.providerAuthorityRevision =
+            nodegraph::unsignedIntegerFromValue(valueMember(*read->state(connection), "providerAuthorityRevision")).value_or(0);
+    if (!thread) {
+        result.identity = std::string(draftIdentity);
+        return result;
+    }
+    if (thread->id().kind != nodegraph::NodeKind::Thread || !read->live(thread))
+        return std::nullopt;
+    const auto state = read->state(thread);
+
+    result.threadIncarnation = thread->incarnation();
+    result.identity = boolFromValue(valueMember(*state, "local")) ? threadRowPresentationKey(thread, *state) : thread->id().canonical;
+    const nodegraph::Value* acknowledgements = valueMember(*state, "settingsAcknowledgements");
+    const auto* acknowledged = acknowledgements ? acknowledgements->asObject() : nullptr;
+    const auto acknowledge = [&result, acknowledged](TurnSettingField field, std::string_view name) {
+        result.acknowledged[static_cast<std::size_t>(field)] =
+            acknowledged ? nodegraph::unsignedIntegerFromValue(valueMember(*acknowledged, name)).value_or(0) : 0;
+    };
+    const auto assign = [&result, &state, &acknowledge](TurnSettingField field, std::string_view name, std::string_view authority = {}) {
+        result.canonical[field] = settingString(valueMember(*state, name), DefaultTurnSetting);
+        acknowledge(field, authority.empty() ? name : authority);
+    };
+    assign(TurnSettingField::Model, "model");
+    result.canonical[TurnSettingField::Effort] = settingString(valueMember(*state, "reasoningEffort"), DefaultTurnSetting);
+    if (result.canonical[TurnSettingField::Effort] == DefaultTurnSetting)
+        result.canonical[TurnSettingField::Effort] = settingString(valueMember(*state, "effort"), DefaultTurnSetting);
+    acknowledge(TurnSettingField::Effort, "effort");
+    assign(TurnSettingField::Personality, "personality");
+    assign(TurnSettingField::Approval, "approvalPolicy", "approval");
+    assign(TurnSettingField::Reviewer, "approvalsReviewer", "reviewer");
+    assign(TurnSettingField::ServiceTier, "serviceTier");
+    assign(TurnSettingField::Summary, "summary");
+
+    const nodegraph::Value* sandbox = valueMember(*state, "sandboxPolicy");
+    if (!sandbox)
+        sandbox = valueMember(*state, "sandbox");
+    result.canonical[TurnSettingField::Sandbox] = settingSandbox(sandbox);
+    const auto* sandboxObject = sandbox ? sandbox->asObject() : nullptr;
+    const nodegraph::Value* network = sandboxObject ? valueMember(*sandboxObject, "networkAccess") : nullptr;
+    const bool networkEnabled = network && ((network->asBool() && *network->asBool()) || scalarTextFromValue(network) == "enabled");
+    const std::string& access = result.canonical[TurnSettingField::Sandbox];
+    result.canonical[TurnSettingField::Network] = access == DefaultTurnSetting                       ? std::string(DefaultTurnSetting)
+                                                  : access == "danger-full-access" || networkEnabled ? "enabled"
+                                                                                                     : "restricted";
+    acknowledge(TurnSettingField::Sandbox, "sandbox");
+    acknowledge(TurnSettingField::Network, "sandbox");
+
+    if (const nodegraph::Value* profile = valueMember(*state, "activePermissionProfile")) {
+        const std::string id = profile->asObject() ? settingString(valueMember(*profile->asObject(), "id")) : settingString(profile);
+        if (!id.empty())
+            result.canonical[TurnSettingField::PermissionProfile] = id;
+    }
+    acknowledge(TurnSettingField::PermissionProfile, "permissionProfile");
+    if (const nodegraph::Value* collaboration = valueMember(*state, "collaborationMode"); collaboration && collaboration->asObject()) {
+        const std::string mode = settingString(valueMember(*collaboration->asObject(), "mode"));
+        if (!mode.empty())
+            result.canonical[TurnSettingField::Collaboration] = mode;
+    }
+    acknowledge(TurnSettingField::Collaboration, "collaboration");
     return result;
-  }
-  if (thread->id().kind != nodegraph::NodeKind::Thread ||
-      !read->live(thread))
-    return std::nullopt;
-  const auto state = read->state(thread);
-
-  result.threadIncarnation = thread->incarnation();
-  result.identity = boolFromValue(valueMember(*state, "local"))
-                        ? threadRowPresentationKey(thread, *state)
-                        : thread->id().canonical;
-  const nodegraph::Value *acknowledgements =
-      valueMember(*state, "settingsAcknowledgements");
-  const auto *acknowledged =
-      acknowledgements ? acknowledgements->asObject() : nullptr;
-  const auto acknowledge = [&result, acknowledged](TurnSettingField field,
-                                                   std::string_view name) {
-    result.acknowledged[static_cast<std::size_t>(field)] =
-        acknowledged ? nodegraph::unsignedIntegerFromValue(
-                           valueMember(*acknowledged, name))
-                           .value_or(0)
-                     : 0;
-  };
-  const auto assign = [&result, &state, &acknowledge](
-                          TurnSettingField field, std::string_view name,
-                          std::string_view authority = {}) {
-    result.canonical[field] =
-        settingString(valueMember(*state, name), DefaultTurnSetting);
-    acknowledge(field, authority.empty() ? name : authority);
-  };
-  assign(TurnSettingField::Model, "model");
-  result.canonical[TurnSettingField::Effort] =
-      settingString(valueMember(*state, "reasoningEffort"), DefaultTurnSetting);
-  if (result.canonical[TurnSettingField::Effort] == DefaultTurnSetting)
-    result.canonical[TurnSettingField::Effort] =
-        settingString(valueMember(*state, "effort"), DefaultTurnSetting);
-  acknowledge(TurnSettingField::Effort, "effort");
-  assign(TurnSettingField::Personality, "personality");
-  assign(TurnSettingField::Approval, "approvalPolicy", "approval");
-  assign(TurnSettingField::Reviewer, "approvalsReviewer", "reviewer");
-  result.canonical[TurnSettingField::Workspace] =
-      settingString(valueMember(*state, "cwd"));
-  acknowledge(TurnSettingField::Workspace, "cwd");
-  assign(TurnSettingField::ServiceTier, "serviceTier");
-  assign(TurnSettingField::Summary, "summary");
-
-  const nodegraph::Value *sandbox = valueMember(*state, "sandboxPolicy");
-  if (!sandbox)
-    sandbox = valueMember(*state, "sandbox");
-  result.canonical[TurnSettingField::Sandbox] = settingSandbox(sandbox);
-  const auto *sandboxObject = sandbox ? sandbox->asObject() : nullptr;
-  const nodegraph::Value *network =
-      sandboxObject ? valueMember(*sandboxObject, "networkAccess") : nullptr;
-  const bool networkEnabled =
-      network && ((network->asBool() && *network->asBool()) ||
-                  scalarTextFromValue(network) == "enabled");
-  const std::string &access = result.canonical[TurnSettingField::Sandbox];
-  result.canonical[TurnSettingField::Network] =
-      access == DefaultTurnSetting ? std::string(DefaultTurnSetting)
-      : access == "danger-full-access" || networkEnabled ? "enabled"
-                                                         : "restricted";
-  acknowledge(TurnSettingField::Sandbox, "sandbox");
-  acknowledge(TurnSettingField::Network, "sandbox");
-
-  if (const nodegraph::Value *profile =
-          valueMember(*state, "activePermissionProfile")) {
-    const std::string id =
-        profile->asObject()
-            ? settingString(valueMember(*profile->asObject(), "id"))
-            : settingString(profile);
-    if (!id.empty())
-      result.canonical[TurnSettingField::PermissionProfile] = id;
-  }
-  acknowledge(TurnSettingField::PermissionProfile, "permissionProfile");
-  if (const nodegraph::Value *collaboration =
-          valueMember(*state, "collaborationMode");
-      collaboration && collaboration->asObject()) {
-    const std::string mode =
-        settingString(valueMember(*collaboration->asObject(), "mode"));
-    if (!mode.empty())
-      result.canonical[TurnSettingField::Collaboration] = mode;
-  }
-  acknowledge(TurnSettingField::Collaboration, "collaboration");
-  return result;
 }
 
 std::optional<InspectorSnapshot>

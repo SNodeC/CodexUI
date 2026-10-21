@@ -1025,16 +1025,7 @@
               "personalityEnabled": false
             },
             "threadOptions": {},
-            "turnOptions": {
-              "collaborationMode": {
-                "mode": "default",
-                "settings": {
-                  "model": "gpt-default",
-                  "developer_instructions": null,
-                  "reasoning_effort": "low"
-                }
-              }
-            }
+            "turnOptions": {}
           }
         },
         {
@@ -1119,15 +1110,7 @@
             "turnOptions": {
               "approvalPolicy": "untrusted",
               "permissions": null,
-              "sandboxPolicy": {"type": "dangerFullAccess"},
-              "collaborationMode": {
-                "mode": "default",
-                "settings": {
-                  "model": "gpt-default",
-                  "developer_instructions": null,
-                  "reasoning_effort": null
-                }
-              }
+              "sandboxPolicy": {"type": "dangerFullAccess"}
             }
           }
         },
@@ -1140,7 +1123,6 @@
             ["network", "enabled"],
             ["approval", "on-request"],
             ["reviewer", "auto_review"],
-            ["cwd", "  /authored/work  "],
             ["permissionProfile", "default"],
             ["serviceTier", "flex"],
             ["summary", "detailed"],
@@ -1155,7 +1137,6 @@
               "network": "enabled",
               "approval": "on-request",
               "reviewer": "auto_review",
-              "cwd": "  /authored/work  ",
               "permissionProfile": "default",
               "serviceTier": "flex",
               "summary": "detailed",
@@ -1169,7 +1150,6 @@
               "network",
               "approval",
               "reviewer",
-              "cwd",
               "permissionProfile",
               "serviceTier",
               "summary",
@@ -1181,7 +1161,6 @@
               "approvalPolicy": "on-request",
               "approvalsReviewer": "auto_review",
               "serviceTier": "flex",
-              "cwd": "/authored/work",
               "permissions": null,
               "sandbox": "workspace-write"
             },
@@ -1193,7 +1172,6 @@
               "approvalsReviewer": "auto_review",
               "serviceTier": "flex",
               "summary": "detailed",
-              "cwd": "/authored/work",
               "permissions": null,
               "sandboxPolicy": {
                 "type": "workspaceWrite",
@@ -1214,6 +1192,108 @@
           }
         },
         {"select": "settings-b", "expect": {"touched": ["effort"]}}
+      ]
+    },
+    {
+      "id": "reported-settings-are-not-authored-overrides",
+      "catalogs": {
+        "models": [
+          {
+            "model": "gpt-a",
+            "isDefault": true,
+            "supportedReasoningEfforts": [
+              {
+                "reasoningEffort": "low"
+              },
+              {
+                "reasoningEffort": "high"
+              }
+            ]
+          }
+        ],
+        "permissionProfiles": []
+      },
+      "threads": [
+        {"id": "unknown", "key": "unknown", "canonical": {"id": "unknown"}},
+        {
+          "id": "restored",
+          "key": "restored",
+          "canonical": {
+            "id": "restored",
+            "model": "gpt-a",
+            "reasoningEffort": "high",
+            "collaborationMode": {
+              "mode": "plan",
+              "settings": {
+                "model": "gpt-a",
+                "reasoning_effort": "high",
+                "developer_instructions": null
+              }
+            }
+          }
+        }
+      ],
+      "newThread": {
+        "key": "draft-restored",
+        "cwd": "/workspace"
+      },
+      "steps": [
+        {"select": "unknown", "expect": {"values": {"collaboration": ""}, "touched": [], "turnOptions": {}}},
+        {
+          "select": "restored",
+          "expect": {
+            "values": {
+              "model": "gpt-a",
+              "effort": "high",
+              "collaboration": "plan"
+            },
+            "touched": [],
+            "turnOptions": {}
+          }
+        },
+        {
+          "change": [
+            "effort",
+            "low"
+          ],
+          "expect": {
+            "turnOptions": {
+              "effort": "low"
+            }
+          }
+        },
+        {
+          "change": [
+            "model",
+            "gpt-a"
+          ],
+          "expect": {
+            "turnOptions": {
+              "model": "gpt-a",
+              "effort": "low"
+            }
+          }
+        },
+        {
+          "change": [
+            "collaboration",
+            "default"
+          ],
+          "expect": {
+            "turnOptions": {
+              "model": "gpt-a",
+              "effort": "low",
+              "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                  "model": "gpt-a",
+                  "developer_instructions": null,
+                  "reasoning_effort": "low"
+                }
+              }
+            }
+          }
+        }
       ]
     }
   ],
@@ -1471,6 +1551,110 @@
       ],
       "overallDetails": [
         "inputTokens coverage: 0/1 threads"
+      ]
+    }
+  ],
+  "workspaceChangeCases": [
+    {
+      "id": "accepted-is-not-confirmed",
+      "initial": "/old",
+      "proposed": "/new",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "partial",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/new",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "notification-before-response",
+      "initial": "/old",
+      "proposed": "/new",
+      "steps": [
+        {
+          "kind": "confirmed",
+          "cwd": "/new",
+          "pending": false
+        },
+        {
+          "kind": "accepted",
+          "cwd": "/new",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "failure-retains-workspace",
+      "initial": "/old",
+      "proposed": "/new",
+      "steps": [
+        {
+          "kind": "failed",
+          "cwd": "/old",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "unreported-workspace",
+      "initial": "",
+      "proposed": "/remote/not-on-frontend",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/remote/not-on-frontend",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "server-resolves-relative-workspace",
+      "initial": "/old",
+      "proposed": "relative",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/server/relative",
+          "pending": false
+        }
+      ]
+    },
+    {
+      "id": "long-unicode-workspace",
+      "initial": "/old",
+      "proposed": "/server/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/",
+      "steps": [
+        {
+          "kind": "accepted",
+          "cwd": "/old",
+          "pending": true
+        },
+        {
+          "kind": "confirmed",
+          "cwd": "/server/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/long-directory-α🙂/",
+          "pending": false
+        }
       ]
     }
   ]
