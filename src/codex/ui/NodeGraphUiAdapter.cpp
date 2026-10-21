@@ -806,6 +806,16 @@ nodegraph::NodeRef conversationTurnRoot(
   return roots.empty() ? nodegraph::NodeRef{} : roots.front();
 }
 
+bool conversationItemsComplete(const nodegraph::NodeGraph::ReadAccess& read, const nodegraph::NodeRef& turn) {
+    const auto state = turn ? read.state(turn) : nullptr;
+    return state && valueMember(*state, "itemsHistoryHasMore") && !boolFromValue(valueMember(*state, "itemsHistoryHasMore"));
+}
+
+nodegraph::NodeRef conversationOpeningItem(const nodegraph::NodeGraph::ReadAccess& read, const nodegraph::NodeRef& turn) {
+    const auto root = conversationTurnRoot(read, turn);
+    return root ? root : conversationItemsComplete(read, turn) ? read.childAt(turn, 0) : nodegraph::NodeRef{};
+}
+
 nodegraph::NodeRef
 conversationActiveTurn(nodegraph::NodeGraph::ReadAccess &read,
                        const nodegraph::NodeRef &thread) {
@@ -829,6 +839,8 @@ VisibleCardData conversationCardData(nodegraph::NodeGraph::ReadAccess &read,
   if (key)
     result.key = *key;
   const auto turn = read.parent(item);
+  result.turnOpening =
+      turn && result.kind != CardKind::LocalPrompt && conversationItemsComplete(read, turn) && conversationOpeningItem(read, turn) == item;
   if (turn &&
       read.isRelated(turn, nodegraph::RelationKind::TurnRootItem, item)) {
     auto timing = protocolTimes(read.state(turn)->fields, "Turn");
@@ -2905,7 +2917,7 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
             continue;
           route.affected = true;
           route.structural = true;
-          addItem(conversationTurnRoot(*read, candidate));
+          addItem(conversationOpeningItem(*read, candidate));
         }
       }
       return;
@@ -2950,7 +2962,7 @@ NodeGraphUiAdapter::ConversationRoute NodeGraphUiAdapter::conversationRoute(
         return;
       route.affected = true;
       route.structural = route.structural || structureChanged || statusChanged;
-      addItem(conversationTurnRoot(*read, node));
+      addItem(conversationOpeningItem(*read, node));
       return;
     }
     route.affected = true;
@@ -3137,7 +3149,7 @@ NodeGraphUiAdapter::conversationDeltaSince(
       continue;
     if (read->changedRevision(turn) > afterRevision ||
         read->structureChangedRevision(turn) > afterRevision)
-      changed.push_back(conversationTurnRoot(*read, turn));
+        changed.push_back(conversationOpeningItem(*read, turn));
     const std::size_t itemCount = read->childCount(turn);
     for (std::size_t itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
       const nodegraph::NodeRef item = read->childAt(turn, itemIndex);

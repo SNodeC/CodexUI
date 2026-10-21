@@ -10,7 +10,8 @@ import {fileURLToPath} from "node:url";
 import {timingLimit} from "./timing-policy.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
-const artifactDirectory = resolve(toolDirectory, "../app-dist");
+const artifactDirectory = process.env.CODEXUI_WEB_ARTIFACT_DIR
+    ? resolve(process.env.CODEXUI_WEB_ARTIFACT_DIR) : resolve(toolDirectory, "../app-dist");
 const wait = milliseconds => new Promise(complete => setTimeout(complete, milliseconds));
 
 async function chromeExecutable() {
@@ -532,6 +533,68 @@ function assertTopBar(measurement, width) {
 
 await access(join(artifactDirectory, "index.html"), fsConstants.R_OK);
 const executable = await chromeExecutable();
+const turnRemovalCheck = `(async()=>{
+    const frame=()=>new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    const waitFor=async(predicate,description)=>{for(let attempt=0;attempt<200;++attempt){
+        if(predicate())return;await new Promise(complete=>setTimeout(complete,5));}throw new Error("Timed out waiting for "+description);};
+    const socket=globalThis.codexuiApplicationProfile.socket;
+    const original=socket.send.bind(socket);
+    const metadata={id:"removal-ui",name:"Removal fixture",historyMode:"paginated",ephemeral:false,status:{type:"idle"}};
+    let turns=[1,2,3].map(index=>({id:"removal-"+index,status:"completed",items:[
+        {id:"prompt-"+index,type:"userMessage",content:[{type:"text",text:("Turn "+index+" **prompt**\\n\\n").repeat(12)}]},
+        {id:"answer-"+index,type:"agentMessage",phase:"final_answer",text:"Retained answer "+index}]}));
+    const reply=(request,result)=>socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:request.id,result}});
+    socket.send=data=>{const envelope=JSON.parse(data),request=envelope.payload;
+        if(envelope.kind==="appserver"&&request?.params?.threadId===metadata.id){
+            socket.sent.push(envelope);
+            if(request.method==="thread/revert")return;
+            const result=request.method==="thread/resume"?{thread:metadata}
+                :request.method==="thread/turns/list"?{data:turns.toReversed(),nextCursor:null}
+                :{data:(turns.find(turn=>turn.id===request.params.turnId)?.items??[]).toReversed()
+                    .map(item=>({turnId:request.params.turnId,item})),nextCursor:null};
+            queueMicrotask(()=>reply(request,result));
+        }else original(data);};
+    socket.receive({kind:"appserver",payload:{method:"thread/started",params:{thread:metadata}}});
+    await waitFor(()=>[...document.querySelectorAll(".thread-row")].some(row=>row.textContent.includes(metadata.name)),"removal thread");
+    [...document.querySelectorAll(".thread-row")].find(row=>row.textContent.includes(metadata.name)).click();
+    await waitFor(()=>document.querySelectorAll('button[aria-label="Turn actions"]').length===3,"three turn action controls");
+    await frame();
+    const controls=()=>[...document.querySelectorAll('button[aria-label="Turn actions"]')];
+    const requests=()=>socket.sent.filter(envelope=>envelope.kind==="appserver"&&envelope.payload.method==="thread/revert");
+    const scroller=document.querySelector(".conversation-scroll");
+    scroller.scrollTop=20;scroller.dispatchEvent(new Event("scroll"));await frame();
+    const first=document.querySelector(".conversation-card");
+    const anchorTop=first.getBoundingClientRect().top;
+    const header=first.querySelector("header"),before=header.getBoundingClientRect().toJSON();
+    controls()[2].click();await frame();
+    const after=header.getBoundingClientRect().toJSON();
+    const geometryStable=JSON.stringify(before)===JSON.stringify(after);
+    const menuItem=()=>[...document.querySelectorAll('[role="menuitem"]')].find(button=>button.textContent.includes("Remove this turn"));
+    const dialogButton=text=>[...document.querySelectorAll("dialog button")].find(button=>button.textContent===text);
+    menuItem().click();await frame();
+    const cancelDefault=document.activeElement?.textContent==="Cancel";
+    const confirmationText=document.querySelector("dialog").textContent;
+    dialogButton("Cancel").click();await frame();
+    const cancelledRequests=requests().length;
+    controls()[2].click();await frame();menuItem().click();await frame();
+    socket.receive({kind:"bridge.controller",controllerConnectionId:"other"});await frame();
+    const lostAuthorityDisabled=dialogButton("Remove turns").disabled;
+    dialogButton("Cancel").click();socket.receive({kind:"bridge.controller",controllerConnectionId:"profile"});await frame();
+    controls()[2].click();await frame();menuItem().click();await frame();
+    dialogButton("Remove turns").click();await frame();
+    const request=requests().at(-1).payload;
+    turns=turns.slice(0,2);
+    reply(request,{thread:{...metadata,turns:[]},turnsBackwardsCursor:"0",itemsBackwardsCursor:"0"});
+    socket.receive({kind:"appserver",payload:{method:"thread/reverted",params:{threadId:metadata.id}}});
+    await waitFor(()=>controls().length===2,"retained turn controls");await frame();
+    const result={geometryStable,cancelDefault,cancelledRequests,lostAuthorityDisabled,requests:requests().length,
+        parameters:request.params,retainedTurns:controls().length,
+        anchorOffsetDelta:Math.abs(first.getBoundingClientRect().top-anchorTop),
+        confirmationScope:confirmationText.includes("File changes and commands already performed will not be undone.")};
+    socket.send=original;
+    return result;
+})()`;
+
 const {server, url} = await staticServer();
 const profile = await mkdtemp(join(tmpdir(), "codexui-browser-qualification."));
 let chrome;
@@ -761,7 +824,16 @@ try {
     });
 
     const catchup = await qualifyCatchup(devTools);
-    console.log(JSON.stringify({workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    const turnRemoval = await devTools.evaluate(turnRemovalCheck);
+    assert.deepEqual(turnRemoval, {geometryStable: true, cancelDefault: true, cancelledRequests: 0,
+        lostAuthorityDisabled: true, requests: 1, parameters: {threadId: "removal-ui", beforeTurnId: "removal-3"},
+        retainedTurns: 2, anchorOffsetDelta: 0, confirmationScope: true});
+    if (process.env.CODEXUI_TEST_EVIDENCE_DIR) {
+        await mkdir(process.env.CODEXUI_TEST_EVIDENCE_DIR, {recursive: true});
+        const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+        await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, "browser-turn-removal.png"), Buffer.from(screenshot.data, "base64"));
+    }
+    console.log(JSON.stringify({turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

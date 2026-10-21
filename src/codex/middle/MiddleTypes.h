@@ -185,6 +185,8 @@ struct VisibleCardData {
   // it but never inspect graph state through it.
   nodegraph::NodeRef target;
 
+  bool turnOpening = false;
+
   ProtocolTimes timing{};
 
   bool operator==(const VisibleCardData &) const = default;

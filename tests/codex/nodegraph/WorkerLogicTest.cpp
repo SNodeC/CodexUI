@@ -2408,6 +2408,143 @@ void workerStoppedDeliveryIsExplicit() {
       "WorkerStopped rejects cleanly once both channel directions are closed");
 }
 
+void historyRemovalEligibilityUsesGraphAuthority() {
+    NodeGraph graph;
+    ThreadChannels channels;
+    WorkerLogic logic(graph, channels);
+    static_cast<void>(logic.transportEvent("connected"));
+    static_cast<void>(logic.bridgeState("bridge", "controller", "bridge", 1, "ready"));
+    NodeRef thread;
+    NodeRef turn;
+    {
+        auto write = graph.write();
+        thread = write.upsert({NodeKind::Thread, "cut"},
+                              NodeState{NodeStatus::Completed, {{"historyMode", Value("paginated")}, {"hydrationState", Value("ready")}}});
+        turn = write.upsert(scopedTurnNodeId("cut", "t"));
+        write.setParent(thread, turn);
+        static_cast<void>(write.finish());
+    }
+    static_cast<void>(logic.threadHydration(thread, "ready"));
+    const auto reason = [&] {
+        auto read = graph.tryRead();
+        return threadRevertUnavailable(*read, turn);
+    };
+    require(reason().empty(), "idle persistent paginated turns can be removed");
+    for (const auto& [fieldName, value] :
+         Value::Object{{"ephemeral", Value(true)}, {"historyMode", Value("legacy")}, {"hydrationState", Value("loading")}}) {
+        {
+            auto write = graph.write();
+            write.setField(thread, fieldName, value);
+            static_cast<void>(write.finish());
+        }
+        require(!reason().empty(), "unsupported and loading threads cannot be removed");
+        {
+            auto write = graph.write();
+            write.setField(thread, "ephemeral", Value(false));
+            write.setField(thread, "historyMode", Value("paginated"));
+            write.setField(thread, "hydrationState", Value("ready"));
+            static_cast<void>(write.finish());
+        }
+    }
+    static_cast<void>(logic.bridgeState("bridge", "observer", "other", 1, "ready"));
+    require(!reason().empty(), "observers cannot remove turns");
+    static_cast<void>(logic.bridgeState("bridge", "controller", "bridge", 1, "ready"));
+    static_cast<void>(logic.apply({DecodedMessageKind::ClientRequest,
+                                   "thread/revert",
+                                   ProtocolRequestId("cut"),
+                                   {{"threadId", Value("cut")}, {"beforeTurnId", Value("t")}}}));
+    require(!reason().empty(), "pending mutations are single-flight");
+    const auto admission = logic.admitPrompt({thread, NodeActionKind::SubmitPrompt, "preserve racing prompt"});
+    require(!admission.command, "a queued UI prompt cannot dispatch across a history removal");
+}
+
+void historyRemovalRecoveryPreservesAuthority() {
+    for (int code : {-32000, -32020}) {
+        NodeGraph graph;
+        ThreadChannels channels;
+        WorkerLogic logic(graph, channels);
+        NodeRef thread;
+        NodeRef turn;
+        {
+            auto write = graph.write();
+            thread = write.upsert({NodeKind::Thread, "recovery-cut"},
+                                  NodeState{NodeStatus::Completed, {{"historyMode", "paginated"}, {"hydrationState", "ready"}}});
+            turn = write.upsert(scopedTurnNodeId("recovery-cut", "retained"));
+            write.setParent(thread, turn);
+            static_cast<void>(write.finish());
+        }
+        const ProtocolRequestId id("uncertain-cut");
+        const auto request = logic.applyDetailed(
+            {DecodedMessageKind::ClientRequest, "thread/revert", id, {{"threadId", "recovery-cut"}, {"beforeTurnId", "retained"}}});
+        static_cast<void>(logic.apply({DecodedMessageKind::ClientError, "thread/revert", id, {{"code", code}}, request.primary}));
+        {
+            auto read = graph.tryRead();
+            require(read->live(turn) && !read->live(request.primary) &&
+                        boolFromValue(valueMember(*read->state(thread), "historyStale")) == (code == -32020),
+                    "definite rejection retains history; an uncertain outcome also retains invalidation for recovery");
+        }
+        static_cast<void>(logic.transportEvent("disconnected"));
+        {
+            auto read = graph.tryRead();
+            require(!read->live(turn) && !read->live(thread) && !read->live(request.primary),
+                    "disconnect retires old provider identities and operations through the established recovery boundary");
+        }
+        const ProtocolRequestId reloadId("authoritative-reload");
+        const auto reload =
+            logic.applyDetailed({DecodedMessageKind::ClientRequest, "thread/read", reloadId, {{"threadId", "recovery-cut"}}});
+        static_cast<void>(logic.apply({DecodedMessageKind::ClientResult,
+                                       "thread/read",
+                                       reloadId,
+                                       {{"thread", Value::Object{{"id", "recovery-cut"}, {"turns", Value::Array{}}}}},
+                                       reload.primary}));
+        const auto late = logic.applyDetailed({DecodedMessageKind::ClientResult,
+                                               "thread/revert",
+                                               id,
+                                               {{"thread", Value::Object{{"id", "recovery-cut"}, {"turns", Value::Array{}}}}},
+                                               request.primary});
+        {
+            auto read = graph.tryRead();
+            const auto reloaded = read->find({NodeKind::Thread, "recovery-cut"});
+            require(!late.primary && reloaded && read->childCount(reloaded) == 0 &&
+                        read->relatedCount(reloaded, RelationKind::PendingOperation) == 0,
+                    "authoritative reload discovers an uncertain cut; the pre-disconnect result cannot mutate or replay it");
+        }
+    }
+    NodeGraph graph;
+    ThreadChannels channels;
+    WorkerLogic logic(graph, channels);
+    NodeRef thread;
+    {
+        auto write = graph.write();
+        thread = write.upsert({NodeKind::Thread, "external-cut"}, NodeState{NodeStatus::Completed, {{"hydrationState", "ready"}}});
+        static_cast<void>(write.finish());
+    }
+    const auto admitted = logic.admitPrompt({thread, NodeActionKind::SubmitPrompt, "keep authored prompt"});
+    require(admitted.command.has_value(), "external-revert fixture admits a prompt before the other client changes history");
+    if (admitted.command) {
+        const ProtocolRequestId id("late-start");
+        const auto request = logic.applyDetailed({DecodedMessageKind::ClientRequest, "turn/start", id, {{"threadId", "external-cut"}}});
+        static_cast<void>(logic.apply({DecodedMessageKind::ServerNotification, "thread/reverted", {}, {{"threadId", "external-cut"}}}));
+        const auto late =
+            logic.completePromptResult({DecodedMessageKind::ClientResult,
+                                        "turn/start",
+                                        id,
+                                        {{"turn", Value::Object{{"id", "discarded"}, {"status", "completed"}, {"items", Value::Array{}}}}},
+                                        request.primary},
+                                       admitted.command->localPrompt,
+                                       true,
+                                       {},
+                                       "discarded");
+        auto read = graph.tryRead();
+        const auto state = read->state(admitted.command->localPrompt);
+        require(!late.command && state && state->status == NodeStatus::Failed &&
+                    boolFromValue(valueMember(*state, "requiresExplicitRecovery")) &&
+                    exactStringFromValue(valueMember(*state, "text")) == "keep authored prompt" &&
+                    !read->find(scopedTurnNodeId("external-cut", "discarded")),
+                "external removal preserves authored recovery and fences late prompt acknowledgements without resending");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -2438,6 +2575,8 @@ int main() {
   providerGenerationResetIsAtomicAndKeepsOnlyRecoveryPrompts();
   providerTurnErrorsKeepTheirAuthoritativeNotice();
   workerStoppedDeliveryIsExplicit();
+  historyRemovalEligibilityUsesGraphAuthority();
+  historyRemovalRecoveryPreservesAuthority();
 
   if (failures != 0) {
     std::cerr << failures << " worker logic assertion(s) failed\n";

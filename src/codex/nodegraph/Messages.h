@@ -62,6 +62,7 @@ enum class NodeActionKind : std::uint8_t {
     Archive,
     Unarchive,
     Delete,
+    RevertTurn,
     SubmitPrompt,
     InterruptTurn,
     ResolveInteraction,

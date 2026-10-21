@@ -190,6 +190,7 @@ signals:
   void timingRequested(nodegraph::NodeRef target);
   void intrinsicGeometryChanged();
   void recoveryRequested();
+  void turnMenuRequested(nodegraph::NodeRef target, QPoint position);
   void noticeRequested(QString message, bool error);
 
 protected:

@@ -284,3 +284,5 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 button[class]:disabled, button:disabled, input:disabled, select:disabled { opacity: 1; color: var(--disabled-text); background: var(--app-background); border-color: var(--divider); cursor: default; }
 .group-arrow { display: inline-flex; flex: none; width: 34px; align-items: center; }.group-disclosure > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-group.section-group:not(.nested-section) > header, .browser-group.project-group:not(:has(.thread-row,.nested-section)) > header, .browser-group:not(.nested-section)[aria-expanded="false"] > header { min-height: 38px; }
+
+.new-thread-dialog footer button.danger { color: var(--destructive-text); }

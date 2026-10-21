@@ -5346,29 +5346,82 @@ void revertReplacesAuthoritativeHistory() {
     const NodeRef threadNode =
         read->find({NodeKind::Thread, "history-mutation"});
     const auto state = threadNode ? read->state(threadNode) : nullptr;
-    require(
-        threadNode && postRevertRequest && read->children(threadNode).empty() &&
-            !read->find(firstTurn->id()) && !read->find(secondTurn->id()) &&
-            !read->live(removedTurn) && !read->live(removedItem) &&
-            !read->live(removedRetainedTurnItem) &&
-            !read->find(postRevertRequest->id()) && !read->live(firstTurn) &&
-            !read->live(secondTurn) && !read->live(postRevertRequest) &&
-            std::ranges::find(reverted.change.removed, postRevertRequest) !=
-                reverted.change.removed.end() &&
-            field(state, "historyHasMore") &&
-            field(state, "historyHasMore")->asBool() &&
-            *field(state, "historyHasMore")->asBool() &&
-            field(state, "historyNextCursor") &&
-            field(state, "historyNextCursor")->asString() &&
-            *field(state, "historyNextCursor")->asString() ==
-                "retained-prefix-cursor" &&
-            field(state, "itemsHistoryBackwardsCursor") &&
-            field(state, "itemsHistoryBackwardsCursor")->asString() &&
-            *field(state, "itemsHistoryBackwardsCursor")->asString() ==
-                "retained-items-cursor",
-        "successful paginated revert unlinks cached history and exposes "
-        "only authoritative reload cursors");
+    require(threadNode && postRevertRequest && read->children(threadNode) == std::vector<NodeRef>{firstTurn} &&
+                read->find(firstTurn->id()) == firstTurn && !read->find(secondTurn->id()) && !read->live(removedTurn) &&
+                !read->live(removedItem) && !read->live(removedRetainedTurnItem) && !read->find(postRevertRequest->id()) &&
+                read->live(firstTurn) && !read->live(secondTurn) && !read->live(postRevertRequest) &&
+                std::ranges::find(reverted.change.removed, postRevertRequest) != reverted.change.removed.end() &&
+                field(state, "historyHasMore") && field(state, "historyHasMore")->asBool() && *field(state, "historyHasMore")->asBool() &&
+                field(state, "historyNextCursor") && field(state, "historyNextCursor")->asString() &&
+                *field(state, "historyNextCursor")->asString() == "retained-prefix-cursor" && field(state, "itemsHistoryBackwardsCursor") &&
+                field(state, "itemsHistoryBackwardsCursor")->asString() &&
+                *field(state, "itemsHistoryBackwardsCursor")->asString() == "retained-items-cursor",
+            "successful paginated revert retires the inclusive suffix, retains "
+            "the exact cached prefix identity and exposes authoritative reload cursors");
   }
+}
+
+void revertBoundariesFenceOldHistoryAndCoalesceNotifications() {
+    for (int boundary = 1; boundary <= 3; ++boundary) {
+        for (bool notificationFirst : {false, true}) {
+            NodeGraph graph;
+            ProtocolUpdater updater(graph);
+            Value::Array turns;
+            for (int index = 1; index <= 3; ++index) {
+                turns.emplace_back(Value::Object{
+                    {"id", Value("t" + std::to_string(index))}, {"status", Value("completed")}, {"items", Value(Value::Array{})}});
+            }
+            static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+                                             "thread/started",
+                                             {},
+                                             {{"thread", Value(Value::Object{{"id", Value("cut")}, {"turns", Value(turns)}})}}}));
+            const auto old = updater.apply(
+                {DecodedMessageKind::ClientRequest, "thread/turns/list", ProtocolRequestId("old"), {{"threadId", Value("cut")}}});
+            const auto request = updater.apply({DecodedMessageKind::ClientRequest,
+                                                "thread/revert",
+                                                ProtocolRequestId("cut"),
+                                                {{"threadId", Value("cut")}, {"beforeTurnId", Value("t" + std::to_string(boundary))}}});
+            if (notificationFirst) {
+                static_cast<void>(
+                    updater.apply({DecodedMessageKind::ServerNotification, "thread/reverted", {}, {{"threadId", Value("cut")}}}));
+            }
+            static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+                                             "thread/revert",
+                                             ProtocolRequestId("cut"),
+                                             {{"thread", Value(Value::Object{{"id", Value("cut")}, {"turns", Value(Value::Array{})}})},
+                                              {"turnsBackwardsCursor", Value(boundary == 1 ? "" : "prefix")}},
+                                             request.primary}));
+            const auto duplicate = updater.apply({DecodedMessageKind::ClientResult,
+                                                  "thread/revert",
+                                                  ProtocolRequestId("cut"),
+                                                  {{"thread", Value::Object{{"id", "cut"}, {"turns", Value::Array{}}}}},
+                                                  request.primary});
+            require(!duplicate.primary, "a duplicate result cannot consume or mutate the history operation twice");
+            const auto page = updater.apply({DecodedMessageKind::ClientRequest,
+                                             "thread/turns/list",
+                                             ProtocolRequestId("new"),
+                                             {{"threadId", Value("cut")}, {"cursor", Value("prefix")}}});
+            if (!notificationFirst) {
+                static_cast<void>(
+                    updater.apply({DecodedMessageKind::ServerNotification, "thread/reverted", {}, {{"threadId", Value("cut")}}}));
+            }
+            static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+                                             "thread/turns/list",
+                                             ProtocolRequestId("old"),
+                                             {{"threadId", Value("cut")}, {"data", Value(turns)}},
+                                             old.primary}));
+            {
+                auto read = graph.tryRead();
+                const auto thread = read->find({NodeKind::Thread, "cut"});
+                require(read->childCount(thread) == static_cast<std::size_t>(boundary - 1),
+                        "first/middle/last removal is inclusive and old pages cannot resurrect turns");
+                require(!read->live(request.primary) && read->live(page.primary),
+                        "both notification orders settle one mutation without cancelling its replacement page");
+                require(!boolFromValue(valueMember(*read->state(thread), "historyStale")),
+                        "own notification and result converge without a redundant invalidation");
+            }
+        }
+    }
 }
 
 } // namespace
@@ -5419,6 +5472,7 @@ int main() {
   chosenNameOverlaySurvivesUntilMatchingAcknowledgement();
   authoritativeReplacementRetiresItemsAndPreservesLocalTail();
   revertReplacesAuthoritativeHistory();
+  revertBoundariesFenceOldHistoryAndCoalesceNotifications();
 
   if (failures != 0) {
     std::cerr << failures << " nodegraph protocol assertion(s) failed\n";

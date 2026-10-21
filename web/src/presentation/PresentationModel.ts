@@ -47,6 +47,7 @@ export interface TurnPresentation {
     timing: ProtocolTime[];
     status: PresentationStatus;
     itemOrder: string[];
+    itemsComplete?: boolean;
     items: Map<string, ItemPresentation>;
     plan: JsonObject;
 }
@@ -499,6 +500,16 @@ export class PresentationModel {
             else if (action === "account.usage.read") this.accountUsage = clone(isObject(data) ? data : {});
             else if (action === "thread.metadata") this.upsertThread(objectMember(data, "thread"), false, true, requestSequence);
             else if (action === "threads.list") this.mergeThreadList(member(data, "threads", []), requestSequence);
+            else if (action === "thread.revert") {
+                const thread = this.upsertThread(objectMember(data, "thread"), false, false);
+                const boundary = thread.turnOrder.indexOf(stringMember(data, "beforeTurnId"));
+                this.retainThreadTurns(thread, thread.turnOrder.slice(0, Math.max(0, boundary)));
+                thread.historyNextCursor = stringMember(data, "turnsBackwardsCursor");
+                thread.historyHasMore = thread.historyNextCursor !== "";
+                delete thread.raw.historyStale;
+                delete thread.raw.historyReload;
+                this.refreshActiveTurn(thread);
+            }
             else if (action === "thread.read") {
                 this.upsertThread(objectMember(data, "thread"), stringMember(event, "authority") === "replace",
                     true, requestSequence);
@@ -507,13 +518,15 @@ export class PresentationModel {
                     stringMember(data, "sortDirection"), stringMember(data, "nextCursor"));
             } else if (action === "thread.items.list") {
                 this.mergeItemPage(stringMember(scope, "threadId"), member(data, "entries", []),
-                    stringMember(data, "sortDirection"), stringMember(data, "cursor"));
+                    stringMember(data, "sortDirection"), stringMember(data, "cursor"),
+                    stringMember(data, "nextCursor"), stringMember(scope, "turnId"));
             } else if (["thread.create", "thread.resume", "thread.fork"].includes(action)) {
                 this.upsertThread(objectMember(data, "thread"), false, true, requestSequence);
             } else if (action === "turn.start") {
                 const thread = this.threads.get(stringMember(scope, "threadId"));
                 if (thread) {
                     const turn = this.upsertTurn(thread, objectMember(data, "turn"), false);
+                    turn.itemsComplete = true;
                     if (turn.id !== "" && !isTerminalTurnStatus(turn.status)) thread.activeTurnId = turn.id;
                 }
             } else if (action === "models.list") {
@@ -593,6 +606,13 @@ export class PresentationModel {
             }
             return;
         }
+        if (type === "thread.reverted") {
+            const thread = this.threads.get(stringMember(scope, "threadId"));
+            if (thread) {
+                this.beginHistoryReload(thread);
+                thread.raw.historyStale = true;
+            }
+        }
         if (type === "thread.removed") {
             this.removeThread(stringMember(scope, "threadId"));
             return;
@@ -655,6 +675,7 @@ export class PresentationModel {
             else if (lifecycle === "started" && isEmptyStatus(incomingStatus))
                 turn.status = "running";
             const updated = this.upsertTurn(thread, turn, false);
+            if (lifecycle === "started") { updated.itemsComplete = true; }
             if (isActiveStatus(updated.status)) thread.activeTurnId = updated.id;
             else if (thread.activeTurnId === updated.id) delete thread.activeTurnId;
             return;
@@ -740,9 +761,29 @@ export class PresentationModel {
         this.orderedThreads = nextOrder;
     }
 
+    private beginHistoryReload(thread: ThreadPresentation): void {
+        const previous = isObject(thread.raw.historyReload) ? thread.raw.historyReload : undefined;
+        thread.raw.historyReload = {before: previous?.before ?? [...thread.turnOrder], known: [...thread.turnOrder], received: []};
+    }
+    private retainThreadTurns(thread: ThreadPresentation, order: string[]): void {
+        const retained = new Set(order);
+        const removed = new Set(thread.turnOrder.filter(id => !retained.has(id)));
+        thread.turnOrder = order;
+        for (const id of removed) { thread.turns.delete(id); }
+        for (const [id, agent] of thread.agents) {
+            if (removed.has(agent.ownerTurnId)) {
+                thread.agents.delete(id);
+                this.releaseChildOwnership(agent.childThreadId, true);
+            }
+        }
+        thread.agentOrder = thread.agentOrder.filter(id => thread.agents.has(id));
+    }
     private mergeTurnPage(threadId: string, listedTurns: unknown, direction: string, nextCursor: string): void {
         if (threadId === "" || !Array.isArray(listedTurns)) return;
         const thread = this.threads.get(threadId) ?? this.upsertThread({id: threadId}, false, false);
+        const previous = [...thread.turnOrder];
+        const reloading = thread.raw.historyStale === true;
+        if (reloading && !isObject(thread.raw.historyReload)) { this.beginHistoryReload(thread); }
         const page: string[] = [];
         for (const raw of listedTurns) {
             if (!isObject(raw)) continue;
@@ -750,8 +791,31 @@ export class PresentationModel {
             if (turn.id !== "" && !page.includes(turn.id)) page.push(turn.id);
         }
         if (direction === "desc") page.reverse();
-        const retained = thread.turnOrder.filter(id => !page.includes(id));
-        thread.turnOrder = direction === "desc" ? [...page, ...retained] : [...retained, ...page];
+        const pageIds = new Set(page);
+        if (reloading && isObject(thread.raw.historyReload)) {
+            const reload = thread.raw.historyReload as {before: string[]; known: string[]; received: string[]};
+            const received = [...new Set([...page, ...reload.received])];
+            const prefixLength = reload.before.reduce((length, id, index) => pageIds.has(id) ? index + 1 : length, 0);
+            const complete = reload.before.length === 0 || prefixLength > 0 || nextCursor === "";
+            const known = new Set(reload.known);
+            const live = thread.turnOrder.filter(id => !known.has(id));
+            const prefix = complete ? reload.before.slice(0, prefixLength) : reload.known;
+            const order = [...new Set([...prefix, ...received, ...live])];
+            if (complete) {
+                this.retainThreadTurns(thread, order);
+                delete thread.raw.historyStale;
+                delete thread.raw.historyReload;
+            } else {
+                thread.turnOrder = order;
+                reload.received = received;
+            }
+        } else {
+            const overlap = previous.findIndex(id => pageIds.has(id));
+            const prefix = direction === "desc" && overlap >= 0 ? previous.slice(0, overlap) : [];
+            const remaining = prefix.length > 0 ? previous.slice(prefix.length) : previous;
+            const retained = remaining.filter(id => !pageIds.has(id));
+            thread.turnOrder = direction === "desc" ? [...prefix, ...page, ...retained] : [...retained, ...page];
+        }
         this.refreshActiveTurn(thread);
         thread.historyNextCursor = nextCursor;
         thread.historyHasMore = nextCursor !== "";
@@ -764,9 +828,12 @@ export class PresentationModel {
         else delete thread.activeTurnId;
     }
 
-    private mergeItemPage(threadId: string, listedEntries: unknown, direction: string, cursor: string): void {
+    private mergeItemPage(threadId: string, listedEntries: unknown, direction: string, cursor: string,
+        nextCursor: string, requestedTurn: string): void {
         const thread = this.threads.get(threadId);
         if (!thread || !Array.isArray(listedEntries)) return;
+        const completeTurn = thread.turns.get(requestedTurn);
+        if (completeTurn) { completeTurn.itemsComplete = nextCursor === ""; }
         const pages = new Map<string, Set<string>>();
         for (const entry of listedEntries) {
             if (!isObject(entry)) continue;
@@ -865,7 +932,12 @@ export class PresentationModel {
                 result.agentOrder = [];
                 result.agents.clear();
             }
-            for (const turn of raw.turns) if (isObject(turn)) this.upsertTurn(result, turn, replaceTurns);
+            for (const turn of raw.turns) {
+                if (isObject(turn)) {
+                    const updated = this.upsertTurn(result, turn, replaceTurns);
+                    if (Array.isArray(turn.items)) { updated.itemsComplete = true; }
+                }
+            }
             if (replaceTurns) {
                 for (const child of previouslyOwnedChildren) {
                     if (!this.childOwnerships.has(child) && this.threads.has(child) && !this.orderedThreads.includes(child))

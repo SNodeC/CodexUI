@@ -167,6 +167,18 @@ export class ConversationViewportState {
         return scroll;
     }
 
+    retainCards(threadId: string, presentationKey: string, retained: ReadonlySet<string>): void {
+        const state = this.state(threadId, presentationKey);
+        if (state) {
+            for (const key of state.foldedCards.keys()) {
+                if (!retained.has(key)) { state.foldedCards.delete(key); }
+            }
+            for (const key of state.codeScroll.keys()) {
+                const cardKey = key.slice(0, key.lastIndexOf(":"));
+                if (!retained.has(cardKey)) { state.codeScroll.delete(key); }
+            }
+        }
+    }
     private state(threadId: string, presentationKey: string): ThreadViewport | undefined {
         const state = this.byThread.get(threadId);
         return state?.identity === presentationKey ? state : undefined;

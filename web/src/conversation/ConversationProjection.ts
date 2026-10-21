@@ -237,6 +237,14 @@ export function projectConversation(
             turnId: item.key.turnId, turnRoot: authoritativeItems.turnRoots.get(item.key.turnId) === index,
             card: authoritativeCard(item.key, item.presentation, visualKey, authoritativeThread?.cwd ?? "")});
     }
+    for (const node of nodes) {
+        const turn = authoritativeThread?.turns.get(node.turnId);
+        const root = authoritativeItems.turnRoots.get(node.turnId);
+        const opening = turn?.itemsComplete
+            ? root !== undefined ? authoritativeItems.ordered[root]?.key.itemId : turn.itemOrder[0]
+            : undefined;
+        if (node.card.itemId === opening) { node.card.turnOpening = true; }
+    }
     for (const submission of localSubmissions) {
         if (!localCardVisible(submission)) continue;
         const anchored = submission.startsTurn || submission.state === "failed";

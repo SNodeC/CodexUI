@@ -246,6 +246,14 @@ export class PromptCoordinator {
     queuedThreadIds(): string[] {
         return [...this.byThread].filter(([, values]) => values.some(value => value.state === "queued")).map(([id]) => id).sort();
     }
+    retainHistoryAliases(threadId: string, index: AuthoritativeItemIndex): void {
+        const aliases = this.visualAliasesByThread.get(threadId);
+        if (aliases) {
+            for (const key of aliases.keys()) {
+                if (!index.positions.has(key)) { aliases.delete(key); }
+            }
+        }
+    }
     clearThread(threadId: string): void { this.byThread.delete(threadId); this.visualAliasesByThread.delete(threadId); }
     private find(threadId: string, id: number): PromptSubmission | undefined {
         return this.byThread.get(threadId)?.find(value => value.id === id);

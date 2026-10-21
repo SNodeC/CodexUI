@@ -1,0 +1,246 @@
+{
+  "schemaVersion": 1,
+  "thread": {
+    "id": "shared-removal",
+    "historyMode": "paginated",
+    "ephemeral": false,
+    "status": {
+      "type": "idle"
+    },
+    "turns": [
+      {
+        "id": "t1",
+        "status": "completed",
+        "items": [
+          {
+            "id": "open-1",
+            "type": "userMessage",
+            "text": "Opening 1",
+            "content": [
+              {
+                "type": "text",
+                "text": "Opening 1"
+              }
+            ]
+          },
+          {
+            "id": "answer-1",
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "Answer 1"
+          },
+          {
+            "id": "steering",
+            "type": "userMessage",
+            "content": [
+              {
+                "type": "text",
+                "text": "Steering input"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "t2",
+        "status": "completed",
+        "items": [
+          {
+            "id": "open-2",
+            "type": "userMessage",
+            "text": "Opening 2",
+            "content": [
+              {
+                "type": "text",
+                "text": "Opening 2"
+              }
+            ]
+          },
+          {
+            "id": "answer-2",
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "Answer 2"
+          }
+        ]
+      },
+      {
+        "id": "t3",
+        "status": "completed",
+        "items": [
+          {
+            "id": "open-3",
+            "type": "agentMessage",
+            "text": "Opening 3",
+            "content": [
+              {
+                "type": "text",
+                "text": "Opening 3"
+              }
+            ]
+          },
+          {
+            "id": "answer-3",
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "Answer 3"
+          }
+        ]
+      },
+      {
+        "id": "t4",
+        "status": "completed",
+        "items": [
+          {
+            "id": "open-4",
+            "type": "userMessage",
+            "text": "Opening 4",
+            "content": [
+              {
+                "type": "text",
+                "text": "Opening 4"
+              }
+            ]
+          },
+          {
+            "id": "answer-4",
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "Answer 4"
+          }
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "beforeTurnId": "t1",
+      "pageTurnIds": [],
+      "retainedTurnIds": []
+    },
+    {
+      "beforeTurnId": "t2",
+      "pageTurnIds": [
+        "t1"
+      ],
+      "retainedTurnIds": [
+        "t1"
+      ]
+    },
+    {
+      "beforeTurnId": "t4",
+      "pageTurnIds": [
+        "t3",
+        "t2"
+      ],
+      "retainedTurnIds": [
+        "t1",
+        "t2",
+        "t3"
+      ]
+    }
+  ],
+  "external": {
+    "liveTurn": {
+      "id": "new-live",
+      "status": "inProgress",
+      "items": [
+        {
+          "id": "live-message",
+          "type": "agentMessage",
+          "text": "New live activity"
+        }
+      ]
+    },
+    "pages": [
+      {
+        "data": [
+          {
+            "id": "new-history",
+            "status": "completed",
+            "items": [
+              {
+                "id": "new-opening",
+                "type": "userMessage",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "New history after revert"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "nextCursor": "older"
+      },
+      {
+        "data": [
+          {
+            "id": "t2",
+            "status": "completed",
+            "items": [
+              {
+                "id": "open-2",
+                "type": "userMessage",
+                "text": "Opening 2",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Opening 2"
+                  }
+                ]
+              },
+              {
+                "id": "answer-2",
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "Answer 2"
+              }
+            ]
+          },
+          {
+            "id": "t1",
+            "status": "completed",
+            "items": [
+              {
+                "id": "open-1",
+                "type": "userMessage",
+                "text": "Opening 1",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Opening 1"
+                  }
+                ]
+              },
+              {
+                "id": "answer-1",
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "Answer 1"
+              },
+              {
+                "id": "steering",
+                "type": "userMessage",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Steering input"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "nextCursor": "older-than-cache"
+      }
+    ],
+    "retainedTurnIds": [
+      "t1",
+      "t2",
+      "new-history",
+      "new-live"
+    ]
+  }
+}

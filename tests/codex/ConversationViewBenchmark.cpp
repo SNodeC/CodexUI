@@ -275,6 +275,7 @@ ConversationSnapshot snapshot(std::size_t count) {
       TurnSection section;
       section.key = "turn-section-" + std::to_string(index / CardsPerTurn);
       section.turnId = card.turnId;
+      card.turnOpening = true;
       section.rootCardKey = card.key;
       result.sections.push_back(std::move(section));
     }
@@ -302,6 +303,7 @@ ConversationSnapshot sparseVisibilitySnapshot(std::size_t hiddenRows) {
       section.turnId,
       "root",
       UserMessageData{"Visible root", {}}};
+  root.turnOpening = true;
   section.rootCardKey = root.key;
   section.cards.push_back(std::move(root));
   section.cards.reserve(hiddenRows + 2);
