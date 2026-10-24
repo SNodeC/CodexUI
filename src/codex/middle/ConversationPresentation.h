@@ -78,12 +78,10 @@ namespace presentation {
 [[nodiscard]] QString prepareMarkdownHtml(const QString &markdown);
 
 struct CardHeaderMetrics final {
-  // Keep the Codex Update header aligned with the card header controls.
-  static constexpr int LineHeight = 24;
-  static constexpr int RichStatusTrailingMargin = 12;
-  static constexpr int CopyControlWidth = 16;
-  static constexpr int DisclosureControlWidth = 14;
-  static constexpr int CopyDisclosureSpacing = 4;
+    static constexpr int LineHeight = 24;
+    static constexpr int ControlWidth = 28;
+    static constexpr int IconSize = 16;
+    static constexpr int GroupSpacing = 8;
 };
 
 class CopyButton final : public QToolButton {

@@ -71,7 +71,6 @@ constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
-constexpr int CardHeaderActionSpacing = 0;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -1216,24 +1215,20 @@ class TimingButton final : public QToolButton {
 public:
   using QToolButton::QToolButton;
   QSize minimumSizeHint() const override {
-    return {fontMetrics().horizontalAdvance(QStringLiteral("◷")) + 8,
-            fontMetrics().height()};
+      return {presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight};
   }
   QSize sizeHint() const override {
-    return {fontMetrics().horizontalAdvance(
-                QStringLiteral("00:00:00–00:00:00 · 000.000 s")),
-            fontMetrics().height()};
+      return {fontMetrics().horizontalAdvance(text()) + 8, presentation::CardHeaderMetrics::LineHeight};
   }
 
 protected:
   void paintEvent(QPaintEvent *) override {
     QStyleOptionToolButton option;
     initStyleOption(&option);
-    option.text =
-        width() <
-                fontMetrics().horizontalAdvance(QStringLiteral("00:00:00")) + 8
-            ? QStringLiteral("◷")
-            : fontMetrics().elidedText(text(), Qt::ElideRight, width() - 8);
+    option.text = width() < sizeHint().width() ? QStringLiteral("◷") : text();
+    if (width() < sizeHint().width()) {
+        option.rect.setLeft(std::max(0, width() - presentation::CardHeaderMetrics::ControlWidth));
+    }
     QPainter painter(this);
     style()->drawComplexControl(QStyle::CC_ToolButton, &option, &painter, this);
   }
@@ -1253,33 +1248,40 @@ public:
 
     header = new QWidget(owner);
     header->setObjectName(QStringLiteral("conversationCardHeader"));
-    headerLayout = new QHBoxLayout(header);
+    header->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    headerLayout = new QGridLayout(header);
     headerLayout->setContentsMargins(UiStyle::markdownSelectionGutter, 0, 0, 0);
-    headerLayout->setSpacing(CardHeaderActionSpacing);
+    headerLayout->setSpacing(0);
+    headerLayout->setColumnStretch(1, 1);
+    for (int column = 4; column <= 5; ++column) {
+        headerLayout->setColumnMinimumWidth(column, presentation::CardHeaderMetrics::ControlWidth);
+    }
     title = makeLabel({}, "title", header);
     title->setWordWrap(false);
+    title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     copy = new presentation::CopyButton(QStringLiteral("Copy card content"),
                                         header);
     copy->setObjectName(QStringLiteral("cardCopyButton"));
     disclosure = new presentation::DisclosureButton(
         QStringLiteral("Expand card"), QStringLiteral("Collapse card"), header);
     disclosure->setObjectName(QStringLiteral("cardDisclosureButton"));
-    headerLayout->addWidget(title, 3);
+    headerLayout->addWidget(title, 0, 0, Qt::AlignVCenter);
     timing = new TimingButton(header);
     timing->setObjectName(QStringLiteral("cardTimingButton"));
     timing->setAccessibleName(QStringLiteral("Timing details"));
+    QFont numericFont = timing->font();
+    numericFont.setFeature(QFont::Tag("tnum"), 1);
+    timing->setFont(numericFont);
     timing->setAutoRaise(true);
     timing->setFocusPolicy(Qt::StrongFocus);
     timing->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    headerLayout->addWidget(timing, 1, Qt::AlignVCenter);
+    headerLayout->addWidget(timing, 0, 2, Qt::AlignRight | Qt::AlignVCenter);
     QObject::connect(timing, &QToolButton::clicked, owner, [this] {
       emit this->owner->timingRequested(current.target);
     });
     refreshTiming();
-    headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
-    headerLayout->addSpacing(
-        presentation::CardHeaderMetrics::CopyDisclosureSpacing);
-    headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
+    headerLayout->addWidget(copy, 0, 4, Qt::AlignVCenter);
+    headerLayout->addWidget(disclosure, 0, 5, Qt::AlignVCenter);
     layout->addWidget(header);
 
     content = new QWidget(owner);
@@ -1579,6 +1581,7 @@ public:
 
   [[nodiscard]] int settleHeightForWidth(int width) {
     width = std::max(1, width);
+    title->setToolTip(title->text());
     owner->setMinimumHeight(0);
     owner->setMaximumHeight(QWIDGETSIZE_MAX);
     owner->resize(width, std::max(1, owner->height()));
@@ -1791,7 +1794,6 @@ public:
     disclosure->setExpanded(!collapsed);
     setExplicitVisibility(disclosure, expandable);
     setExplicitVisibility(content, expandable && !collapsed);
-    refreshPhaseSpacing();
   }
 
   void refreshTiming() {
@@ -1810,31 +1812,16 @@ public:
           turnMenu->setToolTip(QStringLiteral("Turn actions"));
           turnMenu->setAutoRaise(true);
           turnMenu->setFocusPolicy(Qt::StrongFocus);
-          turnMenu->setFixedSize(presentation::CardHeaderMetrics::CopyControlWidth, presentation::CardHeaderMetrics::LineHeight);
+          turnMenu->setFixedSize(presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight);
           QObject::connect(turnMenu, &QToolButton::clicked, owner, [this] {
               emit this->owner->turnMenuRequested(current.target, turnMenu->mapToGlobal(QPoint(0, turnMenu->height())));
           });
-          headerLayout->insertWidget(headerLayout->indexOf(copy), turnMenu, 0, Qt::AlignRight | Qt::AlignVCenter);
+          headerLayout->addWidget(turnMenu, 0, 3, Qt::AlignVCenter);
       }
       if (turnMenu) {
           setExplicitVisibility(turnMenu, current.turnOpening);
       }
       setExplicitVisibility(copy, cardHasCopyContent(current));
-      refreshPhaseSpacing();
-  }
-
-  void refreshPhaseSpacing() {
-    if (!phase)
-      return;
-    int trailing = presentation::CardHeaderMetrics::RichStatusTrailingMargin;
-    if (copy->isHidden())
-      trailing += presentation::CardHeaderMetrics::CopyControlWidth;
-    if (disclosure->isHidden())
-      trailing += presentation::CardHeaderMetrics::DisclosureControlWidth;
-    const QMargins margins = phase->contentsMargins();
-    if (margins.right() != trailing)
-      phase->setContentsMargins(margins.left(), margins.top(), trailing,
-                                margins.bottom());
   }
 
   void showPhase(const QString &value, const QString &objectName) {
@@ -1842,25 +1829,29 @@ public:
       phase = makeLabel({}, "messagePhase", header);
       phase->setWordWrap(false);
       phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-      headerLayout->insertWidget(headerLayout->indexOf(copy), phase, 0,
-                                 Qt::AlignVCenter);
+      phase->setContentsMargins(presentation::CardHeaderMetrics::GroupSpacing, 0, presentation::CardHeaderMetrics::GroupSpacing, 0);
+      headerLayout->addWidget(phase, 0, 1, Qt::AlignVCenter);
     }
-    if (phase->objectName() != objectName)
-      phase->setObjectName(objectName);
-    if (phase->text() != value)
-      phase->setText(value);
-    if (phase->isHidden())
-      phase->show();
-    refreshPhaseSpacing();
+    if (phase->objectName() != objectName) {
+        phase->setObjectName(objectName);
+    }
+    if (phase->text() != value) {
+        phase->setText(value);
+    }
+    phase->setToolTip(value);
+    if (phase->isHidden()) {
+        phase->show();
+    }
   }
 
   void showStatus(const UiStatus &status, const QString &objectName) {
-    if (!phase)
-      showPhase({}, objectName);
-    else if (phase->objectName() != objectName)
-      phase->setObjectName(objectName);
-    presentation::applyStatusLabel(*phase, status);
-    refreshPhaseSpacing();
+      if (!phase) {
+          showPhase({}, objectName);
+      } else if (phase->objectName() != objectName) {
+          phase->setObjectName(objectName);
+      }
+      presentation::applyStatusLabel(*phase, status);
+      phase->setToolTip(phase->text());
   }
 
   void setActiveWork(bool active) {
@@ -2290,7 +2281,7 @@ public:
   bool collapsed = false;
   QVBoxLayout *layout = nullptr;
   QWidget *header = nullptr;
-  QHBoxLayout *headerLayout = nullptr;
+  QGridLayout* headerLayout = nullptr;
   QLabel *title = nullptr;
   TimingButton *timing = nullptr;
   QLabel *phase = nullptr;

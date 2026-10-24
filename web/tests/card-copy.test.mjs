@@ -104,7 +104,7 @@ test("nested user messages expose the steering identity", () => {
         onToggle() {},
     }));
     assert.match(markup, /conversation-card userMessage[^"]*steering/u);
-    assert.match(markup, />You<\/span>[\s\S]*card-phase steering">steering</u);
+    assert.match(markup, />You<\/span>[\s\S]*card-phase steering"[^>]*>steering</u);
     assert.ok(markup.indexOf("card-phase steering") < markup.indexOf("card-copy-button"));
     assert.doesNotMatch(markup, /[·•]\s*steering/u);
 });
@@ -143,12 +143,13 @@ test("local prompt sweep is rendered only after delayed feedback activates", () 
     assert.match(overdue, /localPrompt[^"]*delayed-pending/u);
 });
 
-test("Codex phases are plain right-side metadata before Copy", () => {
+test("Codex phases stay beside the title in the left header group", () => {
     const update = itemCard("agentMessage", "update", {text: "Working", phase: "commentary"});
     const updateMarkup = renderToStaticMarkup(createElement(Card, {
         card: update, active: true, collapsed: false, onToggle() {},
     }));
-    assert.match(updateMarkup, /card-phase update">update</u);
+    assert.match(updateMarkup, /card-phase update"[^>]*>update</u);
+    assert.match(updateMarkup, /class="card-heading"><span[^>]*>Codex<\/span><span class="card-phase update" title="update">update<\/span><\/span>/u);
     assert.ok(updateMarkup.indexOf("card-phase update") < updateMarkup.indexOf("card-copy-button"));
     assert.doesNotMatch(updateMarkup, /[·•]\s*update/u);
 
@@ -156,7 +157,7 @@ test("Codex phases are plain right-side metadata before Copy", () => {
     const finalMarkup = renderToStaticMarkup(createElement(Card, {
         card: final, active: false, collapsed: false, onToggle() {},
     }));
-    assert.match(finalMarkup, /card-phase final">final answer</u);
+    assert.match(finalMarkup, /card-phase final"[^>]*>final answer</u);
     assert.ok(finalMarkup.indexOf("card-phase final") < finalMarkup.indexOf("card-copy-button"));
 });
 
@@ -200,7 +201,7 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
         card: command, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
     assert.match(commandMarkup, /Command execution/u);
-    assert.match(commandMarkup, /card-phase status success">completed/u);
+    assert.match(commandMarkup, /card-phase status success"[^>]*>completed/u);
     assert.match(commandMarkup, /exit 0  \|  \/workspace  \|  1\.5 s/u);
     assert.doesNotMatch(commandMarkup, /completed  \|  exit 0/u);
     assert.ok(commandMarkup.indexOf("card-phase status success") < commandMarkup.indexOf("card-copy-button"));
@@ -216,7 +217,7 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     }));
     for (const value of ["spawn_agent", "worker", "gpt-test", "medium", "thread child", "root/worker", "sender root", "Inspect this"])
         assert.match(agentMarkup, new RegExp(value, "u"));
-    assert.match(agentMarkup, /card-phase status success">completed/u);
+    assert.match(agentMarkup, /card-phase status success"[^>]*>completed/u);
     assert.match(agentMarkup, /<strong>Done<\/strong>/u);
 
     const files = itemCard("fileChanges", "files", {changes: [
@@ -226,7 +227,7 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     const filesMarkup = renderToStaticMarkup(createElement(Card, {
         card: files, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
-    assert.match(filesMarkup, /card-phase status success">completed/u);
+    assert.match(filesMarkup, /card-phase status success"[^>]*>completed/u);
     assert.match(filesMarkup, /2 paths  \|  \+5 −1/u);
     assert.doesNotMatch(filesMarkup, /completed  \|  2 paths/u);
 
@@ -236,7 +237,7 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     const imageMarkup = renderToStaticMarkup(createElement(Card, {
         card: image, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
-    assert.match(imageMarkup, /card-phase status success">completed/u);
+    assert.match(imageMarkup, /card-phase status success"[^>]*>completed/u);
     assert.equal((imageMarkup.match(/>completed</gu) ?? []).length, 1);
 
     const genericThread = {

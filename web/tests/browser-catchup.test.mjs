@@ -27,6 +27,17 @@ function notification(socket, method, params) { socket.receive(appserver({jsonrp
 for (const entry of contract.timingCases) test(`shared timing: ${entry.id}`, () => {
     assert.deepEqual(protocolFrameTimes(entry.method, entry.body, entry.response), entry.expected);
 });
+for (const entry of contract.cardHeader.timingCases) test(`shared header start date/time: ${entry.id}`, () => {
+    const previous = process.env.TZ;
+    process.env.TZ = contract.cardHeader.timeZone;
+    try {
+        const times = protocolTimes(entry.body, entry.type);
+        if (entry.turn) { times.push(...protocolTimes(entry.turn, "Turn", "turn")); }
+        assert.equal(timingSummary(times), entry.expected);
+    } finally {
+        if (previous === undefined) { delete process.env.TZ; } else { process.env.TZ = previous; }
+    }
+});
 for (const entry of contract.tokenUsageCases) test(`shared token usage: ${entry.id}`, () => {
     const model = new PresentationModel();
     model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: entry.threads}));
@@ -44,7 +55,7 @@ test("timing schema is generated from the native authority and extraction stays 
     assert.match(timingDetails(protocolTimes({createdAtMs: 0}, "FsGetMetadataResponse")), /protocol sentinel/u);
     assert.match(timingDetails(protocolTimes({durationMs: -1}, "Turn")), /Invalid duration/u);
     assert.match(timingDetails(protocolTimes({startedAt: 999999999999999}, "Turn")), /outside supported/u);
-    assert.equal(timingSummary(protocolTimes({durationMs: 1234}, "Turn")), "1.234 s");
+    assert.equal(timingSummary(protocolTimes({durationMs: 1234}, "Turn")), "");
 });
 test("live token notifications replace snapshots and provider replacement retires telemetry", () => {
     const model = new PresentationModel(), normalizer = new ProtocolNormalizer(frame => model.applyEvent(frame));

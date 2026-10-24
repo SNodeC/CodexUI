@@ -438,7 +438,7 @@ The behavior inventory in sections 1–21 still applies in full.
 | History/loading controls and loading overlay | Clear action/progress, correct placement and disappearance; no stale overlay or exposed incomplete history frame. |
 | Conversation notice and Dismiss | Message fits its surface; action remains visible; no input obstruction after dismissal. |
 | Turn enclosing surface | One coherent rounded boundary; active emphasis returns to ordinary styling on authoritative turn completion; no independently overlapping root-card frame. |
-| Card header | Title, phase/status, timing, Copy and disclosure fit on the intended header layout; aligned baselines and consistent compact gaps. |
+| Card header | Title and phase/status form the left group; start date/time and fixed action slots align on the right in the same header row. Nested cards share one layout without a turn-menu slot; opening cards include that slot. Status length and absent Copy/disclosure actions do not shift timestamps within either group. |
 | Card timing action | Secondary-tone compact text, transparent idle surface, visible hover/focus boundary; narrow clock fallback as specified in 22.9. |
 | Copy button | Shared copy glyph and success feedback, correctly centered; no header movement when feedback changes. |
 | Disclosure | Shared chevron, correct direction and stable hit target; no excessive spacing from adjacent actions/status. |
@@ -529,9 +529,9 @@ These are supplied facts, not permission to fetch new APIs or invent times.
 
 | Surface/element | Required appearance |
 | --- | --- |
-| Card compact summary | Local `HH:mm:ss` start/end, en dash between supplied start and end, and ` · N.NNN s` for supplied duration; omit absent components instead of inventing zero times. |
+| Card compact summary | Only local `yyyy-MM-dd HH:mm:ss` start date/time; omit completion and duration from the header. Missing starts stay unavailable instead of borrowing completion or inventing zero times. |
 | Card with turn timing | Only the owning turn-root adds its turn timing. Ordinary cards describe their own item; do not show another card's or turn's time as theirs. |
-| Narrow timing button | Deliberate elision while space permits; clock glyph `◷` when too narrow for a time. Remains focusable/clickable; never forces the header wider or overlaps Copy/disclosure. |
+| Narrow timing button | Complete start date/time when it fits; otherwise a clock glyph `◷` anchored beside the actions. Remains focusable/clickable; never forces the header wider or overlaps Copy/disclosure. |
 | Missing compact timing | Neutral em dash where no summary is available; tooltip/details explicitly distinguish absence from a valid epoch. |
 | Exact timing tooltip / Info → Timing | Field/object scope, local ISO date/time with milliseconds and numeric UTC offset, timezone abbreviation, separate UTC value and raw protocol value/unit. |
 | Duration | Seconds with three decimal places in the current formatter; raw milliseconds in details. Never a calendar date or fabricated live countdown. |

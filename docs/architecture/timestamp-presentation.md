@@ -41,7 +41,7 @@ than overflowing or guessing units.
 
 ## Where to see them
 
-- Conversation headers show compact local start/end times and reported duration.
+- Conversation headers show only the supplied start date and time in local `yyyy-MM-dd HH:mm:ss` format. Completion and duration remain in Timing details, and command duration remains below the command output.
   Only the turn-root card adds its owning turn's timing. Each ordinary card uses
   its own item lifecycle. Narrow headers retain a keyboard-accessible clock
   button instead of imposing a wider minimum width.

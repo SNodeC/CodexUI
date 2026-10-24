@@ -1657,5 +1657,115 @@
         }
       ]
     }
-  ]
+  ],
+  "cardHeader": {
+    "timeZone": "Europe/Vienna",
+    "controlWidth": 28,
+    "controlHeight": 24,
+    "iconSize": 16,
+    "gap": 0,
+    "timingCases": [
+      {
+        "id": "start-date-only-despite-completion-and-duration",
+        "type": "Turn",
+        "body": {
+          "startedAt": 1792861806,
+          "completedAt": 1792951867,
+          "durationMs": 90061000
+        },
+        "expected": "2026-10-24 19:10:06"
+      },
+      {
+        "id": "item-start-milliseconds",
+        "type": "ItemLifecycle",
+        "body": {
+          "startedAtMs": 1792861806123,
+          "completedAtMs": 1792861806456,
+          "durationMs": 333
+        },
+        "expected": "2026-10-24 19:10:06"
+      },
+      {
+        "id": "duration-is-not-a-header-time",
+        "type": "Turn",
+        "body": {
+          "durationMs": 1234
+        },
+        "expected": ""
+      },
+      {
+        "id": "completion-is-not-a-start",
+        "type": "Turn",
+        "body": {
+          "completedAt": 1792861806
+        },
+        "expected": ""
+      },
+      {
+        "id": "missing-start-is-not-inferred",
+        "type": "Turn",
+        "body": {
+          "startedAt": null,
+          "completedAt": 1792861806,
+          "durationMs": 0
+        },
+        "expected": ""
+      },
+      {
+        "id": "epoch-is-a-real-start",
+        "type": "Turn",
+        "body": {
+          "startedAt": 0
+        },
+        "expected": "1970-01-01 01:00:00"
+      },
+      {
+        "id": "invalid-start-is-not-inferred",
+        "type": "Turn",
+        "body": {
+          "startedAt": 999999999999999,
+          "completedAt": 1792861806
+        },
+        "expected": ""
+      },
+      {
+        "id": "root-uses-owning-turn-start",
+        "type": "ItemLifecycle",
+        "body": {
+          "startedAtMs": 1792861816000
+        },
+        "turn": {
+          "startedAt": 1792861806
+        },
+        "expected": "2026-10-24 19:10:06"
+      },
+      {
+        "id": "root-does-not-borrow-item-start",
+        "type": "ItemLifecycle",
+        "body": {
+          "startedAtMs": 1792861806000
+        },
+        "turn": {
+          "completedAt": 1792861807
+        },
+        "expected": ""
+      },
+      {
+        "id": "dst-first-instant",
+        "type": "Turn",
+        "body": {
+          "startedAt": 1792888200
+        },
+        "expected": "2026-10-25 02:30:00"
+      },
+      {
+        "id": "dst-second-instant",
+        "type": "Turn",
+        "body": {
+          "startedAt": 1792891800
+        },
+        "expected": "2026-10-25 02:30:00"
+      }
+    ]
+  }
 }

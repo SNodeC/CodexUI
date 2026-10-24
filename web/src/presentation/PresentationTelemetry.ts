@@ -51,15 +51,16 @@ function date(time: ProtocolTime): Date | undefined {
 }
 export function timingSummary(times: readonly ProtocolTime[]): string {
     const turn = times.some(time => time.field.startsWith("turn/"));
-    let start = "", end = "", duration = "";
+    let result = "";
     for (const time of times) {
-        if (time.field.startsWith("turn/") !== turn) continue;
-        if (time.unit === "duration" && time.value !== undefined && time.value >= 0) duration = `${(time.value / 1000).toFixed(3)} s`;
-        const local = date(time); if (!local) continue;
-        if (time.field.includes("startedAt")) start = local.toLocaleTimeString([], {hour12: false});
-        if (time.field.includes("completedAt")) end = local.toLocaleTimeString([], {hour12: false});
+        const local = time.field.startsWith("turn/") === turn && time.field.includes("startedAt") ? date(time) : undefined;
+        if (local) {
+            const day = [local.getFullYear(), local.getMonth() + 1, local.getDate()].map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0")).join("-");
+            const clock = [local.getHours(), local.getMinutes(), local.getSeconds()].map(value => String(value).padStart(2, "0")).join(":");
+            result = `${day} ${clock}`;
+        }
     }
-    return [start + (end ? `${start ? "–" : ""}${end}` : ""), duration].filter(Boolean).join(" · ");
+    return result;
 }
 export function timingDetails(times: readonly ProtocolTime[]): string {
     return times.map(time => {

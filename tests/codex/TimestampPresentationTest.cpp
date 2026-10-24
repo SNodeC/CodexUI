@@ -14,14 +14,18 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QThread>
 #include <QTimeZone>
 #include <QToolButton>
+#include <QVBoxLayout>
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 
 using namespace codexui;
 using namespace codexui::codex;
@@ -351,9 +355,9 @@ void graphProjectionAndLayout() {
         "turn lifecycle routes to its root");
   auto completed = adapter.conversation(thread);
   const auto completedRoot = completed->sections[0].cards[0];
-  check(ui::timingSummary(completedRoot.timing).contains("–") &&
-            ui::timingSummary(completedRoot.timing).contains("10.000 s"),
-        "turn summary includes completion and duration");
+  check(ui::timingSummary(completedRoot.timing) == ui::timingSummary(root.timing) &&
+            ui::timingSummary(completedRoot.timing) == "1970-01-01 01:02:10",
+        "completion and duration do not alter the start date/time in the header");
   const auto corrected = publish(
       "turn/completed",
       {{"threadId", "timed-thread"},
@@ -469,6 +473,126 @@ void graphProjectionAndLayout() {
             "save actual widget screenshot");
   }
 }
+
+void sharedHeaderContractAndAlignment() {
+    std::ifstream input(CODEXUI_PRESENTATION_CONTRACT_PATH);
+    const auto fixture = Json::parse(input, nullptr, false);
+    check(fixture.is_object() && fixture.contains("cardHeader"), "shared header contract exists");
+    if (fixture.is_object() && fixture.contains("cardHeader")) {
+        const auto& contract = fixture.at("cardHeader");
+        for (const auto& entry : contract.at("timingCases")) {
+            auto times = protocolTimes(objectFromJson(entry.at("body")), entry.at("type").get<std::string>());
+            if (entry.contains("turn")) {
+                auto owning = protocolTimes(objectFromJson(entry.at("turn")), "Turn");
+                for (auto& time : owning) {
+                    time.field = "turn/" + time.field;
+                    times.push_back(std::move(time));
+                }
+            }
+            check(ui::timingSummary(times).toStdString() == entry.at("expected").get<std::string>(),
+                  entry.at("id").get<std::string>().c_str());
+        }
+        MiddleRegionWidget region;
+        for (const auto& name : {"conversationReasoningToggle",
+                                 "conversationUpdatesToggle",
+                                 "conversationCommandFoldingToggle",
+                                 "conversationImageFoldingToggle",
+                                 "conversationFileChangesFoldingToggle"}) {
+            const auto* control = region.findChild<QToolButton*>(name);
+            check(control && control->size() == QSize(contract.at("controlWidth").get<int>(), contract.at("controlHeight").get<int>()) &&
+                      control->iconSize() == QSize(contract.at("iconSize").get<int>(), contract.at("iconSize").get<int>()),
+                  "shared header geometry also matches the CONVERSATION toolbar controls");
+        }
+        const QFont original = QApplication::font();
+        for (int fontDelta : {0, 5}) {
+            QFont font = original;
+            font.setPointSize(original.pointSize() + fontDelta);
+            QApplication::setFont(font);
+            qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+            for (int width : {300, 480, 900}) {
+                QWidget surface;
+                auto* stack = new QVBoxLayout(&surface);
+                stack->setContentsMargins(0, 0, 0, 0);
+                std::vector<std::unique_ptr<ConversationCard>> cards;
+                for (int index = 0; index < 5; ++index) {
+                    VisibleCardData data{AuthoritativeItemKey{"header", "t", std::to_string(index)},
+                                         CardKind::AgentMessage,
+                                         "header",
+                                         "t",
+                                         std::to_string(index),
+                                         AgentMessageData{"Body", index == 1 ? "partial_answer" : "commentary"}};
+                    if (index == 2) {
+                        data.kind = CardKind::UserMessage;
+                        data.payload = UserMessageData{"Steered prompt", {}};
+                    } else if (index == 3) {
+                        data.kind = CardKind::CommandExecution;
+                        data.payload = CommandExecutionData{"true", "output", {}, 0, 1234};
+                        data.status = nodegraph::NodeStatus::Completed;
+                    } else if (index == 4) {
+                        data.kind = CardKind::Reasoning;
+                        data.payload = ReasoningData{};
+                    }
+                    data.turnOpening = index == 0;
+                    data.timing = {protocolTime("startedAtMs", 1792861806123),
+                                   protocolTime("completedAtMs", 1792861806456),
+                                   protocolTime("durationMs", 333)};
+                    auto card = std::make_unique<ConversationCard>(data, false);
+                    static_cast<void>(card->setNestedPresentation(index == 2));
+                    card->resize(width, card->settleHeightForWidth(width));
+                    stack->addWidget(card.get());
+                    cards.push_back(std::move(card));
+                }
+                surface.resize(width, surface.sizeHint().height());
+                surface.show();
+                settle();
+                check(surface.width() == width, "the header never widens its requested viewport");
+                int timingRight = -1, copyLeft = -1;
+                for (const auto& card : cards) {
+                    auto* header = card->findChild<QWidget*>("conversationCardHeader");
+                    auto* time = card->findChild<QToolButton*>("cardTimingButton");
+                    auto* copy = card->findChild<QToolButton*>("cardCopyButton");
+                    auto* fold = card->findChild<QToolButton*>("cardDisclosureButton");
+                    const int menuWidth = card == cards.front() ? contract.at("controlWidth").get<int>() : 0;
+                    const int right = time->mapTo(card.get(), time->rect().topRight()).x() + menuWidth;
+                    const int copyX = copy->mapTo(card.get(), QPoint{}).x();
+                    if (timingRight < 0) {
+                        timingRight = right;
+                        copyLeft = copyX;
+                    }
+                    check(right == timingRight && (copy->isHidden() || copyX == copyLeft),
+                          "nested headers share aligned timestamps and omit the opening header's menu slot; Copy stays aligned throughout");
+                    check(time->width() <= time->sizeHint().width(), "the timestamp never centers its text inside unused flexible space");
+                    check(copy->size() == QSize(contract.at("controlWidth").get<int>(), contract.at("controlHeight").get<int>()) &&
+                              fold->size() == copy->size(),
+                          "shared controls use the toolbar hit area");
+                    check(time->geometry().right() < header->width() && header->height() <= std::max(24, QFontMetrics(font).height()),
+                          "the header fits one row without horizontal overflow");
+                    if (width == 900) {
+                        check(time->width() >= time->fontMetrics().horizontalAdvance(time->text()) + 8,
+                              "normal and enlarged headers show the complete date/time when space is available");
+                    }
+                    for (auto* label : header->findChildren<QLabel*>()) {
+                        check(label->toolTip() == label->text(), "bounded header labels retain their complete text on hover");
+                        check(label->width() > 0 && label->geometry().right() <= time->geometry().left(),
+                              "title and status stay to the left of the timestamp");
+                    }
+                }
+                const auto* metadata = cards[3]->findChild<QLabel*>("commandMetadata");
+                check(metadata && metadata->text().contains("1.2 s"), "command duration remains below its output");
+                const QString evidence = qEnvironmentVariable("CODEXUI_TIMESTAMP_SCREENSHOTS");
+                if (!evidence.isEmpty()) {
+                    surface.grab().save(evidence + QStringLiteral("/aligned-headers-%1-font-%2-dpr-%3.png")
+                                                       .arg(width)
+                                                       .arg(fontDelta)
+                                                       .arg(surface.devicePixelRatioF()));
+                }
+            }
+        }
+        QApplication::setFont(original);
+        qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -477,6 +601,7 @@ int main(int argc, char **argv) {
   QApplication app(argc, argv);
   timestampSchemaAndFormatting();
   graphProjectionAndLayout();
+  sharedHeaderContractAndAlignment();
   std::cout << "Timestamp contract/layout failures: " << failures << '\n';
   return failures == 0 ? 0 : 1;
 }

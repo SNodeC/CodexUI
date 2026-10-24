@@ -533,16 +533,20 @@ function assertTopBar(measurement, width) {
 
 await access(join(artifactDirectory, "index.html"), fsConstants.R_OK);
 const executable = await chromeExecutable();
+const headerContract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/frontend-presentation.json"), "utf8")).cardHeader;
 const turnRemovalCheck = `(async()=>{
+    const geometry=${JSON.stringify(headerContract)};
     const frame=()=>new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const waitFor=async(predicate,description)=>{for(let attempt=0;attempt<200;++attempt){
         if(predicate())return;await new Promise(complete=>setTimeout(complete,5));}throw new Error("Timed out waiting for "+description);};
     const socket=globalThis.codexuiApplicationProfile.socket;
     const original=socket.send.bind(socket);
     const metadata={id:"removal-ui",name:"Removal fixture",historyMode:"paginated",ephemeral:false,status:{type:"idle"}};
-    let turns=[1,2,3].map(index=>({id:"removal-"+index,status:"completed",items:[
+    let turns=[1,2,3].map(index=>({id:"removal-"+index,status:"completed",startedAt:1792861806,completedAt:1792861906,durationMs:100000,items:[
         {id:"prompt-"+index,type:"userMessage",content:[{type:"text",text:("Turn "+index+" **prompt**\\n\\n").repeat(12)}]},
-        {id:"answer-"+index,type:"agentMessage",phase:"final_answer",text:"Retained answer "+index}]}));
+        {id:"answer-"+index,type:"agentMessage",phase:index===1?"partial_answer":"commentary",text:"Retained answer "+index},
+        ...(index===2?[{id:"steer",type:"userMessage",content:[{type:"text",text:"Steering"}]}]:[]),
+        ...(index===3?[{id:"cmd",type:"commandExecution",status:"completed",command:"true",aggregatedOutput:"done",durationMs:1234}]:[])]}));
     const reply=(request,result)=>socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:request.id,result}});
     socket.send=data=>{const envelope=JSON.parse(data),request=envelope.payload;
         if(envelope.kind==="appserver"&&request?.params?.threadId===metadata.id){
@@ -551,7 +555,7 @@ const turnRemovalCheck = `(async()=>{
             const result=request.method==="thread/resume"?{thread:metadata}
                 :request.method==="thread/turns/list"?{data:turns.toReversed(),nextCursor:null}
                 :{data:(turns.find(turn=>turn.id===request.params.turnId)?.items??[]).toReversed()
-                    .map(item=>({turnId:request.params.turnId,item})),nextCursor:null};
+                    .map(item=>({turnId:request.params.turnId,startedAtMs:1792861806123,completedAtMs:1792861806456,item})),nextCursor:null};
             queueMicrotask(()=>reply(request,result));
         }else original(data);};
     socket.receive({kind:"appserver",payload:{method:"thread/started",params:{thread:metadata}}});
@@ -563,6 +567,20 @@ const turnRemovalCheck = `(async()=>{
     const requests=()=>socket.sent.filter(envelope=>envelope.kind==="appserver"&&envelope.payload.method==="thread/revert");
     const scroller=document.querySelector(".conversation-scroll");
     scroller.scrollTop=20;scroller.dispatchEvent(new Event("scroll"));await frame();
+    const headerCards=[...document.querySelectorAll(".conversation-card")];
+    const metrics=headerCards.map(card=>{
+        const header=card.querySelector(":scope > header"),time=header.querySelector(".card-timing"),copy=header.querySelector(".card-copy-button");
+        const bounds=card.getBoundingClientRect(),timeRect=time.getBoundingClientRect();
+        const title=header.querySelector(".card-heading"),phase=title.querySelector(".card-phase");
+        return {timeRight:Math.round((bounds.right-timeRect.right-(header.querySelector('button[aria-haspopup="menu"]')?geometry.controlWidth:0))*100)/100,copyRight:Math.round((bounds.right-copy.getBoundingClientRect().right)*100)/100,
+            startsOnly:time.textContent.startsWith("2026-10-24 ")&&!/[–·]/.test(time.textContent),
+            leftGroup:!phase||phase.getBoundingClientRect().right<=timeRect.left+.5,
+            singleRow:header.getBoundingClientRect().height===geometry.controlHeight,
+            buttons:parseFloat(getComputedStyle(header.querySelector(".card-meta")).columnGap)===geometry.gap&&[...header.querySelectorAll(".card-meta button")].every(button=>{const rect=button.getBoundingClientRect(),icon=button.querySelector("svg"),ink=icon?.getBoundingClientRect();return rect.width===geometry.controlWidth&&rect.height===geometry.controlHeight&&(!ink||ink.width===geometry.iconSize&&ink.height===geometry.iconSize);})};
+    });
+    const headerLayout={aligned:metrics.every(row=>row.timeRight===metrics[0].timeRight&&row.copyRight===metrics[0].copyRight),
+        startsOnly:metrics.every(row=>row.startsOnly),leftGroup:metrics.every(row=>row.leftGroup),singleRow:metrics.every(row=>row.singleRow),buttons:metrics.every(row=>row.buttons)};
+    if(!Object.values(headerLayout).every(Boolean))throw new Error("Header layout: "+JSON.stringify({headerLayout,metrics}));
     const first=document.querySelector(".conversation-card");
     const anchorTop=first.getBoundingClientRect().top;
     const header=first.querySelector("header"),before=header.getBoundingClientRect().toJSON();
@@ -587,7 +605,7 @@ const turnRemovalCheck = `(async()=>{
     reply(request,{thread:{...metadata,turns:[]},turnsBackwardsCursor:"0",itemsBackwardsCursor:"0"});
     socket.receive({kind:"appserver",payload:{method:"thread/reverted",params:{threadId:metadata.id}}});
     await waitFor(()=>controls().length===2,"retained turn controls");await frame();
-    const result={geometryStable,cancelDefault,cancelledRequests,lostAuthorityDisabled,requests:requests().length,
+    const result={headerLayout,geometryStable,cancelDefault,cancelledRequests,lostAuthorityDisabled,requests:requests().length,
         parameters:request.params,retainedTurns:controls().length,
         anchorOffsetDelta:Math.abs(first.getBoundingClientRect().top-anchorTop),
         confirmationScope:confirmationText.includes("File changes and commands already performed will not be undone.")};
@@ -825,7 +843,7 @@ try {
 
     const catchup = await qualifyCatchup(devTools);
     const turnRemoval = await devTools.evaluate(turnRemovalCheck);
-    assert.deepEqual(turnRemoval, {geometryStable: true, cancelDefault: true, cancelledRequests: 0,
+    assert.deepEqual(turnRemoval, {headerLayout: {aligned: true, startsOnly: true, leftGroup: true, singleRow: true, buttons: true}, geometryStable: true, cancelDefault: true, cancelledRequests: 0,
         lostAuthorityDisabled: true, requests: 1, parameters: {threadId: "removal-ui", beforeTurnId: "removal-3"},
         retainedTurns: 2, anchorOffsetDelta: 0, confirmationScope: true});
     if (process.env.CODEXUI_TEST_EVIDENCE_DIR) {
