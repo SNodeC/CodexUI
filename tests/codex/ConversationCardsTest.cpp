@@ -784,22 +784,19 @@ QToolButton *copyButton(ConversationCard *card) {
              : nullptr;
 }
 
-int phaseTextRight(ConversationCard *card, QLabel *phase) {
-  if (!card || !phase || !phase->parentWidget())
-    return -1;
-  return phase
-      ->mapTo(card, QPoint(phase->contentsRect().right(),
-                           phase->contentsRect().center().y()))
-      .x();
-}
-
-bool usesReferencePhaseCopySpacing(ConversationCard *card, QLabel *phase) {
-  QToolButton *copy = copyButton(card);
-  if (!phase || !copy || phase->parentWidget() != copy->parentWidget())
-    return false;
-  const int copyLeft = copy->mapTo(card, QPoint{}).x();
-  return !copy->isHidden() && phase->parentWidget()->layout()->spacing() == 0 &&
-         copyLeft - phaseTextRight(card, phase) - 1 == 12;
+bool usesLeftHeaderPhase(ConversationCard* card, QLabel* phase) {
+    bool result = false;
+    if (card && phase) {
+        const auto* time = card->findChild<QToolButton*>(QStringLiteral("cardTimingButton"));
+        const auto labels = phase->parentWidget()->findChildren<QLabel*>(QString{}, Qt::FindDirectChildrenOnly);
+        const auto title = std::ranges::find_if(labels, [](const QLabel* label) {
+            return label->property("kind") == "title";
+        });
+        result = time && title != labels.end() && (*title)->width() > 0 && (*title)->geometry().right() < phase->geometry().left() &&
+                 phase->geometry().right() < time->geometry().left() && phase->contentsMargins().left() == 8 &&
+                 phase->parentWidget()->layout()->spacing() == 0;
+    }
+    return result;
 }
 
 QRect paintedDisclosureBounds(QToolButton *button, qreal devicePixelRatio = 1) {
@@ -2007,23 +2004,21 @@ bool testCardCopyControls() {
       button->clearFocus();
     }
     if (index == 0)
-      result &= expect(
-          button->parentWidget()->layout()->indexOf(button) <
-              button->parentWidget()->layout()->indexOf(disclosure(&card)),
-          "Copy precedes the disclosure control in the card header");
+        result &= expect(button->geometry().right() < disclosure(&card)->geometry().left(),
+                         "Copy precedes the disclosure control in the card header");
     if (index == 0) {
       QToolButton *fold = disclosure(&card);
       const QRect copyInk = paintedDisclosureBounds(button).translated(
           button->mapTo(button->parentWidget(), QPoint{}));
       const QRect foldInk = paintedDisclosureBounds(fold).translated(
           fold->mapTo(fold->parentWidget(), QPoint{}));
-      result &= expect(
-          button->text().isEmpty() && button->height() == fold->height() &&
-              std::abs(copyInk.center().y() - foldInk.center().y()) <= 1 &&
-              foldInk.left() - copyInk.right() - 1 <= 14 &&
-              button->parentWidget()->layout()->spacing() == 0,
-          "copy and disclosure are backgroundless, vertically aligned, and "
-          "use canonical compact spacing");
+      result &= expect(button->text().isEmpty() && button->height() == fold->height() &&
+                           std::abs(copyInk.center().y() - foldInk.center().y()) <= 1 && button->size() == QSize(28, 24) &&
+                           fold->size() == button->size() && button->geometry().right() + 1 == fold->geometry().left() &&
+                           std::abs(copyInk.center().x() - button->geometry().center().x()) <= 1 &&
+                           button->parentWidget()->layout()->spacing() == 0,
+                       "copy and disclosure are backgroundless, vertically aligned, and "
+                       "use canonical compact spacing");
     }
   }
 
@@ -2593,17 +2588,12 @@ bool testMutableCardsAndCommandOutput() {
       commandCard->findChild<QLabel *>(QStringLiteral("commandStatus"));
   auto *commandMeta =
       commandCard->findChild<QLabel *>(QStringLiteral("commandMetadata"));
-  result &= expect(
-      output && output->isHidden() && commandStatus && commandMeta &&
-          commandMeta->isHidden() &&
-          labelUsesColor(commandStatus, UiStyle::statusActiveText) &&
-          commandStatus->font().capitalization() == QFont::MixedCase &&
-          commandStatus->text() == QStringLiteral("running") &&
-          commandStatus->parentWidget()->layout()->indexOf(commandStatus) <
-              commandStatus->parentWidget()->layout()->indexOf(
-                  copyButton(commandCard)),
-      "empty-line command output has no black surface and exposes its "
-      "lowercase status before Copy");
+  result &=
+      expect(output && output->isHidden() && commandStatus && commandMeta && commandMeta->isHidden() &&
+                 labelUsesColor(commandStatus, UiStyle::statusActiveText) && commandStatus->font().capitalization() == QFont::MixedCase &&
+                 commandStatus->text() == QStringLiteral("running") && usesLeftHeaderPhase(commandCard, commandStatus),
+             "empty-line command output has no black surface and exposes its "
+             "lowercase status before Copy");
   auto *userCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
   auto *agentCardWidget = identities[stableKey(
@@ -2625,17 +2615,10 @@ bool testMutableCardsAndCommandOutput() {
                  userMarkdown->textInteractionFlags().testFlag(
                      Qt::LinksAccessibleByKeyboard),
              "authoritative user messages render GitHub Markdown tables");
-  result &=
-      expect(titleText(agentCardWidget) == QStringLiteral("Codex") &&
-                 agentPhase && agentPhase->text() == QStringLiteral("update") &&
-                 labelUsesColor(agentPhase, UiStyle::statusActiveText) &&
-                 agentPhase->font().weight() == QFont::Normal &&
-                 usesReferencePhaseCopySpacing(agentCardWidget, agentPhase) &&
-                 agentPhase->parentWidget()->layout()->indexOf(agentPhase) <
-                     agentPhase->parentWidget()->layout()->indexOf(
-                         copyButton(agentCardWidget)),
-             "interim agent messages show a right-aligned normal-weight update "
-             "phase before Copy");
+  result &= expect(titleText(agentCardWidget) == QStringLiteral("Codex") && agentPhase && agentPhase->text() == QStringLiteral("update") &&
+                       labelUsesColor(agentPhase, UiStyle::statusActiveText) && agentPhase->font().weight() == QFont::Normal &&
+                       usesLeftHeaderPhase(agentCardWidget, agentPhase),
+                   "interim agent messages keep their normal-weight update phase beside the title, before the timestamp");
   result &= expect(
       activityStatus &&
           activityStatus->font().capitalization() == QFont::MixedCase &&
@@ -2664,17 +2647,12 @@ bool testMutableCardsAndCommandOutput() {
       {imageCard, QStringLiteral("imageGenerationStatus")},
       {genericCard, QStringLiteral("genericActivityStatus")},
   }};
-  result &= expect(
-      std::ranges::all_of(
-          statusCards,
-          [](const std::pair<ConversationCard *, QString> &entry) {
-            QLabel *status =
-                entry.first ? entry.first->findChild<QLabel *>(entry.second)
-                            : nullptr;
-            return status && usesReferencePhaseCopySpacing(entry.first, status);
-          }),
-      "every rich-card lifecycle label uses the Codex Update status-to-Copy "
-      "geometry");
+  result &= expect(std::ranges::all_of(statusCards,
+                                       [](const std::pair<ConversationCard*, QString>& entry) {
+                                           QLabel* status = entry.first ? entry.first->findChild<QLabel*>(entry.second) : nullptr;
+                                           return status && usesLeftHeaderPhase(entry.first, status);
+                                       }),
+                   "every rich-card lifecycle label uses the same left header group before the timestamp");
   result &= expect(
       filesList &&
           filesList->toPlainText().contains(QStringLiteral("src/card.cpp")) &&
@@ -3106,10 +3084,9 @@ bool testCardFoldingGeometryAndRetention() {
              "turn completion restores the same card's canonical border");
   const QRect collapsedDisclosure =
       paintedDisclosureBounds(disclosure(reasoningCard));
-  result &= expect(
-      collapsedDisclosure.isValid() && collapsedDisclosure.width() <= 8 &&
-          collapsedDisclosure.right() >= disclosure(reasoningCard)->width() - 3,
-      "collapsed disclosure paints only a right-inset left chevron");
+  result &= expect(collapsedDisclosure.isValid() && collapsedDisclosure.width() <= 8 &&
+                       std::abs(collapsedDisclosure.center().x() - (disclosure(reasoningCard)->width() - 1) / 2) <= 1,
+                   "collapsed disclosure paints a centered left chevron");
   result &= expect(
       std::ranges::all_of(additionalActionCards,
                           [](const QPointer<ConversationCard> &value) {
@@ -3178,20 +3155,13 @@ bool testCardFoldingGeometryAndRetention() {
                                 ? steeringCard->findChild<QTimer *>(
                                       QString{}, Qt::FindDirectChildrenOnly)
                                 : nullptr;
-  result &= expect(
-      steeringCard &&
-          steeringCard->property("nestedConversationCard").toBool() &&
-          cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
-          steeringPhase->text() == QStringLiteral("steering · pending") &&
-          steeringPhase->font().weight() == QFont::Normal &&
-          usesReferencePhaseCopySpacing(steeringCard, steeringPhase) &&
-          steeringPhase->parentWidget()->layout()->indexOf(steeringPhase) <
-              steeringPhase->parentWidget()->layout()->indexOf(
-                  copyButton(steeringCard)) &&
-          cardTitleColor(steeringCard) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::pendingSteeringText)) &&
-          steeringAnimation && steeringAnimation->isActive(),
-      "a pending steering You card is nested and keeps its animation");
+  result &= expect(steeringCard && steeringCard->property("nestedConversationCard").toBool() &&
+                       cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
+                       steeringPhase->text() == QStringLiteral("steering · pending") && steeringPhase->font().weight() == QFont::Normal &&
+                       usesLeftHeaderPhase(steeringCard, steeringPhase) &&
+                       cardTitleColor(steeringCard) == QColor(QString::fromLatin1(codexui::UiStyle::pendingSteeringText)) &&
+                       steeringAnimation && steeringAnimation->isActive(),
+                   "a pending steering You card is nested and keeps its animation");
 
   snapshot.sections.front().cards.back() = {
       steeringKey,     CardKind::UserMessage,
@@ -3252,10 +3222,9 @@ bool testCardFoldingGeometryAndRetention() {
       "expansion fixes the affected title and grows only downward");
   const QRect expandedDisclosure =
       paintedDisclosureBounds(disclosure(reasoningCard));
-  result &= expect(
-      expandedDisclosure.isValid() && expandedDisclosure.width() <= 10 &&
-          expandedDisclosure.right() >= disclosure(reasoningCard)->width() - 3,
-      "expanded disclosure paints only a right-inset down chevron");
+  result &= expect(expandedDisclosure.isValid() && expandedDisclosure.width() <= 10 &&
+                       std::abs(expandedDisclosure.center().x() - (disclosure(reasoningCard)->width() - 1) / 2) <= 1,
+                   "expanded disclosure paints a centered down chevron");
 
   const int commandHeight = commandCard->height();
   auto &execution = std::get<CommandExecutionData>(

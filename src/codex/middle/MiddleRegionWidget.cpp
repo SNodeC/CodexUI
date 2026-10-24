@@ -183,8 +183,8 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
     button->setProperty("kind", "presentationToggle");
     button->setCheckable(true);
     button->setIcon(presentationIcon(icon));
-    button->setIconSize(QSize(16, 16));
-    button->setFixedSize(28, 24);
+    button->setIconSize(QSize(presentation::CardHeaderMetrics::IconSize, presentation::CardHeaderMetrics::IconSize));
+    button->setFixedSize(presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight);
     context->addWidget(button);
     return button;
   };

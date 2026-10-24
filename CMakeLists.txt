@@ -758,6 +758,8 @@ if(BUILD_TESTING)
     target_link_libraries(
         codexui-timestamp-presentation-test PRIVATE codexui-middle-ui
     )
+    target_compile_definitions(codexui-timestamp-presentation-test PRIVATE
+        CODEXUI_PRESENTATION_CONTRACT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/frontend-presentation.json")
     foreach(timing_dpr IN ITEMS 1 1.25 1.5 2)
         string(REPLACE "." "_" timing_dpr_name "${timing_dpr}")
         add_test(

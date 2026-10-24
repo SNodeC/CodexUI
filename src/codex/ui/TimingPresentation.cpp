@@ -61,30 +61,18 @@ QString timingDetails(const ProtocolTimes &times) {
 }
 
 QString timingSummary(const ProtocolTimes &times) {
-  QString start, end, elapsed;
-  const bool turn = std::ranges::any_of(
-      times, [](const auto &t) { return t.field.starts_with("turn/"); });
-  for (const auto &time : times) {
-    if (time.field.starts_with("turn/") != turn)
-      continue;
-    if (time.unit == TimeUnit::DurationMilliseconds) {
-      if (time.value && *time.value >= 0)
-        elapsed = duration(*time.value);
-      continue;
+    QString result;
+    const bool turn = std::ranges::any_of(times, [](const auto& time) {
+        return time.field.starts_with("turn/");
+    });
+    for (const auto& time : times) {
+        if (time.field.starts_with("turn/") == turn && time.field.find("startedAt") != std::string::npos) {
+            const auto local = date(time).toLocalTime();
+            if (local.isValid()) {
+                result = local.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            }
+        }
     }
-    const auto local = date(time).toLocalTime();
-    if (!local.isValid())
-      continue;
-    if (time.field.find("startedAt") != std::string::npos)
-      start = local.toString(QStringLiteral("HH:mm:ss"));
-    if (time.field.find("completedAt") != std::string::npos)
-      end = local.toString(QStringLiteral("HH:mm:ss"));
-  }
-  QString result = start;
-  if (!end.isEmpty())
-    result += (result.isEmpty() ? QString{} : QStringLiteral("–")) + end;
-  if (!elapsed.isEmpty())
-    result += (result.isEmpty() ? QString{} : QStringLiteral(" · ")) + elapsed;
   return result;
 }
 } // namespace codexui::codex::ui

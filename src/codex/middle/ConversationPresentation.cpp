@@ -356,40 +356,38 @@ bool simpleMarkdownParagraphs(QStringView source) {
 
 CopyButton::CopyButton(QString accessibleName, QWidget *parent)
     : QToolButton(parent) {
-  setFixedSize(CardHeaderMetrics::CopyControlWidth,
-               CardHeaderMetrics::LineHeight);
-  setCursor(Qt::PointingHandCursor);
-  setFocusPolicy(Qt::StrongFocus);
-  setAccessibleName(std::move(accessibleName));
-  setToolTip(this->accessibleName());
+    setFixedSize(CardHeaderMetrics::ControlWidth, CardHeaderMetrics::LineHeight);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(std::move(accessibleName));
+    setToolTip(this->accessibleName());
 
-  morph_ = new QVariantAnimation(this);
-  morph_->setDuration(CopyMorphDurationMilliseconds);
-  morph_->setEasingCurve(QEasingCurve::InOutCubic);
-  QObject::connect(morph_, &QVariantAnimation::valueChanged, this,
-                   [this](const QVariant &value) {
-                     morphProgress_ = value.toReal();
-                     update();
-                   });
-  QObject::connect(morph_, &QVariantAnimation::finished, this, [this] {
-    if (returningToCopy_) {
-      finishFeedback();
-      return;
-    }
-    hold_->start(CopyCheckHoldMilliseconds);
-  });
-  hold_ = new QTimer(this);
-  hold_->setSingleShot(true);
-  QObject::connect(hold_, &QTimer::timeout, this, [this] {
-    returningToCopy_ = true;
-    if (UiStyle::animationsEnabled(*this)) {
-      morph_->setStartValue(morphProgress_);
-      morph_->setEndValue(0.0);
-      morph_->start();
-    } else {
-      finishFeedback();
-    }
-  });
+    morph_ = new QVariantAnimation(this);
+    morph_->setDuration(CopyMorphDurationMilliseconds);
+    morph_->setEasingCurve(QEasingCurve::InOutCubic);
+    QObject::connect(morph_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        morphProgress_ = value.toReal();
+        update();
+    });
+    QObject::connect(morph_, &QVariantAnimation::finished, this, [this] {
+        if (returningToCopy_) {
+            finishFeedback();
+            return;
+        }
+        hold_->start(CopyCheckHoldMilliseconds);
+    });
+    hold_ = new QTimer(this);
+    hold_->setSingleShot(true);
+    QObject::connect(hold_, &QTimer::timeout, this, [this] {
+        returningToCopy_ = true;
+        if (UiStyle::animationsEnabled(*this)) {
+            morph_->setStartValue(morphProgress_);
+            morph_->setEndValue(0.0);
+            morph_->start();
+        } else {
+            finishFeedback();
+        }
+    });
 }
 
 void CopyButton::copyText(const QString &text, bool markdown) {
@@ -455,27 +453,30 @@ void CopyButton::focusOutEvent(QFocusEvent *event) {
 void CopyButton::paintEvent(QPaintEvent *event) {
   static_cast<void>(event);
   QColor color(QString::fromLatin1(UiStyle::secondary));
-  if (!isEnabled())
-    color = QColor(QString::fromLatin1(UiStyle::placeholder));
-  else if (underMouse() || keyboardFocusVisible_)
-    color = QColor(QString::fromLatin1(UiStyle::primary));
-  if (feedbackActive_)
-    color = QColor(QString::fromLatin1(UiStyle::copySuccessText));
+  if (!isEnabled()) {
+      color = QColor(QString::fromLatin1(UiStyle::placeholder));
+  } else if (underMouse() || keyboardFocusVisible_) {
+      color = QColor(QString::fromLatin1(UiStyle::primary));
+  }
+  if (feedbackActive_) {
+      color = QColor(QString::fromLatin1(UiStyle::copySuccessText));
+  }
 
   QPainter painter(this);
   painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.translate((width() - CardHeaderMetrics::IconSize) / 2.0, (height() - CardHeaderMetrics::IconSize) / 2.0);
   painter.setBrush(Qt::NoBrush);
   painter.setPen(QPen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   painter.save();
   painter.setOpacity(1.0 - morphProgress_);
-  painter.drawRoundedRect(QRectF(4.5, 5.5, 8.0, 9.0), 1.2, 1.2);
-  painter.drawRoundedRect(QRectF(7.5, 8.5, 8.0, 9.0), 1.2, 1.2);
+  painter.drawRoundedRect(QRectF(2.5, 2.0, 8.0, 9.0), 1.2, 1.2);
+  painter.drawRoundedRect(QRectF(5.5, 5.0, 8.0, 9.0), 1.2, 1.2);
   painter.restore();
   painter.setOpacity(morphProgress_);
   QPainterPath check;
-  check.moveTo(4.5, 12.0);
-  check.lineTo(8.0, 15.5);
-  check.lineTo(15.5, 7.5);
+  check.moveTo(2.5, 8.0);
+  check.lineTo(5.75, 11.25);
+  check.lineTo(13.5, 3.5);
   painter.drawPath(check);
 }
 
@@ -496,8 +497,7 @@ DisclosureButton::DisclosureButton(QString expandAccessibleName,
       expandAccessibleName_(std::move(expandAccessibleName)),
       collapseAccessibleName_(std::move(collapseAccessibleName)) {
   setProperty("kind", "subtle");
-  setFixedSize(CardHeaderMetrics::DisclosureControlWidth,
-               CardHeaderMetrics::LineHeight);
+  setFixedSize(CardHeaderMetrics::ControlWidth, CardHeaderMetrics::LineHeight);
   setCursor(Qt::PointingHandCursor);
   setFocusPolicy(Qt::StrongFocus);
   setAccessibleName(expandAccessibleName_);
@@ -521,8 +521,10 @@ void DisclosureButton::setExpanded(bool expanded) {
 
 void DisclosureButton::paintEvent(QPaintEvent *event) {
   static_cast<void>(event);
-  QRect indicator(0, 3, 12, std::max(0, height() - 6));
-  indicator.translate(expanded_ ? 3 : 5, 0);
+  const QRect indicator((width() - CardHeaderMetrics::IconSize) / 2,
+                        (height() - CardHeaderMetrics::IconSize) / 2,
+                        CardHeaderMetrics::IconSize,
+                        CardHeaderMetrics::IconSize);
   UiStyle::drawChevron(this, indicator, isEnabled(), underMouse() || hasFocus(),
                        expanded_ ? UiStyle::ChevronDirection::Down
                                  : UiStyle::ChevronDirection::Left);
