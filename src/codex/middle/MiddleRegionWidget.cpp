@@ -515,13 +515,22 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
   }
   const bool inCenter =
       target == conversationRegion || conversationRegion->isAncestorOf(target);
+  // Include the bare side margins beside the list, below its controls.
+  const bool inThreads =
+      (target == threadPane &&
+       QRect(0, threadPane->scrollArea()->y(), threadPane->width(), threadPane->scrollArea()->height())
+           .contains(threadPane->mapFromGlobal(wheel->globalPosition().toPoint()))) ||
+      target == threadPane->scrollArea() || threadPane->scrollArea()->isAncestorOf(target);
   const bool onHandle =
       target == splitter->handle(1) || target == splitter->handle(2);
   const bool continuing = wheel->phase() != Qt::NoScrollPhase &&
                           scrollGestureRoute_ != ScrollGestureRoute::Inactive;
-  if (!inCenter && !onHandle && !continuing)
+  if (!inCenter && !inThreads && !onHandle && !continuing)
     return false;
 
+  QAbstractScrollArea* const outerArea =
+      (continuing ? scrollGestureArea_ && threadPane->isAncestorOf(scrollGestureArea_) : inThreads)
+          ? threadPane->scrollArea() : conversationView;
   const bool inComposer = inCenter && (target == composerPane ||
                                        composerPane->isAncestorOf(target));
   const bool inConversation =
@@ -538,6 +547,7 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
   QAbstractScrollArea *const currentArea =
       inComposer       ? scrollAreaBefore(target, composerPane)
       : inConversation ? scrollAreaBefore(target, conversationView)
+      : inThreads      ? scrollAreaBefore(target, threadPane)
                        : nullptr;
   const auto dispatch = [this, wheel](QAbstractScrollArea *owner) {
     wheel->accept();
@@ -568,7 +578,7 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
     }
     if (currentArea && canConsume(currentArea, intent))
       return dispatch(currentArea);
-    return dispatch(conversationView);
+    return dispatch(outerArea);
   }
 
   if (wheel->phase() == Qt::ScrollBegin ||
@@ -579,8 +589,8 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
     } else if (currentArea) {
       scrollGestureRoute_ = ScrollGestureRoute::AwaitingNested;
     } else {
-      scrollGestureArea_ = conversationView;
-      scrollGestureRoute_ = ScrollGestureRoute::Conversation;
+      scrollGestureArea_ = outerArea;
+      scrollGestureRoute_ = ScrollGestureRoute::Outer;
     }
   }
 
@@ -591,8 +601,8 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
     } else if (canConsume(scrollGestureArea_, intent)) {
       scrollGestureRoute_ = ScrollGestureRoute::Native;
     } else {
-      scrollGestureArea_ = conversationView;
-      scrollGestureRoute_ = ScrollGestureRoute::Conversation;
+      scrollGestureArea_ = outerArea;
+      scrollGestureRoute_ = ScrollGestureRoute::Outer;
     }
   }
 
@@ -601,7 +611,7 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
     event->accept();
     break;
   case ScrollGestureRoute::Native:
-  case ScrollGestureRoute::Conversation:
+  case ScrollGestureRoute::Outer:
     static_cast<void>(dispatch(scrollGestureArea_));
     break;
   case ScrollGestureRoute::Dispatching:

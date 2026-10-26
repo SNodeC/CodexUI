@@ -111,7 +111,7 @@ test("operation results retain declared authority and payload shape", () => {
             backwardsCursor: null,
         }, "merge"),
         result(3, 1, "thread.read", "read", true, {
-            thread: {id: "returned", turns: []},
+            thread: {id: "returned", turns: [], lineageKnown: true},
             requestSequence: startedAtSequence,
         }, "replace", {threadId: "returned"}),
         result(4, 1, "thread.resume", "resume", true, {

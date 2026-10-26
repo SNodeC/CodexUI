@@ -28,6 +28,11 @@ export function requests(socket, method) {
     return socket.sent.filter(message => message.kind === "appserver" && message.payload.method === method);
 }
 export function respond(socket, request, result) {
+    socket.replied ??= new Set(); socket.replied.add(request.payload.id);
+    if (request.payload.method === "thread/list") {
+        socket.lineageFixtures ??= new Map();
+        for (const thread of result.data ?? []) socket.lineageFixtures.set(thread.id, thread);
+    }
     socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, result}));
 }
 export function reject(socket, request, message) {
@@ -58,3 +63,19 @@ export async function completeControllerHydration(socket, thread, nextCursor = n
     return {resume, page};
 }
 export const waitForPublish = () => new Promise(resolve => setTimeout(resolve, 25));
+
+export async function completeThreadDiscovery(socket) {
+    let idle = 0;
+    for (let pass = 0; pass < 256 && idle < 4; ++pass) {
+        await Promise.resolve();
+        const request = requests(socket, "thread/read").find(value => value.payload.params.includeTurns === false
+            && !socket.replied?.has(value.payload.id));
+        if (request) {
+            const thread = socket.lineageFixtures?.get(request.payload.params.threadId);
+            assert.ok(thread, "lineage discovery reads an already-listed thread");
+            respond(socket, request, {thread: {...thread, forkedFromId: thread.forkedFromId ?? null,
+                parentThreadId: thread.parentThreadId ?? null}});
+            idle = 0;
+        } else { ++idle; }
+    }
+}

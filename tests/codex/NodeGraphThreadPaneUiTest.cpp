@@ -6,6 +6,7 @@
 #include "codex/NodeGraphJson.h"
 #include "codex/ThreadBrowser.h"
 #include "codex/middle/ThreadPane.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
 
@@ -40,11 +41,12 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <ranges>
@@ -108,6 +110,10 @@ QTreeWidget *threadTree(QWidget &owner) {
 }
 
 void click(QWidget *widget, QPoint position) {
+    if (auto* child = widget->childAt(position)) {
+        position = child->mapFrom(widget, position);
+        widget = child;
+    }
   QMouseEvent press(QEvent::MouseButtonPress, QPointF(position),
                     QPointF(position), widget->mapToGlobal(position),
                     Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
@@ -803,7 +809,7 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
   // Exercise the actual edit dialog and emit authored data, not a handcrafted
   // projection of what the dialog ought to send.
   auto *projectItem = threadItem(tree, "project-a");
-  const QPoint point = tree->visualItemRect(projectItem).center();
+  const QPoint point = tree->visualItemRect(projectItem).topLeft() + QPoint(40, UiStyle::projectCardEdgePadding + 12);
   QMetaObject::invokeMethod(tree, "customContextMenuRequested",
                             Qt::DirectConnection, Q_ARG(QPoint, point));
   QApplication::processEvents();
@@ -1009,6 +1015,101 @@ bool forkNamesPreserveTheirLineage() {
                  "an unrelated thread did not start at fork 1");
 }
 
+bool forkHierarchyIgnoresRootReadOrder() {
+    using namespace nodegraph;
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    std::vector<NodeRef> threads;
+    for (const char* id : {"origin", "fork", "nested-fork"}) {
+        Value::Object fields{{"id", Value(id)}, {"name", Value(id)}, {"projectId", Value("project")}};
+        if (std::string_view(id) != "origin") {
+            fields.emplace("forkedFromId", Value(std::string_view(id) == "fork" ? "origin" : "fork"));
+        }
+        static_cast<void>(
+            updater.apply({DecodedMessageKind::ServerNotification, "thread/started", {}, {{"thread", Value(std::move(fields))}}}));
+        auto read = graph.tryRead();
+        threads.push_back(read->find({NodeKind::Thread, id}));
+    }
+    {
+        auto write = graph.write();
+        for (const char* method : {"project/list", "threadSection/list"}) {
+            static_cast<void>(write.upsert({NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}));
+        }
+        static_cast<void>(write.finish());
+    }
+    ui::NodeGraphUiAdapter adapter(graph);
+    middle::ThreadPane pane;
+    pane.resize(340, 600);
+    pane.show();
+    bool passed = true;
+    QTreeWidgetItem* retainedFork = nullptr;
+    for (const auto& selected : {threads[0], threads[1], threads[2], threads[0]}) {
+        const ProtocolRequestId requestId("read-" + selected->id().canonical);
+        const auto request =
+            updater.apply({DecodedMessageKind::ClientRequest, "thread/read", requestId, {{"threadId", Value(selected->id().canonical)}}});
+        DecodedMessage response{DecodedMessageKind::ClientResult,
+                                "thread/read",
+                                requestId,
+                                {{"thread", Value(Value::Object{{"id", Value(selected->id().canonical)}})}}};
+        response.expectedNode = request.primary;
+        static_cast<void>(updater.apply(std::move(response)));
+        for (const auto grouping : {ui::ThreadGrouping::Ungrouped, ui::ThreadGrouping::Projects, ui::ThreadGrouping::Sections}) {
+            ui::ThreadBrowserOptions browser;
+            browser.grouping = grouping;
+            pane.refresh(*adapter.threads(selected, nullptr, &browser));
+            QApplication::processEvents();
+            auto* tree = threadTree(pane);
+            auto* origin = threadItem(tree, "origin");
+            auto* fork = threadItem(tree, "fork");
+            auto* nested = threadItem(tree, "nested-fork");
+            passed &= require(origin && fork && nested && fork->parent() == origin && nested->parent() == fork &&
+                                  tree->currentItem() == threadItem(tree, selected->id().canonical),
+                              "fork lineage and selection must survive read order and grouping");
+            passed &= require(!retainedFork || retainedFork == fork, "fork refresh and regrouping must preserve row identity");
+            retainedFork = fork;
+        }
+    }
+    ui::ThreadBrowserOptions browser;
+    browser.title = "nested-fork";
+    pane.refresh(*adapter.threads(threads[2], nullptr, &browser));
+    auto* tree = threadTree(pane);
+    auto* visible = threadItem(tree, "nested-fork");
+    passed &= require(visible && visible->parent() && !threadItem(tree, "origin") && !threadItem(tree, "fork"),
+                      "a matching nested fork stays visible when its ancestors are filtered");
+    {
+        auto write = graph.write();
+        auto otherProject = write.upsert({NodeKind::Project, "other-project"});
+        auto otherSection = write.upsert({NodeKind::ThreadSection, "other-section"});
+        for (const auto& thread : {threads[1], threads[2]}) {
+            write.replaceRelated(thread, RelationKind::ProjectMembership, std::array{otherProject});
+            write.replaceRelated(thread, RelationKind::SectionMembership, std::array{otherSection});
+        }
+        static_cast<void>(write.finish());
+    }
+    browser.title.clear();
+    for (const auto grouping : {ui::ThreadGrouping::Projects, ui::ThreadGrouping::Sections}) {
+        browser.grouping = grouping;
+        pane.refresh(*adapter.threads(threads[1], nullptr, &browser));
+        auto* origin = threadItem(tree, "origin");
+        auto* fork = threadItem(tree, "fork");
+        auto* nested = threadItem(tree, "nested-fork");
+        passed &=
+            require(origin && fork && nested && fork->parent() != origin && fork->parent() != origin->parent() && nested->parent() == fork,
+                    "forks in another group retain their membership and nested lineage");
+    }
+    const auto split = adapter.threads(threads[1], nullptr, &browser);
+    const auto checkParent = [&](const auto& self, const std::vector<ui::ThreadListRow>& rows) -> void {
+        for (const auto& row : rows) {
+            if (row.target == threads[1]) {
+                passed &= require(row.parentThread == threads[0], "cross-project fork retains Go to parent identity");
+            }
+            self(self, row.children);
+        }
+    };
+    checkParent(checkParent, split->roots);
+    return passed;
+}
+
 bool selectedChildRetainsRootAndCanonicalIdentity() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef root;
@@ -1104,6 +1205,8 @@ bool accessibilityFollowsTheNativeHierarchy() {
   QTreeWidget *tree = threadTree(pane);
   QTreeWidgetItem *rootItem = threadItem(tree, root.id);
   QTreeWidgetItem *childItem = threadItem(tree, child.id);
+  rootItem->setExpanded(false);
+  QApplication::processEvents();
   QAccessibleInterface *treeAccessible =
       QAccessible::queryAccessibleInterface(tree);
   QAccessibleInterface *rootAccessible = threadAccessible(tree, rootItem);
@@ -1512,6 +1615,9 @@ bool presentationLifetimeFollowsExactThreadIncarnation() {
   QTreeWidget *tree = threadTree(pane);
   QTreeWidgetItem *firstRootItem = threadItem(tree, "stable-root");
   QTreeWidgetItem *firstChildItem = threadItem(tree, "stable-child");
+  if (firstRootItem) {
+      firstRootItem->setExpanded(false);
+  }
   if (!require(tree && tree->topLevelItemCount() == 1 && firstRootItem &&
                    firstRootItem->childCount() == 1 && firstChildItem &&
                    firstChildItem->parent() == firstRootItem &&
@@ -1653,28 +1759,18 @@ bool presentationLifetimeFollowsExactThreadIncarnation() {
   QAccessibleInterface *secondAccessible =
       treeAccessible ? treeAccessible->child(0) : nullptr;
   bool result =
-      require(tree->topLevelItemCount() == 1 && secondItem &&
-                  secondItem->childCount() == 1 && !secondItem->isExpanded(),
-              "the replacement incarnation inherited hierarchy expansion") &&
-      require(!firstRootIndex.isValid() &&
-                  (!firstAccessibleId ||
-                   !QAccessible::accessibleInterface(firstAccessibleId)),
+      require(tree->topLevelItemCount() == 1 && secondItem && secondItem->childCount() == 1 && secondItem->isExpanded(),
+              "the replacement incarnation did not use initially expanded hierarchy") &&
+      require(!firstRootIndex.isValid() && (!firstAccessibleId || !QAccessible::accessibleInterface(firstAccessibleId)),
               "the replacement incarnation retained retired model or "
               "accessibility identity") &&
-      require(
-          staleMenu.isNull() || !staleMenu->isVisible(),
-          "the replacement incarnation retained the retired context menu") &&
-      require(pane.visiblySelectedThread() &&
-                  pane.visiblySelectedThread()->target == secondRoot &&
-                  pane.currentSortCriterion() ==
-                      middle::ThreadPane::SortCriterion::Alphanumeric,
+      require(staleMenu.isNull() || !staleMenu->isVisible(), "the replacement incarnation retained the retired context menu") &&
+      require(pane.visiblySelectedThread() && pane.visiblySelectedThread()->target == secondRoot &&
+                  pane.currentSortCriterion() == middle::ThreadPane::SortCriterion::Alphanumeric,
               "reincarnation lost canonical navigation or global sorting") &&
-      require(secondAccessible &&
-                  secondAccessible->role() == QAccessible::TreeItem &&
-                  secondAccessible->parent() == treeAccessible &&
-                  secondAccessible->state().expandable &&
-                  secondAccessible->state().collapsed,
-              "the fresh hierarchy did not expose nested collapsed "
+      require(secondAccessible && secondAccessible->role() == QAccessible::TreeItem && secondAccessible->parent() == treeAccessible &&
+                  secondAccessible->state().expandable && secondAccessible->state().expanded,
+              "the fresh hierarchy did not expose nested expanded "
               "accessibility");
 
   const auto selectedSecond = adapter.threads(secondChild);
@@ -1938,6 +2034,422 @@ QColor logicalPixel(const QImage &image, QPoint point) {
   return image.rect().contains(point) ? image.pixelColor(point) : QColor{};
 }
 
+bool projectBodiesCapVisibleRows() {
+    bool passed = true;
+    for (const auto& [width, points] : std::array{std::pair{260, 10}, std::pair{440, 10}, std::pair{260, 16}, std::pair{440, 16}}) {
+        middle::ThreadPane pane;
+        auto font = pane.font();
+        font.setPointSize(points);
+        pane.setFont(font);
+        pane.resize(width, 800);
+        ui::ThreadListRow large;
+        large.kind = ui::ThreadRowKind::Project;
+        large.id = large.presentationKey = "cap-large";
+        large.title = "Large project";
+        ui::ThreadListRow section;
+        section.kind = ui::ThreadRowKind::Section;
+        section.id = section.presentationKey = "cap-section";
+        section.title = "Section counts as one row";
+        for (int index = 0; index < 20; ++index) {
+            section.children.push_back(localDraft(
+                "cap-" + std::to_string(index), "cap-" + std::to_string(index), "Thread " + std::to_string(index), "/workspace"));
+        }
+        ui::ThreadListRow page;
+        page.kind = ui::ThreadRowKind::Page;
+        page.id = page.presentationKey = "cap-page";
+        page.title = "Load more";
+        page.query = {{"method", "thread/list"}, {"parameters", {{"projectId", "cap-large"}}}};
+        section.children.push_back(page);
+        large.children = {section};
+        int pagesRequested = 0;
+        middle::ThreadPane::Actions actions;
+        actions.browse = [&](const nlohmann::json&) {
+            ++pagesRequested;
+        };
+        pane.setActions(std::move(actions));
+        ui::ThreadListRow small = large;
+        small.id = small.presentationKey = "cap-small";
+        small.title = "Small project";
+        small.children = {localDraft("small-1", "small-1", "First", "/workspace"),
+                          localDraft("small-2", "small-2", "Second", "/workspace")};
+        ui::ThreadListSnapshot snapshot;
+        snapshot.providerReady = true;
+        snapshot.roots = {large, small};
+        for (int index = 0; index < 15; ++index) {
+            ui::ThreadListRow empty;
+            empty.kind = ui::ThreadRowKind::Project;
+            empty.id = empty.presentationKey = "zz-empty-" + std::to_string(index);
+            empty.title = "Empty project " + std::to_string(index);
+            snapshot.roots.push_back(empty);
+        }
+        pane.refresh(snapshot);
+        pane.show();
+        auto* tree = threadTree(pane);
+        tree->expandAll();
+        threadItem(tree, "cap-section")->setExpanded(true);
+        QApplication::processEvents();
+        QTreeView* largeBody = nullptr;
+        QTreeView* smallBody = nullptr;
+        for (auto* body : pane.findChildren<QTreeView*>("projectThreadBody")) {
+            if (body->rootIndex().data(Qt::UserRole).toString() == "cap-large") {
+                largeBody = body;
+            }
+            if (body->rootIndex().data(Qt::UserRole).toString() == "cap-small") {
+                smallBody = body;
+            }
+        }
+        passed &= require(largeBody && smallBody, "expanded projects have native body viewports");
+        if (largeBody && smallBody) {
+            auto* group = threadItem(tree, "cap-large");
+            auto* sectionItem = threadItem(tree, "cap-section");
+            const auto sectionIndex = tree->indexFromItem(sectionItem);
+            const int rowHeight = largeBody->visualRect(sectionIndex).height();
+            passed &= require(largeBody->viewport()->height() == 8 * rowHeight && smallBody->viewport()->height() == 2 * rowHeight,
+                              "eight physical rows include section headings, while small projects shrink");
+            passed &= require(largeBody->model() == tree->model() && largeBody->selectionModel() == tree->selectionModel() &&
+                                  largeBody->itemDelegate() == tree->itemDelegate(),
+                              "project bodies reuse the authoritative model, selection and row renderer");
+            passed &= require(pagesRequested == 0, "a page beyond the eight visible rows is not requested early");
+            const QRect headerBefore = tree->visualItemRect(group);
+            const QPoint wheelPoint(80, 60);
+            QWheelEvent wheel(QPointF(wheelPoint),
+                              largeBody->viewport()->mapToGlobal(wheelPoint),
+                              QPoint{},
+                              QPoint(0, -120),
+                              Qt::NoButton,
+                              Qt::NoModifier,
+                              Qt::NoScrollPhase,
+                              false);
+            QApplication::sendEvent(largeBody->viewport(), &wheel);
+            QApplication::processEvents();
+            passed &= require(largeBody->verticalScrollBar()->value() > 0 && tree->visualItemRect(group) == headerBefore,
+                              "wheel input scrolls the actual project body while its heading stays fixed");
+            largeBody->verticalScrollBar()->setValue(0);
+            auto* last = threadItem(tree, "cap-19");
+            const auto lastIndex = tree->indexFromItem(last);
+            auto* accessible = threadAccessible(tree, last);
+            const auto identity = accessible ? QAccessible::uniqueId(accessible) : 0;
+            largeBody->scrollTo(lastIndex);
+            QApplication::processEvents();
+            click(largeBody->viewport(), largeBody->visualRect(lastIndex).center());
+            passed &= require(tree->currentItem() == last && tree->visualItemRect(group) == headerBefore &&
+                                  smallBody->verticalScrollBar()->value() == 0,
+                              "scrolling and selecting a late thread keeps project headings and other cards fixed");
+            passed &= require(accessible && !accessible->rect().isEmpty() && accessible->state().selected &&
+                                  QAccessible::uniqueId(threadAccessible(tree, last)) == identity,
+                              "scrolled thread selection uses its visible accessible geometry and stable identity");
+            largeBody->setFocus();
+            auto* bodyAccessible = QAccessible::queryAccessibleInterface(largeBody);
+            passed &= require(bodyAccessible && bodyAccessible->focusChild() == accessible && accessible->state().focused,
+                              "native body focus resolves to the existing logical row accessible");
+            const auto selectedBeforeContext = tree->selectionModel()->selectedRows();
+            const QPoint contextPoint(80, 4);
+            QMouseEvent contextPress(QEvent::MouseButtonPress,
+                                     QPointF(contextPoint),
+                                     QPointF(contextPoint),
+                                     largeBody->viewport()->mapToGlobal(contextPoint),
+                                     Qt::RightButton,
+                                     Qt::RightButton,
+                                     Qt::NoModifier);
+            QApplication::sendEvent(largeBody->viewport(), &contextPress);
+            passed &= require(tree->selectionModel()->selectedRows() == selectedBeforeContext,
+                              "a project-body context click preserves thread selection");
+            const int scrollBefore = largeBody->verticalScrollBar()->value();
+            pane.refresh(snapshot);
+            QApplication::processEvents();
+            passed &= require(largeBody->verticalScrollBar()->value() == scrollBefore && tree->selectionModel()->isSelected(lastIndex),
+                              "a semantic refresh preserves internal scroll and selection");
+            largeBody->setExpanded(sectionIndex, false);
+            QApplication::processEvents();
+            passed &= require(!sectionItem->isExpanded() && largeBody->viewport()->height() == rowHeight &&
+                                  largeBody->verticalScrollBar()->maximum() == 0,
+                              "collapsing a section excludes descendants from the project height");
+            sectionItem->setExpanded(true);
+            QApplication::processEvents();
+            passed &= require(largeBody->isExpanded(sectionIndex) && largeBody->viewport()->height() == 8 * rowHeight,
+                              "the body projects authoritative expansion changes");
+            tree->setCurrentItem(group);
+            tree->setFocus();
+            QKeyEvent down(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+            QApplication::sendEvent(tree, &down);
+            passed &= require(tree->currentItem() == sectionItem && largeBody->hasFocus(), "keyboard navigation enters the project body");
+            QKeyEvent up(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+            QApplication::sendEvent(largeBody, &up);
+            passed &= require(tree->currentItem() == group && tree->hasFocus(), "keyboard navigation returns to the fixed project heading");
+            if (const auto path = qEnvironmentVariable("CODEXUI_CAP_SCREENSHOT_DIR"); !path.isEmpty()) {
+                passed &= require(pane.grab().save(path + "/project-cap-" + QString::number(width) + "-font-" + QString::number(points) +
+                                                   "-dpr-" + QString::number(pane.devicePixelRatioF()) + ".png"),
+                                  "capped project screenshot saved");
+            }
+            largeBody->verticalScrollBar()->setValue(largeBody->verticalScrollBar()->maximum());
+            QApplication::processEvents();
+            passed &= require(pagesRequested == 1, "scrolling the project body to its page requests that page once");
+            const int retainedScroll = largeBody->verticalScrollBar()->value();
+            QPointer<QTreeView> retiredBody = largeBody;
+            tree->setFocus();
+            tree->verticalScrollBar()->setValue(tree->verticalScrollBar()->maximum());
+            QApplication::processEvents();
+            passed &= require(!retiredBody, "offscreen projects release their native body widgets");
+            tree->verticalScrollBar()->setValue(0);
+            QApplication::processEvents();
+            largeBody = nullptr;
+            for (auto* body : pane.findChildren<QTreeView*>("projectThreadBody")) {
+                if (body->rootIndex() == tree->indexFromItem(group)) {
+                    largeBody = body;
+                }
+            }
+            passed &= require(largeBody && largeBody->verticalScrollBar()->value() == retainedScroll,
+                              "recreating a visible body restores its semantic project scroll position");
+            const QPoint labelPoint(100, tree->visualItemRect(group).top() + UiStyle::projectCardEdgePadding + 12);
+            QMouseEvent doubleClick(QEvent::MouseButtonDblClick,
+                                    QPointF(labelPoint),
+                                    QPointF(labelPoint),
+                                    tree->viewport()->mapToGlobal(labelPoint),
+                                    Qt::LeftButton,
+                                    Qt::LeftButton,
+                                    Qt::NoModifier);
+            QApplication::sendEvent(tree->viewport(), &doubleClick);
+            QApplication::processEvents();
+            passed &= require(!group->isExpanded(), "double-clicking a project label collapses its body");
+            group->setExpanded(false);
+            QApplication::processEvents();
+            passed &=
+                require(!pane.findChild<QTreeView*>("projectThreadBody") || pane.findChildren<QTreeView*>("projectThreadBody").size() == 1,
+                        "collapsing the project releases its body view");
+            passed &= require(tree->sizeHintForIndex(tree->indexFromItem(group)).height() == tree->visualItemRect(group).height() &&
+                                  sectionItem->childCount() == 21,
+                              "collapse restores the complete one-line card without dropping threads");
+        }
+    }
+    return passed;
+}
+
+bool projectDisclosureRestoresCollapsedGeometry() {
+    bool passed = true;
+    for (const int points : {10, 16}) {
+        for (const int width : {260, 440}) {
+            middle::ThreadPane pane;
+            auto font = pane.font();
+            font.setPointSize(points);
+            pane.setFont(font);
+            pane.resize(width, 680);
+            pane.show();
+            ui::ThreadListRow project;
+            project.kind = ui::ThreadRowKind::Project;
+            project.id = "height-project";
+            project.presentationKey = project.id;
+            project.title = "Project name with Unicode 日本語 and a long label";
+            ui::ThreadListRow section;
+            section.kind = ui::ThreadRowKind::Section;
+            section.id = "height-section";
+            section.presentationKey = section.id;
+            section.title = "Section";
+            ui::ThreadListRow member;
+            member.id = "height-member";
+            member.presentationKey = member.id;
+            member.title = "Member";
+            section.children = {member};
+            project.children = {section, member};
+            // Distinct semantic identities for the two member rows.
+            project.children.back().id = "direct-member";
+            project.children.back().presentationKey = "direct-member";
+            ui::ThreadListRow sibling;
+            sibling.kind = ui::ThreadRowKind::Project;
+            sibling.id = "next-project";
+            sibling.presentationKey = sibling.id;
+            sibling.title = "Next project";
+            ui::ThreadListSnapshot snapshot;
+            snapshot.roots = {project, sibling};
+            pane.refresh(snapshot);
+            auto* tree = threadTree(pane);
+            auto* item = threadItem(tree, project.id);
+            auto* next = threadItem(tree, sibling.id);
+            tree->collapseAll();
+            QApplication::processEvents();
+            QRect initial = tree->visualItemRect(item);
+            initial.setHeight(tree->sizeHintForIndex(tree->indexFromItem(item)).height());
+            auto* accessible = threadAccessible(tree, item);
+            const auto accessibleId = accessible ? QAccessible::uniqueId(accessible) : 0;
+            passed &= require(accessible && accessible->text(QAccessible::Name) == QString::fromStdString(project.title),
+                              "project headings expose the complete authored name without a Project prefix");
+            passed &= require(tree->visualItemRect(item) == initial, "initially collapsed project uses the delegate's canonical height");
+            for (const bool mouseExpand : {true, false}) {
+                tree->setCurrentItem(item);
+                tree->setFocus();
+                if (mouseExpand) {
+                    const QRect rect = tree->visualItemRect(item);
+                    click(tree->viewport(), QPoint(rect.left() - 1, rect.center().y()));
+                } else {
+                    QKeyEvent expand(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+                    QApplication::sendEvent(tree, &expand);
+                }
+                QApplication::processEvents();
+                passed &= require(item->isExpanded(), "project expands through mouse and keyboard input");
+                const QRect expanded = tree->visualItemRect(item);
+                passed &= require(expanded.height() == tree->sizeHintForIndex(tree->indexFromItem(item)).height(),
+                                  "expanded project header matches the current delegate geometry");
+                if (const auto path = qEnvironmentVariable("CODEXUI_COLLAPSE_SCREENSHOT_DIR"); !path.isEmpty()) {
+                    passed &= require(pane.grab().save(path + "/expanded-" + QString::number(width) + "-font-" + QString::number(points) +
+                                                       "-dpr-" + QString::number(pane.devicePixelRatioF()) + ".png"),
+                                      "expanded project visual evidence saved");
+                }
+                if (mouseExpand) {
+                    QKeyEvent collapse(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
+                    QApplication::sendEvent(tree, &collapse);
+                } else {
+                    click(tree->viewport(), QPoint(expanded.left() - 1, expanded.top() + UiStyle::projectCardEdgePadding + 12));
+                }
+                QApplication::processEvents();
+                const QRect collapsed = tree->visualItemRect(item);
+                passed &= require(!item->isExpanded() && collapsed == initial && tree->visualItemRect(next).top() == initial.bottom() + 1,
+                                  "collapsing a project restores its full one-line card and following-row position");
+                passed &= require(threadAccessible(tree, item) && QAccessible::uniqueId(threadAccessible(tree, item)) == accessibleId &&
+                                      tree->currentItem() == item,
+                                  "project disclosure retains focus and accessible identity");
+                if (const auto path = qEnvironmentVariable("CODEXUI_COLLAPSE_SCREENSHOT_DIR"); !path.isEmpty()) {
+                    passed &= require(pane.grab().save(path + "/collapsed-" + QString::number(width) + "-font-" + QString::number(points) +
+                                                       "-dpr-" + QString::number(pane.devicePixelRatioF()) + ".png"),
+                                      "collapsed project visual evidence saved");
+                }
+            }
+        }
+    }
+    return passed;
+}
+
+bool groupsReportDescendantThreadStatus() {
+    using namespace nodegraph;
+    NodeGraph graph;
+    std::array<NodeRef, 4> threads;
+    {
+        auto write = graph.write();
+        const auto entity = [&](NodeKind kind, const std::string& id, nlohmann::json fields) {
+            NodeState state;
+            state.fields = *valueFromJson(fields).asObject();
+            return write.upsert({kind, id}, std::move(state));
+        };
+        const auto project = entity(NodeKind::Project, "status-project", {{"name", "Project"}});
+        const auto section =
+            entity(NodeKind::ThreadSection, "status-section", {{"name", "Section"}, {"appearance", {{"color", "#ff0000"}}}});
+        static_cast<void>(entity(NodeKind::Project, "empty-project", {{"name", "Empty project"}}));
+        static_cast<void>(entity(NodeKind::ThreadSection, "empty-section", {{"name", "Empty section"}}));
+        for (std::size_t index = 0; index < threads.size(); ++index) {
+            threads[index] = entity(NodeKind::Thread, "member-" + std::to_string(index), {{"name", "Member " + std::to_string(index)}});
+            write.setStatus(threads[index], NodeStatus::NotLoaded);
+            write.relate(threads[index], RelationKind::ProjectMembership, project);
+            write.relate(threads[index], RelationKind::SectionMembership, section);
+        }
+        write.relate(threads[0], RelationKind::StructuralChildThread, threads[1]);
+        write.relate(threads[1], RelationKind::AgentChildThread, threads[2]);
+        for (const auto* method : {"project/list", "threadSection/list"}) {
+            static_cast<void>(
+                entity(NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object()), {{"loaded", true}, {"hasMore", false}}));
+        }
+        static_cast<void>(write.finish());
+    }
+    ui::NodeGraphUiAdapter adapter(graph);
+    middle::ThreadPane pane;
+    pane.show();
+    bool passed = true;
+    // Active grandchildren must win over a loaded sibling in either iteration order;
+    // terminal errors still mean loaded, and unloading must clear the aggregate.
+    const std::array cases{std::array{NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::NotLoaded},
+                           std::array{NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::Completed, NodeStatus::NotLoaded},
+                           std::array{NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::Running, NodeStatus::Completed},
+                           std::array{NodeStatus::Completed, NodeStatus::NotLoaded, NodeStatus::Running, NodeStatus::NotLoaded},
+                           std::array{NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::Failed, NodeStatus::NotLoaded},
+                           std::array{NodeStatus::NotLoaded, NodeStatus::Interrupted, NodeStatus::NotLoaded, NodeStatus::NotLoaded},
+                           std::array{NodeStatus::Running, NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::NotLoaded},
+                           std::array{NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::NotLoaded, NodeStatus::NotLoaded}};
+    for (const auto grouping : {ui::ThreadGrouping::Projects, ui::ThreadGrouping::Sections}) {
+        auto options = pane.browserOptions();
+        options.grouping = grouping;
+        for (const auto& statuses : cases) {
+            {
+                auto write = graph.write();
+                for (std::size_t index = 0; index < threads.size(); ++index) {
+                    write.setStatus(threads[index], statuses[index]);
+                }
+                static_cast<void>(write.finish());
+            }
+            const bool active = std::ranges::find(statuses, NodeStatus::Running) != statuses.end();
+            const bool loaded = std::ranges::any_of(statuses, [](NodeStatus status) {
+                return status != NodeStatus::NotLoaded;
+            });
+            const NodeStatus expected = active ? NodeStatus::Running : loaded ? NodeStatus::Completed : NodeStatus::NotLoaded;
+            const QColor expectedColor(active ? UiStyle::statusIndirect : loaded ? UiStyle::statusSuccess : UiStyle::threadInactive);
+            const auto snapshot = adapter.threads({}, nullptr, &options);
+            passed &= require(snapshot.has_value(), "group status fixture projects through the adapter");
+            if (snapshot) {
+                const auto checkRows = [&](const auto& self, const std::vector<ui::ThreadListRow>& rows) -> void {
+                    for (const auto& row : rows) {
+                        if (row.kind == ui::ThreadRowKind::Project || row.kind == ui::ThreadRowKind::Section) {
+                            passed &= require(row.status.semantic == (row.id.starts_with("empty-") ? NodeStatus::NotLoaded : expected),
+                                              "projects and sections aggregate descendant status with active precedence");
+                        }
+                        self(self, row.children);
+                    }
+                };
+                checkRows(checkRows, snapshot->roots);
+                pane.refresh(*snapshot);
+                auto* tree = threadTree(pane);
+                for (const int width : {260, 420}) {
+                    pane.resize(width, 1000);
+                    for (const bool expanded : {true, false}) {
+                        tree->expandAll();
+                        if (!expanded) {
+                            threadItem(tree, "member-0")->setExpanded(false);
+                            threadItem(tree, "status-section")->setExpanded(false);
+                        }
+                        QApplication::processEvents();
+                        const QImage image = tree->viewport()->grab().toImage();
+                        for (const auto* id : {"status-project", "status-section", "empty-project", "empty-section"}) {
+                            auto* item = threadItem(tree, id);
+                            if (item) {
+                                const bool empty = std::string_view(id).starts_with("empty-");
+                                const QColor color = empty ? QColor(UiStyle::threadInactive) : expectedColor;
+                                const QRect rect = tree->visualItemRect(item);
+                                // Measure the painted disc in device pixels, excluding labels and chevrons.
+                                const qreal dpr = image.devicePixelRatio();
+                                QRect disc;
+                                const QRect search(qRound((rect.left() + 7) * dpr),
+                                                   qRound(rect.top() * dpr),
+                                                   qRound(15 * dpr),
+                                                   qRound(std::min(rect.height(), 40) * dpr));
+                                for (int y = search.top(); y <= search.bottom(); ++y) {
+                                    for (int x = search.left(); x <= search.right(); ++x) {
+                                        if (image.rect().contains(x, y) && colorDistance(image.pixelColor(x, y), color) <= 12) {
+                                            disc = disc.united(QRect(x, y, 1, 1));
+                                        }
+                                    }
+                                }
+                                passed &= require(!disc.isEmpty() && std::abs(disc.width() - 10 * dpr) <= 2 &&
+                                                      std::abs(disc.height() - 10 * dpr) <= 2 &&
+                                                      std::abs(disc.center().x() / dpr - (rect.left() + 14)) <= 1,
+                                                  "group circle uses the thread color, position and ten-pixel diameter");
+                                const auto* accessible = threadAccessible(tree, item);
+                                passed &= require(accessible && accessible->text(QAccessible::Description)
+                                                                    .contains(empty || !loaded ? "Threads: not loaded"
+                                                                              : active         ? "Threads: active"
+                                                                                               : "Threads: loaded"),
+                                                  "group aggregate status is available without relying on color");
+                            }
+                        }
+                        if (const auto path = qEnvironmentVariable("CODEXUI_STATUS_SCREENSHOT_DIR");
+                            !path.isEmpty() && expanded && width == 420) {
+                            passed &= require(pane.grab().save(path + "/group-status-" + QString::number(static_cast<int>(grouping)) + "-" +
+                                                               QString::number(static_cast<int>(expected)) + "-dpr-" +
+                                                               QString::number(pane.devicePixelRatioF()) + ".png"),
+                                              "group status visual evidence saved");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return passed;
+}
+
 bool selectedThreadUsesSemanticSurface() {
   bool passed = require(QColor(UiStyle::threadSelected) == QColor("#ffffb3"),
                         "selected thread must use the bright pure-yellow tint");
@@ -1996,6 +2508,76 @@ bool selectedThreadUsesSemanticSurface() {
   return passed;
 }
 
+bool threadDisclosureIsReadyOnFirstPresentation() {
+    bool passed = true;
+    for (bool grouped : {false, true}) {
+        middle::ThreadPane pane;
+        pane.resize(340, 650);
+        ui::ThreadListRow origin, fork, nested, project;
+        origin.id = origin.presentationKey = origin.title = "initial-origin";
+        fork.id = fork.presentationKey = fork.title = "initial-fork";
+        nested.id = nested.presentationKey = nested.title = "initial-nested";
+        project.kind = ui::ThreadRowKind::Project;
+        project.id = project.presentationKey = project.title = "initial-project";
+        fork.children = {nested};
+        origin.children = {fork};
+        project.children = {origin};
+        ui::ThreadListSnapshot snapshot;
+        snapshot.roots = {grouped ? project : origin};
+        snapshot.selectedThreadId = origin.id;
+        auto initial = snapshot;
+        if (grouped) {
+            initial.roots.front().children.front().children.clear();
+        } else {
+            initial.roots.front().children.clear();
+        }
+        pane.refresh(initial);
+        pane.show();
+        auto* tree = threadTree(pane);
+        if (grouped) {
+            tree->topLevelItem(0)->setExpanded(true);
+        }
+        QApplication::processEvents();
+        pane.refresh(snapshot);
+        QApplication::processEvents();
+        auto* originItem = threadItem(tree, origin.id);
+        auto* forkItem = threadItem(tree, fork.id);
+        auto* nestedItem = threadItem(tree, nested.id);
+        passed &= require(originItem && forkItem && nestedItem && originItem->isExpanded() && forkItem->isExpanded(),
+                          "new thread hierarchies must start expanded without selecting a fork");
+        const auto checkChevron = [&](QTreeWidgetItem* item) {
+            const QRect rect = tree->visualItemRect(item);
+            const QImage image = tree->viewport()->grab().toImage();
+            int pixels = 0;
+            for (int y = rect.center().y() - 7; y <= rect.center().y() + 7; ++y) {
+                for (int x = rect.left() - 7; x <= rect.left() + 5; ++x) {
+                    if (colorDistance(logicalPixel(image, QPoint(x, y)), QColor(QString::fromLatin1(UiStyle::secondary))) < 40) {
+                        ++pixels;
+                    }
+                }
+            }
+            passed &= require(rect.isValid() && pixels >= 3,
+                              ("fork-parent chevron missing: " + item->data(0, Qt::UserRole).toString().toStdString() +
+                               " grouped=" + std::to_string(grouped))
+                                  .c_str());
+        };
+        checkChevron(originItem);
+        originItem->setExpanded(false);
+        QApplication::processEvents();
+        pane.refresh(snapshot);
+        QApplication::processEvents();
+        passed &= require(!originItem->isExpanded(), "refresh must preserve a manually folded thread");
+        checkChevron(originItem);
+        snapshot.selectedThreadId = nested.id;
+        pane.refresh(snapshot);
+        QApplication::processEvents();
+        passed &= require(originItem->isExpanded() && forkItem->isExpanded() && tree->currentItem() == nestedItem,
+                          "selecting a descendant must reveal its ancestors");
+        checkChevron(forkItem);
+    }
+    return passed;
+}
+
 bool threadRowsConsumeCanonicalStatusTone() {
   middle::ThreadPane pane;
   pane.resize(300, 300);
@@ -2025,9 +2607,12 @@ bool threadRowsConsumeCanonicalStatusTone() {
   for (const auto &[status, color] : cases) {
     snapshot.roots.front().status = status;
     pane.refresh(snapshot);
-    QApplication::processEvents();
     QTreeWidget *tree = threadTree(pane);
     QTreeWidgetItem *item = tree ? tree->topLevelItem(0) : nullptr;
+    if (item) {
+        item->setExpanded(false);
+    }
+    QApplication::processEvents();
     const QRect rect = item ? tree->visualItemRect(item) : QRect{};
     const QColor actual =
         rect.isValid()
@@ -2093,6 +2678,8 @@ bool threadRowsConsumeCanonicalStatusTone() {
                       "mouse disclosure target omitted its legacy bottom edge");
     click(tree->viewport(), disclosureEdge);
     QTreeWidgetItem *nested = item->child(0);
+    nested->setExpanded(false);
+    QApplication::processEvents();
     const QRect nestedRect = tree->visualItemRect(nested);
     click(tree->viewport(),
           QPoint(nestedRect.left() - 11, nestedRect.center().y()));
@@ -2116,6 +2703,56 @@ bool rowDotUsesColor(QTreeWidget *tree, QTreeWidgetItem *item,
              logicalPixel(tree->viewport()->grab().toImage(),
                           QPoint(rect.left() + 14, rect.center().y())),
              expected) <= 6;
+}
+
+bool threadIndicatorsDistinguishDirectAndIndirectActivity() {
+    using namespace nodegraph;
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/thread-activity.json");
+    const auto cases = nlohmann::json::parse(input);
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    ui::NodeGraphUiAdapter adapter(graph);
+    middle::ThreadPane pane;
+    pane.resize(340, 650);
+    pane.show();
+    bool passed = true;
+    const std::array ids{"indicator-origin", "indicator-fork", "indicator-nested"};
+    for (const auto& entry : cases) {
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            nlohmann::json fields{{"id", ids[index]}, {"name", ids[index]}, {"status", {{"type", entry.at("statuses").at(index)}}}};
+            if (index != 0) {
+                fields["forkedFromId"] = ids[index - 1];
+            }
+            static_cast<void>(
+                updater.apply({DecodedMessageKind::ServerNotification, "thread/started", {}, {{"thread", valueFromJson(fields)}}}));
+        }
+        pane.refresh(*adapter.threads({}));
+        auto* tree = threadTree(pane);
+        auto* origin = threadItem(tree, ids[0]);
+        origin->setExpanded(true);
+        threadItem(tree, ids[1])->setExpanded(true);
+        QApplication::processEvents();
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            const auto tone = entry.at("tones").at(index).get<std::string>();
+            const QColor color(tone == "active"     ? UiStyle::statusActive
+                               : tone == "indirect" ? UiStyle::statusIndirect
+                               : tone == "success"  ? UiStyle::statusSuccess
+                                                    : UiStyle::threadInactive);
+            auto* item = threadItem(tree, ids[index]);
+            passed &= require(rowDotUsesColor(tree, item, color), "thread indicator violates shared direct/indirect activity contract");
+            passed &= require(item->toolTip(0).contains("Indirect activity") == (tone == "indirect"),
+                              "indirect activity must have a readable tooltip and accessible description");
+        }
+        origin->setExpanded(false);
+        QApplication::processEvents();
+        const auto tone = entry.at("tones").at(0).get<std::string>();
+        const QColor color(tone == "active"     ? UiStyle::statusActive
+                           : tone == "indirect" ? UiStyle::statusIndirect
+                           : tone == "success"  ? UiStyle::statusSuccess
+                                                : UiStyle::threadInactive);
+        passed &= require(rowDotUsesColor(tree, origin, color), "folding must preserve direct/indirect activity indication");
+    }
+    return passed;
 }
 
 bool optimisticCreationHandsOneRowToGraphAuthority() {
@@ -2915,7 +3552,22 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
   visibleRect.setRight(view->viewport()->rect().right());
   const bool visibleApplied = pane.applyRowPresentation(visible);
   settleThreadPane();
-  paints.reset(view, visibleRect);
+  QAbstractItemView* visibleView = view;
+  for (auto* body : pane.findChildren<QTreeView*>("projectThreadBody")) {
+      QModelIndex root = view->currentIndex();
+      while (root.parent().isValid()) {
+          root = root.parent();
+      }
+      if (body->rootIndex() == root) {
+          visibleView = body;
+      }
+  }
+  if (visibleView != view) {
+      visibleRect = visibleView->visualRect(view->currentIndex());
+      visibleRect.setLeft(0);
+      visibleRect.setWidth(visibleView->viewport()->width());
+  }
+  paints.reset(visibleView, visibleRect);
   waitThreadPane(170);
   const int visibleAnimationPaints = paints.paints;
   const bool visiblePaintsBounded = paints.bounded;
@@ -2948,7 +3600,8 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
     const qint64 scaleAllowance = InstrumentedBuild ? 4 : 1;
     gate(indexWidgets == 0,
          QStringLiteral("thread rows retained index widgets"));
-    gate(populatedWidgets <= fixedWidgets + 4,
+    const int projectBodies = pane.findChildren<QTreeView*>("projectThreadBody").size();
+    gate(projectBodies <= 3 && populatedWidgets <= fixedWidgets + 12 * projectBodies + 4,
          QStringLiteral("QWidget residency grew with thread count"));
     gate(documents == fixedDocuments,
          QStringLiteral("thread rows retained QTextDocuments"));
@@ -3010,14 +3663,20 @@ int main(int argc, char **argv) {
   passed &= codexui::codex::groupLabelsIdentifyDestinationsWithoutRoutineIds();
   passed &= codexui::codex::localDraftsUseOneGroupingProjection();
   passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
+  passed &= codexui::codex::forkHierarchyIgnoresRootReadOrder();
   passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
   passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();
   passed &= codexui::codex::presentationLifetimeFollowsExactThreadIncarnation();
   passed &= codexui::codex::sortingAndPromptAnimationAreFixed();
   passed &=
       codexui::codex::reducedMotionStopsThreadFeedbackAtTheStyleBoundary();
+  passed &= codexui::codex::projectBodiesCapVisibleRows();
+  passed &= codexui::codex::projectDisclosureRestoresCollapsedGeometry();
+  passed &= codexui::codex::groupsReportDescendantThreadStatus();
   passed &= codexui::codex::selectedThreadUsesSemanticSurface();
+  passed &= codexui::codex::threadDisclosureIsReadyOnFirstPresentation();
   passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
+  passed &= codexui::codex::threadIndicatorsDistinguishDirectAndIndirectActivity();
   passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
   passed &=
       codexui::codex::optimisticDiscardRetiresAuthorityBeforeSelectionReentry();

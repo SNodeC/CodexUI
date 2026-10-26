@@ -78,12 +78,9 @@ Filled semantic buttons use white text and the primary, hover, and pressed
 steps without opacity changes. Their primary contrast against white ranges
 from 4.55:1 to 5.09:1. Blue denotes primary action or active work, green
 denotes success or connection, orange denotes warning or attention, and red
-denotes failure, stop, removal, or another destructive action. Activity dots
-use the same primary colors at 10 pixels so their state remains legible without
-creating a separate indicator palette. Thread dots project the app-server's
-current runtime status directly: `notLoaded` uses the lighter, less saturated
-`#cacccf`, `idle` uses canonical green, `active` uses canonical blue, and
-`systemError` uses canonical red.
+denotes failure, stop, removal, or another destructive action. Activity dots use shared 10-pixel geometry and explicit vivid palette roles: blue (`#0066ff`) means the thread itself is running, purple (`#9333ea`) means a descendant is running while the thread itself is not running, green (`#00c853`) means loaded, and gray (`#cacccf`) means not loaded. Direct activity takes precedence over indirect activity. Projects and sections use purple for running descendants, green for loaded descendants, and gray when no descendant is loaded. Tooltips and accessible descriptions identify indirect activity in words. The full vivid-purple palette family lives in `UiStyle::Palette`; consumers use the semantic `statusIndirect` role. Thread hierarchies initially unfold, including children discovered after initial metadata; manual folding remains stable across refreshes, and selecting a hidden descendant unfolds its ancestors. A known parent displays its disclosure chevron in both folded and unfolded states.
+
+Initial thread-list pages remain pending until unknown fork/parent relationships have been resolved through metadata-only `thread/read(includeTurns=false)` requests. Discovery uses the existing two-request catalog scheduler, shares reads between overlapping pages, and reuses resolved lineage on refresh. Incomplete list nulls cannot erase known relationships; metadata discovery cannot hydrate conversations, change activity, or erase cached turns. Each previously unknown listed thread requires one additional metadata request because the current app-server list response omits lineage.
 
 Semantic color is reserved for state-bearing UI: running status text uses blue,
 successful completion and connection use green, pending requests and warnings

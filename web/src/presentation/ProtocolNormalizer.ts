@@ -335,8 +335,9 @@ export class ProtocolNormalizer {
             } else if (action === "thread.read" || action === "thread.metadata") {
                 const candidate = member(value, "thread", {});
                 const thread = isObject(candidate) ? candidate : {};
-                data = {thread, ...requestSequence};
-                authority = startedAtSequence !== undefined
+                const {turns: _turns, ...metadata} = thread;
+                data = {thread: {...(context.includeTurns === false ? metadata : thread), lineageKnown: true}, ...requestSequence};
+                authority = context.includeTurns === false ? "merge" : startedAtSequence !== undefined
                     && startedAtSequence === this.nextSequence
                     ? "replace"
                     : "merge";

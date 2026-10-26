@@ -19,6 +19,7 @@ button { color: inherit; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--status-idle); flex: none; }
 .status-dot.success { background: var(--status-success); }
 .status-dot.active { background: var(--status-active); }
+.status-dot.indirect { background: var(--status-indirect); }
 .status-dot.warning { background: var(--status-warning); }
 .status-dot.danger { background: var(--status-danger); }
 .notice-banner { grid-area: workspace; align-self: start; z-index: 8; display: flex; justify-content: space-between; align-items: center; margin: 8px clamp(8px, 2vw, 18px); padding: 8px 12px; background: var(--notice-surface); color: var(--notice-text); border: 1px solid var(--notice-border); border-radius: 8px; font-size: 13px; }.notice-banner button { border: 0; background: transparent; color: inherit; font-size: 17px; cursor: pointer; }
@@ -47,6 +48,7 @@ h1, h2, h3, p { margin: 0; }
 .thread-row .status-dot { background: var(--thread-status-idle); }
 .thread-row .status-dot.success { background: var(--thread-status-success); }
 .thread-row .status-dot.active { background: var(--thread-status-active); }
+.thread-row .status-dot.indirect { background: var(--thread-status-indirect); }
 .thread-row .status-dot.danger { background: var(--thread-status-danger); }
 .thread-title { min-width: 0; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .thread-menu-trigger { visibility: hidden; flex: none; width: 24px; height: 24px; margin-right: 3px; border: 0; border-radius: 6px; background: transparent; color: var(--thread-menu-text); cursor: pointer; }
@@ -274,7 +276,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     .group-menu-trigger { min-width: 44px; }
 }
 .new-thread-button { margin: 8px 0; min-height: 36px; padding: 0 14px; text-align: left; border: 1px solid var(--user-message-border); border-radius: 8px; background: var(--panel); color: var(--primary-action); font-weight: 600; cursor: pointer; }
-.thread-toolbar, .thread-filter { display: flex; align-items: center; gap: 6px; margin-bottom: 0; min-width: 0; }
+.thread-toolbar, .thread-filter { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; min-width: 0; }
 .thread-toolbar { justify-content: space-between; margin-bottom: 6px; }.thread-browser-menu, .additional-settings, .connection-menu { position: relative; }
 .thread-browser-menu > button, .connection-menu > button { cursor: pointer; list-style: none; padding: 6px 8px; color: var(--text-secondary); font-weight: 600; }.connection-control { display: flex; align-items: center; gap: 6px; max-width: calc(100vw - 48px); }
 .thread-filter input { min-width: 0; flex: 1; }.thread-filter select { max-width: 110px; }.thread-filter input, .thread-filter select { height: 32px; border: 1px solid var(--input-border); border-radius: 7px; padding: 3px 10px; background: var(--panel); color: var(--input-text); }
@@ -287,3 +289,7 @@ button[class]:disabled, button:disabled, input:disabled, select:disabled { opaci
 .browser-group.section-group:not(.nested-section) > header, .browser-group.project-group:not(:has(.thread-row,.nested-section)) > header, .browser-group:not(.nested-section)[aria-expanded="false"] > header { min-height: 38px; }
 
 .new-thread-dialog footer button.danger { color: var(--destructive-text); }
+
+.project-thread-body { --project-row-height: max(32px, calc(1lh + 8px)); max-height: calc(var(--project-visible-rows) * var(--project-row-height)); overflow: auto; overscroll-behavior: contain; }
+.project-thread-body .thread-row-wrap, .project-thread-body .nested-section > header, .project-thread-body .load-more { height: var(--project-row-height); min-height: var(--project-row-height); margin-block: 0; }
+@media (pointer: coarse) { .project-thread-body { --project-row-height: max(46px, calc(1lh + 8px)); } }

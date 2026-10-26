@@ -7,21 +7,20 @@
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/ThreadChannels.h"
 
-#include <core/SNodeC.h>
-#include <utils/Config.h>
-
-#include <nlohmann/json.hpp>
-
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <core/SNodeC.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <poll.h>
 #include <pthread.h>
@@ -34,6 +33,7 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
+#include <utils/Config.h>
 #include <vector>
 
 namespace codexui::codex {
@@ -514,42 +514,44 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
     return false;
 
   std::unordered_map<std::string, std::size_t> methods;
-  for (int count = 0; count != 7; ++count) {
-    std::optional<nlohmann::json> request = bridge.receiveAppServer();
-    if (!request || !request->contains("id"))
-      return false;
-    const std::string method = request->value("method", std::string{});
-    ++methods[method];
-    nlohmann::json result{{"data", nlohmann::json::array()}};
-    if (method == "account/usage/read")
-      result = {{"summary", {{"lifetimeTokens", 12000}}}};
-    if (method == "thread/list") {
-      const bool firstThreadPage = methods[method] == 1;
-      expect(request->at("params").value("sortKey", std::string{}) ==
-                     "recency_at" &&
-                 request->at("params").value("sortDirection", std::string{}) ==
-                     "desc" &&
-                 request->at("params").value("limit", 0) == 100 &&
-                 request->at("params").value("useStateDbOnly", false) ==
-                     firstThreadPage,
-             "initial thread hydration requests a fast DB page followed by "
-             "the repair page");
-      result["data"].push_back(listedThread());
-      result["nextCursor"] = nullptr;
-    }
-    if (!bridge.reply(*request, std::move(result)))
-      return false;
+  for (int count = 0; count != 8; ++count) {
+      std::optional<nlohmann::json> request = bridge.receiveAppServer();
+      if (!request || !request->contains("id"))
+          return false;
+      const std::string method = request->value("method", std::string{});
+      ++methods[method];
+      nlohmann::json result{{"data", nlohmann::json::array()}};
+      if (method == "account/usage/read")
+          result = {{"summary", {{"lifetimeTokens", 12000}}}};
+      if (method == "thread/list") {
+          const bool firstThreadPage = methods[method] == 1;
+          expect(request->at("params").value("sortKey", std::string{}) == "recency_at" &&
+                     request->at("params").value("sortDirection", std::string{}) == "desc" &&
+                     request->at("params").value("limit", 0) == 100 &&
+                     request->at("params").value("useStateDbOnly", false) == firstThreadPage,
+                 "initial thread hydration requests a fast DB page followed by "
+                 "the repair page");
+          result["data"].push_back(listedThread());
+          result["nextCursor"] = nullptr;
+      }
+      if (method == "thread/read") {
+          expect(request->at("params").value("includeTurns", true) == false, "startup lineage discovery excludes conversation turns");
+          auto metadata = listedThread();
+          metadata["forkedFromId"] = nullptr;
+          metadata["parentThreadId"] = nullptr;
+          result = {{"thread", metadata}};
+      }
+      if (!bridge.reply(*request, std::move(result)))
+          return false;
   }
-  return methods ==
-             std::unordered_map<std::string, std::size_t>{
-                 {"thread/list", 2},
-                 {"project/list", 1},
-                 {"threadSection/list", 1},
-                 {"model/list", 1},
-                 {"permissionProfile/list", 1},
-                 {"account/usage/read", 1}} &&
-         static_cast<bool>(
-             findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
+  return methods == std::unordered_map<std::string, std::size_t>{{"thread/list", 2},
+                                                                 {"thread/read", 1},
+                                                                 {"project/list", 1},
+                                                                 {"threadSection/list", 1},
+                                                                 {"model/list", 1},
+                                                                 {"permissionProfile/list", 1},
+                                                                 {"account/usage/read", 1}} &&
+         static_cast<bool>(findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
 }
 
 void replyAccountUsage(UnixBridge &bridge) {
@@ -1938,6 +1940,101 @@ void runtimeRefreshActionsHaveExactRequestCardinality(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void startupListsResolveLineageBeforePublishing(UnixBridge& bridge, RunningRuntime& runtime) {
+    const auto browse = [&](const std::string& search, bool refresh = false) {
+        RuntimeAction action{RuntimeActionKind::LoadThreadGroup};
+        action.payload = *valueFromJson({{"parameters", {{"searchTerm", search}}}, {"refresh", refresh}}).asObject();
+        expect(sendAction(runtime.channels(), std::move(action)), "lineage query enters the existing browser scheduler");
+    };
+    const std::array ids{"startup-origin", "startup-fork", "startup-nested"};
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/thread-lineage.json");
+    const auto fixture = nlohmann::json::parse(input);
+    const auto data = fixture.at("listed");
+    browse("lineage-first");
+    const auto first = bridge.receiveAppServer();
+    expect(first && bridge.reply(*first, {{"data", data}, {"nextCursor", nullptr}}), "initial list has the real backend's null lineage");
+    auto metadata = bridge.receiveAppServer();
+    browse("lineage-overlap");
+    const auto overlap = bridge.receiveAppServer();
+    expect(overlap && overlap->value("method", "") == "thread/list" && bridge.reply(*overlap, {{"data", data}, {"nextCursor", nullptr}}),
+           "overlapping discovery shares the two-read ceiling");
+    expect(!bridge.receiveAppServer(80ms), "overlapping queries do not read the same unknown lineage concurrently");
+    for (std::size_t index = 0; index < ids.size(); ++index) {
+        expect(metadata && metadata->value("method", "") == "thread/read" && metadata->at("params").value("threadId", "") == ids[index] &&
+                   !metadata->at("params").value("includeTurns", true),
+               "startup discovery reads metadata only, once per listed thread");
+        {
+            auto read = runtime.graph().tryRead();
+            const auto thread = read->find({NodeKind::Thread, ids[index]});
+            expect(!thread, "discovery belongs to the pending page and cannot create a temporary thread row");
+        }
+        if (metadata) {
+            const auto thread = fixture.at("metadata").at(index);
+            expect(bridge.reply(*metadata, {{"thread", thread}}), "metadata provides authoritative fork lineage");
+        }
+        if (index + 1 < ids.size()) {
+            metadata = bridge.receiveAppServer();
+        }
+    }
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               const auto root = read->find({NodeKind::Thread, ids[0]});
+               const auto child = read->find({NodeKind::Thread, ids[1]});
+               const auto nested = read->find({NodeKind::Thread, ids[2]});
+               return root && child && nested && read->related(root, RelationKind::ForkChildThread) == std::vector<NodeRef>{child} &&
+                      read->related(child, RelationKind::ForkChildThread) == std::vector<NodeRef>{nested};
+           }),
+           "the first published page has the complete nested fork hierarchy without selecting a thread");
+    expect(!bridge.receiveAppServer(80ms), "metadata discovery never requests resume or turn history");
+    browse("lineage-first", true);
+    const auto refresh = bridge.receiveAppServer();
+    expect(refresh && bridge.reply(*refresh, {{"data", data}, {"nextCursor", nullptr}}), "later listings still omit lineage");
+    expect(!bridge.receiveAppServer(80ms), "resolved lineage is reused instead of read again on refresh");
+    {
+        auto read = runtime.graph().tryRead();
+        const auto root = read->find({NodeKind::Thread, ids[0]});
+        expect(root && read->relatedCount(root, RelationKind::ForkChildThread) == 1,
+               "a later null listing cannot flatten the known fork family");
+    }
+    const nlohmann::json retryThread{{"id", "startup-retry"}, {"name", "Retry metadata"}, {"forkedFromId", nullptr}};
+    browse("lineage-retry");
+    auto retryPage = bridge.receiveAppServer();
+    expect(retryPage && bridge.reply(*retryPage, {{"data", nlohmann::json::array({retryThread})}}),
+           "retry fixture lists an unknown thread");
+    auto failedRead = bridge.receiveAppServer();
+    expect(failedRead && bridge.replyError(*failedRead, -32000, "metadata unavailable"),
+           "metadata failure reaches the existing error path");
+    expect(waitUntil([&] {
+               return retryPage && operationRetired(runtime.graph(), retryPage->at("id"));
+           }),
+           "failed discovery retires its pending list operation");
+    browse("lineage-retry", true);
+    retryPage = bridge.receiveAppServer();
+    expect(retryPage && bridge.reply(*retryPage, {{"data", nlohmann::json::array({retryThread})}}),
+           "failed metadata discovery can be retried");
+    const auto staleRead = bridge.receiveAppServer();
+    browse("lineage-retry", true);
+    expect(waitUntil([&] {
+               return staleRead && operationRetired(runtime.graph(), staleRead->at("id"));
+           }),
+           "refresh retires discovery before a stale reply arrives");
+    expect(staleRead && bridge.reply(*staleRead, {{"thread", retryThread}}), "refresh retires an outstanding metadata reply");
+    retryPage = bridge.receiveAppServer();
+    {
+        auto read = runtime.graph().tryRead();
+        expect(!read->find({NodeKind::Thread, "startup-retry"}), "failed and superseded metadata cannot publish a temporary row");
+    }
+    expect(retryPage && bridge.reply(*retryPage, {{"data", nlohmann::json::array({retryThread})}}),
+           "replacement list has its own discovery operation");
+    const auto freshRead = bridge.receiveAppServer();
+    expect(freshRead && bridge.reply(*freshRead, {{"thread", retryThread}}), "replacement metadata completes successfully");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               return static_cast<bool>(read->find({NodeKind::Thread, "startup-retry"}));
+           }),
+           "successful retry publishes the thread");
+}
+
 void threadOrganisationUsesBoundedAuthoritativeRequests(
     UnixBridge &bridge, RunningRuntime &runtime) {
   const auto action = [&](RuntimeActionKind kind, nlohmann::json parameters) {
@@ -2025,6 +2122,13 @@ void threadOrganisationUsesBoundedAuthoritativeRequests(
          "group cursor delivered");
   if (third)
     respondPage(*third);
+  const auto metadata = bridge.receiveAppServer();
+  expect(metadata && metadata->value("method", "") == "thread/read" &&
+             metadata->at("params").value("threadId", "") == "archived-discovery" && !metadata->at("params").value("includeTurns", true),
+         "the archived page resolves lineage before publishing its rows");
+  if (metadata) {
+      expect(bridge.reply(*metadata, {{"thread", archived}}), "archived lineage metadata completes");
+  }
   expect(
       waitUntil([&] {
         auto read = runtime.graph().tryRead();
@@ -3328,6 +3432,7 @@ int main(int argc, char **argv) {
         bridge, runtime);
     codexui::codex::unknownInboundIsRetainedWithoutCorruptingKnownState(
         bridge, runtime);
+    codexui::codex::startupListsResolveLineageBeforePublishing(bridge, runtime);
     codexui::codex::threadOrganisationUsesBoundedAuthoritativeRequests(bridge,
                                                                        runtime);
     codexui::codex::workerRevalidatesCurrentAuthorityAndRetainsResponses(

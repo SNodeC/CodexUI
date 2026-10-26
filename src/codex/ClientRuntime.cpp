@@ -1107,6 +1107,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     bool loaded = false;
     bool repair = false;
     bool needsRepair = false;
+    std::optional<nodegraph::DecodedMessage> lineagePage;
+    std::deque<std::string> lineage;
     bool unsupported = false;
     std::string error;
   };
@@ -1818,18 +1820,29 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
                             {"startedAt", page.startedAt}})));
   };
 
+  const auto discardLineage = [&](BrowserPage& page) {
+      if (page.lineagePage) {
+          auto retired = std::move(*page.lineagePage);
+          retired.kind = nodegraph::DecodedMessageKind::ClientError;
+          retired.payload.clear();
+          static_cast<void>(workerLogic.applyDetailed(std::move(retired)));
+          page.lineagePage.reset();
+          page.lineage.clear();
+      }
+  };
   std::function<void()> pumpBrowserPages;
   const auto queueBrowserPage = [&](const std::string &key, bool refresh) {
     auto &page = browserPages.at(key);
     if (page.unsupported)
       return;
     if (refresh) {
-      page.cycle = ++browserQuerySequence;
-      page.previousIds = page.ids;
-      page.startedAt = graph.publishedRevision();
-      page.cursor.clear();
-      page.seen.clear();
-      page.loaded = false;
+        discardLineage(page);
+        page.cycle = ++browserQuerySequence;
+        page.previousIds = page.ids;
+        page.startedAt = graph.publishedRevision();
+        page.cursor.clear();
+        page.seen.clear();
+        page.loaded = false;
     }
     if (!page.wanted) {
       page.wanted = true;
@@ -1846,114 +1859,200 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
       const std::string key = browserQueue.front();
       browserQueue.pop_front();
       auto &page = browserPages.at(key);
-      if (page.pending) {
-        browserQueue.push_back(key);
-        break;
+      if (page.pending || (page.lineagePage && !page.lineage.empty() && std::ranges::any_of(browserPages, [&](const auto& entry) {
+                               return entry.first != key && entry.second.pending && entry.second.lineagePage &&
+                                      !entry.second.lineage.empty() && entry.second.lineage.front() == page.lineage.front();
+                           }))) {
+          browserQueue.push_back(key);
+          break;
       }
       page.wanted = false;
-      if (page.loaded && page.cursor.empty() && !page.repair) {
-        publishBrowserPage(key, page);
-        continue;
+      if (page.loaded && page.cursor.empty() && !page.repair && !page.lineagePage) {
+          publishBrowserPage(key, page);
+          continue;
       }
       const bool repair = std::exchange(page.repair, false);
-      const std::string cursor = repair ? std::string{} : page.cursor;
-      if (!cursor.empty() && !page.seen.insert(cursor).second) {
-        page.error =
-            "The server repeated a pagination cursor. Refresh to retry.";
-        page.cursor.clear();
-        publishBrowserPage(key, page);
-        continue;
+      const std::string cursor = page.lineagePage ? exactStringFromValue(valueMember(page.lineagePage->payload, "cursor"))
+                                 : repair         ? std::string{}
+                                                  : page.cursor;
+      if (!page.lineagePage && !cursor.empty() && !page.seen.insert(cursor).second) {
+          page.error = "The server repeated a pagination cursor. Refresh to retry.";
+          page.cursor.clear();
+          publishBrowserPage(key, page);
+          continue;
       }
       page.pending = page.cycle;
       ++browserReads;
       publishBrowserPage(key, page);
-      auto parameters = page.parameters;
-      if (!cursor.empty())
-        parameters["cursor"] = cursor;
-      if (page.method == "thread/list")
-        parameters["useStateDbOnly"] = !repair;
+      const std::string lineageId = page.lineagePage && !page.lineage.empty() ? page.lineage.front() : std::string{};
+      auto parameters = lineageId.empty() ? page.parameters : nlohmann::json{{"threadId", lineageId}, {"includeTurns", false}};
+      if (lineageId.empty() && !cursor.empty()) {
+          parameters["cursor"] = cursor;
+      }
+      if (lineageId.empty() && page.method == "thread/list") {
+          parameters["useStateDbOnly"] = !repair;
+      }
       const auto cycle = page.cycle;
       const auto epoch = browserEpoch;
-      auto completed = [&, key, cursor, cycle, epoch,
-                        repair](RequestOutcome outcome,
-                                nodegraph::DecodedMessage decoded) {
-        if (epoch != browserEpoch)
-          return;
-        --browserReads;
-        if (!browserPages.contains(key)) {
-          decoded.kind = nodegraph::DecodedMessageKind::ClientError;
-          decoded.payload = {};
-          static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
-          pumpBrowserPages();
-          return;
-        }
-        auto &current = browserPages.at(key);
-        if (cycle != current.cycle) {
-          // Retire the request, but do not let an obsolete query apply its
-          // data.
-          decoded.kind = nodegraph::DecodedMessageKind::ClientError;
-          decoded.payload = {};
-          static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
-          if (current.pending == cycle)
-            current.pending = 0;
-          pumpBrowserPages();
-          return;
-        }
-        current.pending = false;
-        const auto payload = decoded.payload;
-        static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
-        current.error = outcome.ok ? std::string{} : outcome.error;
-        if (!outcome.ok) {
-          const auto code =
-              nodegraph::signedIntegerFromValue(valueMember(payload, "code"));
-          current.unsupported = code && *code == -32601;
-          if (!cursor.empty())
-            current.seen.erase(cursor);
-        } else {
-          if (cursor.empty())
-            current.ids.clear();
-          std::unordered_set<std::string> seen(current.ids.begin(),
-                                               current.ids.end());
-          const auto *data = valueMember(payload, "data");
-          if (data && data->asArray())
-            for (const auto &value : *data->asArray())
-              if (const auto *object = value.asObject()) {
-                const std::string id =
-                    exactStringFromValue(valueMember(*object, "id"));
-                if (!id.empty() && seen.insert(id).second)
-                  current.ids.push_back(id);
+      auto completed = [&, key, cursor, cycle, epoch, lineageId, repair](RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
+          if (epoch != browserEpoch)
+              return;
+          --browserReads;
+          if (!browserPages.contains(key)) {
+              decoded.kind = nodegraph::DecodedMessageKind::ClientError;
+              decoded.payload = {};
+              static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+              pumpBrowserPages();
+              return;
+          }
+          auto& current = browserPages.at(key);
+          if (cycle != current.cycle) {
+              // Retire the request, but do not let an obsolete query apply its
+              // data.
+              decoded.kind = nodegraph::DecodedMessageKind::ClientError;
+              decoded.payload = {};
+              static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+              if (current.pending == cycle)
+                  current.pending = 0;
+              pumpBrowserPages();
+              return;
+          }
+          current.pending = false;
+          bool complete = true;
+          if (!lineageId.empty()) {
+              const auto* threadValue = valueMember(decoded.payload, "thread");
+              const auto* metadata = threadValue ? threadValue->asObject() : nullptr;
+              outcome.ok = outcome.ok && metadata && exactStringFromValue(valueMember(*metadata, "id")) == lineageId;
+              if (outcome.ok) {
+                  for (auto& [otherKey, other] : browserPages) {
+                      if (other.lineagePage) {
+                          for (auto& value : *other.lineagePage->payload.at("data").asArray()) {
+                              if (auto* fields = value.asObject();
+                                  fields && exactStringFromValue(valueMember(*fields, "id")) == lineageId) {
+                                  for (const std::string field : {"forkedFromId", "parentThreadId"}) {
+                                      const auto* supplied = valueMember(*metadata, field);
+                                      fields->insert_or_assign(field, supplied ? *supplied : nodegraph::Value(nullptr));
+                                  }
+                                  fields->insert_or_assign("lineageKnown", nodegraph::Value(true));
+                              }
+                          }
+                          std::erase(other.lineage, lineageId);
+                      }
+                  }
+              } else if (outcome.error.empty()) {
+                  outcome.error = "Thread metadata did not return its requested identity";
               }
-          current.cursor = std::move(outcome.nextCursor);
-          current.loaded = true;
-        }
-        publishBrowserPage(key, current);
-        // Preserve the existing one initial rollout-repair pass, never one per
-        // project/section. The timer is the existing fast-list-before-repair
-        // seam.
-        if (!repair && cursor.empty() &&
-            std::exchange(current.needsRepair, false)) {
-          static_cast<void>(core::timer::Timer::singleshotTimer(
-              [&, key, cycle, epoch] {
-                if (epoch != browserEpoch)
-                  return;
-                auto found = browserPages.find(key);
-                if (found == browserPages.end() || found->second.cycle != cycle)
-                  return;
-                found->second.repair = true;
-                queueBrowserPage(key, false);
-              },
-              utils::Timeval({0, 50000})));
-        }
-        pumpBrowserPages();
+              // Retire this request; commit its lineage atomically with the list page.
+              decoded.kind = nodegraph::DecodedMessageKind::ClientError;
+              decoded.payload.clear();
+              static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+              complete = !outcome.ok || current.lineage.empty();
+              if (complete) {
+                  decoded = std::move(*current.lineagePage);
+                  current.lineagePage.reset();
+                  current.lineage.clear();
+                  outcome.nextCursor = exactStringFromValue(valueMember(decoded.payload, "nextCursor"));
+                  if (!outcome.ok) {
+                      decoded.kind = nodegraph::DecodedMessageKind::ClientError;
+                      decoded.payload = {{"message", nodegraph::Value(outcome.error)}};
+                  }
+              }
+          } else if (outcome.ok && current.method == "thread/list") {
+              auto read = graph.tryRead();
+              if (auto data = decoded.payload.find("data"); data != decoded.payload.end() && data->second.asArray()) {
+                  for (auto& value : *data->second.asArray()) {
+                      if (auto* fields = value.asObject()) {
+                          const auto id = exactStringFromValue(valueMember(*fields, "id"));
+                          const auto thread = read->find({nodegraph::NodeKind::Thread, id});
+                          const auto known = thread ? read->state(thread) : nullptr;
+                          if (nodegraph::boolFromValue(valueMember(*fields, "lineageKnown")) ||
+                              (known && nodegraph::boolFromValue(valueMember(known->fields, "lineageKnown")))) {
+                              for (const std::string field : {"forkedFromId", "parentThreadId"}) {
+                                  if (const auto* supplied = known ? valueMember(known->fields, field) : nullptr) {
+                                      fields->insert_or_assign(field, *supplied);
+                                  }
+                              }
+                              fields->insert_or_assign("lineageKnown", nodegraph::Value(true));
+                          } else if (!id.empty() && std::ranges::find(current.lineage, id) == current.lineage.end()) {
+                              current.lineage.push_back(id);
+                          }
+                      }
+                  }
+              }
+              if (!current.lineage.empty()) {
+                  decoded.payload.try_emplace("cursor", nodegraph::Value(cursor));
+                  current.lineagePage = std::move(decoded);
+                  complete = false;
+              }
+          }
+          if (complete) {
+              const auto payload = decoded.payload;
+              static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+              current.error = outcome.ok ? std::string{} : outcome.error;
+              if (!outcome.ok) {
+                  const auto code = nodegraph::signedIntegerFromValue(valueMember(payload, "code"));
+                  current.unsupported = code && *code == -32601;
+                  if (!cursor.empty())
+                      current.seen.erase(cursor);
+              } else {
+                  if (cursor.empty())
+                      current.ids.clear();
+                  std::unordered_set<std::string> seen(current.ids.begin(), current.ids.end());
+                  const auto* data = valueMember(payload, "data");
+                  if (data && data->asArray())
+                      for (const auto& value : *data->asArray())
+                          if (const auto* object = value.asObject()) {
+                              const std::string id = exactStringFromValue(valueMember(*object, "id"));
+                              if (!id.empty() && seen.insert(id).second)
+                                  current.ids.push_back(id);
+                          }
+                  current.cursor = std::move(outcome.nextCursor);
+                  current.loaded = true;
+              }
+              publishBrowserPage(key, current);
+              // Preserve the existing one initial rollout-repair pass, never one per
+              // project/section. The timer is the existing fast-list-before-repair
+              // seam.
+              if (!repair && cursor.empty() && std::exchange(current.needsRepair, false)) {
+                  static_cast<void>(core::timer::Timer::singleshotTimer(
+                      [&, key, cycle, epoch] {
+                          if (epoch != browserEpoch)
+                              return;
+                          auto found = browserPages.find(key);
+                          if (found == browserPages.end() || found->second.cycle != cycle)
+                              return;
+                          found->second.repair = true;
+                          queueBrowserPage(key, false);
+                      },
+                      utils::Timeval({0, 50000})));
+              }
+          } else {
+              queueBrowserPage(key, false);
+          }
+          pumpBrowserPages();
       };
       using namespace codex::generated::client_requests;
       const auto dispatch = [&]<typename Operation>() {
-        dispatchRequestHandled<Operation>(
-            sdk, std::move(parameters), workerLogic, {},
-            [](const nodegraph::ProtocolRequestId &) {}, std::move(completed));
+          dispatchRequestHandled<Operation>(
+              sdk,
+              std::move(parameters),
+              workerLogic,
+              page.lineagePage ? page.lineagePage->expectedNode : nodegraph::NodeRef{},
+              [](const nodegraph::ProtocolRequestId&) {
+              },
+              std::move(completed));
       };
-      if (page.method == "project/list")
-        dispatch.template operator()<ProjectList>();
+      if (page.lineagePage && page.lineage.empty()) {
+          auto ready = std::move(*page.lineagePage);
+          page.lineagePage.reset();
+          RequestOutcome outcome;
+          outcome.ok = true;
+          outcome.nextCursor = exactStringFromValue(valueMember(ready.payload, "nextCursor"));
+          completed(std::move(outcome), std::move(ready));
+      } else if (!lineageId.empty()) {
+          dispatch.template operator()<ThreadRead>();
+      } else if (page.method == "project/list")
+          dispatch.template operator()<ProjectList>();
       else if (page.method == "threadSection/list")
         dispatch.template operator()<ThreadSectionList>();
       else
@@ -3194,6 +3293,7 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
             const auto key = it->first;
             std::erase(browserQueue, key);
             static_cast<void>(workerLogic.threadBrowserState(key, {}));
+            discardLineage(it->second);
             it = browserPages.erase(it);
           } else
             ++it;

@@ -84,6 +84,20 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
     session.dispose();
 });
 
+test("project headings show authored names without a synthetic Project prefix", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
+    session.model.applyEvent(result(1, 1, "projects.list", "projects", true, {data: [
+        {id: "plain", name: "SNode.C"}, {id: "authored", name: "Project · Authored name"},
+    ]}));
+    session.model.applyEvent(result(2, 1, "sections.list", "sections", true, {data: [{id: "section", name: "Pinned"}]}));
+    const markup = renderToStaticMarkup(createElement(App, {session}));
+    assert.match(markup, /<span>SNode\.C<\/span><\/button>/u);
+    assert.match(markup, /<span>Project · Authored name<\/span><\/button>/u);
+    assert.doesNotMatch(markup, /Project · SNode\.C/u);
+    assert.match(markup, /Section · Pinned/u);
+    session.dispose();
+});
+
 test("responsive CSS keeps the desktop grid and removes the old document-width floor", async () => {
     const source = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
     const colors = await readFile(new URL("../src/colors.css", import.meta.url), "utf8");
@@ -100,8 +114,8 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.top-bar\s*\{[^}]*flex-wrap:\s*wrap/u);
     assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*color:\s*#1d2633/u);
     assert.match(css, /\.thread-row \.status-dot\s*\{[^}]*background:\s*#cacccf/u);
-    assert.match(css, /\.thread-row \.status-dot\.success\s*\{[^}]*background:\s*#388262/u);
-    assert.match(css, /\.thread-row \.status-dot\.active\s*\{[^}]*background:\s*#5471a6/u);
+    assert.match(source, /\.thread-row \.status-dot\.success\s*\{[^}]*background:\s*var\(--thread-status-success\)/u);
+    assert.match(source, /\.thread-row \.status-dot\.active\s*\{[^}]*background:\s*var\(--thread-status-active\)/u);
     assert.match(css, /\.thread-row \.status-dot\.danger\s*\{[^}]*background:\s*#9f5b5d/u);
     assert.match(css, /\.conversation-card\.userMessage\.steering\s*\{[^}]*background:\s*#eaf8f7;[^}]*border-color:\s*#9bdcdb/u);
     assert.match(css, /\.conversation-card\.localPrompt\.steering\s*\{[^}]*background:\s*#eaf8f7;[^}]*border-color:\s*#53c9c9/u);
@@ -159,9 +173,10 @@ test("browser colors are defined once as semantic roles and every role resolves"
     const definitions = [...colors.matchAll(/--([\w-]+):\s*(#[0-9a-f]{3,8});/gu)];
     const names = new Set(definitions.map(match => match[1]));
     assert.equal(names.size, definitions.length, "each color role has one definition");
+    const metrics = new Set([...colors.matchAll(/--([\w-]+):\s*\d+;/gu)].map(match => match[1]));
     const local = new Set([...source.matchAll(/--([\w-]+):/gu)].map(match => match[1]));
     const used = new Set([...source.matchAll(/var\(--([\w-]+)\)/gu)].map(match => match[1]));
-    for (const name of used) assert.ok(names.has(name) || local.has(name), `undefined token: ${name}`);
+    for (const name of used) assert.ok(names.has(name) || metrics.has(name) || local.has(name), `undefined token: ${name}`);
     for (const name of names) {
         assert.ok(used.has(name), `unused token: ${name}`);
         assert.doesNotMatch(name, /(?:^|-)(?:blue|green|amber|yellow|orange|red|purple|teal|lime)(?:-|$)/u);
@@ -173,4 +188,40 @@ test("browser palette and brand are generated from the native presentation autho
     const assets = generatedUiAssets();
     assert.equal(await readFile(new URL("../src/colors.css", import.meta.url), "utf8"), assets.colors);
     assert.equal(await readFile(new URL("../src/brand.svg", import.meta.url), "utf8"), assets.brand);
+});
+
+
+test("project bodies retain all rows behind the shared eight-row scroll limit", async () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
+    try {
+        session.model.applyEvent(result(1, 1, "projects.list", "projects", true, {data: [{id: "cap-project", name: "Large project"}]}));
+        session.model.applyEvent(result(2, 1, "sections.list", "sections", true, {data: [{id: "cap-section", name: "Section"}]}));
+        session.model.applyEvent(result(3, 1, "threads.list", "list", true, {threads: Array.from({length: 20}, (_, index) => ({id: `cap-${index}`, preview: `Thread ${index}`, projectId: "cap-project", section: {id: "cap-section"}, status: {type: "idle"}}))}, "replace"));
+        const markup = renderToStaticMarkup(createElement(App, {session}));
+        assert.match(markup, /<header[\s\S]*?<\/header><div role="group" class="project-thread-body">/u);
+        assert.equal((markup.match(/class="thread-title"/gu) ?? []).length, 20);
+        assert.match(markup, /nested-section/u);
+        const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+        assert.match(css, /max-height: calc\(var\(--project-visible-rows\) \* var\(--project-row-height\)\); overflow: auto/u);
+        const generated = await readFile(new URL("../src/colors.css", import.meta.url), "utf8");
+        assert.match(generated, /--project-visible-rows: 8;/u);
+    } finally { session.dispose(); }
+});
+
+test("initial hierarchy exposes direct and indirect activity in thread and group markup", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
+    try {
+        session.model.applyEvent(result(1, 1, "projects.list", "projects", true, {data: [{id: "activity-project", name: "Activity project"}]}));
+        session.model.applyEvent(result(2, 1, "sections.list", "sections", true, {data: [{id: "activity-section", name: "Activity section"}]}));
+        session.model.applyEvent(result(3, 1, "threads.list", "list", true, {threads: [
+            {id: "activity-origin", name: "Origin", projectId: "activity-project", section: {id: "activity-section"}, status: {type: "idle"}},
+            {id: "activity-child", name: "Child", parentThreadId: "activity-origin", projectId: "activity-project", section: {id: "activity-section"}, status: {type: "active"}},
+        ]}, "replace"));
+        const markup = renderToStaticMarkup(createElement(App, {session}));
+        assert.equal((markup.match(/class="status-dot indirect"/gu) ?? []).length, 3, "project, section and idle parent show indirect activity");
+        assert.equal((markup.match(/class="status-dot active"/gu) ?? []).length, 1, "only the running thread is blue");
+        assert.match(markup, /Expand|Collapse/u);
+        assert.match(markup, /Indirect activity: running descendant/u);
+        assert.equal((markup.match(/class="thread-title"/gu) ?? []).length, 2, "new thread hierarchies start unfolded");
+    } finally { session.dispose(); }
 });

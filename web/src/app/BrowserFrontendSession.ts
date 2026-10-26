@@ -80,6 +80,7 @@ export interface BrowserPage {
     action: "threads.list" | "projects.list" | "sections.list"; parameters: JsonObject;
     ids: string[]; nextCursor: string; pending: boolean; error: string;
     seen: Set<string>; loadMore: boolean; repairPending: boolean; startedAtSequence: number;
+    lineagePage: JsonObject | undefined; lineage: string[];
 }
 function pageKey(action: string, parameters: JsonObject): string {
     return action + JSON.stringify(Object.entries(parameters).sort(([a], [b]) => a.localeCompare(b)));
@@ -959,7 +960,7 @@ export class BrowserFrontendSession {
         this.dispatchQueuedPrompts();
     }
     private request(action: Action, parameters: JsonObject, callback?: (frame: JsonObject, stale: boolean) => void,
-        acceptResult: () => boolean = () => true): string {
+        acceptResult: () => boolean = () => true, normalize = true): string {
         const method = actionMethods[action];
         const correlation = `web-request-${this.nextCorrelation++}`;
         const startedAtSequence = this.normalizer.sequence;
@@ -982,7 +983,7 @@ export class BrowserFrontendSession {
                     this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
                     this.schedulePublish();
                 }
-                this.normalizer.operationResult(action, correlation, parameters, envelope, startedAtSequence);
+                if (normalize) { this.normalizer.operationResult(action, correlation, parameters, envelope, startedAtSequence); }
                 callback?.(envelope, false);
             };
             const error = isObject(envelope.error) ? envelope.error : {};
@@ -996,10 +997,10 @@ export class BrowserFrontendSession {
         return correlation;
     }
     private requestPromise(action: Action, parameters: JsonObject,
-        acceptResult: () => boolean = () => true): Promise<OperationResponse> {
+        acceptResult: () => boolean = () => true, normalize = true): Promise<OperationResponse> {
         return new Promise(resolve => this.request(action, parameters, (response, stale) => resolve(stale
             ? {ok: false, stale: true, error: response.error}
-            : Object.hasOwn(response, "result") ? {ok: true, data: response.result} : {ok: false, error: response.error}), acceptResult));
+            : Object.hasOwn(response, "result") ? {ok: true, data: response.result} : {ok: false, error: response.error}), acceptResult, normalize));
     }
     private persistBrowser(): void {
         writeBrowserStorage(`codexui.browser:${this.bridgeUrl}`, JSON.stringify({grouping: this.browser.grouping, sort: this.browser.sort, manualProjects: this.browser.manualProjects, expansion: [...this.groupExpansion]}));
@@ -1040,13 +1041,13 @@ export class BrowserFrontendSession {
         const key = pageKey(action, parameters);
         let page = this.pages.get(key);
         if (!page) {
-            page = {action, parameters, ids: [], nextCursor: "", pending: false, error: "", seen: new Set(), loadMore: false, repairPending: false, startedAtSequence: 0};
+            page = {action, parameters, ids: [], nextCursor: "", pending: false, error: "", seen: new Set(), loadMore: false, repairPending: false, startedAtSequence: 0, lineagePage: undefined, lineage: []};
             this.pages.set(key, page);
         }
         return page;
     }
     private retirePage(key: string, page: BrowserPage): void {
-        this.pages.delete(key); this.catalogReads.delete(page);
+        this.pages.delete(key);
         for (let index = this.catalogQueue.length - 1; index >= 0; --index)
             if (this.catalogQueue[index]!.page === page) this.catalogQueue.splice(index, 1);
     }
@@ -1093,38 +1094,87 @@ export class BrowserFrontendSession {
     private drainCatalogReads(): void {
         while (this.catalogReads.size < 2) {
             const next = this.catalogQueue.findIndex(({page}) => this.currentPage(page)
-                && (page.action === "threads.list" || ![...this.catalogReads].some(read => read.action !== "threads.list")));
+                && (page.action === "threads.list" || ![...this.catalogReads].some(read => read.action !== "threads.list"))
+                && !(page.lineagePage && page.lineage.length && [...this.catalogReads].some(read =>
+                    read !== page && read.lineagePage && read.lineage[0] === page.lineage[0])));
             if (next < 0) return;
             const {page, cursor, repair} = this.catalogQueue.splice(next, 1)[0]!;
             this.catalogReads.add(page);
-            const parameters = {...page.parameters, ...(page.action === "threads.list" ? {useStateDbOnly: !repair} : {}), ...(cursor ? {cursor} : {})};
+            const lineageId = page.lineagePage && page.lineage.length ? page.lineage[0]! : "";
+            const parameters = lineageId ? {threadId: lineageId, includeTurns: false}
+                : {...page.parameters, ...(page.action === "threads.list" ? {useStateDbOnly: !repair} : {}), ...(cursor ? {cursor} : {})};
             const epoch = this.lifecycleEpoch;
-            if (!cursor) page.startedAtSequence = this.normalizer.sequence;
-            void this.requestPromise(page.action, parameters, () => this.currentPage(page)).then(response => {
+            if (!cursor && !page.lineagePage) { page.startedAtSequence = this.normalizer.sequence; }
+            const ready = page.lineagePage && page.lineage.length === 0 ? page.lineagePage : undefined;
+            if (ready) { page.lineagePage = undefined; }
+            void (ready ? Promise.resolve<OperationResponse>({ok: true, data: ready}) :
+                this.requestPromise(lineageId ? "thread.read" : page.action, parameters, () => this.currentPage(page),
+                    page.action !== "threads.list")).then(response => {
                 this.catalogReads.delete(page);
                 if (epoch !== this.lifecycleEpoch || !this.currentPage(page)) { this.drainCatalogReads(); return; }
                 page.pending = false;
-                if (!response.ok) {
-                    page.error = this.errorMessage(response);
-                    if (isObject(response.error) && response.error.code === -32601 && page.action !== "threads.list") this.unsupportedCatalogs.add(page.action);
-                } else {
-                    const data = isObject(response.data) && Array.isArray(response.data.data) ? response.data.data : [];
-                    const ids = data.map(raw => stringMember(raw, "id")).filter(Boolean);
-                    page.ids = [...new Set(cursor || repair ? [...page.ids, ...ids] : ids)];
-                    page.seen.add(cursor);
-                    page.nextCursor = stringMember(response.data, "nextCursor");
-                    if (page.nextCursor && page.seen.has(page.nextCursor)) page.nextCursor = "";
-                    if (!page.nextCursor && page.action !== "threads.list") this.model.finishGroupCatalog(page.action === "projects.list" ? "project" : "section", page.ids, page.startedAtSequence);
+                let complete = true;
+                if (lineageId) {
+                    const metadata = member(response.data, "thread");
+                    if (response.ok && isObject(metadata) && stringMember(metadata, "id") === lineageId) {
+                        for (const other of this.pages.values()) {
+                            if (other.lineagePage) {
+                                for (const fields of other.lineagePage.data as JsonObject[]) {
+                                    if (stringMember(fields, "id") === lineageId) {
+                                        fields.forkedFromId = metadata.forkedFromId ?? null;
+                                        fields.parentThreadId = metadata.parentThreadId ?? null;
+                                        fields.lineageKnown = true;
+                                    }
+                                }
+                                other.lineage = other.lineage.filter(id => id !== lineageId);
+                            }
+                        }
+                    } else { response = {ok: false, error: response.error ?? {message: "Thread metadata did not return its requested identity"}}; }
+                    complete = !response.ok || page.lineage.length === 0;
+                    if (complete) {
+                        if (response.ok) { response = {ok: true, data: page.lineagePage}; }
+                        page.lineagePage = undefined; page.lineage = [];
+                    }
+                } else if (response.ok && page.action === "threads.list" && isObject(response.data)) {
+                    const data = Array.isArray(response.data.data) ? response.data.data.filter(isObject).map(raw => ({...raw})) : [];
+                    for (const fields of data) {
+                        const id = stringMember(fields, "id"), known = this.model.thread(id)?.raw;
+                        if (fields.lineageKnown === true || known?.lineageKnown === true || stringMember(known, "forkedFromId")) {
+                            fields.forkedFromId = known?.forkedFromId ?? fields.forkedFromId ?? null;
+                            fields.parentThreadId = known?.parentThreadId ?? fields.parentThreadId ?? null;
+                            fields.lineageKnown = true;
+                        } else if (id && !page.lineage.includes(id)) { page.lineage.push(id); }
+                    }
+                    response = {ok: true, data: {...response.data, data}};
+                    if (page.lineage.length) { page.lineagePage = response.data as JsonObject; complete = false; }
                 }
-                const general = page.action === "threads.list" && !page.parameters.projectId && !page.parameters.sectionId && !page.parameters.archived;
-                if (general && !cursor && !repair && !this.threadListRepairTimer) {
-                    page.repairPending = true;
-                    this.threadListRepairTimer = setTimeout(() => {
-                        this.threadListRepairTimer = undefined;
-                        if (this.currentPage(page)) { page.repairPending = false; this.readPage(page, "", true); }
-                    }, 16);
-                }
-                if (page.loadMore && !page.repairPending) { page.loadMore = false; this.loadPage(page); }
+                if (complete) {
+                    if (page.action === "threads.list") {
+                        this.normalizer.operationResult("threads.list", `lineage-page-${this.nextCorrelation++}`, page.parameters,
+                            response.ok ? {result: response.data} : {error: response.error}, page.startedAtSequence);
+                    }
+                    if (!response.ok) {
+                        page.error = this.errorMessage(response);
+                        if (isObject(response.error) && response.error.code === -32601 && page.action !== "threads.list") this.unsupportedCatalogs.add(page.action);
+                    } else {
+                        const data = isObject(response.data) && Array.isArray(response.data.data) ? response.data.data : [];
+                        const ids = data.map(raw => stringMember(raw, "id")).filter(Boolean);
+                        page.ids = [...new Set(cursor || repair ? [...page.ids, ...ids] : ids)];
+                        page.seen.add(cursor);
+                        page.nextCursor = stringMember(response.data, "nextCursor");
+                        if (page.nextCursor && page.seen.has(page.nextCursor)) page.nextCursor = "";
+                        if (!page.nextCursor && page.action !== "threads.list") this.model.finishGroupCatalog(page.action === "projects.list" ? "project" : "section", page.ids, page.startedAtSequence);
+                    }
+                    const general = page.action === "threads.list" && !page.parameters.projectId && !page.parameters.sectionId && !page.parameters.archived;
+                    if (general && !cursor && !repair && !this.threadListRepairTimer) {
+                        page.repairPending = true;
+                        this.threadListRepairTimer = setTimeout(() => {
+                            this.threadListRepairTimer = undefined;
+                            if (this.currentPage(page)) { page.repairPending = false; this.readPage(page, "", true); }
+                        }, 16);
+                    }
+                    if (page.loadMore && !page.repairPending) { page.loadMore = false; this.loadPage(page); }
+                } else { this.readPage(page, cursor, repair); }
                 this.publish(); this.drainCatalogReads();
             });
         }

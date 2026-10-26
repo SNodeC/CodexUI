@@ -2663,7 +2663,7 @@ bool testMutableCardsAndCommandOutput() {
             return cursor.charFormat().anchorHref() ==
                        QStringLiteral("codexui-file:0") &&
                    cursor.charFormat().foreground().color() ==
-                       QColor(QString::fromLatin1(UiStyle::statusActive));
+                       QColor(QString::fromLatin1(UiStyle::linkText));
           }() &&
           filesStatus &&
           filesStatus->font().capitalization() == QFont::MixedCase &&

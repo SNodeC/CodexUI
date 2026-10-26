@@ -56,7 +56,7 @@ public:
       std::function<void(bool sidebarVisible, bool inspectorVisible)> action);
 
   // Called by ShellWidget's application event filter. Returns true only when
-  // a wheel/touchpad event was consumed by the conversation.
+  // a wheel/touchpad event was consumed by a routed scrolling surface.
   bool routeScrollEvent(QObject *watched, QEvent *event);
 
 protected:
@@ -66,7 +66,7 @@ private:
   enum class ScrollGestureRoute {
     Inactive,
     AwaitingNested,
-    Conversation,
+    Outer,
     Native,
     Dispatching,
   };

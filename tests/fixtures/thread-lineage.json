@@ -1,0 +1,13 @@
+{
+  "listed": [
+    {"id": "startup-origin", "name": "startup-origin", "status": {"type": "notLoaded"}, "forkedFromId": null, "parentThreadId": null, "turns": []},
+    {"id": "startup-fork", "name": "startup-fork", "status": {"type": "notLoaded"}, "forkedFromId": null, "parentThreadId": null, "turns": []},
+    {"id": "startup-nested", "name": "startup-nested", "status": {"type": "notLoaded"}, "forkedFromId": null, "parentThreadId": null, "turns": []}
+  ],
+  "metadata": [
+    {"id": "startup-origin", "name": "startup-origin", "status": {"type": "notLoaded"}, "forkedFromId": null, "parentThreadId": null, "turns": []},
+    {"id": "startup-fork", "name": "startup-fork", "status": {"type": "notLoaded"}, "forkedFromId": "startup-origin", "parentThreadId": null, "turns": []},
+    {"id": "startup-nested", "name": "startup-nested", "status": {"type": "notLoaded"}, "forkedFromId": "startup-fork", "parentThreadId": null, "turns": []}
+  ],
+  "roots": ["startup-origin"]
+}
