@@ -1758,8 +1758,16 @@ NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
   auto read = graph_->tryRead();
   if (!read)
     return std::nullopt;
-  if (!read->live(thread))
-    return std::nullopt;
+  // Family activity requires the full projection rather than an isolated row update.
+  if (!read->live(thread) || std::ranges::any_of(std::array{nodegraph::RelationKind::StructuralChildThread,
+                                                            nodegraph::RelationKind::AgentChildThread,
+                                                            nodegraph::RelationKind::ForkChildThread},
+                                                 [&](auto kind) {
+                                                     return read->relatedCount(thread, kind) != 0 ||
+                                                            read->hasIncomingRelation(thread, kind);
+                                                 })) {
+      return std::nullopt;
+  }
   std::size_t pending = 0;
   forEachPendingRequestThread(*read, [&](const nodegraph::NodeRef &owner) {
     pending += owner == thread;
@@ -1801,21 +1809,18 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
     }
   }
 
-  std::vector<nodegraph::NodeRef> allThreads;
+  const auto allThreads = read->orderedNodes(nodegraph::NodeKind::Thread);
   std::unordered_set<const nodegraph::Node *> childThreads;
-  for (const nodegraph::NodeRef &node :
-       read->orderedNodes(nodegraph::NodeKind::Thread)) {
-    allThreads.push_back(node);
-    for (const nodegraph::RelationKind kind :
-         {nodegraph::RelationKind::StructuralChildThread,
-          nodegraph::RelationKind::AgentChildThread,
-          nodegraph::RelationKind::ForkChildThread})
-      for (std::size_t index = 0; index < read->relatedCount(node, kind);
-           ++index) {
-        const nodegraph::NodeRef child = read->relatedAt(node, kind, index);
-        if (child->id().kind == nodegraph::NodeKind::Thread)
-          childThreads.insert(child.get());
-      }
+  for (const nodegraph::NodeRef& node : allThreads) {
+      for (const nodegraph::RelationKind kind : {nodegraph::RelationKind::StructuralChildThread,
+                                                 nodegraph::RelationKind::AgentChildThread,
+                                                 nodegraph::RelationKind::ForkChildThread})
+          for (std::size_t index = 0; index < read->relatedCount(node, kind); ++index) {
+              const nodegraph::NodeRef child = read->relatedAt(node, kind, index);
+              if (child->id().kind == nodegraph::NodeKind::Thread) {
+                  childThreads.insert(child.get());
+              }
+          }
   }
 
   std::unordered_set<const nodegraph::Node *> emitted;
@@ -1847,6 +1852,9 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
           row.children.push_back(std::move(projected));
       }
     }
+    row.indirectActive = !isActiveStatus(row.status) && std::ranges::any_of(row.children, [](const auto& child) {
+        return isActiveStatus(child.status) || child.indirectActive;
+    });
     return row;
   };
 
@@ -1855,13 +1863,14 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
       read->find({nodegraph::NodeKind::Runtime, "runtime"});
   if (runtime)
     roots = read->related(runtime, nodegraph::RelationKind::RootThread);
-  for (const nodegraph::NodeRef &thread : allThreads)
-    if (!childThreads.contains(thread.get()))
-      roots.push_back(thread);
-  for (const nodegraph::NodeRef &root : roots) {
-    ThreadListRow row = buildRow(buildRow, root);
-    if (!row.id.empty())
-      result.roots.push_back(std::move(row));
+  roots.insert(roots.end(), allThreads.begin(), allThreads.end());
+  for (const nodegraph::NodeRef& root : roots) {
+      if (!childThreads.contains(root.get())) {
+          ThreadListRow row = buildRow(buildRow, root);
+          if (!row.id.empty()) {
+              result.roots.push_back(std::move(row));
+          }
+      }
   }
   // Malformed or partially paged ownership must not make a canonical thread
   // disappear. Keep any still-unreachable thread as a root until its owner is
@@ -2151,10 +2160,11 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
             const UiStatus descendants = self(self, row.children);
             if (row.kind == ThreadRowKind::Project || row.kind == ThreadRowKind::Section) {
                 row.status = descendants;
+                row.indirectActive = isActiveStatus(descendants);
             }
             // Fold descendants without changing an individual thread's own status.
             for (const auto& status : {row.status, descendants}) {
-                if (isActiveStatus(status)) {
+                if (isActiveStatus(status) || row.indirectActive) {
                     aggregate = nodegraph::NodeStatus::Running;
                 } else if (!isActiveStatus(aggregate) && !statusTone(status).empty()) {
                     aggregate = nodegraph::NodeStatus::Completed;

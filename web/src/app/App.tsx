@@ -232,6 +232,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const visibleRows: {id: string; presentationKey: string; depth: number; position: number;
         setSize: number; expanded: boolean}[] = [];
     const eligibleThreads = new Set(session.browserThreadIds());
+    const indicatorTones = session.model.threadIndicatorTones();
     const appendVisibleRows = (ids: readonly string[], depth: number) => {
         const present = ids.filter(id => eligibleThreads.has(id) || id === DraftThreadId && snapshot.newThreadDraft);
         for (let index = 0; index < present.length; ++index) {
@@ -266,6 +267,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         const recentAt = session.threadRecentAt(id);
         const hoverDetails = [title, `Workspace: ${thread?.cwd || draft?.workspace || "Unknown"}`,
             `Status: ${statusText}`,
+            ...(indicatorTones.get(id) === "indirect" ? ["Indirect activity: running descendant"] : []),
             `Recent turn: ${recentAt === undefined ? "Unknown" : threadTimestampText(recentAt)}`,
             `Created: ${thread?.createdAt === undefined ? "Unknown" : threadTimestampText(thread.createdAt)}`,
             `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : threadTimestampText(thread.lastActivityAt)}`,
@@ -280,7 +282,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren && <FoldIcon collapsed={!expanded} leading />}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
                     aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id, presentationKey), onClose)}>
-                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : statusTone(status) || "muted"} /><span className="thread-title">{title}</span>
+                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : indicatorTones.get(id) || "muted"} /><span className="thread-title">{title}</span>
                 </button>
                 {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
                     aria-haspopup="menu" aria-expanded={contextOpen}
@@ -306,8 +308,13 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const renderGroup = (kind: "project" | "section", group: WorkspaceGroup, ids: string[], nested = false, projectId = ""): ReactNode => {
         const expanded = session.groupExpanded(`${kind}:${group.id}`);
         const active = membership(selected, `${kind}Id`) === group.id;
-        return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={groupLabel(kind, group)} aria-expanded={expanded}>
-            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><span>{kind === "section" && !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
+        const members = session.model.threadIds().filter(id => membership(id, `${kind}Id`) === group.id
+            && (!nested || membership(id, "projectId") === projectId));
+        const tone = members.some(id => ["active", "indirect"].includes(indicatorTones.get(id) ?? "")) ? "indirect"
+            : members.some(id => statusTone(session.model.thread(id)!.status) !== "") ? "success" : "muted";
+        const statusDescription = tone === "indirect" ? "Indirect activity: running descendant" : tone === "success" ? "Threads: loaded" : "Threads: not loaded";
+        return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={`${groupLabel(kind, group)}, ${statusDescription}`} aria-expanded={expanded}>
+            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><StatusDot tone={tone} /><span>{kind === "section" && !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
                 <button className="thread-menu-trigger group-menu-trigger" aria-label={`Actions for ${groupLabel(kind, group)}`} aria-haspopup="menu"
                     aria-expanded={contextGroup?.group === group && contextGroup.projectId === projectId}
                     onClick={event => { const bounds = event.currentTarget.getBoundingClientRect(); setContextMenu({kind, group, projectId, x: bounds.right, y: bounds.bottom, trigger: event.currentTarget}); }}>•••</button></header>

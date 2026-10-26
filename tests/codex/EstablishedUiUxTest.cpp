@@ -34,6 +34,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QPointer>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTemporaryDir>
@@ -47,6 +48,7 @@
 #include <array>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1017,8 +1019,8 @@ bool nestedWheelGestureHasOneRoutingOwner(bool measurePerformance) {
                           QPoint pixelDelta, QPoint angleDelta = {},
                           Qt::MouseButtons buttons = Qt::NoButton,
                           Qt::KeyboardModifiers modifiers = Qt::NoModifier,
-                          bool inverted = false) -> ulong {
-    const QPointF local = wheelPosition(target);
+                          bool inverted = false, std::optional<QPointF> position = {}) -> ulong {
+    const QPointF local = position.value_or(wheelPosition(target));
     QWheelEvent event(local, target->mapToGlobal(local), pixelDelta, angleDelta,
                       buttons, modifiers, phase, inverted,
                       Qt::MouseEventSynthesizedByApplication, device);
@@ -1339,6 +1341,130 @@ bool nestedWheelGestureHasOneRoutingOwner(bool measurePerformance) {
   static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollEnd, {}));
   result &= expect(outer->value() == beforePixels - 9,
                    "pixel-only scrolling works without a Begin event");
+
+  ui::ThreadListSnapshot projects;
+  for (int group = 0; group < 12; ++group) {
+      ui::ThreadListRow project;
+      project.kind = ui::ThreadRowKind::Project;
+      project.id = project.presentationKey = "wheel-project-" + std::to_string(group);
+      project.title = project.id;
+      for (int row = 0; row < 24; ++row) {
+          ui::ThreadListRow thread;
+          thread.id = thread.presentationKey = project.id + "-thread-" + std::to_string(row);
+          thread.title = thread.id;
+          project.children.push_back(std::move(thread));
+      }
+      projects.roots.push_back(std::move(project));
+  }
+  region.threads().refresh(projects);
+  auto* threadList = region.threads().findChild<QTreeWidget*>("threadList");
+  threadList->expandAll();
+  for (int pass = 0; pass < 4; ++pass) {
+      QCoreApplication::processEvents();
+  }
+  const auto bodyAtTop = [&]() {
+      QTreeView* body = nullptr;
+      for (auto* candidate : region.threads().findChildren<QTreeView*>("projectThreadBody")) {
+          if (candidate->rootIndex() == threadList->model()->index(0, 0)) {
+              body = candidate;
+          }
+      }
+      return body;
+  };
+  QPointer<QTreeView> projectBody = bodyAtTop();
+  result &= expect(projectBody && threadList->verticalScrollBar()->maximum() > 100,
+                   "real project and threads panel expose nested scrolling ranges");
+  if (projectBody) {
+      auto* threadScroll = threadList->verticalScrollBar();
+      const int conversationBeforeProjects = outer->value();
+      for (const bool right : {false, true}) {
+          for (const int direction : {-1, 1}) {
+              threadScroll->setValue(40);
+              projectBody = bodyAtTop();
+              auto* projectScroll = projectBody->verticalScrollBar();
+              projectScroll->setValue(projectScroll->maximum() / 2);
+              const int projectBefore = projectScroll->value();
+              const int panelBefore = threadScroll->value();
+              const QPointF margin(right ? region.threads().width() - 2 : 1, threadList->y() + 60);
+              result &=
+                  expect(!region.threads().childAt(margin.toPoint()), "wheel fixture targets the actual bare left/right panel margin");
+              static_cast<void>(sendAt(&region.threads(), Qt::ScrollBegin, {}, {}, Qt::NoButton, Qt::NoModifier, false, margin));
+              static_cast<void>(
+                  sendAt(&region.threads(), Qt::ScrollUpdate, {}, QPoint(0, direction * 15), Qt::NoButton, Qt::NoModifier, false, margin));
+              static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollMomentum, {}, QPoint(0, direction * 15)));
+              static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollEnd, {}));
+              result &= expect((threadScroll->value() - panelBefore) * direction < 0 &&
+                                   (!projectBody || projectBody->verticalScrollBar()->value() == projectBefore) &&
+                                   outer->value() == conversationBeforeProjects,
+                               "both margins scroll only the threads panel and retain ownership when the pointer enters a project");
+              threadScroll->setValue(40);
+              projectBody = bodyAtTop();
+              projectScroll = projectBody->verticalScrollBar();
+              const int beforeNotch = threadScroll->value();
+              static_cast<void>(
+                  sendAt(&region.threads(), Qt::NoScrollPhase, {}, QPoint(0, direction * 15), Qt::NoButton, Qt::NoModifier, false, margin));
+              result &= expect(threadScroll->value() != beforeNotch &&
+                                   (!projectBody || projectBody->verticalScrollBar()->value() == projectBefore) &&
+                                   outer->value() == conversationBeforeProjects,
+                               "a discrete wheel notch over either margin scrolls the threads panel");
+          }
+      }
+      const int beforeControls = threadScroll->value();
+      const QPointF controlsMargin(1, threadList->y() - 2);
+      QWheelEvent controlsWheel(controlsMargin,
+                                region.threads().mapToGlobal(controlsMargin),
+                                {},
+                                QPoint(0, 120),
+                                Qt::NoButton,
+                                Qt::NoModifier,
+                                Qt::NoScrollPhase,
+                                false);
+      router.topLevelConsumed = false;
+      QApplication::sendEvent(&region.threads(), &controlsWheel);
+      result &= expect(!router.topLevelConsumed && threadScroll->value() == beforeControls && outer->value() == conversationBeforeProjects,
+                       "the margin route stops above the list, leaving its controls outside the scroll band");
+      for (const int direction : {-1, 1}) {
+          threadScroll->setValue(40);
+          projectBody = bodyAtTop();
+          auto* projectScroll = projectBody->verticalScrollBar();
+          const int panelBefore = threadScroll->value();
+          const int boundary = direction < 0 ? projectScroll->maximum() : projectScroll->minimum();
+          projectScroll->setValue(boundary + direction);
+          static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollBegin, {}));
+          static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollUpdate, {}, QPoint(0, direction * 120)));
+          static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollUpdate, {}, QPoint(0, direction * 120)));
+          static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollMomentum, QPoint(0, direction * 9)));
+          result &= expect(projectScroll->value() == boundary && threadScroll->value() == panelBefore,
+                           "a project retains its gesture and momentum after reaching either boundary");
+          static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollEnd, {}));
+          static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollBegin, {}));
+          // Ownership comes from the gesture origin, even if the pointer moves
+          // before the first directional update.
+          static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollUpdate, {}, QPoint(0, direction * 120)));
+          const int panelAfterHandoff = threadScroll->value();
+          static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollMomentum, QPoint(0, direction * 9)));
+          static_cast<void>(sendAt(conversation.viewport(), Qt::ScrollEnd, {}));
+          result &= expect(panelAfterHandoff != panelBefore && (!projectBody || projectBody->verticalScrollBar()->value() == boundary) &&
+                               outer->value() == conversationBeforeProjects,
+                           "a new gesture at a project boundary belongs to the threads panel, including momentum");
+      }
+      threadScroll->setValue(40);
+      projectBody = bodyAtTop();
+      auto* projectScroll = projectBody->verticalScrollBar();
+      const int panelBefore = threadScroll->value();
+      projectScroll->setValue(projectScroll->maximum() - 1);
+      static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollUpdate, {}, QPoint(0, -120)));
+      static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollMomentum, QPoint(0, -9)));
+      static_cast<void>(sendAt(projectBody->viewport(), Qt::ScrollEnd, {}));
+      result &= expect(projectScroll->value() == projectScroll->maximum() && threadScroll->value() == panelBefore,
+                       "a gesture without ScrollBegin still keeps its project owner");
+      projectScroll->setValue(projectScroll->maximum() - 1);
+      static_cast<void>(sendAt(projectBody->viewport(), Qt::NoScrollPhase, {}, QPoint(0, -120)));
+      result &= expect(threadScroll->value() == panelBefore, "a discrete wheel notch is consumed by the project when it can scroll");
+      static_cast<void>(sendAt(projectBody->viewport(), Qt::NoScrollPhase, {}, QPoint(0, -120)));
+      result &= expect(threadScroll->value() != panelBefore && outer->value() == conversationBeforeProjects,
+                       "the next discrete wheel notch at the boundary scrolls only the threads panel");
+  }
 
   if (measurePerformance) {
     // Quantify the central route on the same native viewport against direct

@@ -11,7 +11,7 @@ import {
 } from "./PresentationProtocol.js";
 import type {JsonObject, PresentationFrame, ThreadSettingStamp} from "./PresentationProtocol.js";
 import {
-    UnknownStatus, isActiveStatus, isEmptyStatus, isTerminalTurnStatus, statusFromValue, statusToken,
+    UnknownStatus, isActiveStatus, isEmptyStatus, isTerminalTurnStatus, statusFromValue, statusToken, statusTone,
 } from "./PresentationStatus.js";
 import type {PresentationStatus} from "./PresentationStatus.js";
 
@@ -402,6 +402,27 @@ export class PresentationModel {
     threadOrder(): readonly string[] { return this.orderedThreads; }
     threadIds(): readonly string[] { return [...this.threads.keys()]; }
     threadTitles(): readonly string[] { return [...this.threads.values()].map(thread => thread.title); }
+    threadIndicatorTones(): Map<string, string> {
+        const tones = new Map<string, string>(), parents = new Map<string, string[]>(), pending: string[] = [];
+        for (const thread of this.threads.values()) {
+            tones.set(thread.id, statusTone(thread.status));
+            if (isActiveStatus(thread.status)) { pending.push(thread.id); }
+            for (const child of thread.childThreadOrder) {
+                parents.set(child, [...(parents.get(child) ?? []), thread.id]);
+            }
+        }
+        while (pending.length > 0) {
+            const child = pending.pop()!;
+            for (const parent of parents.get(child) ?? []) {
+                if (tones.get(parent) !== "active" && tones.get(parent) !== "indirect") {
+                    tones.set(parent, "indirect");
+                    pending.push(parent);
+                }
+            }
+        }
+        return tones;
+    }
+
     thread(threadId: string): ThreadPresentation | undefined { return this.threads.get(threadId); }
     setThreadTitleLocally(threadId: string, title: string): void {
         const thread = this.threads.get(threadId);
@@ -870,7 +891,10 @@ export class PresentationModel {
             this.threads.set(id, result);
         }
         const incoming = {...raw};
-        for (const key of ["projectId", "section", "archived"] as const) {
+        for (const key of ["forkedFromId", "parentThreadId"] as const) {
+            if (incoming[key] === null && incoming.lineageKnown !== true) { delete incoming[key]; }
+        }
+        for (const key of ["projectId", "section", "archived", "forkedFromId", "parentThreadId"] as const) {
             if (preserveSettingsAfter !== undefined && (result.membershipSequence.get(key) ?? 0) >= preserveSettingsAfter) {
                 delete incoming[key];
             } else if (Object.hasOwn(incoming, key)) result.membershipSequence.set(key, this.lastSequence);
@@ -913,8 +937,8 @@ export class PresentationModel {
             && (result.lastActivityAt === undefined || result.recencyAt > result.lastActivityAt))
             result.lastActivityAt = result.recencyAt;
         if (typeof raw.archived === "boolean") result.archived = raw.archived;
-        if (Object.hasOwn(raw, "parentThreadId")) {
-            const parentThreadId = stringMember(raw, "parentThreadId");
+        if (Object.hasOwn(raw, "parentThreadId") || Object.hasOwn(raw, "forkedFromId")) {
+            const parentThreadId = stringMember(result.raw, "parentThreadId") || stringMember(result.raw, "forkedFromId");
             if (parentThreadId !== "") this.retainStructuralOwnership(id, parentThreadId);
             else if (this.childOwnerships.get(id)?.agentId === "")
                 this.releaseChildOwnership(id, false);

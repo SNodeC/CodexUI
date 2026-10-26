@@ -6,7 +6,7 @@ import {BrowserFrontendSession, DraftThreadId, suggestForkName} from "../dist/ap
 import {cardKeys, changeSettingDraft, result, settingDraftFor, settingPromptOptions, stableKey,
     turnSettingCatalog} from "../dist/index.js";
 
-import {FakeSocket, DelayedCloseSocket, appserver, requests, respond, reject, rejectWithCode, readyProvider, completeControllerHydration, waitForPublish} from "./browser-harness.mjs";
+import {FakeSocket, DelayedCloseSocket, appserver, requests, respond, reject, rejectWithCode, readyProvider, completeThreadDiscovery, completeControllerHydration, waitForPublish} from "./browser-harness.mjs";
 
 test("browser session defaults to the bridge's canonical WebSocket endpoint", () => {
     assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "ws://127.0.0.1:8080/codex");
@@ -31,6 +31,7 @@ test("selected-thread loading follows the latest hydration identity", async () =
         {id: "thread-a", status: {type: "notLoaded"}},
         {id: "thread-b", status: {type: "notLoaded"}},
     ]});
+    await completeThreadDiscovery(socket);
 
     session.selectThread("thread-a");
     const resumeA = requests(socket, "thread/resume").at(-1);
@@ -62,6 +63,7 @@ test("repeated reloads share one metadata resume and turn page until hydration s
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "reload-thread", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     session.selectThread("reload-thread");
     const initialResume = requests(socket, "thread/resume").at(-1);
 
@@ -90,6 +92,7 @@ test("browser history hydration separates metadata, turn summaries, and bounded 
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "paged", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     session.selectThread("paged");
     const metadata = requests(socket, "thread/resume").at(-1);
     assert.deepEqual(metadata.payload.params, {threadId: "paged", excludeTurns: true});
@@ -151,6 +154,7 @@ test("observer hydration reads directly and the item-page ceiling is global acro
         {id: "bounded-a", status: {type: "idle"}},
         {id: "bounded-b", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     session.selectThread("bounded-a");
     assert.equal(session.getSnapshot().selectedThreadLoading, true);
     const pageA = requests(socket, "thread/turns/list").at(-1);
@@ -190,6 +194,7 @@ test("turn history advances one explicit page at a time and retries the same cur
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "paged-turns", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     session.selectThread("paged-turns");
     await completeControllerHydration(socket, {
         id: "paged-turns", status: {type: "idle"}, turns: [{id: "newest", items: []}],
@@ -227,6 +232,7 @@ test("active retained agent children hydrate read-only without another metadata 
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "parent", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     session.selectThread("parent");
     await completeControllerHydration(socket, {id: "parent", status: {type: "idle"}, turns: [{
         id: "parent-turn", items: [{
@@ -312,6 +318,7 @@ test("thread catalog loads fast, repairs in the background, and pages on demand"
     assert.deepEqual(first.payload.params,
         {sortKey: "recency_at", sortDirection: "desc", limit: 100, useStateDbOnly: true});
     respond(socket, first, {data: [{id: "newest", recencyAt: 30}], nextCursor: "discarded-fast-cursor"});
+    await completeThreadDiscovery(socket);
     await waitForPublish();
     const repair = requests(socket, "thread/list").at(-1);
     assert.notEqual(repair, first);
@@ -320,6 +327,7 @@ test("thread catalog loads fast, repairs in the background, and pages on demand"
     respond(socket, repair, {data: [
         {id: "repaired", recencyAt: 20}, {id: "newest", recencyAt: 30},
     ], nextCursor: "older-page"});
+    await completeThreadDiscovery(socket);
     await Promise.resolve(); await Promise.resolve();
     session.loadMoreThreads();
     const older = requests(socket, "thread/list").at(-1);
@@ -329,6 +337,7 @@ test("thread catalog loads fast, repairs in the background, and pages on demand"
         useStateDbOnly: true, cursor: "older-page",
     });
     respond(socket, older, {data: [{id: "oldest", recencyAt: 10}], nextCursor: null});
+    await completeThreadDiscovery(socket);
     await Promise.resolve(); await Promise.resolve();
 
     assert.deepEqual(session.threadOrder(), ["newest", "repaired", "oldest"]);
@@ -342,6 +351,7 @@ test("thread paging falls back after repair failure and retries transient page e
 
     const first = requests(socket, "thread/list").at(-1);
     respond(socket, first, {data: [{id: "newest", recencyAt: 30}], nextCursor: "fast-page"});
+    await completeThreadDiscovery(socket);
     await waitForPublish();
     const repair = requests(socket, "thread/list").at(-1);
     reject(socket, repair, "repair unavailable");
@@ -360,6 +370,7 @@ test("thread paging falls back after repair failure and retries transient page e
     assert.equal(retry.payload.params.cursor, "fast-page",
         "a failed page does not consume its retry cursor");
     respond(socket, retry, {data: [{id: "older", recencyAt: 20}], nextCursor: null});
+    await completeThreadDiscovery(socket);
     await Promise.resolve(); await Promise.resolve();
     assert.deepEqual(session.threadOrder(), ["newest", "older"]);
     session.dispose();
@@ -372,6 +383,7 @@ test("the first prompt after a successful fork starts without redundant hydratio
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "fork-source", preview: "Fork source", status: {type: "idle"}},
     ], nextCursor: null});
+    await completeThreadDiscovery(socket);
     await Promise.resolve(); await Promise.resolve();
 
     session.forkThread("fork-source");
@@ -406,7 +418,7 @@ test("the first prompt after a successful fork starts without redundant hydratio
     }}));
     assert.equal(session.model.thread("fork-result")?.title, "Fork source (fork 1)",
         "the chosen name survives its app-server acknowledgement");
-    assert.equal(requests(socket, "thread/read").length, 0,
+    assert.equal(requests(socket, "thread/read").filter(value => value.payload.params.threadId === "fork-result").length, 0,
         "thread/fork already returns the loaded and subscribed thread");
     assert.equal(await session.submitPrompt("answer this fork"), true);
     await Promise.resolve(); await Promise.resolve();
@@ -494,6 +506,7 @@ test("acknowledged turn roots stay active across a delayed lifecycle event", asy
     session.connect(); socket.open(); await readyProvider(socket, "border-handoff");
     respond(socket, requests(socket, "thread/list").at(-1),
         {data: [{id: "handoff-thread", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("handoff-thread");
     await completeControllerHydration(socket,
         {id: "handoff-thread", status: {type: "idle"}, turns: []});
@@ -532,6 +545,7 @@ test("stream deltas reconcile prompts only when a user message can materialize",
     session.connect(); socket.open();
     await readyProvider(socket, "reconcile-scope");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "thread-1"}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("thread-1");
     await completeControllerHydration(socket, {
         id: "thread-1", turns: [{id: "turn-1", status: "inProgress", items: [{
@@ -641,6 +655,7 @@ test("new-thread completion preserves later navigation and explicit drafts start
     session.connect(); socket.open();
     await readyProvider(socket, "new-thread-navigation");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "other-thread"}]});
+    await completeThreadDiscovery(socket);
 
     session.beginNewThread();
     const firstDraftKey = session.threadVisualKey(DraftThreadId);
@@ -761,6 +776,7 @@ test("ephemeral Fork with options sends adjustable fields without a rename", asy
         {id: "source", name: "Original (fork 1)", cwd: "/old"},
         {id: "child", name: "Original (fork 1.1)", cwd: "/old"},
     ], nextCursor: null});
+    await completeThreadDiscovery(socket);
     await Promise.resolve(); await Promise.resolve();
     assert.equal(session.forkDraft("source").name, "Original (fork 1.2)");
 
@@ -789,6 +805,7 @@ test("Recent promotes on turn admission, reverts rejection, confirms acknowledge
         {id: "older", recencyAt: 10, updatedAt: 12, status: {type: "idle"}},
         {id: "recent", recencyAt: 30, updatedAt: 32, status: {type: "idle"}},
     ], nextCursor: null});
+    await completeThreadDiscovery(socket);
     await Promise.resolve(); await Promise.resolve();
     assert.deepEqual(session.threadOrder(), ["recent", "older"],
         "Recent is explicit newest-first ordering");
@@ -862,6 +879,7 @@ test("thread activity preserves provider time during hydration and advances for 
         {id: "tracked", updatedAt: 20, recencyAt: 30},
         {id: "updated-only", updatedAt: 25},
     ]});
+    await completeThreadDiscovery(socket);
     assert.equal(session.model.thread("tracked").lastActivityAt, 30);
     assert.equal(session.model.thread("updated-only").lastActivityAt, 25);
 
@@ -925,6 +943,7 @@ test("browser transport reconnects cleanly across provider generations", async (
     session.connect(); sockets[0].open();
     await readyProvider(sockets[0], "first", "observer");
     respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "old-thread"}]});
+    await completeThreadDiscovery(sockets[0]);
     assert.ok(session.model.thread("old-thread"));
     sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
     assert.equal(session.model.thread("old-thread"), undefined);
@@ -971,6 +990,7 @@ test("browser session resumes a not-loaded thread before starting its queued tur
     session.connect(); socket.open();
     await readyProvider(socket, "resume-test");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "sleeping", status: {type: "notLoaded"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("sleeping");
     await session.submitPrompt("wake and work");
     const resume = requests(socket, "thread/resume").at(-1);
@@ -993,6 +1013,7 @@ test("a hydration resume is not repeated before dispatching its already-queued p
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "still-sleeping", status: {type: "notLoaded"}},
     ]});
+    await completeThreadDiscovery(socket);
     await Promise.resolve();
     session.selectThread("still-sleeping");
     const resume = requests(socket, "thread/resume").at(-1);
@@ -1015,6 +1036,7 @@ test("resume eligibility follows authoritative lifecycle state after hydration",
         {id: "closed-after-read", status: {type: "idle"}},
         {id: "woken-after-read", status: {type: "notLoaded"}},
     ]});
+    await completeThreadDiscovery(socket);
 
     session.selectThread("closed-after-read");
     await completeControllerHydration(socket,
@@ -1184,6 +1206,7 @@ test("a prompt admitted during thread hydration waits for the first authoritativ
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "hydrate-before-send");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "thread-h", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("thread-h");
     const resume = requests(socket, "thread/resume").at(-1);
     assert.ok(resume);
@@ -1205,6 +1228,7 @@ test("a queued prompt waits through controller loss and resumes after control re
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "role-transition");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "role-thread", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("role-thread");
     const resume = requests(socket, "thread/resume").at(-1);
     assert.equal(await session.submitPrompt("wait for control"), true);
@@ -1259,6 +1283,7 @@ test("provider replacement retires an in-flight turn with an uncertain outcome a
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "inflight-thread", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     await Promise.resolve();
     session.selectThread("inflight-thread");
     await completeControllerHydration(socket,
@@ -1290,6 +1315,7 @@ test("transport detach retires an in-flight turn before its synthetic failure ca
     respond(socket, requests(socket, "thread/list").at(-1), {data: [
         {id: "detach-thread", status: {type: "idle"}},
     ]});
+    await completeThreadDiscovery(socket);
     await Promise.resolve();
     session.selectThread("detach-thread");
     await completeControllerHydration(socket,
@@ -1442,6 +1468,7 @@ test("a provider-generation transition invalidates prior thread hydration", asyn
     const staleModels = requests(socket, "model/list").at(-1);
     const staleProfiles = requests(socket, "permissionProfile/list").at(-1);
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "same-thread", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("same-thread");
     await completeControllerHydration(socket,
         {id: "same-thread", status: {type: "idle"}, turns: []});
@@ -1480,6 +1507,7 @@ test("a rejected turn is terminal and never resubmitted automatically", async ()
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "recover");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "recover-thread", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("recover-thread");
     await completeControllerHydration(socket,
         {id: "recover-thread", status: {type: "idle"}, turns: []});
@@ -1498,6 +1526,7 @@ test("cached selection refreshes effective settings once without reloading histo
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "cached-settings");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "cached", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("cached");
     await completeControllerHydration(socket, {id: "cached", model: "old-model", status: {type: "idle"}});
     const identity = session.threadVisualKey("cached");
@@ -1529,6 +1558,7 @@ test("claiming controller refreshes an observer's retained selection without rea
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "claim-settings", "observer");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("retained");
     respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: null});
     await Promise.resolve(); await Promise.resolve();
@@ -1549,6 +1579,7 @@ test("failed settings refresh preserves cached history and reports the failure",
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "failed-settings");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "cached-failure", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("cached-failure");
     await completeControllerHydration(socket, {id: "cached-failure", model: "last-confirmed", status: {type: "idle"}});
     session.selectThread("cached-failure");
@@ -1567,6 +1598,7 @@ test("controller acquisition while history is pending refreshes settings before 
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "pending-claim", "observer");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "pending-thread", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
     session.selectThread("pending-thread");
     const page = requests(socket, "thread/turns/list").at(-1);
     socket.receive({kind: "bridge.controller", controllerConnectionId: "pending-claim"});

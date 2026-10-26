@@ -1818,6 +1818,42 @@ void inspectorIndexFollowsProtocolIngestionOrder() {
           "Plan and agentMessage items remain indexed");
 }
 
+void metadataOnlyReadsAndSparseListsPreserveThreadState() {
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    Value::Object thread{{"id", "metadata-fork"},
+                         {"forkedFromId", "metadata-origin"},
+                         {"parentThreadId", "metadata-parent"},
+                         {"turns", Value::Array{Value::Object{{"id", "retained-turn"}}}}};
+    DecodedMessage initial{DecodedMessageKind::ClientResult, "thread/read", {}, {{"thread", thread}}};
+    static_cast<void>(applyCorrelatedResult(updater, initial, {{"threadId", "metadata-fork"}, {"includeTurns", true}}));
+    Value::Object listed{{"id", "metadata-fork"}, {"forkedFromId", nullptr}, {"parentThreadId", nullptr}};
+    DecodedMessage listing{DecodedMessageKind::ClientResult, "thread/list", {}, {{"data", Value::Array{listed}}}};
+    static_cast<void>(applyCorrelatedResult(updater, listing));
+    {
+        auto read = graph.tryRead();
+        const auto fork = read->find({NodeKind::Thread, "metadata-fork"});
+        require(read->related(read->find({NodeKind::Thread, "metadata-origin"}), RelationKind::ForkChildThread) ==
+                        std::vector<NodeRef>{fork} &&
+                    read->related(read->find({NodeKind::Thread, "metadata-parent"}), RelationKind::StructuralChildThread) ==
+                        std::vector<NodeRef>{fork},
+                "a sparse list preserves lineage before any later metadata read");
+    }
+    thread["turns"] = Value::Array{};
+    DecodedMessage metadata{DecodedMessageKind::ClientResult, "thread/read", {}, {{"thread", thread}}};
+    static_cast<void>(applyCorrelatedResult(updater, metadata, {{"threadId", "metadata-fork"}, {"includeTurns", false}}));
+    auto read = graph.tryRead();
+    const auto fork = read->find({NodeKind::Thread, "metadata-fork"});
+    const auto origin = read->find({NodeKind::Thread, "metadata-origin"});
+    const auto parent = read->find({NodeKind::Thread, "metadata-parent"});
+    require(fork && read->children(fork).size() == 1 &&
+                read->children(fork).front()->id() == scopedTurnNodeId("metadata-fork", "retained-turn"),
+            "metadata-only reads preserve cached turn history even when the response contains an empty turns array");
+    require(read->related(origin, RelationKind::ForkChildThread) == std::vector<NodeRef>{fork} &&
+                read->related(parent, RelationKind::StructuralChildThread) == std::vector<NodeRef>{fork},
+            "sparse list nulls cannot clear authoritative fork or structural lineage");
+}
+
 void forkRelationsFollowTheCurrentSource() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -5440,6 +5476,7 @@ int main() {
   rootOrderAndThreadHierarchyAreExplicit();
   inspectorIndexFollowsProtocolIngestionOrder();
   agentChildAggregatesTrackEveryReferencingItem();
+  metadataOnlyReadsAndSparseListsPreserveThreadState();
   forkRelationsFollowTheCurrentSource();
   semanticDeltasAndHydratedOrderStayCurrent();
   realtimeNotificationsMaintainOneCurrentSession();

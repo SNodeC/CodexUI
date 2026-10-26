@@ -207,3 +207,21 @@ test("project bodies retain all rows behind the shared eight-row scroll limit", 
         assert.match(generated, /--project-visible-rows: 8;/u);
     } finally { session.dispose(); }
 });
+
+test("initial hierarchy exposes direct and indirect activity in thread and group markup", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
+    try {
+        session.model.applyEvent(result(1, 1, "projects.list", "projects", true, {data: [{id: "activity-project", name: "Activity project"}]}));
+        session.model.applyEvent(result(2, 1, "sections.list", "sections", true, {data: [{id: "activity-section", name: "Activity section"}]}));
+        session.model.applyEvent(result(3, 1, "threads.list", "list", true, {threads: [
+            {id: "activity-origin", name: "Origin", projectId: "activity-project", section: {id: "activity-section"}, status: {type: "idle"}},
+            {id: "activity-child", name: "Child", parentThreadId: "activity-origin", projectId: "activity-project", section: {id: "activity-section"}, status: {type: "active"}},
+        ]}, "replace"));
+        const markup = renderToStaticMarkup(createElement(App, {session}));
+        assert.equal((markup.match(/class="status-dot indirect"/gu) ?? []).length, 3, "project, section and idle parent show indirect activity");
+        assert.equal((markup.match(/class="status-dot active"/gu) ?? []).length, 1, "only the running thread is blue");
+        assert.match(markup, /Expand|Collapse/u);
+        assert.match(markup, /Indirect activity: running descendant/u);
+        assert.equal((markup.match(/class="thread-title"/gu) ?? []).length, 2, "new thread hierarchies start unfolded");
+    } finally { session.dispose(); }
+});

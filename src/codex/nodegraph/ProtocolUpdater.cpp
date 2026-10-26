@@ -3014,7 +3014,9 @@ void ProtocolUpdater::applyGraphUpdate(
     const bool authoritativeHistoryResult =
         message.kind == DecodedMessageKind::ClientResult &&
         method == "thread/revert";
-    const bool replaceTurns = message.kind == DecodedMessageKind::ClientResult && method == "thread/read";
+    const Value* includeTurns = valueMember(message.payload, "includeTurns");
+    const bool replaceTurns =
+        message.kind == DecodedMessageKind::ClientResult && method == "thread/read" && (!includeTurns || boolFromValue(includeTurns));
     thread = ingestThread(write, *threadObject, {}, replaceTurns,
                           authoritativeHistoryResult ? std::nullopt
                                                      : preserveChangesAfter);
@@ -3040,15 +3042,15 @@ void ProtocolUpdater::applyGraphUpdate(
         write.eraseField(thread, "historyStale");
         write.eraseField(thread, "historyReload");
     }
+    if (thread && method == "thread/read") {
+        write.setField(thread, "lineageKnown", Value(true));
+    }
     if (thread && (method == "thread/started" ||
                    (message.kind == DecodedMessageKind::ClientResult &&
                     (method == "thread/start" || method == "thread/resume" ||
                      method == "thread/fork" || method == "thread/read"))))
       admitRootThread(write, thread, true);
-    if (thread && message.kind == DecodedMessageKind::ClientResult &&
-        method == "thread/read" && replaceTurns) {
-      const Value *includeTurns = valueMember(message.payload, "includeTurns");
-      if (includeTurns && includeTurns->asBool() && *includeTurns->asBool())
+    if (thread && replaceTurns && boolFromValue(includeTurns)) {
         write.eraseField(thread, "historyStale");
     }
   } else {
@@ -3436,8 +3438,15 @@ void ProtocolUpdater::replaceThreadList(
     const Value::Object *object = value.asObject();
     if (!object)
       continue;
-    NodeRef thread =
-        ingestThread(write, *object, {}, false, preserveChangesAfter);
+    Value::Object metadata = *object;
+    if (!boolFromValue(valueMember(metadata, "lineageKnown"))) {
+        for (const std::string field : {"forkedFromId", "parentThreadId"}) {
+            if (const auto* value = valueMember(metadata, field); value && value->isNull()) {
+                metadata.erase(field);
+            }
+        }
+    }
+    NodeRef thread = ingestThread(write, metadata, {}, false, preserveChangesAfter);
     // Thread does not carry archive membership; the correlated list filter
     // does. An older page must still yield to a newer archive notification.
     if (thread && (!preserveChangesAfter ||

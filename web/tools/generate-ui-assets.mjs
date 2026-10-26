@@ -53,6 +53,7 @@ const roles = {
     "secondary": "connection-input-text global-status-text text-secondary thread-disclosure-text thread-menu-text",
     "secondaryStrong": "text-detail text-emphasis",
     "statusActive": "status-active thread-status-active",
+    "statusIndirect": "status-indirect thread-status-indirect",
     "statusActiveText": "status-active-text",
     "statusDanger": "status-danger thread-status-danger",
     "statusDangerText": "copy-failure-border copy-failure-surface destructive-text status-danger-text status-failed-text validation-text",

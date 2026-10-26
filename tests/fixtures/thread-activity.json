@@ -1,0 +1,8 @@
+[
+  {"statuses": ["idle", "idle", "active"], "tones": ["indirect", "indirect", "active"]},
+  {"statuses": ["active", "idle", "active"], "tones": ["active", "indirect", "active"]},
+  {"statuses": ["notLoaded", "notLoaded", "active"], "tones": ["indirect", "indirect", "active"]},
+  {"statuses": ["idle", "idle", "idle"], "tones": ["success", "success", "success"]},
+  {"statuses": ["notLoaded", "notLoaded", "notLoaded"], "tones": ["muted", "muted", "muted"]},
+  {"statuses": ["idle", "active", "notLoaded"], "tones": ["indirect", "active", "muted"]}
+]

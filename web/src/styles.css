@@ -19,6 +19,7 @@ button { color: inherit; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--status-idle); flex: none; }
 .status-dot.success { background: var(--status-success); }
 .status-dot.active { background: var(--status-active); }
+.status-dot.indirect { background: var(--status-indirect); }
 .status-dot.warning { background: var(--status-warning); }
 .status-dot.danger { background: var(--status-danger); }
 .notice-banner { grid-area: workspace; align-self: start; z-index: 8; display: flex; justify-content: space-between; align-items: center; margin: 8px clamp(8px, 2vw, 18px); padding: 8px 12px; background: var(--notice-surface); color: var(--notice-text); border: 1px solid var(--notice-border); border-radius: 8px; font-size: 13px; }.notice-banner button { border: 0; background: transparent; color: inherit; font-size: 17px; cursor: pointer; }
@@ -47,6 +48,7 @@ h1, h2, h3, p { margin: 0; }
 .thread-row .status-dot { background: var(--thread-status-idle); }
 .thread-row .status-dot.success { background: var(--thread-status-success); }
 .thread-row .status-dot.active { background: var(--thread-status-active); }
+.thread-row .status-dot.indirect { background: var(--thread-status-indirect); }
 .thread-row .status-dot.danger { background: var(--thread-status-danger); }
 .thread-title { min-width: 0; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .thread-menu-trigger { visibility: hidden; flex: none; width: 24px; height: 24px; margin-right: 3px; border: 0; border-radius: 6px; background: transparent; color: var(--thread-menu-text); cursor: pointer; }

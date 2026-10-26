@@ -39,7 +39,7 @@ test("exact presentation lifetime owns viewport, folds, promotion, and retiremen
     assert.notEqual(replacement, first, "same protocol ID cannot preserve a retired presentation lifetime");
     assert.deepEqual(state.scroll("same-id", replacement), {scrollTop: 0, following: true});
     assert.equal(state.cardCollapsed("same-id", replacement, "card-a", false), false);
-    assert.equal(state.threadExpanded("same-id", replacement), false);
+    assert.equal(state.threadExpanded("same-id", replacement), true);
     state.updateScroll("same-id", first, 999, false);
     assert.deepEqual(state.scroll("same-id", replacement), {scrollTop: 0, following: true},
         "a delayed callback from the old lifetime is a semantic no-op");

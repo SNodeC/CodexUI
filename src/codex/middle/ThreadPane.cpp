@@ -97,19 +97,23 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
              : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
-QColor statusColor(const UiStatus &status, std::size_t pending, bool draft) {
-  if (draft || pending != 0)
-    return QColor(QString::fromLatin1(UiStyle::statusWarning));
-  const std::string_view tone = statusTone(status);
-  if (tone == "active")
-    return QColor(QString::fromLatin1(UiStyle::statusActive));
-  if (tone == "success")
-    return QColor(QString::fromLatin1(UiStyle::statusSuccess));
-  if (tone == "warning")
-    return QColor(QString::fromLatin1(UiStyle::statusWarning));
-  if (tone == "danger")
-    return QColor(QString::fromLatin1(UiStyle::statusDanger));
-  return QColor(QString::fromLatin1(UiStyle::threadInactive));
+QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool indirectActive) {
+    const std::string_view tone = statusTone(status);
+    const char* role = UiStyle::threadInactive;
+    if (draft || pending != 0) {
+        role = UiStyle::statusWarning;
+    } else if (indirectActive) {
+        role = UiStyle::statusIndirect;
+    } else if (tone == "active") {
+        role = UiStyle::statusActive;
+    } else if (tone == "success") {
+        role = UiStyle::statusSuccess;
+    } else if (tone == "warning") {
+        role = UiStyle::statusWarning;
+    } else if (tone == "danger") {
+        role = UiStyle::statusDanger;
+    }
+    return QColor(QString::fromLatin1(role));
 }
 
 bool contextSelection(const QEvent* event) {
@@ -136,6 +140,7 @@ public:
   std::string cwd;
   std::string workspaceChangeUnavailable;
   UiStatus status;
+  bool indirectActive = false;
   std::optional<std::int64_t> createdAt;
   ProtocolTimes timing;
   std::optional<std::int64_t> recencyAt;
@@ -481,6 +486,7 @@ protected:
 
   void showEvent(QShowEvent *event) override {
     QTreeWidget::showEvent(event);
+    doItemsLayout();
     owner_->updateAnimationTimer();
     owner_->requestMoreNearListEnd();
     if (owner_->providerReady && owner_->actions.refreshGroups)
@@ -496,8 +502,9 @@ protected:
     QTreeWidget::resizeEvent(event);
     positionProjectViews();
     owner_->updateAnimationTimer();
-    if (event->oldSize().isValid())
-      owner_->requestMoreNearListEnd();
+    if (event->oldSize().isValid() && isVisible()) {
+        owner_->requestMoreNearListEnd();
+    }
   }
 
   void hideEvent(QHideEvent *event) override {
@@ -645,6 +652,9 @@ QString itemDescription(const ThreadTreeItem& item) {
             details.push_back(QStringLiteral("Parent: %1").arg(displayTitle(*parent)));
         }
         details << QStringLiteral("Server timestamps:\n") + ui::timingDetails(item.timing);
+    }
+    if (item.indirectActive) {
+        details.push_back(QStringLiteral("Indirect activity: running descendant"));
     }
     return details.join(QLatin1Char('\n'));
 }
@@ -802,7 +812,7 @@ public:
     const QPointF dotCenter(contentLeft + StatusCenterOffset,
                             QRectF(contentRow).center().y());
     painter->setPen(Qt::NoPen);
-    painter->setBrush(statusColor(item->status, item->pending, item->draft));
+    painter->setBrush(statusColor(item->status, item->pending, item->draft, item->indirectActive));
     if (item->kind != ui::ThreadRowKind::Page) {
         painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
     }
@@ -1255,16 +1265,6 @@ void ThreadTreeWidget::positionProjectViews() {
                 body->setStyleSheet(
                     QStringLiteral("QTreeView#projectThreadBody{background:transparent;border:0;padding-left:%1px;outline:0;}")
                         .arg(ThreadIndent));
-                const std::function<void(const QModelIndex&)> projectExpansion = [&](const QModelIndex& parent) {
-                    for (int row = 0; row < model()->rowCount(parent); ++row) {
-                        const QModelIndex child = model()->index(row, 0, parent);
-                        if (isExpanded(child)) {
-                            body->setExpanded(child, true);
-                            projectExpansion(child);
-                        }
-                    }
-                };
-                projectExpansion(root);
                 connect(body, &QTreeView::expanded, this, [this](const QModelIndex& index) {
                     setExpanded(index, true);
                 });
@@ -1292,6 +1292,17 @@ void ThreadTreeWidget::positionProjectViews() {
                 });
                 projectViews_.append(body);
             }
+            const std::function<void(const QModelIndex&)> projectExpansion = [&](const QModelIndex& parent) {
+                for (int row = 0; row < model()->rowCount(parent); ++row) {
+                    const QModelIndex child = model()->index(row, 0, parent);
+                    body->setExpanded(child, isExpanded(child));
+                    if (isExpanded(child)) {
+                        projectExpansion(child);
+                    }
+                }
+            };
+            const QSignalBlocker expansion(body);
+            projectExpansion(root);
             QRect bounds = QTreeWidget::visualRect(root);
             bounds.setLeft(1);
             bounds.setRight(viewport()->width() - 2);
@@ -1681,6 +1692,10 @@ ThreadPane::~ThreadPane() { delete tree; }
 
 void ThreadPane::setActions(Actions next) { actions = std::move(next); }
 
+QAbstractScrollArea* ThreadPane::scrollArea() const {
+    return tree;
+}
+
 QString ThreadPane::settingsKey() const {
   return QStringLiteral("threads/") +
          QString::fromLatin1(
@@ -2015,6 +2030,7 @@ bool ThreadPane::applyItemPresentation(
   assign(item->cwd, row.cwd);
   assign(item->workspaceChangeUnavailable, row.workspaceChangeUnavailable);
   assign(item->status, row.status);
+  assign(item->indirectActive, row.indirectActive);
   assign(item->createdAt, row.createdAt);
   assign(item->timing, row.timing);
   assign(item->recencyAt, row.recencyAt);
@@ -2258,10 +2274,6 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   ThreadTreeItem *selected = nullptr;
   bool selectedReparented = false;
   bool currentReparented = false;
-  const bool initialPopulation = rows.empty();
-  QList<QTreeWidgetItem *> initialRoots;
-  if (initialPopulation)
-    initialRoots.reserve(static_cast<qsizetype>(snapshot.roots.size()));
 
   const auto eraseSubtree = [this, &structureChanged](ThreadTreeItem *root) {
     structureChanged = true;
@@ -2322,17 +2334,15 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       revealNewest =
           newest && newest != item && row.recencyAt > newest->recencyAt;
     }
-    bool reparented = false;
-    if (initialPopulation && !parent)
-      initialRoots.push_back(item);
-    else
-      reparented = place(item, parent, position);
-    if (item->presentationKey == currentKey && item->target == currentTarget)
-      currentReparented = reparented || ancestorReparented;
-    if (item == draftItem && row.target)
-      draftItem = nullptr;
+    if (item == draftItem && row.target) {
+        draftItem = nullptr;
+    }
     static_cast<void>(applyItemPresentation(item, row, item == draftItem,
                                             item->animationEpoch, false));
+    const bool reparented = place(item, parent, position);
+    if (item->presentationKey == currentKey && item->target == currentTarget) {
+        currentReparented = reparented || ancestorReparented;
+    }
     // These describe placement, not a targeted status/title presentation.
     item->parentThread = row.parentThread;
     item->order = row.order;
@@ -2352,13 +2362,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
     for (std::size_t child = 0; child < children.size(); ++child)
       reconcile(*children[child], item, static_cast<int>(child),
                 reparented || ancestorReparented);
-    if (createdItem && row.kind != ui::ThreadRowKind::Thread &&
-        row.kind != ui::ThreadRowKind::Page)
-      item->setExpanded(
-          QSettings()
-              .value(settingsKey() + "/expanded/" + text(item->presentationKey),
-                     false)
-              .toBool());
+    if (createdItem && row.kind != ui::ThreadRowKind::Page) {
+        item->setExpanded(row.kind == ui::ThreadRowKind::Thread ||
+                          QSettings().value(settingsKey() + "/expanded/" + text(item->presentationKey), false).toBool());
+    }
   };
 
   std::vector<const ui::ThreadListRow *> roots;
@@ -2381,10 +2388,6 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
         rootPosition == tree->indexOfTopLevelItem(draftItem))
       ++rootPosition;
     reconcile(*row, nullptr, rootPosition++, false);
-  }
-  if (!initialRoots.isEmpty()) {
-    tree->addTopLevelItems(initialRoots);
-    structureChanged = true;
   }
 
   std::vector<ThreadTreeItem *> staleRoots;
@@ -2428,16 +2431,16 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       (!hadCurrent && !selected) ||
       (hadCurrent && selected && selected->presentationKey == currentKey &&
        selected->target == currentTarget && !selectedReparented);
-  if (tree->isVisible() && structureChanged) {
-    // QAbstractItemView defers scrollbar geometry; settle a structural refresh
-    // before restoring its stable semantic anchor or requesting another page.
-    tree->doItemsLayout();
-    const auto retainedAnchor = rows.find(anchorKey);
-    if (revealNewest)
-      tree->scrollToTop();
-    else if (sameSelection && retainedAnchor != rows.end() &&
-             retainedAnchor->second->target == anchorTarget)
-      tree->restoreViewportY(retainedAnchor->second, anchorY);
+  if (tree->isVisible() && (structureChanged || !sameSelection)) {
+      // QAbstractItemView defers scrollbar geometry; settle a structural refresh
+      // before restoring its stable semantic anchor or requesting another page.
+      tree->doItemsLayout();
+      const auto retainedAnchor = rows.find(anchorKey);
+      if (revealNewest) {
+          tree->scrollToTop();
+      } else if (sameSelection && retainedAnchor != rows.end() && retainedAnchor->second->target == anchorTarget) {
+          tree->restoreViewportY(retainedAnchor->second, anchorY);
+      }
   }
   blocked.unblock();
 #if QT_CONFIG(accessibility)

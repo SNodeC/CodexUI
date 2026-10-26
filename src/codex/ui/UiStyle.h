@@ -168,6 +168,17 @@ inline constexpr auto yellowText = "#5b5c26";
 // Vivid status accents are separate from the perceptually matched UI ramps.
 inline constexpr auto vividBlue = "#0066ff";
 inline constexpr auto vividGreen = "#00c853";
+inline constexpr auto vividPurple = "#9333ea";
+inline constexpr auto vividPurpleHover = "#7e22ce";
+inline constexpr auto vividPurplePressed = "#6b21a8";
+inline constexpr auto vividPurpleSurface = "#faf5ff";
+inline constexpr auto vividPurpleSurfaceHover = "#f3e8ff";
+inline constexpr auto vividPurpleSelected = vividPurpleSurfaceHover;
+inline constexpr auto vividPurpleSelectedHover = "#e9d5ff";
+inline constexpr auto vividPurpleBorder = "#d8b4fe";
+inline constexpr auto vividPurpleBorderHover = "#c084fc";
+inline constexpr auto vividPurpleBorderStrong = "#a855f7";
+inline constexpr auto vividPurpleText = vividPurpleHover;
 
 } // namespace Palette
 
@@ -215,6 +226,7 @@ inline constexpr auto threadFocusBorder = Palette::blueBorder;
 inline constexpr auto draftThreadSweep = Palette::orange;
 inline constexpr auto statusWarning = Palette::orange;
 inline constexpr auto statusActive = Palette::vividBlue;
+inline constexpr auto statusIndirect = Palette::vividPurple;
 inline constexpr auto statusSuccess = Palette::vividGreen;
 inline constexpr auto statusDanger = Palette::red;
 inline constexpr auto activeGroupHeaderSurface = Palette::limeSurfaceHover;

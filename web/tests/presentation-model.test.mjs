@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {readFileSync} from "node:fs";
 
 import {
     changeSettingDraft,
@@ -585,4 +586,32 @@ test("resume wrapper collaboration mode uses existing causal settings authority"
     normalizer.operationResult("thread.resume", "fresh", {threadId: "resume-mode"},
         {result: {thread: {id: "resume-mode"}, collaborationMode: mode("plan")}}, normalizer.sequence);
     assert.deepEqual(model.thread("resume-mode").raw.collaborationMode, mode("plan"));
+});
+
+test("thread indicator activity follows the shared native/browser corpus", () => {
+    const cases = JSON.parse(readFileSync(new URL("../../tests/fixtures/thread-activity.json", import.meta.url), "utf8"));
+    const model = new PresentationModel();
+    let sequence = 0;
+    for (const entry of cases) {
+        model.applyEvent(result(++sequence, 1, "threads.list", "activity", true, {threads: entry.statuses.map((status, index) => ({
+            id: String(index), status: {type: status}, ...(index > 0 ? {parentThreadId: String(index - 1)} : {}),
+        }))}, "replace"));
+        const tones = model.threadIndicatorTones();
+        assert.deepEqual([0, 1, 2].map(index => tones.get(String(index)) || "muted"), entry.tones);
+    }
+});
+
+
+test("metadata-only reads and sparse lists preserve cached history and fork ownership", () => {
+    const {model, normalizer} = pipeline();
+    normalizer.transportEvent("connected");
+    const thread = {id: "metadata-fork", forkedFromId: "metadata-origin", turns: [{id: "retained-turn", items: []}]};
+    normalizer.operationResult("thread.read", "initial", {threadId: thread.id, includeTurns: true}, {result: {thread}});
+    const cached = model.thread(thread.id).turns.get("retained-turn");
+    normalizer.operationResult("threads.list", "sparse", {}, {result: {data: [{id: thread.id, forkedFromId: null, parentThreadId: null}]}});
+    assert.equal(model.childOwnership(thread.id)?.parentThreadId, "metadata-origin");
+    normalizer.operationResult("thread.read", "metadata", {threadId: thread.id, includeTurns: false}, {result: {thread: {...thread, turns: []}}});
+    assert.equal(model.thread(thread.id).turns.get("retained-turn"), cached);
+    assert.deepEqual(model.thread(thread.id).turnOrder, ["retained-turn"]);
+    assert.equal(model.childOwnership(thread.id)?.parentThreadId, "metadata-origin");
 });

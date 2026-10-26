@@ -9,7 +9,7 @@ import {ConversationViewportState} from "../dist/app/ConversationViewportState.j
 import {PresentationModel, ProtocolNormalizer, event, result, statusFromValue} from "../dist/index.js";
 import {protocolTimes, protocolFrameTimes, targetTimes, timingDetails, timingSummary, tokenUsage} from "../dist/presentation/PresentationTelemetry.js";
 import {generatedTimingPaths} from "../tools/generate-timing-paths.mjs";
-import {FakeSocket, appserver, requests, respond, reject, rejectWithCode, readyProvider, completeControllerHydration, waitForPublish} from "./browser-harness.mjs";
+import {FakeSocket, appserver, requests, respond, reject, rejectWithCode, readyProvider, completeControllerHydration, completeThreadDiscovery, waitForPublish} from "./browser-harness.mjs";
 
 const contract = JSON.parse(readFileSync(new URL("../../tests/fixtures/frontend-presentation.json", import.meta.url)));
 const flush = async () => { for (let index = 0; index < 8; index++) await Promise.resolve(); };
@@ -79,21 +79,22 @@ test("card timing preserves turn and item lifecycle fields independently of text
 });
 test("search invalidates old pages before they can update entities or visible results", async t => {
     const {socket, session} = await setup(t); const obsolete = requests(socket, "thread/list").at(-1);
-    session.changeBrowser({search: "新しい"}); const current = requests(socket, "thread/list").at(-1);
+    session.changeBrowser({search: "新しい"});
+    respond(socket, obsolete, {data: [{id: "obsolete", name: "Wrong"}], nextCursor: "wrong"}); await flush();
+    const current = requests(socket, "thread/list").at(-1);
     assert.equal(current.payload.params.searchTerm, "新しい");
-    respond(socket, obsolete, {data: [{id: "obsolete", name: "Wrong"}], nextCursor: "wrong"});
-    respond(socket, current, {data: [{id: "match", name: "新しい"}], nextCursor: "next"}); await flush();
+    respond(socket, current, {data: [{id: "match", name: "新しい"}], nextCursor: "next"}); await flush(); await completeThreadDiscovery(socket);
     assert.equal(session.model.thread("obsolete"), undefined); assert.deepEqual(session.threadOrder(), ["match"]);
-    await waitForPublish(); respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "match", name: "新しい"}], nextCursor: "next"}); await flush();
+    await waitForPublish(); respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "match", name: "新しい"}], nextCursor: "next"}); await flush(); await completeThreadDiscovery(socket);
     session.loadMoreThreads(); assert.equal(requests(socket, "thread/list").at(-1).payload.params.cursor, "next");
 });
 test("All uses separate active/archived queries and section order keeps active first", async t => {
     const {socket, session} = await setup(t); respond(socket, requests(socket, "thread/list").at(-1), {data: []}); await flush();
     session.changeBrowser({archive: "all", sort: "section"});
     const active = requests(socket, "thread/list").findLast(request => request.payload.params.sortKey === "section_position" && !request.payload.params.archived);
-    respond(socket, active, {data: [{id: "active"}], nextCursor: null}); await flush();
+    respond(socket, active, {data: [{id: "active"}], nextCursor: null}); await flush(); await completeThreadDiscovery(socket);
     const archived = requests(socket, "thread/list").findLast(request => request.payload.params.archived === true);
-    assert.ok(archived); respond(socket, archived, {data: [{id: "archived"}], nextCursor: null}); await flush();
+    assert.ok(archived); respond(socket, archived, {data: [{id: "archived"}], nextCursor: null}); await flush(); await completeThreadDiscovery(socket);
     assert.deepEqual(session.threadOrder("section"), ["active", "archived"]);
     assert.equal(session.model.thread("archived").archived, true);
 });
@@ -145,7 +146,7 @@ test("newer project/archive notifications survive an older list snapshot", async
 });
 test("same-membership children nest while cross-membership children remain discoverable", async t => {
     const {socket, session} = await setup(t);
-    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "parent", projectId: "p"}, {id: "same", parentThreadId: "parent", projectId: "p"}, {id: "other", parentThreadId: "parent", projectId: "q"}]}); await flush();
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "parent", projectId: "p"}, {id: "same", parentThreadId: "parent", projectId: "p"}, {id: "other", parentThreadId: "parent", projectId: "q"}]}); await flush(); await completeThreadDiscovery(socket);
     assert.deepEqual(new Set(session.threadOrder()), new Set(["parent", "other"]));
     session.changeBrowser({grouping: "ungrouped"}); assert.deepEqual(session.threadOrder(), ["parent"]);
 });
@@ -266,9 +267,10 @@ test("changing filters retires the pending repair and reconciles the new query",
 test("manual project sorting retires an old catalog read before admitting its replacement", async t => {
     const {socket, session} = await setup(t); const old = requests(socket, "project/list").at(-1);
     session.changeBrowser({manualProjects: true}); await flush();
+    assert.equal(requests(socket, "project/list").at(-1), old, "retired requests occupy their slot until the wire reply arrives");
+    respond(socket, old, {data: [{id: "old", name: "Stale"}]}); await flush();
     const current = requests(socket, "project/list").at(-1);
     assert.notEqual(current, old); assert.equal(current.payload.params.sortKey, "position");
-    respond(socket, old, {data: [{id: "old", name: "Stale"}]});
     respond(socket, current, {data: [{id: "new", name: "Current", position: 1}]}); await flush();
     assert.equal(session.model.projects.has("old"), false); assert.equal(session.model.projects.has("new"), true);
 });

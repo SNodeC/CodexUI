@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 
+class QAbstractScrollArea;
 class QMenu;
 class QAction;
 class QToolButton;
@@ -61,6 +62,7 @@ public:
   ~ThreadPane() override;
 
   void setActions(Actions actions);
+  [[nodiscard]] QAbstractScrollArea* scrollArea() const;
   void refresh(const ui::ThreadListSnapshot &snapshot);
   [[nodiscard]] bool applyRowPresentation(const ui::ThreadListRow &row);
   void beginOptimisticThread(const ui::ThreadListRow &draft);

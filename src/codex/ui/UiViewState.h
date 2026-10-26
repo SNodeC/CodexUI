@@ -85,6 +85,7 @@ struct ThreadListRow {
   std::string cwd;
   std::string workspaceChangeUnavailable;
   UiStatus status;
+  bool indirectActive = false;
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;

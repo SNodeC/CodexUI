@@ -44,7 +44,7 @@ function initialViewport(identity: string, owner: object): ThreadViewport {
         following: true,
         anchor: undefined,
         foldedCards: new Map(),
-        expanded: false,
+        expanded: true,
         codeScroll: new Map(),
     };
 }
