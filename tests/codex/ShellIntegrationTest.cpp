@@ -4171,6 +4171,64 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           "an exact selected-row removal does not reset the conversation");
 }
 
+void groupedStatusNotificationsRefreshAncestors(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    auto& graph = FrontendSessionTestPeer::graph(session);
+    WorkerLogic worker(graph, channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    GraphChange initial;
+    {
+        auto write = graph.write();
+        const auto entity = [&](NodeKind kind, const std::string& id, Value::Object fields) {
+            NodeState state;
+            state.fields = std::move(fields);
+            return write.upsert({kind, id}, std::move(state));
+        };
+        const auto project = entity(NodeKind::Project, "status-notify-project", {{"name", "Project"}});
+        const auto section = entity(NodeKind::ThreadSection, "status-notify-section", {{"name", "Section"}});
+        const auto thread = entity(NodeKind::Thread, "status-notify-thread", {{"name", "Member"}});
+        write.setStatus(thread, NodeStatus::NotLoaded);
+        write.relate(thread, RelationKind::ProjectMembership, project);
+        write.relate(thread, RelationKind::SectionMembership, section);
+        for (const auto* method : {"project/list", "threadSection/list"}) {
+            static_cast<void>(
+                entity(NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object()), {{"loaded", true}, {"hasMore", false}}));
+        }
+        initial = write.finish();
+    }
+    require(messageAdmitted(channels.sendGraphChanged(std::move(initial))), "group status fixture reaches the shell");
+    auto* tree = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    require(spinUntil([&] {
+                return threadItem(tree, "status-notify-project") && threadItem(tree, "status-notify-section");
+            }),
+            "group status fixture renders project and section rows");
+    auto* project = threadItem(tree, "status-notify-project");
+    auto* section = threadItem(tree, "status-notify-section");
+    for (const auto& [status, description] :
+         {std::pair{"idle", "loaded"}, std::pair{"active", "active"}, std::pair{"idle", "loaded"}, std::pair{"notLoaded", "not loaded"}}) {
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "thread/status/changed",
+                                        std::nullopt,
+                                        {{"threadId", "status-notify-thread"}, {"status", Value::Object{{"type", status}}}}}));
+        require(spinUntil([&] {
+                    const QString expected = QStringLiteral("Threads: ") + QString::fromLatin1(description);
+                    return threadItem(tree, "status-notify-project") == project && threadItem(tree, "status-notify-section") == section &&
+                           project && section && project->toolTip(0).contains(expected) && section->toolTip(0).contains(expected);
+                }),
+                "status-only protocol notifications update both ancestor circles without replacing rows");
+        if (const auto path = qEnvironmentVariable("CODEXUI_STATUS_SCREENSHOT_DIR"); !path.isEmpty()) {
+            tree->expandAll();
+            QApplication::processEvents();
+            require(shell.grab().save(path + "/shell-status-" + QString::fromLatin1(status) + ".png"),
+                    "full-shell group status evidence saved");
+        }
+    }
+}
+
 void optimisticDraftUsesOneTypedCreateAction(Configuration& configuration, bool grouped = false, bool multipleRoots = false) {
     FrontendSession session(configuration);
     ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
@@ -6531,6 +6589,7 @@ int main(int argc, char **argv) {
   connectionCapabilitiesRefreshOpenThreadActions(*configuration);
   forkActionsExposeLineageAndAdvancedOptions(*configuration);
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
+  groupedStatusNotificationsRefreshAncestors(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration, true);
   optimisticDraftUsesOneTypedCreateAction(*configuration, true, true);

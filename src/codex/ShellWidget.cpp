@@ -133,6 +133,7 @@ ThreadPaneRoute
 threadPaneRoute(const nodegraph::GraphChanged &change,
                 const nodegraph::NodeGraph::ReadAccess &access,
                 middle::ThreadPane::SortCriterion sortCriterion,
+                ui::ThreadGrouping grouping,
                 std::uint64_t lastRoutedRevision) {
   if (lastRoutedRevision != 0 && change.revision != 0 &&
       change.revision <= lastRoutedRevision)
@@ -223,8 +224,11 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
           fieldChanged(*read, node, "confirmedLocalPromptActivityAt",
                        change.revision)));
     if (read->structureChangedRevision(node) == change.revision ||
-        sortChanged || fieldChanged(*read, node, "archived", change.revision))
+        (grouping != ui::ThreadGrouping::Ungrouped &&
+         read->statusChangedRevision(node) == change.revision) ||
+        sortChanged || fieldChanged(*read, node, "archived", change.revision)) {
       return {true, true, {}};
+    }
     route.affected = true;
     if (std::ranges::find(route.rows, node) == route.rows.end())
       route.rows.push_back(node);
@@ -1773,6 +1777,7 @@ bool ShellWidget::Impl::handleGraphChanged(
           ? ThreadPaneRoute{true, true, {}}
           : threadPaneRoute(change, *read,
                             middleRegion->threads().currentSortCriterion(),
+                            middleRegion->threads().browserOptions().grouping,
                             routedThreadRevision);
   if (threads.structural) {
     pendingThreadPane = true;

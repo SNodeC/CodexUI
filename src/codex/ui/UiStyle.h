@@ -46,6 +46,7 @@ inline constexpr int markdownSelectionGutter = 6;
 inline constexpr int commandOutputHorizontalPadding = 7;
 inline constexpr int commandOutputVerticalPadding = 4;
 inline constexpr int projectCardEdgePadding = 8;
+inline constexpr auto projectVisibleRows = 8;
 inline constexpr auto hover = "#f1f5fb";
 
 namespace Palette {
@@ -164,6 +165,10 @@ inline constexpr auto yellowBorderHover = "#bec180";
 inline constexpr auto yellowBorderStrong = "#b8ba69";
 inline constexpr auto yellowText = "#5b5c26";
 
+// Vivid status accents are separate from the perceptually matched UI ramps.
+inline constexpr auto vividBlue = "#0066ff";
+inline constexpr auto vividGreen = "#00c853";
+
 } // namespace Palette
 
 // Semantic color roles: change palette assignments here, never in UI consumers.
@@ -209,8 +214,8 @@ inline constexpr auto groupBorder = Palette::blueBorder;
 inline constexpr auto threadFocusBorder = Palette::blueBorder;
 inline constexpr auto draftThreadSweep = Palette::orange;
 inline constexpr auto statusWarning = Palette::orange;
-inline constexpr auto statusActive = Palette::blue;
-inline constexpr auto statusSuccess = Palette::green;
+inline constexpr auto statusActive = Palette::vividBlue;
+inline constexpr auto statusSuccess = Palette::vividGreen;
 inline constexpr auto statusDanger = Palette::red;
 inline constexpr auto activeGroupHeaderSurface = Palette::limeSurfaceHover;
 inline constexpr auto draftThreadBorder = Palette::orangeBorderStrong;

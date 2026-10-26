@@ -16,11 +16,11 @@
     --composer-text: #1d2633; --copy-feedback-surface: #1d2633; --input-text: #1d2633; --text-primary: #1d2633; --text-strong: #1d2633; --tooltip-surface: #1d2633;
     --activity-active-text: #5471a6; --activity-spinner-accent: #5471a6; --primary-action: #5471a6; --raised-surface: #f8fafc; --subdued-surface: #f8fafc; --connection-input-text: #667085;
     --global-status-text: #667085; --text-secondary: #667085; --thread-disclosure-text: #667085; --thread-menu-text: #667085; --text-detail: #475467; --text-emphasis: #475467;
-    --status-active: #5471a6; --thread-status-active: #5471a6; --status-active-text: #415882; --status-danger: #9f5b5d; --thread-status-danger: #9f5b5d; --copy-failure-border: #7d4648;
-    --copy-failure-surface: #7d4648; --destructive-text: #7d4648; --status-danger-text: #7d4648; --status-failed-text: #7d4648; --validation-text: #7d4648; --status-success: #388262;
-    --thread-status-success: #388262; --final-answer-phase-text: #2a654c; --status-completed-text: #2a654c; --status-success-text: #2a654c; --status-warning: #986438; --status-warning-text: #774d2b;
+    --status-active: #0066ff; --thread-status-active: #0066ff; --status-active-text: #415882; --status-danger: #9f5b5d; --thread-status-danger: #9f5b5d; --copy-failure-border: #7d4648;
+    --copy-failure-surface: #7d4648; --destructive-text: #7d4648; --status-danger-text: #7d4648; --status-failed-text: #7d4648; --validation-text: #7d4648; --status-success: #00c853;
+    --thread-status-success: #00c853; --final-answer-phase-text: #2a654c; --status-completed-text: #2a654c; --status-success-text: #2a654c; --status-warning: #986438; --status-warning-text: #774d2b;
     --steer-action: #138282; --steer-action-hover: #0f6e6e; --steer-action-pressed: #0b5c5c; --steering-message-border: #9bdcdb; --steering-message-surface: #eaf8f7; --steering-message-text: #0d6565;
     --thread-status-idle: #cacccf; --thread-selected: #ffffb3; --thread-selected-border: #d0d2a1; --update-message-border: #e1cb9d; --update-message-surface: #f9f4ea; --update-message-phase-text: #6b5521;
     --user-message-border: #b7cff9; --user-message-surface: #eff5fe; --user-message-text: #415882; --notice-border: #efc4a4; --request-detail-border: #efc4a4; --notice-surface: #fcf2eb;
-    --request-detail-surface: #fcf2eb; --primary-action-hover: #47608e; --primary-action-pressed: #3a5076; --destructive-action-pressed: #713f41;
+    --request-detail-surface: #fcf2eb; --primary-action-hover: #47608e; --primary-action-pressed: #3a5076; --destructive-action-pressed: #713f41; --project-visible-rows: 8;
 }

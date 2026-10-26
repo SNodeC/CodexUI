@@ -103,7 +103,6 @@ struct ThreadListRow {
   std::int64_t order = 0;
   nlohmann::json query;
   bool pendingPage = false;
-  std::string appearanceColor;
 
   bool operator==(const ThreadListRow &) const = default;
 };

@@ -1933,9 +1933,6 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
       if (icon != appearance->end() && icon->is_string() &&
           !icon->get_ref<const std::string &>().empty())
         row.title = icon->get<std::string>() + " " + row.title;
-      const auto color = appearance->find("color");
-      if (color != appearance->end() && color->is_string())
-        row.appearanceColor = color->get<std::string>();
     };
     nlohmann::json filter = nlohmann::json::object();
     if (browser->archived != 2)
@@ -2148,38 +2145,51 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
       for (const auto index : roots)
         result.roots.push_back(family(family, index));
     }
-    const auto addPages = [&](const auto &self,
-                              std::vector<ThreadListRow> &rows) -> void {
-      for (auto &row : rows) {
-        self(self, row.children);
-        if (row.query.is_null())
-          continue;
-        const auto parameters = row.query.at("parameters");
-        if (browser->manualSections && row.kind == ThreadRowKind::Section) {
-          std::unordered_map<std::string, std::int64_t> rank;
-          // The API sorts active and archived pages independently; in All,
-          // preserve each server order and place active threads first.
-          for (int page = 0; page < (browser->archived == 2 ? 2 : 1); ++page) {
-            auto query = parameters;
-            if (browser->archived == 2)
-              query["archived"] = page != 0;
-            const auto state = catalogState("thread/list", query);
-            const auto *ids = state ? valueMember(*state, "ids") : nullptr;
-            if (ids && ids->asArray())
-              for (const auto &id : *ids->asArray())
-                rank.emplace(exactStringFromValue(&id), rank.size());
-          }
-          for (auto &child : row.children) {
-            const auto position = rank.find(child.id);
-            child.order = position == rank.end()
-                              ? std::numeric_limits<std::int64_t>::max() - 1
-                              : position->second;
-          }
+    const auto finalizeRows = [&](const auto& self, std::vector<ThreadListRow>& rows) -> UiStatus {
+        UiStatus aggregate{nodegraph::NodeStatus::NotLoaded};
+        for (auto& row : rows) {
+            const UiStatus descendants = self(self, row.children);
+            if (row.kind == ThreadRowKind::Project || row.kind == ThreadRowKind::Section) {
+                row.status = descendants;
+            }
+            // Fold descendants without changing an individual thread's own status.
+            for (const auto& status : {row.status, descendants}) {
+                if (isActiveStatus(status)) {
+                    aggregate = nodegraph::NodeStatus::Running;
+                } else if (!isActiveStatus(aggregate) && !statusTone(status).empty()) {
+                    aggregate = nodegraph::NodeStatus::Completed;
+                }
+            }
+            if (!row.query.is_null()) {
+                const auto parameters = row.query.at("parameters");
+                if (browser->manualSections && row.kind == ThreadRowKind::Section) {
+                    std::unordered_map<std::string, std::int64_t> rank;
+                    // The API sorts active and archived pages independently; in All,
+                    // preserve each server order and place active threads first.
+                    for (int page = 0; page < (browser->archived == 2 ? 2 : 1); ++page) {
+                        auto query = parameters;
+                        if (browser->archived == 2) {
+                            query["archived"] = page != 0;
+                        }
+                        const auto state = catalogState("thread/list", query);
+                        const auto* ids = state ? valueMember(*state, "ids") : nullptr;
+                        if (ids && ids->asArray()) {
+                            for (const auto& id : *ids->asArray()) {
+                                rank.emplace(exactStringFromValue(&id), rank.size());
+                            }
+                        }
+                    }
+                    for (auto& child : row.children) {
+                        const auto position = rank.find(child.id);
+                        child.order = position == rank.end() ? std::numeric_limits<std::int64_t>::max() - 1 : position->second;
+                    }
+                }
+                appendPages(row.children, "thread/list", parameters);
+            }
         }
-        appendPages(row.children, "thread/list", parameters);
-      }
+        return aggregate;
     };
-    addPages(addPages, result.roots);
+    finalizeRows(finalizeRows, result.roots);
     // Absence of membership is not another enclosing group. Standalone
     // sections and wholly ungrouped threads are peers of project cards.
     if (grouped) {

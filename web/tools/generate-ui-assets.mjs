@@ -80,6 +80,7 @@ const roles = {
     "primaryActionHover": "primary-action-hover",
     "primaryActionPressed": "primary-action-pressed",
     "destructiveActionPressed": "destructive-action-pressed",
+    "projectVisibleRows": "project-visible-rows",
 };
 export function generatedUiAssets() {
     const source = readFileSync(new URL("../../src/codex/ui/UiStyle.h", import.meta.url), "utf8");
@@ -96,7 +97,7 @@ export function generatedUiAssets() {
             const rgba = source.match(new RegExp(`${role.slice(1)} = qRgba\\(([^)]+)\\)`))[1].split(",").map(Number);
             return `#${rgba.map(channel => channel.toString(16).padStart(2,"0")).join("")}`;
         }
-        if (role.startsWith("#")) return role;
+        if (role.startsWith("#") || /^\d+$/u.test(role)) return role;
         if (!values.has(role)) throw new Error(`Unknown native UI role ${role}`);
         return value(values.get(role));
     };

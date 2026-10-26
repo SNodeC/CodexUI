@@ -22,7 +22,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
-#include <QInputDialog>
+#include <QKeyEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
@@ -112,6 +112,11 @@ QColor statusColor(const UiStatus &status, std::size_t pending, bool draft) {
   return QColor(QString::fromLatin1(UiStyle::threadInactive));
 }
 
+bool contextSelection(const QEvent* event) {
+    return event && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) &&
+           static_cast<const QMouseEvent*>(event)->button() == Qt::RightButton;
+}
+
 QString itemDescription(const ThreadTreeItem &item);
 
 } // namespace
@@ -148,61 +153,210 @@ public:
   std::int64_t order = 0;
   nlohmann::json query;
   bool pendingPage = false;
-  std::string appearanceColor;
+  int projectScroll = 0;
 #if QT_CONFIG(accessibility)
   QAccessible::Id accessibleId = 0;
 #endif
 };
 
+// Each row is displayed once. Project bodies project the outer tree's model,
+// selection and expansion; only their native viewport geometry is independent.
+class ProjectThreadView final : public QTreeView {
+public:
+    using QTreeView::QTreeView;
+
+protected:
+    QItemSelectionModel::SelectionFlags selectionCommand(const QModelIndex& index, const QEvent* event = nullptr) const override {
+        return contextSelection(event) ? QItemSelectionModel::NoUpdate : QTreeView::selectionCommand(index, event);
+    }
+    void drawBranches(QPainter*, const QRect&, const QModelIndex&) const override {
+    }
+    void keyPressEvent(QKeyEvent* event) override {
+        auto* outer = static_cast<QTreeWidget*>(parentWidget()->parentWidget());
+        QModelIndex destination;
+        if ((event->key() == Qt::Key_Up && currentIndex() == model()->index(0, 0, rootIndex())) ||
+            (event->key() == Qt::Key_Left && currentIndex().parent() == rootIndex() && !isExpanded(currentIndex()))) {
+            destination = rootIndex();
+        } else if (event->key() == Qt::Key_Down && !indexBelow(currentIndex()).isValid()) {
+            destination = outer->indexBelow(rootIndex());
+        }
+        if (destination.isValid()) {
+            outer->setCurrentIndex(destination);
+            outer->setFocus();
+            event->accept();
+        } else {
+            QTreeView::keyPressEvent(event);
+        }
+    }
+};
+
 class ThreadTreeWidget final : public QTreeWidget {
 public:
-  explicit ThreadTreeWidget(ThreadPane *owner)
-      : QTreeWidget(owner), owner_(owner), collator_(effectiveLocale()) {
-    setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    collator_.setCaseSensitivity(Qt::CaseInsensitive);
-    collator_.setIgnorePunctuation(true);
-    collator_.setNumericMode(true);
-  }
+    explicit ThreadTreeWidget(ThreadPane* owner)
+        : QTreeWidget(owner)
+        , owner_(owner)
+        , collator_(effectiveLocale()) {
+        setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        connect(this, &QTreeView::expanded, this, &ThreadTreeWidget::scheduleDelayedItemsLayout);
+        connect(this, &QTreeView::collapsed, this, &ThreadTreeWidget::scheduleDelayedItemsLayout);
+        const auto expansion = [this](const QModelIndex& index) {
+            for (auto* body : projectViews_) {
+                const QSignalBlocker blocked(body);
+                body->setExpanded(index, isExpanded(index));
+            }
+        };
+        connect(this, &QTreeView::expanded, this, expansion);
+        connect(this, &QTreeView::collapsed, this, expansion);
+        collator_.setCaseSensitivity(Qt::CaseInsensitive);
+        collator_.setIgnorePunctuation(true);
+        collator_.setNumericMode(true);
+    }
 
-  ~ThreadTreeWidget() override {
-    blockSignals(true);
-    verticalScrollBar()->blockSignals(true);
-    clear();
-  }
+    ~ThreadTreeWidget() override {
+        blockSignals(true);
+        verticalScrollBar()->blockSignals(true);
+        qDeleteAll(projectViews_);
+        projectViews_.clear();
+        clear();
+    }
 
-  [[nodiscard]] ThreadTreeItem *threadItem(QTreeWidgetItem *item) const {
-    return static_cast<ThreadTreeItem *>(item);
-  }
-  [[nodiscard]] ThreadTreeItem *threadItem(const QModelIndex &index) const {
-    return index.isValid() ? threadItem(itemFromIndex(index)) : nullptr;
-  }
-  [[nodiscard]] QRect rowRect(const QModelIndex &index) const {
-    QRect result = visualRect(index);
-    result.setLeft(viewport()->rect().left());
-    result.setRight(viewport()->rect().right());
-    return result;
-  }
-  [[nodiscard]] QMargins projectCardInsets(const QModelIndex &index) const {
-    const auto *item = threadItem(index);
-    if (!item)
-      return {};
-    const auto *outer = item;
-    while (outer->parent())
-      outer = threadItem(outer->parent());
-    if (outer->kind != ui::ThreadRowKind::Project ||
-        !outer->isExpanded() || outer->childCount() == 0)
-      return {};
-    const auto *last = outer;
-    while (last->isExpanded() && last->childCount())
-      last = threadItem(last->child(last->childCount() - 1));
-    return {0, item == outer ? UiStyle::projectCardEdgePadding : 0,
-            0, item == last ? UiStyle::projectCardEdgePadding : 0};
-  }
-  void setActiveThread(ThreadTreeItem *item) {
-    if (std::exchange(activeThreadIndex_, item ? indexFromItem(item) : QModelIndex{}) !=
-        activeThreadIndex_)
-      viewport()->update();
-  }
+    [[nodiscard]] ThreadTreeItem* threadItem(QTreeWidgetItem* item) const {
+        return static_cast<ThreadTreeItem*>(item);
+    }
+    [[nodiscard]] ThreadTreeItem* threadItem(const QModelIndex& index) const {
+        return index.isValid() ? threadItem(itemFromIndex(index)) : nullptr;
+    }
+    [[nodiscard]] QTreeView* rowView(const QModelIndex& index) const {
+        QTreeView* result = const_cast<ThreadTreeWidget*>(this);
+        QModelIndex root = index;
+        while (root.parent().isValid()) {
+            root = root.parent();
+        }
+        if (root != index) {
+            for (auto* body : projectViews_) {
+                if (body->rootIndex() == root) {
+                    result = body;
+                }
+            }
+        }
+        return result;
+    }
+    [[nodiscard]] QRect visualRect(const QModelIndex& index) const override {
+        auto* view = rowView(index);
+        QRect result = view == this ? QTreeWidget::visualRect(index) : view->visualRect(index);
+        if (view != this && result.isValid()) {
+            result.moveTopLeft(view->viewport()->mapTo(viewport(), result.topLeft()));
+        }
+        return result;
+    }
+    [[nodiscard]] QModelIndex indexAt(const QPoint& point) const override {
+        QModelIndex result = QTreeWidget::indexAt(point);
+        for (auto* body : projectViews_) {
+            if (body->geometry().contains(point)) {
+                result = body->indexAt(body->viewport()->mapFrom(viewport(), point));
+            }
+        }
+        return result;
+    }
+    [[nodiscard]] QRect rowRect(const QModelIndex& index) const {
+        QRect result = visualRect(index);
+        auto* view = rowView(index);
+        if (result.isValid()) {
+            result.setLeft(view->viewport()->mapTo(viewport(), QPoint{}).x());
+            result.setWidth(view->viewport()->width());
+        }
+        return result;
+    }
+    [[nodiscard]] int compactRowHeight() const {
+        return std::max(DisclosureHitExtent, fontMetrics().height() + 2 * ProjectRowVerticalPadding);
+    }
+    [[nodiscard]] int projectBodyHeight(const QModelIndex& project) const {
+        int count = 0;
+        const std::function<void(const QModelIndex&)> countRows = [&](const QModelIndex& parent) {
+            for (int row = 0; row < model()->rowCount(parent) && count < UiStyle::projectVisibleRows; ++row) {
+                const QModelIndex index = model()->index(row, 0, parent);
+                ++count;
+                if (isExpanded(index)) {
+                    countRows(index);
+                }
+            }
+        };
+        countRows(project);
+        return count * compactRowHeight();
+    }
+    [[nodiscard]] QMargins projectCardInsets(const QModelIndex& index) const {
+        const auto* item = threadItem(index);
+        const bool project =
+            item && !item->parent() && item->kind == ui::ThreadRowKind::Project && item->isExpanded() && item->childCount();
+        return {0, project ? UiStyle::projectCardEdgePadding : 0, 0, 0};
+    }
+    void updateRow(const QModelIndex& index) {
+        auto* view = rowView(index);
+        QRect rect = view == this ? QTreeWidget::visualRect(index) : view->visualRect(index);
+        rect.setLeft(0);
+        rect.setWidth(view->viewport()->width());
+        view->viewport()->update(rect);
+    }
+    void updateViewports() {
+        viewport()->update();
+        for (auto* body : projectViews_) {
+            body->viewport()->update();
+        }
+    }
+    template <typename Function>
+    void forEachVisibleRow(Function function) const {
+        QList<QTreeView*> views{const_cast<ThreadTreeWidget*>(this)};
+        for (auto* body : projectViews_) {
+            views.append(body);
+        }
+        for (auto* view : views) {
+            QModelIndex index = view == this ? QTreeWidget::indexAt(QPoint(viewport()->width() / 2, 0))
+                                             : view->indexAt(QPoint(view->viewport()->width() / 2, 0));
+            while (index.isValid() && view->visualRect(index).top() < view->viewport()->height()) {
+                if (rowRect(index).intersects(viewport()->rect())) {
+                    function(index);
+                }
+                index = view->indexBelow(index);
+            }
+        }
+    }
+    void doItemsLayout() override {
+        for (int row = 0; row < topLevelItemCount(); ++row) {
+            auto* item = threadItem(topLevelItem(row));
+            setRowHidden(row, {}, false);
+            const std::function<void(QTreeWidgetItem*)> hideChildren = [&](QTreeWidgetItem* parent) {
+                for (int child = 0; child < parent->childCount(); ++child) {
+                    const bool hidden = parent == item && item->kind == ui::ThreadRowKind::Project && item->isExpanded();
+                    const auto parentIndex = indexFromItem(parent);
+                    if (isRowHidden(child, parentIndex) != hidden) {
+                        setRowHidden(child, parentIndex, hidden);
+                    }
+                    hideChildren(parent->child(child));
+                }
+            };
+            hideChildren(item);
+        }
+        QTreeWidget::doItemsLayout();
+        positionProjectViews();
+    }
+    void scrollTo(const QModelIndex& index, ScrollHint hint = EnsureVisible) override {
+        QModelIndex root = index;
+        while (root.parent().isValid()) {
+            root = root.parent();
+        }
+        const auto* item = threadItem(root);
+        QTreeWidget::scrollTo(item && item->kind == ui::ThreadRowKind::Project ? root : index, hint);
+        positionProjectViews();
+        if (auto* view = rowView(index); view != this) {
+            view->scrollTo(index, hint);
+        }
+    }
+    void positionProjectViews();
+    void setActiveThread(ThreadTreeItem* item) {
+        if (std::exchange(activeThreadIndex_, item ? indexFromItem(item) : QModelIndex{}) != activeThreadIndex_) {
+            updateViewports();
+        }
+    }
   [[nodiscard]] QModelIndex activeCardIndex() const {
     QModelIndex index = activeThreadIndex_;
     while (index.parent().isValid())
@@ -269,13 +423,46 @@ protected:
   QItemSelectionModel::SelectionFlags
   selectionCommand(const QModelIndex &index,
                    const QEvent *event = nullptr) const override {
-    if (event && (event->type() == QEvent::MouseButtonPress ||
-                  event->type() == QEvent::MouseButtonRelease)) {
-      const auto *mouse = static_cast<const QMouseEvent *>(event);
-      if (mouse->button() == Qt::RightButton)
-        return QItemSelectionModel::NoUpdate;
-    }
-    return QTreeWidget::selectionCommand(index, event);
+    return contextSelection(event) ? QItemSelectionModel::NoUpdate : QTreeWidget::selectionCommand(index, event);
+  }
+
+  bool viewportEvent(QEvent* event) override {
+      bool handled = false;
+      if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick) {
+          auto* mouse = static_cast<QMouseEvent*>(event);
+          const QModelIndex index = QTreeWidget::indexAt(mouse->position().toPoint());
+          const auto* item = threadItem(index);
+          QStyleOptionViewItem option;
+          initViewItemOption(&option);
+          option.rect = QTreeWidget::visualRect(index);
+          option.rect.setLeft(option.rect.left() - indentation());
+          option.rect.setWidth(indentation());
+          const bool disclosure =
+              style()->subElementRect(QStyle::SE_TreeViewDisclosureItem, &option, this).contains(mouse->position().toPoint());
+          if (item && item->kind == ui::ThreadRowKind::Project && item->childCount() && mouse->button() == Qt::LeftButton &&
+              (event->type() == QEvent::MouseButtonPress ? disclosure : !disclosure)) {
+              // Qt omits disclosure hit testing when this view's children are hidden.
+              setExpanded(index, !isExpanded(index));
+              event->accept();
+              handled = true;
+          }
+      }
+      return handled || QTreeWidget::viewportEvent(event);
+  }
+
+  void keyPressEvent(QKeyEvent* event) override {
+      const QModelIndex current = currentIndex();
+      const auto* item = threadItem(current);
+      if ((event->key() == Qt::Key_Down || event->key() == Qt::Key_Right) && item && item->kind == ui::ThreadRowKind::Project &&
+          isExpanded(current) && item->childCount()) {
+          const QModelIndex child = model()->index(0, 0, current);
+          setCurrentIndex(child);
+          scrollTo(child);
+          rowView(child)->setFocus();
+          event->accept();
+      } else {
+          QTreeWidget::keyPressEvent(event);
+      }
   }
 
   void drawBranches(QPainter *, const QRect &,
@@ -300,8 +487,14 @@ protected:
       owner_->actions.refreshGroups();
   }
 
+  void scrollContentsBy(int dx, int dy) override {
+      QTreeWidget::scrollContentsBy(dx, dy);
+      positionProjectViews();
+  }
+
   void resizeEvent(QResizeEvent *event) override {
     QTreeWidget::resizeEvent(event);
+    positionProjectViews();
     owner_->updateAnimationTimer();
     if (event->oldSize().isValid())
       owner_->requestMoreNearListEnd();
@@ -345,6 +538,7 @@ private:
   }
 
   // A lifetime-safe projection of the active conversation, not keyboard focus.
+  QList<ProjectThreadView*> projectViews_;
   QPersistentModelIndex activeThreadIndex_;
   ThreadPane *owner_ = nullptr;
   QCollator collator_;
@@ -359,9 +553,13 @@ QRect ThreadTreeStyle::subElementRect(SubElement element,
     if (element != SE_TreeViewDisclosureItem || !option)
       return native;
     if (const auto *tree = dynamic_cast<const ThreadTreeWidget *>(widget)) {
-      const QModelIndex index = tree->indexAt(
+      const QModelIndex index = tree->QTreeWidget::indexAt(
           QPoint(tree->viewport()->width() / 2, option->rect.center().y()));
       native = native.marginsRemoved(tree->projectCardInsets(index));
+      const auto* item = tree->threadItem(index);
+      if (item && item->kind == ui::ThreadRowKind::Project && item->isExpanded() && item->childCount()) {
+          native.setHeight(tree->compactRowHeight());
+      }
     }
     const int verticalInset =
         std::max(0, (native.height() - DisclosureHitExtent) / 2);
@@ -400,18 +598,14 @@ bool ThreadTreeItem::operator<(const QTreeWidgetItem &other) const {
 
 namespace {
 
-QString displayTitle(const ThreadTreeItem &item) {
-  QString result = text(item.title);
-  if (result.isEmpty())
-    result = text(item.id.substr(0, 12));
-  if (item.pending != 0)
-    result.prepend(QStringLiteral("! "));
-  if (item.kind == ui::ThreadRowKind::Project)
-    result.prepend(QStringLiteral("Project · "));
-  else if (item.kind == ui::ThreadRowKind::Section && !item.parent())
-    result.prepend(QStringLiteral("Section · "));
-  return result;
-}
+    QString displayTitle(const ThreadTreeItem& item) {
+        QString result = text(item.title);
+        if (result.isEmpty())
+            result = text(item.id.substr(0, 12));
+        if (item.pending != 0)
+            result.prepend(QStringLiteral("! "));
+        return item.kind == ui::ThreadRowKind::Section && !item.parent() ? QStringLiteral("Section · ") + result : result;
+    }
 
 int itemLevel(const ThreadTreeItem *item) {
   int level = 1;
@@ -421,34 +615,38 @@ int itemLevel(const ThreadTreeItem *item) {
   return level;
 }
 
-QString itemDescription(const ThreadTreeItem &item) {
-  if (item.kind != ui::ThreadRowKind::Thread)
-    return displayTitle(item) + QLatin1Char('\n') + text(item.details);
-  QStringList details{
-      displayTitle(item),
-      QStringLiteral("Status: %1").arg(text(displayStatus(item.status))),
-      QStringLiteral("Workspace: %1")
-          .arg(item.cwd.empty() ? QStringLiteral("Unknown") : text(item.cwd)),
-      QStringLiteral("Recent turn: %1").arg(activityText(item.recencyAt)),
-      QStringLiteral("Created: %1").arg(activityText(item.createdAt)),
-      QStringLiteral("Last activity: %1")
-          .arg(activityText(item.lastActivityAt)),
-      QStringLiteral("Level %1").arg(itemLevel(&item))};
-  if (item.pending != 0)
-    details.push_back(
-        QStringLiteral("%1 pending request(s)").arg(item.pending));
-  if (item.draft)
-    details.push_back(QStringLiteral("Draft thread"));
-  if (item.awaitingPrompt)
-    details.push_back(
-        QStringLiteral("Waiting for prompt to enter conversation"));
-  if (const auto *parent =
-          item.parent() ? static_cast<const ThreadTreeItem *>(item.parent())
-                        : nullptr)
-    details.push_back(QStringLiteral("Parent: %1").arg(displayTitle(*parent)));
-  details << QStringLiteral("Server timestamps:\n") +
-                 ui::timingDetails(item.timing);
-  return details.join(QLatin1Char('\n'));
+QString itemDescription(const ThreadTreeItem& item) {
+    QStringList details{displayTitle(item)};
+    if (item.kind != ui::ThreadRowKind::Thread) {
+        if (item.kind != ui::ThreadRowKind::Page) {
+            details.push_back(QStringLiteral("Threads: %1")
+                                  .arg(isActiveStatus(item.status)                                ? QStringLiteral("active")
+                                       : item.status.semantic == nodegraph::NodeStatus::Completed ? QStringLiteral("loaded")
+                                                                                                  : QStringLiteral("not loaded")));
+        }
+        details.push_back(text(item.details));
+    } else {
+        details << QStringLiteral("Status: %1").arg(text(displayStatus(item.status)))
+                << QStringLiteral("Workspace: %1").arg(item.cwd.empty() ? QStringLiteral("Unknown") : text(item.cwd))
+                << QStringLiteral("Recent turn: %1").arg(activityText(item.recencyAt))
+                << QStringLiteral("Created: %1").arg(activityText(item.createdAt))
+                << QStringLiteral("Last activity: %1").arg(activityText(item.lastActivityAt))
+                << QStringLiteral("Level %1").arg(itemLevel(&item));
+        if (item.pending != 0) {
+            details.push_back(QStringLiteral("%1 pending request(s)").arg(item.pending));
+        }
+        if (item.draft) {
+            details.push_back(QStringLiteral("Draft thread"));
+        }
+        if (item.awaitingPrompt) {
+            details.push_back(QStringLiteral("Waiting for prompt to enter conversation"));
+        }
+        if (const auto* parent = item.parent() ? static_cast<const ThreadTreeItem*>(item.parent()) : nullptr) {
+            details.push_back(QStringLiteral("Parent: %1").arg(displayTitle(*parent)));
+        }
+        details << QStringLiteral("Server timestamps:\n") + ui::timingDetails(item.timing);
+    }
+    return details.join(QLatin1Char('\n'));
 }
 
 bool itemIsVisible(const ThreadTreeWidget &tree, const ThreadTreeItem *item) {
@@ -467,22 +665,22 @@ public:
   explicit ThreadItemDelegate(ThreadTreeWidget *tree)
       : QStyledItemDelegate(tree), tree_(tree) {}
 
-  QSize sizeHint(const QStyleOptionViewItem &option,
-                 const QModelIndex &index) const override {
-    const auto *item = tree_->threadItem(index);
-    if (!item)
-      return {0, ThreadRowHeight};
-    const auto *outer = item;
-    while (outer->parent())
-      outer = tree_->threadItem(outer->parent());
-    if (outer->kind != ui::ThreadRowKind::Project ||
-        !outer->isExpanded() || outer->childCount() == 0)
-      return {0, ThreadRowHeight};
-    const QMargins insets = tree_->projectCardInsets(index);
-    return {0, std::max(DisclosureHitExtent,
-                        QFontMetrics(titleFont(option.font, *item)).height() +
-                            2 * ProjectRowVerticalPadding) +
-                   insets.top() + insets.bottom()};
+  QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex& index) const override {
+      const auto* item = tree_->threadItem(index);
+      int height = ThreadRowHeight;
+      if (item) {
+          const auto* outer = item;
+          while (outer->parent()) {
+              outer = tree_->threadItem(outer->parent());
+          }
+          if (outer->kind == ui::ThreadRowKind::Project && outer->isExpanded() && outer->childCount()) {
+              height = tree_->compactRowHeight();
+              if (item == outer) {
+                  height += 2 * UiStyle::projectCardEdgePadding + tree_->projectBodyHeight(index);
+              }
+          }
+      }
+      return {0, height};
   }
 
   void paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -491,6 +689,9 @@ public:
     if (!item)
       return;
     const QRect row = tree_->rowRect(index);
+    auto* view = tree_->rowView(index);
+    painter->save();
+    painter->translate(view->viewport()->mapFrom(tree_->viewport(), QPoint{}));
     QStyleOptionViewItem effective(option);
     effective.rect = row;
     if (tree_->isContextHighlighted(item))
@@ -506,7 +707,10 @@ public:
     const bool hovered = effective.state.testFlag(QStyle::State_MouseOver);
     const QColor rowBackground(QString::fromLatin1(
         selected ? UiStyle::threadSelected : hovered ? UiStyle::hover : UiStyle::panel));
-    const QRect contentRow = row.marginsRemoved(tree_->projectCardInsets(index));
+    QRect contentRow = row.marginsRemoved(tree_->projectCardInsets(index));
+    if (item == outer && outer->kind == ui::ThreadRowKind::Project && outer->isExpanded() && outer->childCount()) {
+        contentRow.setHeight(tree_->compactRowHeight());
+    }
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     if (!grouped && item->kind != ui::ThreadRowKind::Page) {
@@ -522,14 +726,13 @@ public:
     if (!grouped && item->kind == ui::ThreadRowKind::Page)
       painter->fillRect(row, QColor(QString::fromLatin1(UiStyle::sidebar)));
     if (grouped) {
-      // Paint only this row's slice of the enclosing card. Qt continues to own
-      // row geometry, disclosure, input and accessibility; no container
-      // widgets.
       const auto *last = outer;
       while (last->isExpanded() && last->childCount())
         last = tree_->threadItem(last->child(last->childCount() - 1));
       QRectF surface = tree_->rowRect(tree_->indexFromItem(outer));
-      surface.setBottom(tree_->rowRect(tree_->indexFromItem(last)).bottom());
+      if (outer->kind != ui::ThreadRowKind::Project) {
+          surface.setBottom(tree_->rowRect(tree_->indexFromItem(last)).bottom());
+      }
       surface.adjust(0.5, 3.5, -0.5, -3.5);
       painter->setClipRect(row, Qt::IntersectClip);
       painter->setPen(QColor(QString::fromLatin1(
@@ -541,8 +744,7 @@ public:
       clip.addRoundedRect(surface.adjusted(1, 1, -1, -1), 7, 7);
       painter->setClipPath(clip, Qt::IntersectClip);
       if (activeCard && item == outer)
-        painter->fillRect(row.adjusted(2, 0, -2, 0),
-                          QColor(QString::fromLatin1(UiStyle::activeGroupHeaderSurface)));
+          painter->fillRect(contentRow.adjusted(2, 0, -2, 0), QColor(QString::fromLatin1(UiStyle::activeGroupHeaderSurface)));
       else if (selected || hovered)
         painter->fillRect(contentRow.adjusted(2, 0, -2, 0), rowBackground);
     }
@@ -601,14 +803,8 @@ public:
                             QRectF(contentRow).center().y());
     painter->setPen(Qt::NoPen);
     painter->setBrush(statusColor(item->status, item->pending, item->draft));
-    if (item->kind == ui::ThreadRowKind::Thread)
-      painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
-    else if (!item->appearanceColor.empty()) {
-      const QColor color(text(item->appearanceColor));
-      if (color.isValid()) {
-        painter->setBrush(color);
+    if (item->kind != ui::ThreadRowKind::Page) {
         painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
-      }
     }
 
     const QFont font = titleFont(option.font, *item);
@@ -639,6 +835,7 @@ public:
       painter->drawRoundedRect(QRectF(row).adjusted(0.5, 3.5, -0.5, -3.5), 8.0,
                                8.0);
     }
+    painter->restore();
     painter->restore();
   }
 
@@ -688,8 +885,7 @@ public:
     result.focusable = result.selectable = !result.disabled && visible;
     result.selected = tree_->selectionModel()->isSelected(
         tree_->indexFromItem(current));
-    result.focused =
-        visible && tree_->hasFocus() && tree_->currentItem() == current;
+    result.focused = visible && tree_->rowView(tree_->indexFromItem(current))->hasFocus() && tree_->currentItem() == current;
     result.expandable = current->childCount() != 0;
     if (result.expandable) {
       result.expanded = current->isExpanded();
@@ -708,7 +904,10 @@ public:
     const ThreadTreeItem *current = item();
     if (!itemIsVisible(*tree_, current))
       return {};
-    const QRect local = tree_->rowRect(tree_->indexFromItem(current));
+    const auto index = tree_->indexFromItem(current);
+    auto* view = tree_->rowView(index);
+    const QRect bounds(view->viewport()->mapTo(tree_->viewport(), QPoint{}), view->viewport()->size());
+    const QRect local = tree_->rowRect(index).intersected(bounds).intersected(tree_->viewport()->rect());
     return local.isEmpty()
                ? QRect{}
                : QRect(tree_->viewport()->mapToGlobal(local.topLeft()),
@@ -792,7 +991,8 @@ public:
         action == QAccessibleActionInterface::setFocusAction()) {
       tree_->setCurrentItem(current);
       current->setSelected(true);
-      tree_->setFocus(Qt::OtherFocusReason);
+      tree_->scrollTo(tree_->indexFromItem(current));
+      tree_->rowView(tree_->indexFromItem(current))->setFocus(Qt::OtherFocusReason);
       if (action == QAccessibleActionInterface::pressAction() &&
           current->kind != ui::ThreadRowKind::Thread)
         tree_->activateItem(current);
@@ -852,7 +1052,7 @@ public:
     ThreadTreeWidget *view = tree();
     ThreadTreeItem *current =
         view ? view->threadItem(view->currentItem()) : nullptr;
-    return view && view->hasFocus() && itemIsVisible(*view, current)
+    return view && current && view->rowView(view->indexFromItem(current))->hasFocus() && itemIsVisible(*view, current)
                ? view->accessibleItem(current)
                : nullptr;
   }
@@ -861,10 +1061,13 @@ public:
   }
   QList<QAccessibleInterface *> selectedItems() const override {
     QList<QAccessibleInterface *> result;
-    if (tree())
-      for (QTreeWidgetItem *item : tree()->selectedItems())
-        if (!item->parent())
-          result.push_back(tree()->accessibleItem(tree()->threadItem(item)));
+    if (tree()) {
+      for (const auto& index : tree()->selectionModel()->selectedRows()) {
+        if (!index.parent().isValid()) {
+          result.push_back(tree()->accessibleItem(tree()->threadItem(index)));
+        }
+      }
+    }
     return result;
   }
   bool select(QAccessibleInterface *candidate) override {
@@ -902,10 +1105,23 @@ private:
   }
 };
 
-QAccessibleInterface *threadAccessibleFactory(const QString &,
-                                              QObject *object) {
-  auto *tree = dynamic_cast<ThreadTreeWidget *>(object);
-  return tree ? new ThreadTreeAccessible(tree) : nullptr;
+// Viewport focus resolves to the same stable logical row interfaces as the tree.
+class ProjectThreadAccessible final : public QAccessibleWidget {
+public:
+    explicit ProjectThreadAccessible(ProjectThreadView* body)
+        : QAccessibleWidget(body, QAccessible::Pane) {
+    }
+    QAccessibleInterface* focusChild() const override {
+        auto* body = static_cast<ProjectThreadView*>(object());
+        auto* tree = static_cast<ThreadTreeWidget*>(body->parentWidget()->parentWidget());
+        return body->hasFocus() ? tree->accessibleItem(tree->threadItem(body->currentIndex())) : nullptr;
+    }
+};
+
+QAccessibleInterface* threadAccessibleFactory(const QString&, QObject* object) {
+    auto* tree = dynamic_cast<ThreadTreeWidget*>(object);
+    auto* body = dynamic_cast<ProjectThreadView*>(object);
+    return tree ? static_cast<QAccessibleInterface*>(new ThreadTreeAccessible(tree)) : body ? new ProjectThreadAccessible(body) : nullptr;
 }
 
 void sendThreadEvent(QAccessibleInterface *interface,
@@ -1004,19 +1220,108 @@ findPresentation(const std::vector<ui::ThreadListRow> &roots,
 
 } // namespace
 
-void ThreadTreeWidget::currentChanged(const QModelIndex &current,
-                                      const QModelIndex &previous) {
-  QAbstractItemView::currentChanged(current, previous);
-  if (allColumnsShowFocus()) {
-    if (previous.isValid())
-      viewport()->update(rowRect(previous));
-    if (current.isValid())
-      viewport()->update(rowRect(current));
-  }
+void ThreadTreeWidget::positionProjectViews() {
+    projectViews_.removeIf([this](ProjectThreadView* body) {
+        const QModelIndex root = body->rootIndex();
+        const QRect card = QTreeWidget::visualRect(root);
+        const bool retire = !root.isValid() || !isExpanded(root) || (!card.intersects(viewport()->rect()) && !body->hasFocus());
+        if (retire) {
+            delete body;
+        }
+        return retire;
+    });
+    QModelIndex root = QTreeWidget::indexAt(QPoint(viewport()->width() / 2, 0));
+    while (root.isValid() && QTreeWidget::visualRect(root).top() < viewport()->height()) {
+        const auto* item = threadItem(root);
+        if (!root.parent().isValid() && item->kind == ui::ThreadRowKind::Project && isExpanded(root) && item->childCount()) {
+            auto found = std::find_if(projectViews_.begin(), projectViews_.end(), [&](auto* body) {
+                return body->rootIndex() == root;
+            });
+            ProjectThreadView* body = found == projectViews_.end() ? nullptr : *found;
+            if (!body) {
+                body = new ProjectThreadView(viewport());
+                const QSignalBlocker blocked(body);
+                body->setObjectName(QStringLiteral("projectThreadBody"));
+                body->setModel(model());
+                body->setSelectionModel(selectionModel());
+                body->setItemDelegate(itemDelegate());
+                body->setRootIndex(root);
+                body->setHeaderHidden(true);
+                body->setIndentation(ThreadIndent);
+                body->setSelectionBehavior(selectionBehavior());
+                body->setMouseTracking(true);
+                body->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                body->setStyle(style());
+                body->setStyleSheet(
+                    QStringLiteral("QTreeView#projectThreadBody{background:transparent;border:0;padding-left:%1px;outline:0;}")
+                        .arg(ThreadIndent));
+                const std::function<void(const QModelIndex&)> projectExpansion = [&](const QModelIndex& parent) {
+                    for (int row = 0; row < model()->rowCount(parent); ++row) {
+                        const QModelIndex child = model()->index(row, 0, parent);
+                        if (isExpanded(child)) {
+                            body->setExpanded(child, true);
+                            projectExpansion(child);
+                        }
+                    }
+                };
+                projectExpansion(root);
+                connect(body, &QTreeView::expanded, this, [this](const QModelIndex& index) {
+                    setExpanded(index, true);
+                });
+                connect(body, &QTreeView::collapsed, this, [this](const QModelIndex& index) {
+                    setExpanded(index, false);
+                });
+                connect(body, &QTreeView::activated, this, [this](const QModelIndex& index) {
+                    owner_->activateBrowserRow(threadItem(index));
+                });
+                connect(body, &QTreeView::clicked, this, [this](const QModelIndex& index) {
+                    if (threadItem(index)->kind == ui::ThreadRowKind::Page) {
+                        owner_->activateBrowserRow(threadItem(index));
+                    }
+                });
+                body->setContextMenuPolicy(Qt::CustomContextMenu);
+                connect(body, &QTreeView::customContextMenuRequested, this, [this, body](const QPoint& point) {
+                    owner_->showContextMenu(body->viewport()->mapTo(viewport(), point));
+                });
+                connect(body->verticalScrollBar(), &QScrollBar::valueChanged, this, [this, body](int value) {
+                    if (auto* project = threadItem(body->rootIndex())) {
+                        project->projectScroll = value;
+                    }
+                    owner_->updateAnimationTimer();
+                    owner_->requestMoreNearListEnd();
+                });
+                projectViews_.append(body);
+            }
+            QRect bounds = QTreeWidget::visualRect(root);
+            bounds.setLeft(1);
+            bounds.setRight(viewport()->width() - 2);
+            bounds.setTop(bounds.top() + UiStyle::projectCardEdgePadding + compactRowHeight());
+            bounds.setHeight(projectBodyHeight(root));
+            const QSignalBlocker scrolling(body->verticalScrollBar());
+            const int offset = item->projectScroll;
+            body->setGeometry(bounds);
+            body->setAccessibleName(text(item->title));
+            body->show();
+            body->doItemsLayout();
+            body->verticalScrollBar()->setValue(offset);
+            threadItem(root)->projectScroll = body->verticalScrollBar()->value();
+        }
+        root = QTreeWidget::indexBelow(root);
+    }
+}
+
+void ThreadTreeWidget::currentChanged(const QModelIndex& current, const QModelIndex& previous) {
+    QAbstractItemView::currentChanged(current, previous);
+    if (allColumnsShowFocus()) {
+        for (const auto& index : {previous, current}) {
+            if (index.isValid()) {
+                updateRow(index);
+            }
+        }
+    }
 #if QT_CONFIG(accessibility)
-  if (!signalsBlocked() && current.isValid() && hasFocus())
-    sendThreadEvent(accessibleItemForEvent(threadItem(current)),
-                    QAccessible::Focus);
+    if (!signalsBlocked() && current.isValid() && rowView(current)->hasFocus())
+        sendThreadEvent(accessibleItemForEvent(threadItem(current)), QAccessible::Focus);
 #endif
 }
 
@@ -1276,19 +1581,13 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   filters->addWidget(search, 1);
   filters->addWidget(archive);
   layout->addLayout(filters);
+  layout->addSpacing(8);
 
   tree = new ThreadTreeWidget(this);
   tree->setObjectName(QStringLiteral("threadList"));
   tree->setAccessibleName(QStringLiteral("Threads"));
   tree->setHeaderHidden(true);
-  tree->setColumnCount(1);
-  tree->setRootIsDecorated(true);
-  tree->setItemsExpandable(true);
-  tree->setExpandsOnDoubleClick(true);
   tree->setIndentation(ThreadIndent);
-  tree->setAnimated(false);
-  tree->setSelectionMode(QAbstractItemView::SingleSelection);
-  tree->setSelectionBehavior(QAbstractItemView::SelectRows);
   tree->setMouseTracking(true);
   tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   tree->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1728,7 +2027,6 @@ bool ThreadPane::applyItemPresentation(
   assign(item->details, row.details);
   assign(item->query, row.query);
   assign(item->pendingPage, row.pendingPage);
-  assign(item->appearanceColor, row.appearanceColor);
   assign(item->draft, draft);
   assign(item->awaitingPrompt, row.awaitingPromptConversation);
   assign(item->animationEpoch,
@@ -1737,8 +2035,9 @@ bool ThreadPane::applyItemPresentation(
                                  : row.pendingPromptAdmittedAtMs.value_or(0)));
   if (!changed)
     return false;
-  if (item->treeWidget() == tree)
-    tree->viewport()->update(tree->rowRect(tree->indexFromItem(item)));
+  if (item->treeWidget() == tree) {
+      tree->updateRow(tree->indexFromItem(item));
+  }
 #if QT_CONFIG(accessibility)
   for (const auto &[observedItem, state] : observed)
     notifyThreadAccessibility(observedItem, state);
@@ -1941,7 +2240,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   const nodegraph::NodeRef currentTarget =
       currentBefore ? currentBefore->target : nodegraph::NodeRef{};
 #if QT_CONFIG(accessibility)
-  const QList<QTreeWidgetItem *> selectedBeforeItems = tree->selectedItems();
+  const QModelIndexList selectedBeforeItems = tree->selectionModel()->selectedRows();
   const auto *selectedBefore =
       selectedBeforeItems.isEmpty()
           ? nullptr
@@ -2151,7 +2450,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
     if (found != rows.end())
       notifyThreadAccessibility(found->second, state);
   }
-  const QList<QTreeWidgetItem *> selectedAfterItems = tree->selectedItems();
+  const QModelIndexList selectedAfterItems = tree->selectionModel()->selectedRows();
   ThreadTreeItem *const selectedAfter =
       selectedAfterItems.isEmpty()
           ? nullptr
@@ -2167,7 +2466,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   ThreadTreeItem *const currentAfter = tree->threadItem(tree->currentItem());
   ThreadTreeItem *const currentBeforeRetained =
       retainedByKey(currentKey);
-  if (tree->hasFocus() && currentAfter &&
+  if (currentAfter && tree->rowView(tree->indexFromItem(currentAfter))->hasFocus() &&
       currentAfter != currentBeforeRetained)
     sendThreadEvent(tree->accessibleItemForEvent(currentAfter),
                     QAccessible::Focus);
@@ -2213,25 +2512,18 @@ void ThreadPane::updateAnimationTimer(bool repaint) {
   const qint64 now = QDateTime::currentMSecsSinceEpoch();
   qint64 earliest = std::numeric_limits<qint64>::max();
   bool active = false;
-  QModelIndex index = tree->indexAt(QPoint(1, 1));
-  if (!index.isValid())
-    index = tree->indexAt(QPoint(tree->viewport()->width() / 2, 1));
-  while (index.isValid()) {
-    const QRect rect = tree->visualRect(index);
-    if (rect.top() >= tree->viewport()->height())
-      break;
-    const ThreadTreeItem *item = tree->threadItem(index);
-    if (itemCanAnimate(*item, now)) {
-      active = true;
-      if (repaint)
-        tree->viewport()->update(tree->rowRect(index));
-    } else if (item->awaitingPrompt && item->animationEpoch > 0) {
-      const qint64 deadline =
-          item->animationEpoch + PendingAnimationDelayMilliseconds;
-      earliest = std::min(earliest, deadline - now);
-    }
-    index = tree->indexBelow(index);
-  }
+  tree->forEachVisibleRow([&](const QModelIndex& index) {
+      const ThreadTreeItem* item = tree->threadItem(index);
+      if (itemCanAnimate(*item, now)) {
+          active = true;
+          if (repaint) {
+              tree->updateRow(index);
+          }
+      } else if (item->awaitingPrompt && item->animationEpoch > 0) {
+          const qint64 deadline = item->animationEpoch + PendingAnimationDelayMilliseconds;
+          earliest = std::min(earliest, deadline - now);
+      }
+  });
   if (active) {
     if (!optimisticAnimation->isActive() ||
         optimisticAnimation->isSingleShot() ||
@@ -2256,19 +2548,13 @@ void ThreadPane::updateAnimationTimer(bool repaint) {
 
 void ThreadPane::requestMoreNearListEnd() {
   if (actions.browse) {
-    QModelIndex index = tree->indexAt(QPoint(tree->viewport()->width() / 2, 0));
-    if (!index.isValid())
-      index = tree->model()->index(0, 0);
-    while (index.isValid()) {
-      if (tree->visualRect(index).top() >= tree->viewport()->height())
-        break;
-      auto *item = tree->threadItem(index);
-      if (item->kind == ui::ThreadRowKind::Page && !item->pendingPage &&
-          item->details.empty())
-        activateBrowserRow(item);
-      index = tree->indexBelow(index);
-    }
-    return;
+      tree->forEachVisibleRow([&](const QModelIndex& index) {
+          auto* item = tree->threadItem(index);
+          if (item->kind == ui::ThreadRowKind::Page && !item->pendingPage && item->details.empty()) {
+              activateBrowserRow(item);
+          }
+      });
+      return;
   }
   if (!actions.loadMore || tree->topLevelItemCount() == 0)
     return;
@@ -2279,15 +2565,16 @@ void ThreadPane::requestMoreNearListEnd() {
     actions.loadMore();
 }
 
-std::optional<ThreadPane::VisibleThread>
-ThreadPane::visiblySelectedThread() const {
-  const QList<QTreeWidgetItem *> selected = tree->selectedItems();
-  if (selected.size() != 1 || !selected.front())
-    return std::nullopt;
-  const ThreadTreeItem *item = tree->threadItem(selected.front());
-  if (item->kind != ui::ThreadRowKind::Thread)
-    return std::nullopt;
-  return VisibleThread{item->id, item->presentationKey, item->target};
+std::optional<ThreadPane::VisibleThread> ThreadPane::visiblySelectedThread() const {
+    const QModelIndexList selected = tree->selectionModel()->selectedRows();
+    std::optional<VisibleThread> result;
+    if (selected.size() == 1) {
+        const auto* item = tree->threadItem(selected.front());
+        if (item->kind == ui::ThreadRowKind::Thread) {
+            result = VisibleThread{item->id, item->presentationKey, item->target};
+        }
+    }
+    return result;
 }
 
 bool ThreadPane::retainsTarget(
@@ -2305,7 +2592,7 @@ void ThreadPane::updateContextRow(const std::string &presentationKey) {
   const auto found = rows.find(presentationKey);
   if (found == rows.end())
     return;
-  tree->viewport()->update(tree->rowRect(tree->indexFromItem(found->second)));
+  tree->updateRow(tree->indexFromItem(found->second));
 }
 
 void ThreadPane::showContextMenu(const QPoint &position) {

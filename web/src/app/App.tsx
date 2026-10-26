@@ -307,11 +307,11 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         const expanded = session.groupExpanded(`${kind}:${group.id}`);
         const active = membership(selected, `${kind}Id`) === group.id;
         return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={groupLabel(kind, group)} aria-expanded={expanded}>
-            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><span>{kind === "project" ? "Project · " : !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
+            <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><span>{kind === "section" && !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
                 <button className="thread-menu-trigger group-menu-trigger" aria-label={`Actions for ${groupLabel(kind, group)}`} aria-haspopup="menu"
                     aria-expanded={contextGroup?.group === group && contextGroup.projectId === projectId}
                     onClick={event => { const bounds = event.currentTarget.getBoundingClientRect(); setContextMenu({kind, group, projectId, x: bounds.right, y: bounds.bottom, trigger: event.currentTarget}); }}>•••</button></header>
-            {expanded && <div role="group">{kind === "project" ? renderProjectMembers(ids, group.id) : renderRows(ids, nested ? 2 : 1)}
+            {expanded && <div role="group" className={kind === "project" ? "project-thread-body" : undefined}>{kind === "project" ? renderProjectMembers(ids, group.id) : renderRows(ids, nested ? 2 : 1)}
                 {pageControls(session.threadPages({[`${kind}Id`]: group.id}))}</div>}
         </section>;
     };
