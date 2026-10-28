@@ -10,7 +10,7 @@ import {
     foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
     isEmptyStatus, isWorkingStatus, projectTurnPlan, settingDraftFor, settingPresentation, settingPromptOptions, statusTone,
-    statusToken, trimTrailingEmptyLines, turnSettingCatalog,
+    statusToken, trimTrailingEmptyLines, turnSettingCatalog, turnOpenings, turnNavigationTarget,
 } from "../index.js";
 import type {ConversationViewportAnchor, PendingRequestPresentation, SettingCatalog, SettingDraft, SettingField, SettingPresentation, ThreadPresentation} from "../index.js";
 import type {
@@ -687,7 +687,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const activeTurn = active && turnContainer && (card.kind === "localPrompt" || card.kind === "userMessage");
     const activeWork = isWorkingStatus(card.status);
     const delayedPending = card.kind === "localPrompt" && (card.payload as LocalPromptData).showPendingAnimation;
-    return <article className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
+    return <article tabIndex={-1} className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span className="card-heading"><span title={title}>{title}</span>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`} title={phaseLabel}>{phaseLabel}</span>}</span>{onTiming && <button className="card-timing" title={timingDetails(times)} aria-label="Timing details" onClick={onTiming}>{timingSummary(times) || "—"}</button>}<span className="card-meta">{card.turnOpening && onTurnMenu && <button aria-label="Turn actions" aria-haspopup="menu" onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); onTurnMenu({x: rect.right, y: rect.bottom}, event.currentTarget); }}>⋯</button>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
@@ -696,17 +696,29 @@ interface PendingConversationGeometry {
     presentationKey: string;
     following: boolean;
     anchor: ConversationViewportAnchor | undefined;
+    focus?: boolean;
+    first?: boolean;
     fold?: {cardKey: string; collapsed: boolean; previousTitleTop: number};
 }
 
-function conversationAnchor(container: HTMLElement): ConversationViewportAnchor | undefined {
+function conversationAnchor(container: HTMLElement, preferred?: ConversationViewportAnchor): ConversationViewportAnchor | undefined {
     const viewportTop = container.getBoundingClientRect().top;
-    for (const card of container.querySelectorAll<HTMLElement>(".conversation-card[data-card-key]")) {
-        const header = card.querySelector<HTMLElement>(":scope > header");
-        if (!header || header.getBoundingClientRect().bottom < viewportTop) continue;
-        return {cardKey: card.dataset.cardKey ?? "", pixelOffset: header.getBoundingClientRect().top - viewportTop};
+    let result: ConversationViewportAnchor | undefined;
+    const retained = preferred ? cardForKey(container, preferred.cardKey)?.querySelector<HTMLElement>(":scope > header") : undefined;
+    if (retained) {
+        result = {cardKey: preferred!.cardKey, pixelOffset: retained.getBoundingClientRect().top - viewportTop};
+    } else {
+        const cards = container.querySelectorAll<HTMLElement>(".conversation-card[data-card-key]");
+        for (let index = 0; !result && index < cards.length; ++index) {
+            const card = cards[index]!;
+            const header = card.querySelector<HTMLElement>(":scope > header");
+            const nested = card.querySelector<HTMLElement>(":scope > .turn-nested");
+            if (header && (nested?.getBoundingClientRect().top ?? card.getBoundingClientRect().bottom) >= viewportTop) {
+                result = {cardKey: card.dataset.cardKey ?? "", pixelOffset: header.getBoundingClientRect().top - viewportTop};
+            }
+        }
     }
-    return undefined;
+    return result;
 }
 
 function cardForKey(container: HTMLElement, key: string): HTMLElement | undefined {
@@ -858,6 +870,10 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         const saved = viewport.scroll(projectionId, presentationKey);
         const switchedPresentation = previousPresentation.current !== presentationKey;
         const transaction = pendingGeometry.current?.presentationKey === presentationKey ? pendingGeometry.current : undefined;
+        if (transaction?.first) {
+            const first = turnOpenings(conversation.sections)[0];
+            if (first) { transaction.anchor = {cardKey: stableKey(first.key), pixelOffset: 0}; }
+        }
         if (switchedPresentation) {
             previousPresentation.current = presentationKey;
             pendingGeometry.current = undefined;
@@ -881,8 +897,17 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             restoreConversationAnchor(element, transaction?.anchor ?? saved.anchor, saved.scrollTop);
         }
         const following = transaction?.fold ? false : transaction?.following ?? saved.following;
-        viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, conversationAnchor(element));
-        if (transaction) pendingGeometry.current = undefined;
+        const anchor = conversationAnchor(element, following || transaction?.fold ? undefined : transaction?.anchor ?? saved.anchor);
+        viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, anchor);
+        const focusOwned = pane.current?.contains(document.activeElement) && !composerDock.current?.contains(document.activeElement);
+        if (transaction?.focus && (!transaction.first || focusOwned)) {
+            const target = anchor ? cardForKey(element, anchor.cardKey) : undefined;
+            (following ? pane.current : target ?? pane.current)?.focus({preventScroll: true});
+        }
+        if (transaction) {
+            pendingGeometry.current = transaction.first && (thread?.historyHasMore || session.historyLoading(projectionId, presentationKey))
+                ? {...transaction, focus: Boolean(transaction.focus && focusOwned)} : undefined;
+        }
     }, [snapshot.revision, projectionId, presentationKey, cardStateRevision, presentation, viewport]);
     useBrowserLayoutEffect(() => {
         const dock = composerDock.current; const owner = pane.current;
@@ -894,13 +919,13 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             const element = scroll.current; const height = Math.ceil(owner.getBoundingClientRect().bottom - dock.getBoundingClientRect().top);
             if (height === previousHeight) return;
             const saved = viewport.scroll(projectionId, presentationKey);
-            const anchor = element ? conversationAnchor(element) ?? saved.anchor : saved.anchor;
+            const anchor = element ? conversationAnchor(element, saved.anchor) ?? saved.anchor : saved.anchor;
             owner.style.setProperty("--composer-overlay-height", `${height}px`);
             if (element && previousHeight !== 0) {
                 if (height > previousHeight && saved.following) element.scrollTop = element.scrollHeight;
                 else restoreConversationAnchor(element, anchor, saved.scrollTop);
                 viewport.updateScroll(projectionId, presentationKey, element.scrollTop, saved.following,
-                    conversationAnchor(element));
+                    conversationAnchor(element, anchor));
             }
             previousHeight = height;
         });
@@ -948,6 +973,48 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
     const historyPagePending = session.historyPagePending(projectionId, presentationKey);
+    const navigation = viewport.scroll(projectionId, presentationKey);
+    const openingCards = turnOpenings(visibleSections);
+    const anchoredCard = visibleSections.flatMap(section => section.cards)
+        .find(card => stableKey(card.key) === navigation.anchor?.cardKey);
+    const currentOpening = openingCards.find(card => card.turnId === anchoredCard?.turnId)
+        ?? (anchoredCard?.turnId === "" ? openingCards.at(-1) : openingCards[0]);
+    const atOpening = currentOpening !== undefined && navigation.anchor?.cardKey === stableKey(currentOpening.key)
+        && (Math.abs(navigation.anchor.pixelOffset) <= 1 || (navigation.anchor.pixelOffset >= 0
+            && Boolean(scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight <= 1)));
+    const navigationEnabled = !threadTransitionActive && currentOpening !== undefined;
+    const loadEarlier = () => {
+        if (!historyPagePending) {
+            viewport.loadMore(projectionId, presentationKey);
+            if (conversation.hiddenAuthoritativeItemCount <= AuthoritativeHistoryPageSize) {
+                session.loadMoreHistory(projectionId, presentationKey);
+            }
+            forceCardState(value => value + 1);
+        }
+    };
+    const loadedOpenings = () => turnOpenings(session.conversation(authoritativeCount).sections
+        .map(section => ({...section, cards: section.cards.filter(cardVisible)})));
+    const navigateTo = (card?: VisibleCardData, first = false) => {
+        if (card && navigationEnabled && session.threadVisualKey(projectionId) === presentationKey) {
+            const key = stableKey(card.key);
+            const loaded = session.conversation(authoritativeCount);
+            const target = turnOpenings(loaded.sections).find(opening => stableKey(opening.key) === key);
+            if (target) {
+                const position = loaded.sections.flatMap(section => section.cards).findIndex(item => stableKey(item.key) === key);
+                let requested = limit;
+                while (requested < authoritativeCount - position) { requested = viewport.loadMore(projectionId, presentationKey); }
+                const anchor = {cardKey: key, pixelOffset: 0};
+                pendingGeometry.current = {presentationKey, following: false, anchor, focus: true, first};
+                viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, false, anchor);
+                if (first) { session.loadMoreHistory(projectionId, presentationKey, true); }
+                forceCardState(value => value + 1);
+            }
+        }
+    };
+    const navigateAdjacent = (direction: number) => {
+        navigateTo(turnNavigationTarget(loadedOpenings(), currentOpening?.turnId ?? "", atOpening, direction));
+    };
+
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
         return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} times={card.key.kind === "item" ? targetTimes(session.model, {threadId: card.threadId, turnId: card.turnId, itemId: card.itemId}) : []}
@@ -973,6 +1040,24 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
+                    <div className="turn-navigation" aria-label="Turn navigation">
+                        <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || session.historyLoading(projectionId, presentationKey)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
+                        <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
+                        <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
+                            const openings = loadedOpenings();
+                            return <><div className="turn-outline-count">{openings.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
+                                {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier turns…" : "Load earlier turns"}</button>}
+                                {openings.map(card => <button key={stableKey(card.key)} aria-current={card.turnId === currentOpening?.turnId ? "true" : undefined}
+                                    autoFocus={card.turnId === currentOpening?.turnId} onClick={() => navigateTo(card)} title={card.kind === "userMessage" ? (card.payload as UserMessageData).text : "Turn without an opening prompt"}>
+                                    {card.kind === "userMessage" ? (card.payload as UserMessageData).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
+                        }}</Menu>
+                        <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
+                        <button className="conversation-latest" style={{visibility: navigation.following || !navigationEnabled ? "hidden" : "visible"}} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
+                            pendingGeometry.current = {presentationKey, following: true, anchor: undefined, focus: true};
+                            viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, true);
+                            forceCardState(value => value + 1);
+                        }}>↧</button>
+                    </div>
                     <button className={presentation.showReasoning ? "active" : ""} aria-label={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} data-tooltip={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} aria-pressed={presentation.showReasoning} onClick={() => updatePresentation({showReasoning: !presentation.showReasoning})}><PresentationIcon kind="reasoning" /></button>
                     <button className={presentation.showCodexUpdates ? "active" : ""} aria-label={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} data-tooltip={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} aria-pressed={presentation.showCodexUpdates} onClick={() => updatePresentation({showCodexUpdates: !presentation.showCodexUpdates})}><PresentationIcon kind="updates" /></button>
                     <button className={presentation.commandsInitiallyExpanded ? "active" : ""} aria-label={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} data-tooltip={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} aria-pressed={presentation.commandsInitiallyExpanded} onClick={() => updatePresentation({commandsInitiallyExpanded: !presentation.commandsInitiallyExpanded})}><PresentationIcon kind="command" /></button>
@@ -983,20 +1068,25 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         </div>
         <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
             aria-busy={threadTransitionActive || undefined} onScroll={event => {
-            const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-            viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following,
-                conversationAnchor(element));
+            const element = event.currentTarget;
+            const previous = viewport.scroll(projectionId, presentationKey);
+            // Restores and explicit jumps record their achieved position before
+            // asynchronous scroll events arrive; those events do not own intent.
+            if (Math.abs(previous.scrollTop - element.scrollTop) > 0.5) {
+                pendingGeometry.current = undefined;
+                const following = element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
+                const anchor = conversationAnchor(element);
+                viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, anchor);
+                if (previous.following !== following || previous.anchor?.cardKey !== anchor?.cardKey
+                    || (Math.abs(previous.anchor?.pixelOffset ?? Infinity) <= 1) !== (Math.abs(anchor?.pixelOffset ?? Infinity) <= 1)) {
+                    forceCardState(value => value + 1);
+                }
+            }
         }}>
             {threadTransitionActive
                 ? <ThreadLoadingSurface spinning={spinnerProjection === presentationKey} />
                 : <>{conversation.hasMore && <button className="load-more" disabled={historyPagePending}
-                    aria-busy={historyPagePending || undefined} onClick={() => {
-                    if (historyPagePending) return;
-                    viewport.loadMore(projectionId, presentationKey);
-                    if (conversation.hiddenAuthoritativeItemCount <= AuthoritativeHistoryPageSize)
-                        session.loadMoreHistory(projectionId, presentationKey);
-                    forceCardState(value => value + 1);
-                }}>{historyPagePending ? "Loading earlier activity…" : "Load earlier activity"}</button>}
+                    aria-busy={historyPagePending || undefined} onClick={loadEarlier}>{historyPagePending ? "Loading earlier activity…" : "Load earlier activity"}</button>}
                     {visibleSections.length === 0 && <div className="empty-state"><h3>Conversation activity appears here</h3></div>}
                     {visibleSections.map(section => {
                         const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
@@ -1048,9 +1138,27 @@ const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange
     </div>;
 }, (previous, current) => previous.draft === current.draft && previous.presentation === current.presentation);
 
-function Menu({label, className, children}: {label: string; className: string; children: ReactNode}) {
+function Menu({label, className, children, disabled = false}: {label: string; className: string; children: ReactNode | (() => ReactNode); disabled?: boolean}) {
     const id = useId();
-    return <div className={className}><button type="button" {...{popovertarget: id}}>{label}</button><div id={id} className="menu-popover" {...{popover: "auto"}} role="dialog" aria-label={label} onWheel={event => event.stopPropagation()} onClick={event => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.hidePopover(); }}>{children}</div></div>;
+    const popover = useRef<HTMLDivElement>(null);
+    const [open, setOpen] = useState(false);
+    useEffect(() => {
+        const element = popover.current;
+        const toggle = () => setOpen(element?.matches(":popover-open") ?? false);
+        element?.addEventListener("toggle", toggle);
+        return () => element?.removeEventListener("toggle", toggle);
+    }, []);
+    useEffect(() => { if (disabled) { popover.current?.hidePopover(); } }, [disabled]);
+    return <div className={className}><button type="button" disabled={disabled} {...{popovertarget: id}}>{label}</button><div ref={popover} id={id} className="menu-popover" {...{popover: "auto"}} role="dialog" aria-label={label} onWheel={event => event.stopPropagation()} onClick={event => { if ((event.target as HTMLElement).closest("button")) { event.currentTarget.hidePopover(); } }}
+        onKeyDown={event => {
+            if (typeof children === "function" && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+                const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current + (event.key === "ArrowUp" ? -1 : 1);
+                buttons[Math.max(0, Math.min(buttons.length - 1, next))]?.focus();
+                event.preventDefault();
+            }
+        }}>{typeof children === "function" ? open && children() : children}</div></div>;
 }
 
 function resizePromptEditor(element: HTMLTextAreaElement) {

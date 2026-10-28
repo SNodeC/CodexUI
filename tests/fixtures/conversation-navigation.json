@@ -1,0 +1,19 @@
+{
+  "threadId": "history-navigation",
+  "turns": [
+    {"id": "first", "prompt": "Investigate thread history", "steering": "Keep the existing header"},
+    {"id": "second", "prompt": "Same prompt"},
+    {"id": "third", "prompt": "Same prompt"},
+    {"id": "last", "prompt": null}
+  ],
+  "transitions": [
+    {"turn": "first", "direction": -1, "target": null},
+    {"turn": "first", "direction": 1, "target": "second"},
+    {"turn": "second", "direction": -1, "target": "first"},
+    {"turn": "second", "direction": 1, "target": "third"},
+    {"turn": "third", "direction": -1, "target": "second"},
+    {"turn": "third", "direction": 1, "target": "last"},
+    {"turn": "last", "direction": -1, "target": "third"},
+    {"turn": "last", "direction": 1, "target": null}
+  ]
+}

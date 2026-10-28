@@ -570,6 +570,10 @@ export class BrowserFrontendSession {
         return this.matchesThreadPresentation(threadId, presentationKey)
             && this.runtimeByThread.get(threadId)?.historyPageInFlight === true;
     }
+    historyLoading(threadId: string, presentationKey: string): boolean {
+        return this.historyPagePending(threadId, presentationKey) || (this.matchesThreadPresentation(threadId, presentationKey)
+            && ((this.runtimeByThread.get(threadId)?.itemRequests ?? 0) > 0 || this.itemPageQueue.some(page => page.threadId === threadId)));
+    }
     workspaceChangeUnavailable(threadId: string, presentationKey?: string, currentOperation?: object): string {
         const thread = this.model.thread(threadId);
         let reason = "";
@@ -850,6 +854,7 @@ export class BrowserFrontendSession {
                     this.setNotice(`Thread item history could not be loaded: ${this.errorMessage(response)}`);
                 }
                 this.pumpItemPages();
+                this.publish();
             });
         }
     }
@@ -892,29 +897,35 @@ export class BrowserFrontendSession {
             this.publish();
         });
     }
-    loadMoreHistory(threadId: string, presentationKey?: string): void {
-        if (!this.providerReady() || !this.matchesThreadPresentation(threadId, presentationKey)) return;
-        const runtime = this.threadRuntime(threadId);
-        const cursor = this.model.thread(threadId)?.historyNextCursor ?? "";
-        if (runtime.phase !== "ready" || runtime.historyPageInFlight || cursor === ""
-            || runtime.seenHistoryCursors.has(cursor)) return;
-        runtime.historyPageInFlight = true;
-        runtime.seenHistoryCursors.add(cursor);
-        this.publish();
-        void this.requestTurnPage(threadId, cursor, runtime).then(response => {
-            if (this.runtimeByThread.get(threadId) !== runtime) return;
-            runtime.historyPageInFlight = false;
-            if (response.stale) return;
-            if (!response.ok) {
-                runtime.seenHistoryCursors.delete(cursor);
-                this.setNotice(`Loading more thread history failed: ${this.errorMessage(response)}`);
-                return;
+    loadMoreHistory(threadId: string, presentationKey?: string, throughFirst = false): void {
+        if (this.providerReady() && this.matchesThreadPresentation(threadId, presentationKey)) {
+            const runtime = this.threadRuntime(threadId);
+            const cursor = this.model.thread(threadId)?.historyNextCursor ?? "";
+            if (runtime.phase === "ready" && !runtime.historyPageInFlight && cursor !== "" && !runtime.seenHistoryCursors.has(cursor)) {
+                runtime.historyPageInFlight = true;
+                runtime.seenHistoryCursors.add(cursor);
+                this.publish();
+                void this.requestTurnPage(threadId, cursor, runtime).then(response => {
+                    if (this.runtimeByThread.get(threadId) === runtime) {
+                        runtime.historyPageInFlight = false;
+                        if (!response.stale) {
+                            if (!response.ok) {
+                                runtime.seenHistoryCursors.delete(cursor);
+                                this.setNotice(`Loading more thread history failed: ${this.errorMessage(response)}`);
+                            } else {
+                                this.queueTurnItems(threadId, response.data, runtime);
+                                this.queueActiveAgentChildren(threadId);
+                                if (this.model.thread(threadId)?.raw.historyStale === true
+                                    || (throughFirst && this.model.thread(threadId)?.historyHasMore)) {
+                                    this.loadMoreHistory(threadId, presentationKey, throughFirst);
+                                }
+                                this.publish();
+                            }
+                        }
+                    }
+                });
             }
-            this.queueTurnItems(threadId, response.data, runtime);
-            this.queueActiveAgentChildren(threadId);
-            if (this.model.thread(threadId)?.raw.historyStale === true) { this.loadMoreHistory(threadId); }
-            this.publish();
-        });
+        }
     }
     private dispatchQueuedPrompts(): void {
         if (!this.canSubmit()) return;

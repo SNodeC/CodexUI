@@ -30,11 +30,13 @@
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
-#include <QPushButton>
 #include <QPointer>
+#include <QPushButton>
+#include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTemporaryDir>
@@ -1586,6 +1588,233 @@ bool tokenDetailsRemainVisible() {
   return result;
 }
 
+bool turnNavigationUsesTheExistingHeader() {
+    MiddleRegionWidget region;
+    region.setStyleSheet(UiStyle::applicationStyleSheet());
+    region.showSidebar(false);
+    region.showInspector(false);
+    region.resize(820, 700);
+    region.show();
+    auto* first = region.findChild<QToolButton*>(QStringLiteral("conversationFirstTurn"));
+    auto* previous = region.findChild<QToolButton*>(QStringLiteral("conversationPreviousTurn"));
+    auto* outline = region.findChild<QToolButton*>(QStringLiteral("conversationTurnOutline"));
+    auto* next = region.findChild<QToolButton*>(QStringLiteral("conversationNextTurn"));
+    auto* latest = region.findChild<QToolButton*>(QStringLiteral("conversationLatest"));
+    auto* presentation = region.findChild<QToolButton*>(QStringLiteral("conversationReasoningToggle"));
+    bool result = expect(first && previous && outline && next && latest && presentation,
+                         "the established conversation header owns the navigation controls");
+    ConversationSnapshot snapshot;
+    snapshot.threadId = "header-navigation";
+    snapshot.hasMore = true;
+    for (int index = 0; index < 3; ++index) {
+        const std::string id = "turn-" + std::to_string(index);
+        TurnSection section;
+        section.key = section.turnId = id;
+        auto prompt = card(CardKind::UserMessage, "prompt-" + id, UserMessageData{"Prompt & " + id});
+        prompt.threadId = snapshot.threadId;
+        prompt.turnId = id;
+        prompt.key = AuthoritativeItemKey{snapshot.threadId, id, prompt.itemId};
+        section.rootCardKey = prompt.key;
+        section.cards.push_back(prompt);
+        auto answer = card(CardKind::AgentMessage,
+                           "answer-" + id,
+                           AgentMessageData{QString("A long answer\n\n").repeated(25).toStdString(), "final_answer"});
+        answer.threadId = snapshot.threadId;
+        answer.turnId = id;
+        answer.key = AuthoritativeItemKey{snapshot.threadId, id, answer.itemId};
+        section.cards.push_back(answer);
+        snapshot.sections.push_back(section);
+    }
+    CommandExecutionData output;
+    output.command = "echo navigation";
+    output.output = QString("Command output\n").repeated(100).toStdString();
+    auto command = card(CardKind::CommandExecution, "command", output);
+    command.threadId = snapshot.threadId;
+    command.turnId = snapshot.sections.back().turnId;
+    command.key = AuthoritativeItemKey{snapshot.threadId, command.turnId, command.itemId};
+    snapshot.sections.back().cards.push_back(command);
+    auto* commandFolding = region.findChild<QToolButton*>(QStringLiteral("conversationCommandFoldingToggle"));
+    if (commandFolding) {
+        commandFolding->setChecked(true);
+    }
+    region.setThreadHeading(QStringLiteral("History navigation fixture"), {}, {}, QStringLiteral("completed"));
+    region.setThreadWorkspace(QStringLiteral("/workspace"), QStringLiteral("Test fixture"), {});
+    region.conversation().beginThreadSelection(snapshot.threadId);
+    static_cast<void>(region.conversation().reconcileStaged(snapshot));
+    QElapsedTimer loading;
+    loading.start();
+    while (region.conversation().structuralStagingActive() && loading.elapsed() < 2000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    QCoreApplication::processEvents();
+    result &= expect(outline && outline->isEnabled(), "navigation enables after staged history commits");
+    if (first && previous && outline && next && latest && presentation) {
+        const QRect header = presentation->geometry();
+        result &= expect(!latest->isVisible(), "Latest is absent while following");
+        previous->click();
+        QCoreApplication::processEvents();
+        result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible(),
+                         "the actual Previous control pauses following and reveals Latest");
+        result &= expect(presentation->geometry() == header, "Latest retains its slot and never shifts presentation controls");
+        for (int width : {820, 460, 340}) {
+            region.resize(width, 700);
+            QCoreApplication::processEvents();
+            int right = 0;
+            for (auto* button : {first, previous, outline, next, latest, presentation}) {
+                result &= expect(button->geometry().top() == presentation->geometry().top() && button->height() == presentation->height() &&
+                                     !button->accessibleName().isEmpty() && button->geometry().left() >= right,
+                                 "navigation and presentation share one accessible header row at every width");
+                right = button->geometry().right();
+            }
+        }
+        auto* menu = region.findChild<QFrame*>(QStringLiteral("conversationTurnMenu"));
+        outline->click();
+        QCoreApplication::processEvents();
+        auto* list = menu->findChild<QListWidget*>(QStringLiteral("conversationTurnList"));
+        result &= expect(menu->isVisible() && list && list->count() == 3 &&
+                             menu->findChild<QLabel*>(QStringLiteral("conversationTurnCount"))->text() == "3 loaded" &&
+                             menu->findChild<QPushButton*>(QStringLiteral("conversationTurnLoadEarlier"))->isVisible(),
+                         "the native outline exposes loaded-only counts and earlier loading above prompts");
+        if (list) {
+            result &= expect(list->item(2)->text() == "Prompt & turn-2" && list->item(2)->toolTip() == "Prompt & turn-2",
+                             "list prompts preserve literal ampersands");
+            list->setCurrentRow(2);
+            const auto point = list->visualItemRect(list->currentItem()).center();
+            for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+                QMouseEvent click(type,
+                                  point,
+                                  list->viewport()->mapToGlobal(point),
+                                  Qt::LeftButton,
+                                  type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(list->viewport(), &click);
+            }
+        }
+        QCoreApplication::processEvents();
+        result &=
+            expect(!menu->isVisible() && region.conversation().navigationTarget() == stableKey(snapshot.sections.back().cards.front().key),
+                   "a single outline click reaches its stable prompt destination and dismisses the popup");
+        latest->click();
+        QCoreApplication::processEvents();
+        result &= expect(region.conversation().mode() == ConversationView::Mode::Following && !latest->isVisible(),
+                         "the actual Latest control restores following without a toolbar row");
+        auto* commandOutput = region.conversation().findChild<CommandOutputView*>(QStringLiteral("commandOutputView"));
+        result &= expect(commandOutput && commandOutput->verticalScrollBar()->maximum() > 0,
+                         "the actual header fixture includes scrollable command output");
+        if (commandOutput) {
+            commandOutput->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
+            QCoreApplication::processEvents();
+            result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible(),
+                             "command-owned follow pauses immediately update the same Latest control");
+            latest->click();
+        }
+        for (int index = 3; index < 100; ++index) {
+            auto section = snapshot.sections.front();
+            section.key = section.turnId = "turn-" + std::to_string(index);
+            section.cards.resize(1);
+            auto& prompt = section.cards.front();
+            prompt.turnId = section.turnId;
+            prompt.key = AuthoritativeItemKey{snapshot.threadId, section.turnId, "opening"};
+            prompt.payload = UserMessageData{"Prompt " + section.turnId};
+            section.rootCardKey = prompt.key;
+            snapshot.sections.push_back(section);
+        }
+        snapshot.hasMore = false;
+        static_cast<void>(region.conversation().reconcile(snapshot));
+        region.conversation().navigateToTurn(stableKey(snapshot.sections[50].cards.front().key));
+        QCoreApplication::processEvents();
+        const auto available = outline->screen()->availableGeometry();
+        class PopupScrollRouter final : public QObject {
+        public:
+            explicit PopupScrollRouter(MiddleRegionWidget& region)
+                : region_(region) {
+            }
+
+        protected:
+            bool eventFilter(QObject* target, QEvent* event) override {
+                return region_.routeScrollEvent(target, event);
+            }
+
+        private:
+            MiddleRegionWidget& region_;
+        } router(region);
+        qApp->installEventFilter(&router);
+        const auto originalPosition = region.pos();
+        for (const auto point : {available.topLeft(), available.bottomRight()}) {
+            region.move(point - outline->mapTo(&region, QPoint()));
+            outline->click();
+            QCoreApplication::processEvents();
+            result &= expect(available.contains(menu->geometry()) && menu->height() <= available.height() * 3 / 5,
+                             "a hundred-turn popup stays within the work area and its sixty-percent height cap at screen edges");
+            if (list) {
+                result &= expect(list->count() == 100 && list->verticalScrollBar()->maximum() > 0 && list->hasFocus(),
+                                 "the bounded native list owns a scrollbar and keyboard focus");
+                const auto reading = region.conversation().navigationTarget();
+                const auto readingIndex = region.conversation().conversationModel()->indexForStableKey(reading);
+                const int readingPixel = region.conversation().visualRect(readingIndex).top();
+                list->verticalScrollBar()->setValue(list->verticalScrollBar()->maximum());
+                const auto local = list->viewport()->rect().center();
+                for (int step = 0; step < 100; ++step) {
+                    QWheelEvent wheel(local,
+                                      list->viewport()->mapToGlobal(local),
+                                      {},
+                                      QPoint(0, 120),
+                                      Qt::NoButton,
+                                      Qt::NoModifier,
+                                      Qt::NoScrollPhase,
+                                      false);
+                    QApplication::sendEvent(list->viewport(), &wheel);
+                }
+                QCoreApplication::processEvents();
+                result &= expect(list->verticalScrollBar()->value() == 0 &&
+                                     list->viewport()->rect().contains(list->visualItemRect(list->item(0))) &&
+                                     region.conversation().navigationTarget() == reading &&
+                                     std::abs(region.conversation().visualRect(readingIndex).top() - readingPixel) <= 1,
+                                 "wheel scrolling reaches the very first prompt without moving the conversation");
+                QKeyEvent end(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
+                QApplication::sendEvent(list, &end);
+                QKeyEvent home(QEvent::KeyPress, Qt::Key_Home, Qt::NoModifier);
+                QApplication::sendEvent(list, &home);
+                result &= expect(list->currentRow() == 0 && list->visualItemRect(list->item(0)).top() >= 0,
+                                 "Home returns to the first selectable prompt after End");
+                QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QApplication::sendEvent(list, &enter);
+                QCoreApplication::processEvents();
+                result &= expect(!menu->isVisible() &&
+                                     region.conversation().navigationTarget() == stableKey(snapshot.sections.front().cards.front().key),
+                                 "Enter activates the first prompt through the focused bounded list");
+            }
+            menu->close();
+            outline->click();
+            QCoreApplication::processEvents();
+            QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QApplication::sendEvent(list, &escape);
+            QCoreApplication::processEvents();
+            result &= expect(!menu->isVisible(), "Escape dismisses the focused outline without activating a prompt");
+        }
+        qApp->removeEventFilter(&router);
+        region.move(originalPosition);
+        latest->click();
+        first->click();
+        QCoreApplication::processEvents();
+        result &= expect(region.conversation().navigationTarget() == stableKey(snapshot.sections.front().cards.front().key) &&
+                             latest->isVisible(),
+                         "the actual First header control lands at the beginning and pauses following");
+        if (!qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR").isEmpty()) {
+            region.resize(1400, 850);
+            region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
+            QCoreApplication::processEvents();
+            region.grab().save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") + QStringLiteral("/native-thread-navigation.png"));
+            outline->click();
+            QCoreApplication::processEvents();
+            menu->grab().save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") + QStringLiteral("/native-turn-outline.png"));
+            menu->close();
+        }
+    }
+    return result;
+}
+
 bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   MiddleRegionWidget region;
   region.setStyleSheet(UiStyle::applicationStyleSheet());
@@ -1722,6 +1951,7 @@ int main(int argc, char **argv) {
   run("nestedWheelGestureHasOneRoutingOwner",
       [] { return nestedWheelGestureHasOneRoutingOwner(false); });
   run("tokenDetailsRemainVisible", tokenDetailsRemainVisible);
+  run("turnNavigationUsesTheExistingHeader", turnNavigationUsesTheExistingHeader);
   run("completeMiddleSurfaceRetainsPaneAndHeadingBehavior",
       completeMiddleSurfaceRetainsPaneAndHeadingBehavior);
   if (passed)

@@ -34,18 +34,19 @@ class ConversationLoadingOverlay;
 // genuinely local interaction state. QWidget count is bounded by the visible
 // viewport plus one viewport of overscan on each side.
 class ConversationView final : public QAbstractItemView {
+    Q_OBJECT
 public:
-  enum class Mode { Following, Paused };
+    enum class Mode { Following, Paused, First };
 
-  struct PresentationOptions {
-    bool showReasoning = true;
-    bool showCodexUpdates = true;
-    bool commandsInitiallyExpanded = false;
-    bool imagesInitiallyExpanded = false;
-    bool fileChangesInitiallyExpanded = false;
+    struct PresentationOptions {
+        bool showReasoning = true;
+        bool showCodexUpdates = true;
+        bool commandsInitiallyExpanded = false;
+        bool imagesInitiallyExpanded = false;
+        bool fileChangesInitiallyExpanded = false;
 
-    bool operator==(const PresentationOptions &) const = default;
-  };
+        bool operator==(const PresentationOptions&) const = default;
+    };
 
   enum class SnapshotDisposition {
     Admitted,
@@ -58,7 +59,17 @@ public:
   explicit ConversationView(QWidget *parent = nullptr);
   ~ConversationView() override;
 
-  void setLoadMoreAction(std::function<void()> action);
+  void setLoadMoreAction(std::function<void(bool)> action);
+  struct TurnDestination {
+      std::string key;
+      QString prompt;
+  };
+  [[nodiscard]] std::vector<TurnDestination> turnDestinations() const;
+  [[nodiscard]] std::string navigationTarget(int direction = 0) const;
+  void navigateToTurn(const std::string& key, bool focus = true);
+  void navigateToFirstTurn();
+  void followLatest();
+  void loadEarlier(bool throughFirst = false);
   void setTurnMenuAction(std::function<void(nodegraph::NodeRef, QPoint)> action) {
       turnMenuAction_ = std::move(action);
   }
@@ -134,7 +145,10 @@ public:
                 ScrollHint hint = EnsureVisible) override;
   [[nodiscard]] QModelIndex indexAt(const QPoint &point) const override;
 
-protected:
+  Q_SIGNALS:
+  void navigationChanged();
+
+  protected:
   bool event(QEvent *event) override;
   [[nodiscard]] QModelIndex
   moveCursor(CursorAction cursorAction,
@@ -222,7 +236,7 @@ private:
       std::span<const ConversationItemModel::StructuralDeltaPlan::Operation>
           operations,
       const std::unordered_map<std::string, bool> &rootChildrenPresented);
-  [[nodiscard]] Anchor captureAnchor() const;
+  [[nodiscard]] Anchor captureAnchor(int scrollValue = -1) const;
   void restoreAnchor(const Anchor &anchor, bool follow = false);
   void restoreViewport(const Anchor &anchor, bool follow = false);
   void setScrollValue(int value);
@@ -316,7 +330,7 @@ private:
   QTimer *resizeFrameTimer_ = nullptr;
   QTimer *resizeSettleTimer_ = nullptr;
 
-  std::function<void()> loadMoreAction_;
+  std::function<void(bool)> loadMoreAction_;
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
   std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
   std::function<void(QString, bool)> noticeAction_;

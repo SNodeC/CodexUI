@@ -180,7 +180,11 @@ const applicationProfileSetup = `(async()=>{
             globalThis.codexuiProfileSocket=this;queueMicrotask(()=>{this.readyState=1;this.onopen?.();});}
         send(data){const message=JSON.parse(data);this.sent.push(message);const payload=message.kind==="appserver"?message.payload:null;
             if(!payload?.method||payload.method==="thread/resume"||payload.method==="thread/settings/update")return;
-            if(payload.method==="thread/read")throw new Error("Profile hydration must use pagination");
+            if(payload.method==="thread/read"){
+                if(payload.params.includeTurns!==false){throw new Error("Profile hydration must use pagination");}
+                queueMicrotask(()=>this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:payload.id,
+                    result:{thread:{id:payload.params.threadId,forkedFromId:null,parentThreadId:null}}}}));
+                return;}
             if(payload.method==="thread/turns/list"||payload.method==="thread/items/list"){
                 this.historyPage(payload);
                 return;}
@@ -271,7 +275,8 @@ const exactInteractionLifetimeCheck = `(async()=>{
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const treeItem=title=>[...document.querySelectorAll('.thread-title')]
         .find(label=>label.textContent===title)?.closest('[role="treeitem"]');
-    treeItem('Reparent parent').querySelector('.tree-toggle').click();
+    const parent=treeItem('Reparent parent');
+    if(parent.getAttribute('aria-expanded')==='false'){parent.querySelector('.tree-toggle').click();}
     await new Promise(complete=>requestAnimationFrame(()=>complete()));
     const childBefore=treeItem('Reparent child');const triggerBefore=childBefore.querySelector('.thread-menu-trigger');
     triggerBefore.focus();const levelBefore=childBefore.getAttribute('aria-level');
@@ -534,6 +539,125 @@ function assertTopBar(measurement, width) {
 await access(join(artifactDirectory, "index.html"), fsConstants.R_OK);
 const executable = await chromeExecutable();
 const headerContract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/frontend-presentation.json"), "utf8")).cardHeader;
+const navigationContract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/conversation-navigation.json"), "utf8"));
+const navigationCheck = `(async()=>{
+    const contract=${JSON.stringify(navigationContract)};
+    const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
+    const waitFor=async(predicate,label)=>{for(let attempt=0;attempt<300;++attempt){
+        if(predicate()){return;}await new Promise(done=>setTimeout(done,5));}throw new Error("Navigation timeout: "+label);};
+    document.querySelector('[aria-label="Dismiss notice"]')?.click();await frame();
+    const socket=globalThis.codexuiApplicationProfile.socket,original=socket.send.bind(socket);
+    const metadata={id:contract.threadId,name:"History navigation fixture",historyMode:"paginated",ephemeral:false,status:{type:"idle"}};
+    const turns=contract.turns.map(turn=>({id:turn.id,status:"completed",items:[
+        ...(turn.prompt===null?[]:[{id:"opening",type:"userMessage",content:[{type:"text",text:turn.prompt}]}]),
+        {id:turn.prompt===null?"opening":"answer",type:"agentMessage",phase:"final_answer",text:turn.prompt===null?"Automatic turn":"Long answer paragraph.\\n\\n".repeat(35)},
+        ...(turn.steering?[{id:"steering",type:"userMessage",content:[{type:"text",text:turn.steering}]}]:[])]}));
+    const earlier={id:"earlier",status:"completed",items:[{id:"opening",type:"userMessage",content:[{type:"text",text:"An earlier prompt"}]}]};
+    const oldest={id:"oldest",status:"completed",items:[{id:"opening",type:"userMessage",content:[{type:"text",text:"The very first prompt"}]}]};
+    let pages=0;
+    socket.send=data=>{const envelope=JSON.parse(data),request=envelope.payload;
+        if(envelope.kind==="appserver"&&request?.params?.threadId===metadata.id){
+            socket.sent.push(envelope);
+            const paging=request.method==="thread/turns/list"&&Boolean(request.params.cursor);
+            const atBeginning=request.params.cursor==="oldest";
+            if(paging){++pages;}
+            const result=request.method==="thread/resume"?{thread:metadata}
+                :request.method==="thread/turns/list"?{data:paging?(atBeginning?[oldest]:[earlier]):turns.toReversed(),nextCursor:atBeginning?null:paging?"oldest":"older"}
+                :{data:([oldest,earlier,...turns].find(turn=>turn.id===request.params.turnId)?.items??[]).toReversed()
+                    .map(item=>({turnId:request.params.turnId,item})),nextCursor:null};
+            queueMicrotask(()=>socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:request.id,result}}));
+        }else{original(data);}};
+    socket.receive({kind:"appserver",payload:{method:"thread/started",params:{thread:metadata}}});
+    await waitFor(()=>[...document.querySelectorAll(".thread-row")].some(row=>row.textContent.includes(metadata.name)),"thread row");
+    [...document.querySelectorAll(".thread-row")].find(row=>row.textContent.includes(metadata.name)).click();
+    await waitFor(()=>document.querySelectorAll(".turn-section").length===4,"four loaded turns");await frame();
+    const scroll=document.querySelector(".conversation-scroll");
+    const navigation=document.querySelector(".turn-navigation"),previous=navigation.querySelector('button[aria-label^="Turn opening;"]');
+    const firstButton=navigation.querySelector('button[aria-label^="First turn;"]');
+    const next=navigation.querySelector('button[aria-label="Next turn opening"]'),latest=navigation.querySelector(".conversation-latest");
+    const trigger=navigation.querySelector(".turn-outline > button");
+    const menu=()=>navigation.querySelector(".menu-popover");
+    const entries=()=>[...menu().querySelectorAll("button")].filter(button=>!button.textContent.includes("earlier turns"));
+    const open=async()=>{trigger.click();await waitFor(()=>menu().matches(":popover-open")&&entries().length>=4,"outline");await frame();};
+    const jump=async index=>{await open();entries()[index].click();await frame();};
+    const activeKey=()=>document.activeElement?.dataset.cardKey;
+    const card=key=>[...scroll.querySelectorAll(".conversation-card")].find(element=>element.dataset.cardKey===key);
+    const headerTop=key=>card(key).querySelector(":scope > header").getBoundingClientRect().top-scroll.getBoundingClientRect().top;
+    const heading=document.querySelector(".conversation-heading"),height=heading.getBoundingClientRect().height;
+    const presentation=document.querySelector('.conversation-view-controls > button'),presentationLeft=presentation.getBoundingClientRect().left;
+    const sameRow=Math.abs(previous.getBoundingClientRect().top-presentation.getBoundingClientRect().top)<=1;
+    const latestInitiallyHidden=getComputedStyle(latest).visibility==="hidden";
+    await jump(0);const first=activeKey();
+    next.click();await frame();const second=activeKey();
+    scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
+    previous.click();await frame();const currentOpeningFirst=activeKey()===second;
+    previous.click();await frame();const repeatedUp=activeKey()===first;
+    await jump(3);const last=activeKey(),clamped=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<=1;
+    const before=headerTop(last),visibleAtClamp=before>1;
+    socket.receive({kind:"appserver",payload:{method:"item/completed",params:{threadId:metadata.id,turnId:"last",
+        item:{id:"stream",type:"agentMessage",phase:"final_answer",text:"Streaming after the jump.\\n\\n".repeat(30)}}}});
+    await frame();
+    const streamingAnchor=Math.abs(headerTop(last)-before)<=1&&getComputedStyle(latest).visibility==="visible";
+    previous.click();await frame();const third=activeKey();previous.click();await frame();
+    const clampedUp=third!==last&&activeKey()===second;
+    await open();
+    const honestCount=menu().textContent.includes("4 loaded")&&!menu().textContent.includes(" of ");
+    const loadFirst=menu().querySelector("button").textContent.includes("Load earlier");
+    const selected=menu().querySelector('[aria-current="true"]');
+    const selectedFocused=selected===document.activeElement;
+    menu().dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowDown",bubbles:true,cancelable:true}));
+    const arrowFocus=document.activeElement!==selected;
+    menu().hidePopover();await frame();
+    await jump(3);const beforePaging=headerTop(last);
+    await open();menu().querySelector("button").click();
+    await waitFor(()=>document.querySelectorAll(".turn-section").length===5,"earlier page");await frame();
+    const pagingAnchor=Math.abs(headerTop(last)-beforePaging)<=1;
+    firstButton.click();
+    await waitFor(()=>document.querySelectorAll(".turn-section").length===6,"First loads through the beginning");await frame();
+    const firstLoadsHistory=pages===2&&document.activeElement?.textContent.includes("The very first prompt")
+        &&getComputedStyle(latest).visibility==="visible";
+    await jump(5);
+    const stableHeader=Math.abs(heading.getBoundingClientRect().height-height)<=1
+        &&Math.abs(presentation.getBoundingClientRect().left-presentationLeft)<=1;
+    await open();const lastEntry=entries().at(-1);lastEntry.focus();
+    menu().dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));lastEntry.click();await frame();
+    const fallbackSelected=activeKey()===last;
+    latest.click();await frame();
+    const followingResumed=getComputedStyle(latest).visibility==="hidden"&&scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<=1;
+    const textarea=document.querySelector('textarea[aria-label="Message Codex"]');textarea.focus();
+    const position=scroll.scrollTop;textarea.dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowUp",altKey:true,bubbles:true}));
+    const composerIsolated=scroll.scrollTop===position&&document.activeElement===textarea;
+    for(let index=0;index<90;++index){
+        const turn={id:"later-"+index,status:"completed",items:[
+            {id:"opening",type:"userMessage",content:[{type:"text",text:"Later prompt "+index}]},
+            {id:"answer",type:"agentMessage",phase:"final_answer",text:"Later answer "+index}]};
+        turns.push(turn);
+        socket.receive({kind:"appserver",payload:{method:"turn/started",params:{threadId:metadata.id,turn:{id:turn.id,status:"completed"}}}});
+        for(const item of turn.items){socket.receive({kind:"appserver",payload:{method:"item/completed",params:{threadId:metadata.id,turnId:turn.id,item}}});}
+    }
+    await frame();
+    const earlierOutsideWindow=!card(first);
+    await jump(2);
+    const olderLoadedReachable=earlierOutsideWindow&&activeKey()===first;
+    const opening=card(first),fold=opening.querySelector('[aria-label="Collapse card"]');fold.click();await frame();
+    next.click();await frame();previous.click();await frame();
+    const foldedPreserved=activeKey()===first&&card(first).classList.contains("collapsed");
+    card(first).querySelector('[aria-label="Expand card"]').click();await frame();
+    await open();
+    const bounds=menu().getBoundingClientRect();
+    const boundedOutline=bounds.height<=innerHeight*0.6+1&&bounds.top>=0&&bounds.bottom<=innerHeight
+        &&menu().scrollHeight>menu().clientHeight;
+    entries().at(-1).focus();await frame();
+    menu().dispatchEvent(new KeyboardEvent("keydown",{key:"Home",bubbles:true,cancelable:true}));await frame();
+    const topPromptReachable=document.activeElement===entries()[0]&&entries()[0].getBoundingClientRect().top>=bounds.top;
+    menu().scrollTop=menu().scrollHeight;
+    menu().scrollBy({top:-menu().scrollHeight,behavior:"instant"});await frame();
+    const scrollReachesTop=menu().scrollTop===0&&entries()[0].getBoundingClientRect().top>=bounds.top;
+    socket.send=original;
+    return {sameRow,latestInitiallyHidden,currentOpeningFirst,repeatedUp,clamped,visibleAtClamp,streamingAnchor,clampedUp,
+        honestCount,loadFirst,selectedFocused,arrowFocus,pages,pagingAnchor,stableHeader,fallbackSelected,followingResumed,composerIsolated,
+        olderLoadedReachable,foldedPreserved,firstLoadsHistory,boundedOutline,topPromptReachable,scrollReachesTop};
+})()`;
 const turnRemovalCheck = `(async()=>{
     const geometry=${JSON.stringify(headerContract)};
     const frame=()=>new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
@@ -841,6 +965,33 @@ try {
             reasoning_effort: "low"}},
     });
 
+    await devTools.call("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1400, deviceScaleFactor: 1, mobile: false});
+    const navigation = await devTools.evaluate(navigationCheck);
+    for (const [name, value] of Object.entries(navigation)) {
+        assert.equal(value, name === "pages" ? 2 : true, `Thread navigation: ${name}`);
+    }
+    if (process.env.CODEXUI_TEST_EVIDENCE_DIR) {
+        await mkdir(process.env.CODEXUI_TEST_EVIDENCE_DIR, {recursive: true});
+        await devTools.call("Emulation.setDeviceMetricsOverride", {width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false});
+        await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+        const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+        await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, "browser-thread-navigation.png"), Buffer.from(screenshot.data, "base64"));
+    }
+    await devTools.evaluate(`document.querySelector('.turn-outline .menu-popover:popover-open')?.hidePopover()`);
+    const navigationGeometry = [];
+    for (const width of [1280, 760, 521, 360, 320]) {
+        await setWidth(devTools, width);
+        await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+        const geometry = await devTools.evaluate(`(()=>{const group=document.querySelector('.conversation-view-controls'),nav=document.querySelector('.turn-navigation'),heading=document.querySelector('.eyebrow'),buttons=[...group.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),r=nav.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth-innerWidth,singleRow:buttons.every(button=>Math.abs(button.getBoundingClientRect().top-r.top)<=1),labelClear:heading.getBoundingClientRect().bottom<=r.top+1||heading.getBoundingClientRect().right<=r.left};})()`);
+        navigationGeometry.push({width, ...geometry});
+        assert.deepEqual(geometry, {overflow: 0, singleRow: true, labelClear: true}, `Navigation header at ${width}px`);
+    }
+    await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: true, maxTouchPoints: 1});
+    await waitUntil(devTools, `matchMedia('(pointer: coarse)').matches`, "touch navigation");
+    const touchNavigation = await devTools.evaluate(`(async()=>{const group=document.querySelector('.conversation-view-controls'),buttons=[...group.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),height=group.getBoundingClientRect().height,frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));buttons.at(-1).focus();await frame();const last=buttons.at(-1).getBoundingClientRect(),lastReachable=last.left>=0&&last.right<=innerWidth;buttons[0].focus();await frame();const first=buttons[0].getBoundingClientRect();return {lastReachable,firstReachable:first.left>=0&&first.right<=innerWidth,sameHeight:group.getBoundingClientRect().height===height,hitTargets:buttons.every(button=>button.getBoundingClientRect().width>=44&&button.getBoundingClientRect().height>=44)};})()`);
+    assert.deepEqual(touchNavigation, {lastReachable: true, firstReachable: true, sameHeight: true, hitTargets: true});
+    await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: false});
+    await setWidth(devTools, 1280);
     const catchup = await qualifyCatchup(devTools);
     const turnRemoval = await devTools.evaluate(turnRemovalCheck);
     assert.deepEqual(turnRemoval, {headerLayout: {aligned: true, startsOnly: true, leftGroup: true, singleRow: true, buttons: true}, geometryStable: true, cancelDefault: true, cancelledRequests: 0,
@@ -851,7 +1002,7 @@ try {
         const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
         await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, "browser-turn-removal.png"), Buffer.from(screenshot.data, "base64"));
     }
-    console.log(JSON.stringify({turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    console.log(JSON.stringify({navigation, navigationGeometry, touchNavigation, turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

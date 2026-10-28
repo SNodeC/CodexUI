@@ -956,24 +956,17 @@ void ShellWidget::Impl::connectUi() {
   };
   middleRegion->composer().setActions(std::move(composerActions));
 
-  middleRegion->conversation().setLoadMoreAction([this] {
-    if (!boundGraphThread || pendingConversation ||
-        middleRegion->conversation().structuralStagingActive())
-      return;
-    const auto info = uiAdapter.conversationInfo(boundGraphThread);
-    if (!info) {
-      showNotice(QStringLiteral(
-          "Conversation state is busy; no history request was sent."));
-      return;
-    }
-    if (info->historyRequestPending || !info->providerHasMore)
-      return;
-    nodegraph::NodeAction action{boundGraphThread,
-                                 nodegraph::NodeActionKind::LoadHistory,
-                                 {}, {}, {}, {}};
-    static_cast<void>(sendNodeAction(
-        std::move(action),
-        QStringLiteral("History request was not admitted; try again.")));
+  middleRegion->conversation().setLoadMoreAction([this](bool throughFirst) {
+      if (boundGraphThread && !pendingConversation && !middleRegion->conversation().structuralStagingActive()) {
+          const auto info = uiAdapter.conversationInfo(boundGraphThread);
+          if (!info) {
+              showNotice(QStringLiteral("Conversation state is busy; no history request was sent."));
+          } else if (!info->historyRequestPending && info->providerHasMore) {
+              nodegraph::NodeAction action{
+                  boundGraphThread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {{"throughFirst", throughFirst}}, {}};
+              static_cast<void>(sendNodeAction(std::move(action), QStringLiteral("History request was not admitted; try again.")));
+          }
+      }
   });
   middleRegion->conversation().setPromptMaterializedAction(
       [this](nodegraph::NodeRef localPrompt) {
