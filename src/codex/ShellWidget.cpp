@@ -1071,31 +1071,21 @@ void ShellWidget::Impl::scheduleGraphBinding(bool immediate) {
 }
 
 void ShellWidget::Impl::runGraphBinding() {
-  nodegraph::NodeRef selectedThread;
-  if (!selectedGraphThreadId.empty()) {
-    {
-      auto graphRead = session.nodeGraph().tryRead();
-      if (!graphRead) {
-        scheduleGraphBinding(false);
-        return;
-      }
-      selectedThread =
-          graphRead->find({nodegraph::NodeKind::Thread, selectedGraphThreadId});
+    if (!selectedGraphThreadId.empty()) {
+        auto read = session.nodeGraph().tryRead();
+        if (!read) {
+            scheduleGraphBinding(false);
+        } else {
+            const auto selectedThread = read->find({nodegraph::NodeKind::Thread, selectedGraphThreadId});
+            read.reset();
+            if (selectedThread && selectedThread != boundGraphThread) {
+                bindGraphPanes(selectedThread);
+                nodegraph::NodeAction action{selectedThread, nodegraph::NodeActionKind::Hydrate, {}, {}, {}, {}};
+                static_cast<void>(
+                    sendNodeAction(std::move(action), QStringLiteral("Thread loading was not admitted; select Reload to retry.")));
+            }
+        }
     }
-  }
-
-  const bool reboundSelectedThread =
-      selectedThread && selectedThread != boundGraphThread;
-  bindGraphPanes(std::move(selectedThread));
-  if (reboundSelectedThread) {
-    nodegraph::NodeAction action{boundGraphThread,
-                                 nodegraph::NodeActionKind::Hydrate,
-                                 {}, {}, {}, {}};
-    static_cast<void>(sendNodeAction(
-        std::move(action),
-        QStringLiteral(
-            "Thread loading was not admitted; select Reload to retry.")));
-  }
 }
 
 void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
