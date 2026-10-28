@@ -52,7 +52,7 @@ struct PromptCommand final {
   Value::Object options;
   std::string expectedTurnId;
 
-  // CreateThread only: attachCreatedThread changes kind to StartTurn and
+  // CreateThread only: completeCreatedThread changes kind to StartTurn and
   // moves turnOptions into options after thread/start returns.
   Value::Object turnOptions;
   std::string requestedName;
@@ -126,11 +126,7 @@ public:
                    std::optional<std::int64_t> activityAt = std::nullopt,
                    std::optional<std::int64_t> admittedAtMs = std::nullopt);
   [[nodiscard]] ChannelSendStatus
-  attachCreatedThread(PromptCommand &command, std::string threadId,
-                      NodeState providerState = {});
-  [[nodiscard]] ChannelSendStatus
-  completeCreatedThread(DecodedMessage result, PromptCommand &command,
-                        std::string threadId, NodeState providerState = {});
+  completeCreatedThread(DecodedMessage result, PromptCommand& command, std::string threadId, NodeState providerState = {});
   [[nodiscard]] ChannelSendStatus
   markPromptDispatched(const NodeRef &localPrompt,
                        const ProtocolRequestId &requestId);
@@ -173,11 +169,7 @@ private:
   void updateThreadHydration(NodeGraph::WriteAccess &write,
                              const NodeRef &thread, std::string state,
                              std::string error);
-  [[nodiscard]] bool attachCreatedThread(NodeGraph::WriteAccess &write,
-                                         PromptCommand &command,
-                                         std::string threadId,
-                                         NodeState providerState,
-                                         NodeRef &authoritative);
+  void selectThread(NodeGraph::WriteAccess& write, const NodeRef& thread);
   [[nodiscard]] std::optional<PromptCommand>
   completePrompt(NodeGraph::WriteAccess &write, const NodeRef &localPrompt,
                  bool accepted, std::string error,
