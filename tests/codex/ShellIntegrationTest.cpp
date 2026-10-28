@@ -4886,9 +4886,10 @@ void optimisticCreationDoesNotOverrideLaterNavigation(
           "promoted settings draft");
 }
 
-void createdThreadSelectionSurvivesRescan(Configuration& configuration, bool navigateAway, bool notificationFirst, bool contended) {
+void createdThreadSelectionSurvivesRescan(
+    Configuration& configuration, bool navigateAway, bool notificationFirst, bool contended, bool queuedBinding = false) {
     std::cerr << "Creation rescan: navigateAway=" << navigateAway << " notificationFirst=" << notificationFirst
-              << " contended=" << contended << '\n';
+              << " contended=" << contended << " queuedBinding=" << queuedBinding << '\n';
     FrontendSession session(configuration);
     ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
     NodeGraph& graph = FrontendSessionTestPeer::graph(session);
@@ -4903,13 +4904,14 @@ void createdThreadSelectionSurvivesRescan(Configuration& configuration, bool nav
     auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
     auto* editor = shell.findChild<ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
     auto* view = dynamic_cast<middle::ConversationView*>(shell.findChild<QWidget*>(QStringLiteral("conversationScroll")));
+    auto* title = shell.findChild<QLabel*>(QStringLiteral("conversationTitle"));
     QTimer::singleShot(0, &shell, [] {
         if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
             dialog->accept();
         }
     });
-    require(newThread && list && editor && view, "creation rescan exposes the real shell controls");
-    if (newThread && list && editor && view) {
+    require(newThread && list && editor && view && title, "creation rescan exposes the real shell controls");
+    if (newThread && list && editor && view && title) {
         newThread->click();
         spin(30);
         require(submit(editor, QStringLiteral("first prompt survives promotion")), "creation rescan admits the first prompt");
@@ -4939,6 +4941,9 @@ void createdThreadSelectionSurvivesRescan(Configuration& configuration, bool nav
                         {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt, {{"thread", Value(created)}}}));
                     spin(30);
                 }
+                if (queuedBinding) {
+                    FrontendSessionTestPeer::deliverGraphChanged(session, {graph.publishedRevision(), {}, {}, true});
+                }
                 while (channels.workerToQtSizeApprox() < ThreadChannels::WorkerToQtCapacity - ThreadChannels::WorkerToQtReservedSlots) {
                     ProtocolDiagnostic filler;
                     static_cast<void>(channels.sendProtocolDiagnostic(filler));
@@ -4952,6 +4957,21 @@ void createdThreadSelectionSurvivesRescan(Configuration& configuration, bool nav
                     static_cast<void>(worker.apply(
                         {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt, {{"thread", Value(created)}}}));
                 }
+                if (queuedBinding) {
+                    std::vector<WorkerToQtMessage> deferred;
+                    WorkerToQtMessage message;
+                    while (channels.tryReceiveForQt(message)) {
+                        deferred.emplace_back(std::move(message));
+                    }
+                    // The writer has promoted the thread, but Qt's queued rebind
+                    // runs before the corresponding worker notification is delivered.
+                    spin(20);
+                    for (const auto& notification : deferred) {
+                        if (const auto* change = std::get_if<GraphChanged>(&notification)) {
+                            FrontendSessionTestPeer::deliverGraphChanged(session, *change);
+                        }
+                    }
+                }
                 if (contended) {
                     auto write = graph.write();
                     FrontendSessionTestPeer::drainWorkerMessages(session);
@@ -4962,7 +4982,8 @@ void createdThreadSelectionSurvivesRescan(Configuration& configuration, bool nav
                             const auto* selected = threadItem(list, expected);
                             return selected && threadItem(list, "rescan-created") && !threadItem(list, temporaryId) &&
                                    list->currentItem() == selected && selected->isSelected() &&
-                                   list->selectionModel()->selectedRows().size() == 1 && view->presentedThreadId() == expected;
+                                   list->selectionModel()->selectedRows().size() == 1 && view->presentedThreadId() == expected &&
+                                   title->toolTip() != QStringLiteral("Select a thread");
                         }),
                         navigateAway ? "coalesced creation preserves deliberate later navigation"
                                      : "coalesced creation selects and displays the canonical conversation");
@@ -6764,6 +6785,7 @@ int main(int argc, char **argv) {
           for (const bool contended : {false, true}) {
               createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, contended);
           }
+          createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, false, true);
       }
   }
   optimisticCreationIgnoresAnotherCreationCorrelation(*configuration);
