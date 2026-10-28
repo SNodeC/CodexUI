@@ -116,7 +116,7 @@ QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool
     return QColor(QString::fromLatin1(role));
 }
 
-bool contextSelection(const QEvent* event) {
+bool contextMouseEvent(const QEvent* event) {
     return event && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) &&
            static_cast<const QMouseEvent*>(event)->button() == Qt::RightButton;
 }
@@ -171,8 +171,8 @@ public:
     using QTreeView::QTreeView;
 
 protected:
-    QItemSelectionModel::SelectionFlags selectionCommand(const QModelIndex& index, const QEvent* event = nullptr) const override {
-        return contextSelection(event) ? QItemSelectionModel::NoUpdate : QTreeView::selectionCommand(index, event);
+    bool viewportEvent(QEvent* event) override {
+        return contextMouseEvent(event) || QTreeView::viewportEvent(event);
     }
     void drawBranches(QPainter*, const QRect&, const QModelIndex&) const override {
     }
@@ -424,16 +424,10 @@ public:
   void retireAccessible(ThreadTreeItem *item);
 #endif
 
-protected:
-  QItemSelectionModel::SelectionFlags
-  selectionCommand(const QModelIndex &index,
-                   const QEvent *event = nullptr) const override {
-    return contextSelection(event) ? QItemSelectionModel::NoUpdate : QTreeWidget::selectionCommand(index, event);
-  }
-
+  protected:
   bool viewportEvent(QEvent* event) override {
-      bool handled = false;
-      if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick) {
+      bool handled = contextMouseEvent(event);
+      if (!handled && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)) {
           auto* mouse = static_cast<QMouseEvent*>(event);
           const QModelIndex index = QTreeWidget::indexAt(mouse->position().toPoint());
           const auto* item = threadItem(index);

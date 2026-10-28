@@ -2071,6 +2071,41 @@ bool preservesThreadRootsAndExactChildTargets() {
                  "unreachable canonical thread was hidden");
 }
 
+bool threadActionsRemainAvailableAcrossLineage() {
+    using nodegraph::NodeStatus;
+    bool passed = true;
+    for (const auto kind : {nodegraph::RelationKind::StructuralChildThread,
+                            nodegraph::RelationKind::AgentChildThread,
+                            nodegraph::RelationKind::ForkChildThread}) {
+        nodegraph::NodeGraph graph;
+        NodeRef parent;
+        NodeRef child;
+        {
+            auto write = graph.write();
+            const auto connection = write.upsert({NodeKind::Connection, "connection"});
+            write.setStatus(connection, NodeStatus::Connected);
+            write.setField(connection, "providerState", "ready");
+            write.setField(connection, "role", "controller");
+            parent = write.upsert({NodeKind::Thread, "action-parent"});
+            child = write.upsert({NodeKind::Thread, "action-child"});
+            write.setStatus(parent, NodeStatus::Completed);
+            write.setStatus(child, NodeStatus::Completed);
+            write.setField(child, "cwd", "/tmp/child");
+            write.relate(parent, kind, child);
+            static_cast<void>(write.finish());
+        }
+        NodeGraphUiAdapter adapter(graph);
+        const auto parentRow = adapter.threadRow(parent);
+        const auto childRow = adapter.threadRow(child);
+        passed &= require(parentRow && parentRow->target == parent && parentRow->status.semantic == NodeStatus::Completed,
+                          "a completed parent remains available to thread actions");
+        passed &= require(childRow && childRow->target == child && childRow->cwd == "/tmp/child" &&
+                              childRow->status.semantic == NodeStatus::Completed && childRow->workspaceChangeUnavailable.empty(),
+                          "a completed child retains its exact action target and workspace");
+    }
+    return passed;
+}
+
 bool rejectsRetiredThreadIncarnationsAtEveryProjectionBoundary() {
   nodegraph::NodeGraph graph;
   NodeRef runtime;
@@ -3512,6 +3547,7 @@ int main() {
   passed &= ordersStructuralRowsByCanonicalDependencies();
   passed &= routesRelationsIncrementallyAndTurnReordersAuthoritatively();
   passed &= preservesThreadRootsAndExactChildTargets();
+  passed &= threadActionsRemainAvailableAcrossLineage();
   passed &= rejectsRetiredThreadIncarnationsAtEveryProjectionBoundary();
   passed &= preservesReadinessActivityAndProviderPaginationSemantics();
   passed &= projectsHistoryRequestLifecycleFromTheGraph();

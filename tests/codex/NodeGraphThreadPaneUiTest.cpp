@@ -16,6 +16,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -109,20 +110,23 @@ QTreeWidget *threadTree(QWidget &owner) {
   return owner.findChild<QTreeWidget *>(QStringLiteral("threadList"));
 }
 
-void click(QWidget *widget, QPoint position) {
+void click(QWidget* widget, QPoint position, Qt::MouseButton button = Qt::LeftButton) {
     if (auto* child = widget->childAt(position)) {
         position = child->mapFrom(widget, position);
         widget = child;
     }
-  QMouseEvent press(QEvent::MouseButtonPress, QPointF(position),
-                    QPointF(position), widget->mapToGlobal(position),
-                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-  QApplication::sendEvent(widget, &press);
-  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(position),
-                      QPointF(position), widget->mapToGlobal(position),
-                      Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-  QApplication::sendEvent(widget, &release);
-  QApplication::processEvents();
+    QMouseEvent press(
+        QEvent::MouseButtonPress, QPointF(position), QPointF(position), widget->mapToGlobal(position), button, button, Qt::NoModifier);
+    QApplication::sendEvent(widget, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease,
+                        QPointF(position),
+                        QPointF(position),
+                        widget->mapToGlobal(position),
+                        button,
+                        Qt::NoButton,
+                        Qt::NoModifier);
+    QApplication::sendEvent(widget, &release);
+    QApplication::processEvents();
 }
 
 QTreeWidgetItem *threadItem(QTreeWidget *tree, std::string_view id,
@@ -654,6 +658,15 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     return false;
   const auto *standalone = threadItem(tree, "standalone-section");
   const auto *ungrouped = threadItem(tree, "ungrouped-thread");
+  tree->scrollToItem(threadItem(tree, "ungrouped-thread"));
+  QApplication::processEvents();
+  const auto currentBeforeContext = tree->currentIndex();
+  const auto selectionBeforeContext = tree->selectionModel()->selectedRows();
+  const auto activeBeforeContext = selected;
+  click(tree->viewport(), tree->visualItemRect(ungrouped).center(), Qt::RightButton);
+  passed &= require(tree->currentIndex() == currentBeforeContext && tree->selectionModel()->selectedRows() == selectionBeforeContext &&
+                        selected == activeBeforeContext,
+                    "an outer-tree context click preserves the current conversation and shared selection");
   const auto projectsFirst = [&] {
     const int first = tree->indexOfTopLevelItem(threadItem(tree, "project-a"));
     const int second = tree->indexOfTopLevelItem(threadItem(tree, "project-b"));
@@ -2036,6 +2049,15 @@ QColor logicalPixel(const QImage &image, QPoint point) {
 
 bool projectBodiesCapVisibleRows() {
     bool passed = true;
+    nodegraph::NodeGraph graph;
+    std::vector<nodegraph::NodeRef> targets;
+    {
+        auto write = graph.write();
+        for (int index = 0; index < 20; ++index) {
+            targets.push_back(write.upsert({nodegraph::NodeKind::Thread, "cap-" + std::to_string(index)}));
+        }
+        static_cast<void>(write.finish());
+    }
     for (const auto& [width, points] : std::array{std::pair{260, 10}, std::pair{440, 10}, std::pair{260, 16}, std::pair{440, 16}}) {
         middle::ThreadPane pane;
         auto font = pane.font();
@@ -2053,6 +2075,7 @@ bool projectBodiesCapVisibleRows() {
         for (int index = 0; index < 20; ++index) {
             section.children.push_back(localDraft(
                 "cap-" + std::to_string(index), "cap-" + std::to_string(index), "Thread " + std::to_string(index), "/workspace"));
+            section.children.back().target = targets[index];
         }
         ui::ThreadListRow page;
         page.kind = ui::ThreadRowKind::Page;
@@ -2062,7 +2085,15 @@ bool projectBodiesCapVisibleRows() {
         section.children.push_back(page);
         large.children = {section};
         int pagesRequested = 0;
+        int selections = 0;
+        nodegraph::NodeRef archived;
         middle::ThreadPane::Actions actions;
+        actions.select = [&](const nodegraph::NodeRef&) {
+            ++selections;
+        };
+        actions.toggleArchive = [&](const nodegraph::NodeRef& target) {
+            archived = target;
+        };
         actions.browse = [&](const nlohmann::json&) {
             ++pagesRequested;
         };
@@ -2074,6 +2105,7 @@ bool projectBodiesCapVisibleRows() {
                           localDraft("small-2", "small-2", "Second", "/workspace")};
         ui::ThreadListSnapshot snapshot;
         snapshot.providerReady = true;
+        snapshot.canControl = true;
         snapshot.roots = {large, small};
         for (int index = 0; index < 15; ++index) {
             ui::ThreadListRow empty;
@@ -2142,8 +2174,26 @@ bool projectBodiesCapVisibleRows() {
             auto* bodyAccessible = QAccessible::queryAccessibleInterface(largeBody);
             passed &= require(bodyAccessible && bodyAccessible->focusChild() == accessible && accessible->state().focused,
                               "native body focus resolves to the existing logical row accessible");
+            tree->verticalScrollBar()->setValue(2 * rowHeight);
+            QApplication::processEvents();
+            const int panelScrollBeforeContext = tree->verticalScrollBar()->value();
+            passed &= require(panelScrollBeforeContext > 0 && tree->visualItemRect(group).top() < 0,
+                              "the project heading is clipped above the panel before the context click");
             const auto selectedBeforeContext = tree->selectionModel()->selectedRows();
-            const QPoint contextPoint(80, 4);
+            const auto currentBeforeContext = tree->currentIndex();
+            const int selectionsBeforeContext = selections;
+            const int scrollBeforeContext = largeBody->verticalScrollBar()->value();
+            const QPoint contextPoint(80, std::max(4, -largeBody->geometry().top() + rowHeight / 2));
+            const QPoint contextGlobal = largeBody->viewport()->mapToGlobal(contextPoint);
+            const auto contextIndex = largeBody->indexAt(contextPoint);
+            const auto contextId = contextIndex.data(Qt::UserRole).toString().toStdString();
+            nodegraph::NodeRef expectedArchive;
+            {
+                auto read = graph.tryRead();
+                expectedArchive = read->find({nodegraph::NodeKind::Thread, contextId});
+            }
+            passed &= require(expectedArchive && contextIndex != lastIndex,
+                              "the pointer addresses a different older thread in the scrolled project");
             QMouseEvent contextPress(QEvent::MouseButtonPress,
                                      QPointF(contextPoint),
                                      QPointF(contextPoint),
@@ -2152,8 +2202,47 @@ bool projectBodiesCapVisibleRows() {
                                      Qt::RightButton,
                                      Qt::NoModifier);
             QApplication::sendEvent(largeBody->viewport(), &contextPress);
-            passed &= require(tree->selectionModel()->selectedRows() == selectedBeforeContext,
-                              "a project-body context click preserves thread selection");
+            const QPoint releasePoint = largeBody->viewport()->mapFromGlobal(contextGlobal);
+            QMouseEvent contextRelease(QEvent::MouseButtonRelease,
+                                       QPointF(releasePoint),
+                                       QPointF(releasePoint),
+                                       contextGlobal,
+                                       Qt::RightButton,
+                                       Qt::NoButton,
+                                       Qt::NoModifier);
+            QApplication::sendEvent(largeBody->viewport(), &contextRelease);
+            QApplication::processEvents();
+            passed &= require(tree->selectionModel()->selectedRows() == selectedBeforeContext &&
+                                  tree->currentIndex() == currentBeforeContext && selections == selectionsBeforeContext,
+                              "a project-body context click preserves both current and selected thread without activating a conversation");
+            passed &= require(largeBody->verticalScrollBar()->value() == scrollBeforeContext &&
+                                  tree->verticalScrollBar()->value() == panelScrollBeforeContext &&
+                                  largeBody->indexAt(largeBody->viewport()->mapFromGlobal(contextGlobal)) == contextIndex,
+                              "a context click keeps the older thread under the pointer without moving the project viewport");
+            QContextMenuEvent contextEvent(QContextMenuEvent::Mouse, largeBody->viewport()->mapFromGlobal(contextGlobal), contextGlobal);
+            QApplication::sendEvent(largeBody->viewport(), &contextEvent);
+            QApplication::processEvents();
+            QMenu* contextMenu = nullptr;
+            for (auto* menu : pane.findChildren<QMenu*>()) {
+                if (menu->isVisible()) {
+                    contextMenu = menu;
+                }
+            }
+            passed &= require(contextMenu, "the scrolled project's native context menu opens");
+            if (contextMenu) {
+                QAction* archiveAction = nullptr;
+                for (auto* action : contextMenu->actions()) {
+                    if (action->text() == "Archive") {
+                        archiveAction = action;
+                    }
+                }
+                passed &= require(archiveAction && archiveAction->isEnabled(), "the older thread can be archived from its context menu");
+                if (archiveAction) {
+                    archiveAction->trigger();
+                }
+                contextMenu->close();
+            }
+            passed &= require(archived == expectedArchive, "Archive targets the older thread originally right-clicked");
             const int scrollBefore = largeBody->verticalScrollBar()->value();
             pane.refresh(snapshot);
             QApplication::processEvents();

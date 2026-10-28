@@ -3410,25 +3410,40 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
   shell.show();
 
   makeReady(worker);
+  applyThread(worker, "fork-parent", "Original");
   applyThread(worker, "fork-source", "Original (fork 1)");
   applyThread(worker, "existing-child", "Original (fork 1.1)");
-  auto *list = shell.findChild<QTreeWidget *>(QStringLiteral("threadList"));
-  require(spinUntil([&] { return threadItem(list, "fork-source"); }),
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "thread/started",
+                                  std::nullopt,
+                                  {{"thread", Value::Object{{"id", "fork-source"}, {"forkedFromId", "fork-parent"}}}}}));
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "thread/started",
+                                  std::nullopt,
+                                  {{"thread", Value::Object{{"id", "existing-child"}, {"forkedFromId", "fork-source"}}}}}));
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "turn/completed",
+                                  std::nullopt,
+                                  {{"threadId", "fork-source"}, {"turn", Value::Object{{"id", "completed-source-turn"}}}}}));
+  auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+  require(spinUntil([&] {
+              return threadItem(list, "fork-source");
+          }),
           "fork fixture appears in the real thread list");
+  require(selectThread(list, "fork-parent"), "a different conversation is selected before forking the child");
+  list->expandAll();
   static_cast<void>(takeQtMessages(channels));
 
-  const auto openAction = [&](QStringView label) -> QAction * {
-    const QPoint point =
-        list->visualItemRect(threadItem(list, "fork-source")).center();
-    QMetaObject::invokeMethod(list, "customContextMenuRequested",
-                              Qt::DirectConnection, Q_ARG(QPoint, point));
-    auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-    if (!menu)
+  const auto openAction = [&](QStringView label) -> QAction* {
+      const QPoint point = list->visualItemRect(threadItem(list, "fork-source")).center();
+      QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, point));
+      auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+      if (!menu)
+          return nullptr;
+      for (QAction* action : menu->actions())
+          if (action && action->text() == label)
+              return action;
       return nullptr;
-    for (QAction *action : menu->actions())
-      if (action && action->text() == label)
-        return action;
-    return nullptr;
   };
 
   QAction *quick = openAction(u"Quick fork");
@@ -3448,46 +3463,41 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
   }
   const auto quickName = quickFork ? quickFork->payload.find("requestedName")
                                    : Value::Object::const_iterator{};
-  require(quickFork && quickName != quickFork->payload.end() &&
-              quickName->second.asString() &&
-              *quickName->second.asString() == "Original (fork 1.2)" &&
-              !quickFork->payload.contains("cwd"),
+  require(quickFork && quickName != quickFork->payload.end() && quickFork->target->id().canonical == "fork-source" &&
+              quickName->second.asString() && *quickName->second.asString() == "Original (fork 1.2)" && !quickFork->payload.contains("cwd"),
           "Quick fork sends only the correct next nested chosen name");
 
   bool suggestedNameVisible = false;
   bool nameDisabledForEphemeral = false;
-  QAction *advanced = openAction(u"Fork with options…");
+  QAction* advanced = openAction(u"Fork with options…");
   QTimer::singleShot(0, [&] {
-    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
-    if (!dialog)
-      return;
-    const auto lineEdits = dialog->findChildren<QLineEdit *>();
-    const auto plainEdits = dialog->findChildren<QPlainTextEdit *>();
-    QLineEdit *workspace = nullptr;
-    QLineEdit *name = nullptr;
-    for (QLineEdit *edit : lineEdits) {
-      if (edit->text() == QStringLiteral("/tmp"))
-        workspace = edit;
-      else
-        name = edit;
-    }
-    suggestedNameVisible =
-        name && name->text() == QStringLiteral("Original (fork 1.2)");
-    if (workspace)
-      workspace->setText(QStringLiteral("/adjusted-workspace"));
-    if (name)
-      name->setText(QStringLiteral("Chosen advanced fork"));
-    if (plainEdits.size() >= 2) {
-      plainEdits[0]->setPlainText(QStringLiteral("Adjusted base"));
-      plainEdits[1]->setPlainText(QStringLiteral("Adjusted developer"));
-    }
-    if (auto *ephemeral = dialog->findChild<QCheckBox *>()) {
-      ephemeral->setChecked(true);
-      nameDisabledForEphemeral =
-          name && !name->isEnabled() &&
-          name->text() == QStringLiteral("Chosen advanced fork");
-    }
-    dialog->accept();
+      auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      if (!dialog)
+          return;
+      const auto lineEdits = dialog->findChildren<QLineEdit*>();
+      const auto plainEdits = dialog->findChildren<QPlainTextEdit*>();
+      QLineEdit* workspace = nullptr;
+      QLineEdit* name = nullptr;
+      for (QLineEdit* edit : lineEdits) {
+          if (edit->text() == QStringLiteral("/tmp"))
+              workspace = edit;
+          else
+              name = edit;
+      }
+      suggestedNameVisible = name && name->text() == QStringLiteral("Original (fork 1.2)");
+      if (workspace)
+          workspace->setText(QStringLiteral("/adjusted-workspace"));
+      if (name)
+          name->setText(QStringLiteral("Chosen advanced fork"));
+      if (plainEdits.size() >= 2) {
+          plainEdits[0]->setPlainText(QStringLiteral("Adjusted base"));
+          plainEdits[1]->setPlainText(QStringLiteral("Adjusted developer"));
+      }
+      if (auto* ephemeral = dialog->findChild<QCheckBox*>()) {
+          ephemeral->setChecked(true);
+          nameDisabledForEphemeral = name && !name->isEnabled() && name->text() == QStringLiteral("Chosen advanced fork");
+      }
+      dialog->accept();
   });
   if (advanced)
     advanced->trigger();
@@ -3507,16 +3517,49 @@ void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
   };
   const auto ephemeral = advancedFork ? advancedFork->payload.find("ephemeral")
                                       : Value::Object::const_iterator{};
-  require(advanced && suggestedNameVisible && nameDisabledForEphemeral &&
-              advancedFork &&
-              !advancedFork->payload.contains("requestedName") &&
-              hasString("cwd", "/adjusted-workspace") &&
-              hasString("baseInstructions", "Adjusted base") &&
-              hasString("developerInstructions", "Adjusted developer") &&
-              ephemeral != advancedFork->payload.end() &&
+  require(advanced && suggestedNameVisible && nameDisabledForEphemeral && advancedFork &&
+              advancedFork->target->id().canonical == "fork-source" && !advancedFork->payload.contains("requestedName") &&
+              hasString("cwd", "/adjusted-workspace") && hasString("baseInstructions", "Adjusted base") &&
+              hasString("developerInstructions", "Adjusted developer") && ephemeral != advancedFork->payload.end() &&
               ephemeral->second.asBool() && *ephemeral->second.asBool(),
           "Temporary Fork with options disables its name while retaining "
           "workspace and instruction fields");
+  require(list->currentItem() == threadItem(list, "fork-parent"), "fork actions retain the selected conversation until completion");
+  auto* grouping = shell.findChild<QToolButton*>(QStringLiteral("threadGroupingButton"));
+  QAction* priorGrouping = nullptr;
+  require(grouping && grouping->menu(), "thread grouping menu is available");
+  if (grouping && grouping->menu()) {
+      QMetaObject::invokeMethod(grouping->menu(), "aboutToShow", Qt::DirectConnection);
+      for (auto* action : grouping->menu()->actions()) {
+          if (action->isChecked()) {
+              priorGrouping = action;
+          }
+      }
+      for (auto* action : grouping->menu()->actions()) {
+          if (action->text() == "Ungrouped") {
+              action->trigger();
+          }
+      }
+  }
+  require(priorGrouping, "the original grouping action is retained for fixture cleanup");
+  spin();
+  for (const auto* status : {"active", "idle"}) {
+      static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                      "thread/status/changed",
+                                      std::nullopt,
+                                      {{"threadId", "existing-child"}, {"status", Value::Object{{"type", status}}}}}));
+      require(spinUntil([&] {
+                  const auto* parent = threadItem(list, "fork-parent");
+                  const auto* source = threadItem(list, "fork-source");
+                  const bool active = std::string_view(status) == "active";
+                  return parent && source && parent->toolTip(0).contains("Indirect activity") == active &&
+                         source->toolTip(0).contains("Indirect activity") == active;
+              }),
+              "ungrouped status-only updates refresh activity on both fork ancestors");
+  }
+  if (priorGrouping) {
+      priorGrouping->trigger();
+  }
 }
 
 void backgroundGraphChangesDoNotRefreshSelectedConversation(
