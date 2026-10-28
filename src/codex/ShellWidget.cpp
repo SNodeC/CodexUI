@@ -1930,64 +1930,53 @@ void ShellWidget::Impl::reconcileGraphUiFallback() {
 void ShellWidget::Impl::selectGraphThread(nodegraph::NodeRef thread,
                                           ThreadSelectionOrigin origin,
                                           std::uint64_t graphSerial) {
-  if (!thread || thread->id().kind != nodegraph::NodeKind::Thread)
-    return;
-  std::string creationCorrelation;
-  bool local = false;
-  {
-    auto read = session.nodeGraph().tryRead();
-    if (!read) {
-      QTimer::singleShot(
-          GraphRetryDelayMilliseconds, owner,
-          [this, thread = std::move(thread), origin, graphSerial]() mutable {
-            selectGraphThread(std::move(thread), origin, graphSerial);
-          });
-      return;
+    if (thread && thread->id().kind == nodegraph::NodeKind::Thread) {
+        auto read = session.nodeGraph().tryRead();
+        if (!read) {
+            QTimer::singleShot(GraphRetryDelayMilliseconds, owner, [this, thread = std::move(thread), origin, graphSerial]() mutable {
+                selectGraphThread(std::move(thread), origin, graphSerial);
+            });
+        } else if (read->live(thread)) {
+            const auto state = read->state(thread);
+            const std::string creationCorrelation = exactStringFromValue(valueMember(*state, "creationCorrelation"));
+            const bool local = boolFromValue(valueMember(*state, "local"));
+            const bool selectedCreation =
+                !creationCorrelation.empty() && boundGraphThread && read->contains(boundGraphThread) &&
+                exactStringFromValue(valueMember(*read->state(boundGraphThread), "creationCorrelation")) == creationCorrelation;
+            read.reset();
+            const auto visible = middleRegion->threads().visiblySelectedThread();
+            bool selected = origin == ThreadSelectionOrigin::User ? visible && visible->target == thread
+                                                                  : graphSerial == 0 || graphSerial == lastSelectionSerial;
+            if (selected) {
+                const std::string targetId = thread->id().canonical;
+                const bool ownsCreation = !creationCorrelation.empty() && creationCorrelation == creationDraftCorrelation;
+                if (!local && !creationCorrelation.empty()) {
+                    middleRegion->composer().turnSettings().promote(
+                        ui::threadPresentationKey(targetId, creationCorrelation), targetId, thread->incarnation());
+                }
+                if (origin == ThreadSelectionOrigin::Graph && !creationCorrelation.empty()) {
+                    selected = ownsCreation ? selectedGraphThreadId.empty() || selectedGraphThreadId == targetId || selectedCreation
+                                            : creationDraftCorrelation.empty();
+                    if (ownsCreation && !local) {
+                        creationDraftCorrelation.clear();
+                    }
+                }
+                if (selected) {
+                    if (origin == ThreadSelectionOrigin::User && newThreadDraft) {
+                        middleRegion->composer().turnSettings().forget(ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation));
+                        middleRegion->threads().discardOptimisticThread(DraftThreadId);
+                        creationDraftCorrelation.clear();
+                    }
+                    newThreadDraft.reset();
+                    selectedGraphThreadId = targetId;
+                    bindGraphPanes(thread);
+                    if (origin == ThreadSelectionOrigin::User) {
+                        hydrateSelectedThreadIfNeeded(std::move(thread));
+                    }
+                }
+            }
+        }
     }
-    if (!read->live(thread))
-      return;
-    const auto state = read->state(thread);
-    creationCorrelation =
-        exactStringFromValue(valueMember(*state, "creationCorrelation"));
-    local = boolFromValue(valueMember(*state, "local"));
-  }
-  if (origin == ThreadSelectionOrigin::Graph && graphSerial != 0 &&
-      graphSerial != lastSelectionSerial)
-    return;
-  if (origin == ThreadSelectionOrigin::User) {
-    const auto visible = middleRegion->threads().visiblySelectedThread();
-    if (!visible || visible->target != thread)
-      return;
-  }
-  const std::string targetId = thread->id().canonical;
-  const bool ownsCreation = !creationCorrelation.empty() &&
-                            creationCorrelation == creationDraftCorrelation;
-  if (!local && !creationCorrelation.empty())
-    middleRegion->composer().turnSettings().promote(
-        ui::threadPresentationKey(targetId, creationCorrelation), targetId,
-        thread->incarnation());
-  if (origin == ThreadSelectionOrigin::Graph && !creationCorrelation.empty()) {
-    if (!ownsCreation && !creationDraftCorrelation.empty())
-      return;
-    if (ownsCreation) {
-      if (!local)
-        creationDraftCorrelation.clear();
-      if (!selectedGraphThreadId.empty() && selectedGraphThreadId != targetId)
-        return;
-    }
-  }
-  if (origin == ThreadSelectionOrigin::User && newThreadDraft) {
-    middleRegion->composer().turnSettings().forget(
-        ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation));
-    middleRegion->threads().discardOptimisticThread(DraftThreadId);
-    creationDraftCorrelation.clear();
-  }
-  newThreadDraft.reset();
-  selectedGraphThreadId = targetId;
-  bindGraphPanes(thread);
-  if (origin == ThreadSelectionOrigin::User) {
-      hydrateSelectedThreadIfNeeded(std::move(thread));
-  }
 }
 
 void ShellWidget::Impl::handleProtocolDiagnostic(

@@ -562,22 +562,23 @@ ChannelSendStatus WorkerLogic::showNotice(std::string message) {
   return publish(std::move(change));
 }
 
-ChannelSendStatus WorkerLogic::selectThread(const NodeRef &thread) {
-  if (!thread || thread->id().kind != NodeKind::Thread)
-    return ChannelSendStatus::Accepted;
-  const std::uint64_t serial = nextSelectionSerial_++;
-  GraphChange change;
-  {
-    auto write = graph_.write();
-    if (write.find(thread->id()) != thread)
-      return ChannelSendStatus::Accepted;
-    NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
-    std::array<NodeRef, 1> target{thread};
-    write.replaceRelated(runtime, RelationKind::UiSelectionTarget, target);
-    write.setField(runtime, "uiSelectionSerial", Value(serial));
-    change = write.finish();
-  }
-  return publish(std::move(change));
+ChannelSendStatus WorkerLogic::selectThread(const NodeRef& thread) {
+    GraphChange change;
+    {
+        auto write = graph_.write();
+        selectThread(write, thread);
+        change = write.finish();
+    }
+    return publish(std::move(change));
+}
+
+void WorkerLogic::selectThread(NodeGraph::WriteAccess& write, const NodeRef& thread) {
+    if (thread && thread->id().kind == NodeKind::Thread && write.find(thread->id()) == thread) {
+        NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
+        const std::array<NodeRef, 1> target{thread};
+        write.replaceRelated(runtime, RelationKind::UiSelectionTarget, target);
+        write.setField(runtime, "uiSelectionSerial", Value(nextSelectionSerial_++));
+    }
 }
 
 ChannelSendStatus WorkerLogic::resolveInteraction(const NodeRef &interaction) {
@@ -833,13 +834,7 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
         command = takeNextPrompt(write, ownerThread);
       }
     }
-    if (selectedDraft) {
-      NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
-      const std::array<NodeRef, 1> target{selectedDraft};
-      write.replaceRelated(runtime, RelationKind::UiSelectionTarget, target);
-      write.setField(runtime, "uiSelectionSerial",
-                     Value(nextSelectionSerial_++));
-    }
+    selectThread(write, selectedDraft);
     if (invalidTarget) {
       NodeRef notice =
           write.upsert({NodeKind::Notice, "local-worker-notice"});
@@ -1030,137 +1025,83 @@ WorkerLogic::takeNextPrompt(NodeGraph::WriteAccess &write,
   return std::nullopt;
 }
 
-ChannelSendStatus WorkerLogic::attachCreatedThread(PromptCommand &command,
-                                                   std::string threadId,
-                                                   NodeState providerState) {
-  NodeRef authoritative;
-  GraphChange change;
-  bool attached = false;
-  {
-    auto write = graph_.write();
-    attached = attachCreatedThread(write, command, std::move(threadId),
-                                   std::move(providerState), authoritative);
-    change = write.finish();
-  }
-  forgetRemoved(change);
-  const ChannelSendStatus status = publish(std::move(change));
-  if (!attached)
-    return status;
-
-  command.thread = authoritative;
-  command.kind = PromptCommandKind::StartTurn;
-  command.expectedTurnId.clear();
-  command.options = std::move(command.turnOptions);
-  static_cast<void>(selectThread(authoritative));
-  return status;
-}
-
-ChannelSendStatus WorkerLogic::completeCreatedThread(DecodedMessage result,
-                                                     PromptCommand &command,
-                                                     std::string threadId,
-                                                     NodeState providerState) {
-  NodeRef authoritative;
-  GraphChange change;
-  bool attached = false;
-  {
-    auto write = graph_.write();
-    static_cast<void>(updater_.applyInto(write, result));
-    attached = attachCreatedThread(write, command, std::move(threadId),
-                                   std::move(providerState), authoritative);
-    change = write.finish();
-  }
-  forgetRemoved(change);
-  const ChannelSendStatus status = publish(std::move(change));
-  if (!attached)
-    return status;
-
-  command.thread = authoritative;
-  command.kind = PromptCommandKind::StartTurn;
-  command.expectedTurnId.clear();
-  command.options = std::move(command.turnOptions);
-  static_cast<void>(selectThread(authoritative));
-  return status;
-}
-
-bool WorkerLogic::attachCreatedThread(NodeGraph::WriteAccess &write,
-                                      PromptCommand &command,
-                                      std::string threadId,
-                                      NodeState providerState,
-                                      NodeRef &authoritative) {
-  if (command.kind != PromptCommandKind::CreateThread || threadId.empty() ||
-      !command.thread || !command.localPrompt)
-    return false;
-
-  NodeRef draft = write.find(command.thread->id());
-  if (draft != command.thread ||
-      write.find(command.localPrompt->id()) != command.localPrompt)
-    return false;
-  const std::shared_ptr<const NodeState> draftState = write.state(draft);
-  authoritative = write.find({NodeKind::Thread, threadId});
-  if (!authoritative)
-    authoritative = write.upsert({NodeKind::Thread, std::move(threadId)},
-                                 std::move(providerState));
-  // A successful thread/start result is the complete initial authority for a
-  // newly created thread.  Treat it as display-ready so the admitted prompt
-  // is not hidden behind a redundant thread/read gate.
-  updateThreadHydration(write, authoritative, "ready", {});
-  for (const std::string_view key :
-       {std::string_view("localActivityAt"),
-        std::string_view("localPromptActivityAt"),
-        std::string_view("confirmedLocalPromptActivityAt"),
-        std::string_view("creationCorrelation"), std::string_view("cwd")}) {
-    if (const Value *value = valueMember(*draftState, key))
-      write.setField(authoritative, std::string(key), *value);
-  }
-  if (const std::string chosenName = stringField(*draftState, "name");
-      !chosenName.empty()) {
-    write.setField(authoritative, "localNameOverlay", Value(chosenName));
-    write.setField(authoritative, "name", Value(chosenName));
-  }
-
-  const std::vector<NodeRef> draftChildren = write.children(draft);
-  for (const NodeRef &child : draftChildren)
-    write.setParent(authoritative, child);
-  const std::vector<NodeRef> prompts =
-      write.related(draft, RelationKind::PendingPrompt);
-  for (const NodeRef &prompt : prompts) {
-    write.relate(authoritative, RelationKind::PendingPrompt, prompt);
-    write.setField(prompt, "threadId", Value(authoritative->id().canonical));
-  }
-
-  if (NodeRef runtime = write.find({NodeKind::Runtime, "runtime"})) {
-    std::vector<NodeRef> roots =
-        write.related(runtime, RelationKind::RootThread);
-    roots.erase(std::remove(roots.begin(), roots.end(), draft), roots.end());
-    roots.erase(std::remove(roots.begin(), roots.end(), authoritative),
-                roots.end());
-    roots.insert(roots.begin(), authoritative);
-    write.replaceRelated(runtime, RelationKind::RootThread, roots);
-  }
-
-  if (auto queued = promptQueues_.find(draft.get());
-      queued != promptQueues_.end()) {
-    std::deque<PendingPrompt> moved = std::move(queued->second);
-    promptQueues_.erase(queued);
-    std::deque<PendingPrompt> &destination = promptQueues_[authoritative.get()];
-    for (PendingPrompt &entry : moved) {
-      entry.thread = authoritative;
-      destination.emplace_back(std::move(entry));
+ChannelSendStatus
+WorkerLogic::completeCreatedThread(DecodedMessage result, PromptCommand& command, std::string threadId, NodeState providerState) {
+    GraphChange change;
+    {
+        auto write = graph_.write();
+        static_cast<void>(updater_.applyInto(write, result));
+        if (command.kind == PromptCommandKind::CreateThread && !threadId.empty() && command.thread && command.localPrompt &&
+            write.find(command.thread->id()) == command.thread && write.find(command.localPrompt->id()) == command.localPrompt) {
+            const NodeRef draft = command.thread;
+            const auto draftState = write.state(draft);
+            NodeRef authoritative = write.find({NodeKind::Thread, threadId});
+            if (!authoritative) {
+                authoritative = write.upsert({NodeKind::Thread, std::move(threadId)}, std::move(providerState));
+            }
+            // thread/start supplies the complete initial authority, including display readiness.
+            updateThreadHydration(write, authoritative, "ready", {});
+            for (const std::string_view key : {std::string_view("localActivityAt"),
+                                               std::string_view("localPromptActivityAt"),
+                                               std::string_view("confirmedLocalPromptActivityAt"),
+                                               std::string_view("creationCorrelation"),
+                                               std::string_view("cwd")}) {
+                if (const Value* value = valueMember(*draftState, key)) {
+                    write.setField(authoritative, std::string(key), *value);
+                }
+            }
+            if (const std::string chosenName = stringField(*draftState, "name"); !chosenName.empty()) {
+                write.setField(authoritative, "localNameOverlay", Value(chosenName));
+                write.setField(authoritative, "name", Value(chosenName));
+            }
+            const auto draftChildren = write.children(draft);
+            for (const NodeRef& child : draftChildren) {
+                write.setParent(authoritative, child);
+            }
+            const auto prompts = write.related(draft, RelationKind::PendingPrompt);
+            for (const NodeRef& prompt : prompts) {
+                write.relate(authoritative, RelationKind::PendingPrompt, prompt);
+                write.setField(prompt, "threadId", Value(authoritative->id().canonical));
+            }
+            if (const NodeRef runtime = write.find({NodeKind::Runtime, "runtime"})) {
+                auto roots = write.related(runtime, RelationKind::RootThread);
+                roots.erase(std::remove(roots.begin(), roots.end(), draft), roots.end());
+                roots.erase(std::remove(roots.begin(), roots.end(), authoritative), roots.end());
+                roots.insert(roots.begin(), authoritative);
+                write.replaceRelated(runtime, RelationKind::RootThread, roots);
+            }
+            if (auto queued = promptQueues_.find(draft.get()); queued != promptQueues_.end()) {
+                auto moved = std::move(queued->second);
+                promptQueues_.erase(queued);
+                auto& destination = promptQueues_[authoritative.get()];
+                for (PendingPrompt& entry : moved) {
+                    entry.thread = authoritative;
+                    destination.emplace_back(std::move(entry));
+                }
+            }
+            if (auto inFlight = promptInFlight_.find(draft.get()); inFlight != promptInFlight_.end()) {
+                NodeRef prompt = std::move(inFlight->second);
+                promptInFlight_.erase(inFlight);
+                promptInFlight_.insert_or_assign(authoritative.get(), std::move(prompt));
+            }
+            if (!command.creationCorrelation.empty()) {
+                const auto creating = creatingThreads_.find(command.creationCorrelation);
+                if (creating != creatingThreads_.end() && creating->second == draft) {
+                    creatingThreads_.erase(creating);
+                }
+            }
+            // Selection and retirement are one graph transition, including coalesced delivery.
+            selectThread(write, authoritative);
+            write.remove(draft);
+            command.thread = authoritative;
+            command.kind = PromptCommandKind::StartTurn;
+            command.expectedTurnId.clear();
+            command.options = std::move(command.turnOptions);
+        }
+        change = write.finish();
     }
-  }
-  if (auto inFlight = promptInFlight_.find(draft.get());
-      inFlight != promptInFlight_.end()) {
-    NodeRef prompt = std::move(inFlight->second);
-    promptInFlight_.erase(inFlight);
-    promptInFlight_.insert_or_assign(authoritative.get(), std::move(prompt));
-  }
-  if (!command.creationCorrelation.empty()) {
-    const auto creating = creatingThreads_.find(command.creationCorrelation);
-    if (creating != creatingThreads_.end() && creating->second == draft)
-      creatingThreads_.erase(creating);
-  }
-  write.remove(draft);
-  return true;
+    forgetRemoved(change);
+    return publish(std::move(change));
 }
 
 ChannelSendStatus

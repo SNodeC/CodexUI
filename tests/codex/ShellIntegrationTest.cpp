@@ -4434,19 +4434,16 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration& configuration, bool 
     if (!transition.command)
         return;
     const NodeRef localPrompt = transition.command->localPrompt;
+    const ProtocolRequestId id("draft-thread-start");
+    const auto request = worker.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", id, {}});
+    Value::Object created{{"id", "created-thread"}, {"name", chosenName.toStdString()}};
     if (grouped) {
-        const ProtocolRequestId id("group-draft-thread-start");
-        const auto request =
-            worker.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", id, {{"projectId", Value("openwrt")}}});
-        static_cast<void>(worker.apply(
-            {DecodedMessageKind::ClientResult,
-             "thread/start",
-             id,
-             {{"thread",
-               Value::Object{{"id", Value("created-thread")}, {"projectId", Value("openwrt")}, {"name", Value(chosenName.toStdString())}}}},
-             request.primary}));
+        created.emplace("projectId", "openwrt");
     }
-    require(worker.attachCreatedThread(*transition.command, "created-thread") == ChannelSendStatus::Accepted,
+    require(worker.completeCreatedThread(
+                {DecodedMessageKind::ClientResult, "thread/start", id, {{"thread", Value(std::move(created))}}, request.primary},
+                *transition.command,
+                "created-thread") == ChannelSendStatus::Accepted,
             "the worker attaches the accepted canonical thread exactly once");
     require(spinUntil(
                 [&] {
@@ -4831,8 +4828,15 @@ void optimisticCreationDoesNotOverrideLaterNavigation(
     return;
 
   const NodeRef localPrompt = transition.command->localPrompt;
-  static_cast<void>(
-      worker.attachCreatedThread(*transition.command, "background-created"));
+  const ProtocolRequestId creationId("background-creation");
+  const auto creation = worker.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", creationId, {}});
+  static_cast<void>(worker.completeCreatedThread({DecodedMessageKind::ClientResult,
+                                                  "thread/start",
+                                                  creationId,
+                                                  {{"thread", Value::Object{{"id", "background-created"}}}},
+                                                  creation.primary},
+                                                 *transition.command,
+                                                 "background-created"));
   require(spinUntil(
               [&] {
                 return list->currentItem() ==
@@ -4865,6 +4869,105 @@ void optimisticCreationDoesNotOverrideLaterNavigation(
               approval->currentData() == QStringLiteral("untrusted"),
           "selecting the completed background thread restores its exact "
           "promoted settings draft");
+}
+
+void createdThreadSelectionSurvivesRescan(Configuration& configuration, bool navigateAway, bool notificationFirst, bool contended) {
+    std::cerr << "Creation rescan: navigateAway=" << navigateAway << " notificationFirst=" << notificationFirst
+              << " contended=" << contended << '\n';
+    FrontendSession session(configuration);
+    ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
+    NodeGraph& graph = FrontendSessionTestPeer::graph(session);
+    WorkerLogic worker(graph, channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    applyThread(worker, "other-selection", "Deliberate later selection");
+    spin(40);
+    auto* newThread = shell.findChild<QPushButton*>(QStringLiteral("threadNewButton"));
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    auto* editor = shell.findChild<ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
+    auto* view = dynamic_cast<middle::ConversationView*>(shell.findChild<QWidget*>(QStringLiteral("conversationScroll")));
+    QTimer::singleShot(0, &shell, [] {
+        if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+            dialog->accept();
+        }
+    });
+    require(newThread && list && editor && view, "creation rescan exposes the real shell controls");
+    if (newThread && list && editor && view) {
+        newThread->click();
+        spin(30);
+        require(submit(editor, QStringLiteral("first prompt survives promotion")), "creation rescan admits the first prompt");
+        std::optional<RuntimeAction> create;
+        for (auto& message : takeQtMessages(channels)) {
+            if (auto* action = std::get_if<RuntimeAction>(&message); action && action->kind == RuntimeActionKind::CreateThread) {
+                create = std::move(*action);
+            }
+        }
+        require(create.has_value(), "creation rescan dispatches one typed create action");
+        if (create) {
+            auto admitted = worker.admitFirstPrompt(std::move(*create));
+            spin(60);
+            require(admitted.command.has_value(), "creation rescan admits one worker creation");
+            if (admitted.command) {
+                const auto temporaryId = admitted.command->thread->id().canonical;
+                require(view->presentedThreadId() == temporaryId, "the worker-local conversation is selected before promotion");
+                if (navigateAway) {
+                    require(selectThread(list, "other-selection"), "the user deliberately navigates away after local admission");
+                }
+                const ProtocolRequestId creationId("rescan-creation");
+                const auto creation = worker.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", creationId, {}});
+                spin(30);
+                Value::Object created{{"id", "rescan-created"}, {"status", Value::Object{{"type", "idle"}}}};
+                if (notificationFirst) {
+                    static_cast<void>(worker.apply(
+                        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt, {{"thread", Value(created)}}}));
+                    spin(30);
+                }
+                while (channels.workerToQtSizeApprox() < ThreadChannels::WorkerToQtCapacity - ThreadChannels::WorkerToQtReservedSlots) {
+                    ProtocolDiagnostic filler;
+                    static_cast<void>(channels.sendProtocolDiagnostic(filler));
+                }
+                require(worker.completeCreatedThread(
+                            {DecodedMessageKind::ClientResult, "thread/start", creationId, {{"thread", Value(created)}}, creation.primary},
+                            *admitted.command,
+                            "rescan-created") == ChannelSendStatus::CoalescedRescan,
+                        "creation completion uses the real coalesced graph delivery path");
+                if (!notificationFirst) {
+                    static_cast<void>(worker.apply(
+                        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt, {{"thread", Value(created)}}}));
+                }
+                if (contended) {
+                    auto write = graph.write();
+                    FrontendSessionTestPeer::drainWorkerMessages(session);
+                    static_cast<void>(write.finish());
+                }
+                const std::string expected = navigateAway ? "other-selection" : "rescan-created";
+                require(spinUntil([&] {
+                            const auto* selected = threadItem(list, expected);
+                            return selected && threadItem(list, "rescan-created") && !threadItem(list, temporaryId) &&
+                                   list->currentItem() == selected && selected->isSelected() &&
+                                   list->selectionModel()->selectedRows().size() == 1 && view->presentedThreadId() == expected;
+                        }),
+                        navigateAway ? "coalesced creation preserves deliberate later navigation"
+                                     : "coalesced creation selects and displays the canonical conversation");
+                require(threadItem(list, "rescan-created") && !threadItem(list, temporaryId),
+                        "promotion retains one canonical row and retires the temporary identity");
+                if (!navigateAway) {
+                    require(localPromptCard(shell, "first prompt survives promotion"),
+                            "the first prompt remains visible without manual selection");
+                }
+                std::size_t hydrations = 0;
+                for (const auto& message : takeQtMessages(channels)) {
+                    if (const auto* action = std::get_if<NodeAction>(&message);
+                        action && action->kind == NodeActionKind::Hydrate && action->target == admitted.command->thread) {
+                        ++hydrations;
+                    }
+                }
+                require(hydrations == 0, "canonical creation display needs no redundant history hydration");
+            }
+        }
+    }
 }
 
 void optimisticCreationIgnoresAnotherCreationCorrelation(
@@ -6641,6 +6744,13 @@ int main(int argc, char **argv) {
   secondNewThreadIsGuardedWhileCreationIsInFlight(*configuration);
   providerResetKeepsInFlightCreationGuard(*configuration);
   optimisticCreationDoesNotOverrideLaterNavigation(*configuration);
+  for (const bool navigateAway : {false, true}) {
+      for (const bool notificationFirst : {false, true}) {
+          for (const bool contended : {false, true}) {
+              createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, contended);
+          }
+      }
+  }
   optimisticCreationIgnoresAnotherCreationCorrelation(*configuration);
   saturatedShellKeepsTheEditorDraft(*configuration);
   saturatedRenameRetainsAuthoredName(*configuration);

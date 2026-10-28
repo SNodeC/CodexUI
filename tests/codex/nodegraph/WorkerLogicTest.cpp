@@ -1955,11 +1955,20 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
                                     {"id", Value("created-thread")},
                                     {"name", Value("Provider default")}})}}}));
   static_cast<void>(takeWorkerMessages(channels));
-  require(admitted.command &&
-              logic.attachCreatedThread(*admitted.command, "created-thread") ==
-                  ChannelSendStatus::Accepted,
+  const ProtocolRequestId creationId("first-prompt-creation");
+  const auto creation = logic.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", creationId, {}});
+  const auto beforePromotion = graph.publishedRevision();
+  require(admitted.command && logic.completeCreatedThread({DecodedMessageKind::ClientResult,
+                                                           "thread/start",
+                                                           creationId,
+                                                           {{"thread", Value::Object{{"id", "created-thread"}}}},
+                                                           creation.primary},
+                                                          *admitted.command,
+                                                          "created-thread") == ChannelSendStatus::Accepted,
           "thread/start result migrates the draft prompt atomically");
   static_cast<void>(takeWorkerMessages(channels));
+  require(graph.publishedRevision() == beforePromotion + 1,
+          "prompt migration, draft retirement and replacement selection publish atomically");
   {
     auto read = graph.tryRead();
     const NodeRef actual = read->find({NodeKind::Thread, "created-thread"});
@@ -2119,8 +2128,15 @@ void creationCorrelationSharesExactlyOneDraft() {
             "stable prompt nodes");
   }
 
-  require(logic.attachCreatedThread(*admitted.command, "correlated-thread") ==
-              ChannelSendStatus::Accepted,
+  const ProtocolRequestId creationId("correlated-creation");
+  const auto creation = logic.applyDetailed({DecodedMessageKind::ClientRequest, "thread/start", creationId, {}});
+  require(logic.completeCreatedThread({DecodedMessageKind::ClientResult,
+                                       "thread/start",
+                                       creationId,
+                                       {{"thread", Value::Object{{"id", "correlated-thread"}}}},
+                                       creation.primary},
+                                      *admitted.command,
+                                      "correlated-thread") == ChannelSendStatus::Accepted,
           "the single draft is promoted to its canonical thread");
   static_cast<void>(takeWorkerMessages(channels));
   PromptTransition next = logic.completePrompt(admitted.command->localPrompt,
