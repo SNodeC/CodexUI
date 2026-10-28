@@ -2423,6 +2423,21 @@ void initialHydrationRetainsAllLoadedRowsWithBoundedResidency(
           "Load Earlier sends one provider action without changing loaded "
           "model membership");
 
+  auto* first = shell.findChild<QToolButton*>(QStringLiteral("conversationFirstTurn"));
+  require(first && first->isEnabled(), "First is available on retained paginated history");
+  if (first) {
+      first->click();
+  }
+  const auto firstMessages = takeQtMessages(channels);
+  require(std::ranges::any_of(firstMessages,
+                              [&](const QtToWorkerMessage& message) {
+                                  const auto* action = std::get_if<NodeAction>(&message);
+                                  const auto* throughFirst = action ? valueMember(action->payload, "throughFirst") : nullptr;
+                                  return action && action->kind == NodeActionKind::LoadHistory && action->target == historyThread &&
+                                         throughFirst && throughFirst->asBool() && *throughFirst->asBool();
+                              }),
+          "First uses the existing target-owned history action with explicit through-beginning intent");
+
   const ProtocolRequestId olderPageId("shell-history-older-page");
   DecodedMessage olderPageRequest{DecodedMessageKind::ClientRequest,
                                   "thread/turns/list",

@@ -1565,6 +1565,50 @@ void conversationSnapshotsShareOneAdmissionAuthority(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void firstNavigationDrainsTheExistingHistoryPager(UnixBridge& bridge, RunningRuntime& runtime) {
+    NodeRef thread;
+    {
+        auto write = runtime.graph().write();
+        NodeState state;
+        state.fields = {{"historyHasMore", Value(true)}, {"historyNextCursor", Value("first-1")}};
+        thread = write.upsert({NodeKind::Thread, "first-navigation"}, std::move(state));
+        static_cast<void>(write.finish());
+    }
+    expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::LoadHistory, {}, {}, {{"throughFirst", Value(true)}}, {}}),
+           "First enters the existing typed history action");
+    for (int page = 1; page <= 3; ++page) {
+        const auto request = bridge.receiveAppServer();
+        expect(request && request->value("method", "") == "thread/turns/list" &&
+                   request->at("params").value("cursor", "") == "first-" + std::to_string(page) &&
+                   request->at("params").value("sortDirection", "") == "desc",
+               "First sequentially follows authoritative cursors through the existing history pager");
+        if (request) {
+            const nlohmann::json cursor = page == 3 ? nlohmann::json(nullptr) : nlohmann::json("first-" + std::to_string(page + 1));
+            expect(bridge.reply(*request, {{"data", nlohmann::json::array()}, {"nextCursor", cursor}}), "First receives an earlier page");
+        }
+    }
+    expect(!bridge.receiveAppServer(100ms), "First stops paging at the authoritative beginning");
+    {
+        auto write = runtime.graph().write();
+        write.setField(thread, "historyNextCursor", Value("first-retry"));
+        write.setField(thread, "historyHasMore", Value(true));
+        static_cast<void>(write.finish());
+    }
+    expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::LoadHistory, {}, {}, {{"throughFirst", Value(true)}}, {}}),
+           "First can request retained earlier history again");
+    const auto failed = bridge.receiveAppServer();
+    expect(failed.has_value(), "First failure coverage receives a request");
+    if (failed) {
+        expect(bridge.replyError(*failed, -32000, "First paging failed"), "First exposes history failure");
+        expect(waitUntil([&] {
+                   return operationRetired(runtime.graph(), failed->at("id"));
+               }),
+               "First failure retires its operation");
+    }
+    expect(!bridge.receiveAppServer(100ms), "First does not loop or automatically retry after failure");
+    runtime.drainNotifications();
+}
+
 void staleHistoryFailureIsSemanticallyInert(UnixBridge &bridge,
                                             RunningRuntime &runtime) {
   constexpr std::string_view ThreadId = "stale-history-thread";
@@ -3417,6 +3461,7 @@ int main(int argc, char **argv) {
                                                                      runtime);
     codexui::codex::conversationSnapshotsShareOneAdmissionAuthority(bridge,
                                                                     runtime);
+    codexui::codex::firstNavigationDrainsTheExistingHistoryPager(bridge, runtime);
     codexui::codex::staleHistoryFailureIsSemanticallyInert(bridge, runtime);
     codexui::codex::ordinaryThreadPromptStillStartsAndCompletes(bridge,
                                                                 runtime);

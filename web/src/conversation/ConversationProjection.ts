@@ -7,14 +7,32 @@ import {AuthoritativeHistoryPageSize, PendingAnimationDelayMilliseconds, termina
 import type {
     AgentActivityData, AgentMessageData, AuthoritativeItemKey, CardKey, CardKind, CardPayload,
     CommandExecutionData, ConversationSnapshot, FileChangeData, FileChangesData, GenericActivityData,
-    ImageGenerationData, LocalPromptData, PlanData, ReasoningData, UserMessageData, VisibleCardData,
+    ImageGenerationData, LocalPromptData, PlanData, ReasoningData, UserMessageData, VisibleCardData, TurnSection,
 } from "./MiddleTypes.js";
 import {
     authoritativePosition, indexAuthoritativeItems, localCardVisible,
 } from "./PromptCoordinator.js";
+import {stableKey} from "./MiddleTypes.js";
 import type {AuthoritativeItemIndex, PromptSubmission} from "./PromptCoordinator.js";
 
 export const DefaultAuthoritativeItemLimit = AuthoritativeHistoryPageSize;
+
+export function turnOpenings(sections: readonly TurnSection[]): VisibleCardData[] {
+    const result: VisibleCardData[] = [];
+    for (const section of sections) {
+        const root = section.rootCardKey ? stableKey(section.rootCardKey) : "";
+        const opening = section.cards.find(card => stableKey(card.key) === root) ?? section.cards[0];
+        if (section.turnId !== "" && opening) { result.push(opening); }
+    }
+    return result;
+}
+
+export function turnNavigationTarget(openings: readonly VisibleCardData[], turnId: string,
+    atOpening: boolean, direction: number): VisibleCardData | undefined {
+    const current = openings.findIndex(card => card.turnId === turnId);
+    const offset = direction > 0 ? 1 : direction < 0 && atOpening ? -1 : 0;
+    return current < 0 ? undefined : openings[current + offset];
+}
 
 function integerValue(object: unknown, key: string): number | undefined {
     const value = isObject(object) ? object[key] : undefined;

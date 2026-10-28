@@ -17,14 +17,17 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
 #include <QScopedValueRollback>
+#include <QScreen>
 #include <QScrollBar>
 #include <QSettings>
+#include <QShortcut>
 #include <QSplitter>
 #include <QTimer>
 #include <QToolButton>
@@ -176,17 +179,136 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   context->addWidget(sectionTitle);
   context->addStretch();
   const QSettings settings;
-  const auto presentationToggle = [&context](QString objectName,
-                                             PresentationIcon icon) {
-    auto *button = new QToolButton;
-    button->setObjectName(std::move(objectName));
-    button->setProperty("kind", "presentationToggle");
-    button->setCheckable(true);
-    button->setIcon(presentationIcon(icon));
-    button->setIconSize(QSize(presentation::CardHeaderMetrics::IconSize, presentation::CardHeaderMetrics::IconSize));
-    button->setFixedSize(presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight);
-    context->addWidget(button);
-    return button;
+  const auto headerButton = [&context](QString objectName) {
+      auto* button = new QToolButton;
+      button->setObjectName(std::move(objectName));
+      button->setProperty("kind", "presentationToggle");
+      button->setIconSize(QSize(presentation::CardHeaderMetrics::IconSize, presentation::CardHeaderMetrics::IconSize));
+      button->setFixedSize(presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight);
+      context->addWidget(button);
+      return button;
+  };
+  auto* firstTurn = headerButton(QStringLiteral("conversationFirstTurn"));
+  firstTurn->setText(QStringLiteral("↥"));
+  firstTurn->setToolTip(QStringLiteral("First turn; load earlier history if needed"));
+  auto* previousTurn = headerButton(QStringLiteral("conversationPreviousTurn"));
+  previousTurn->setText(QStringLiteral("↑"));
+  previousTurn->setToolTip(QStringLiteral("Turn opening; previous turn when already there"));
+  auto* turns = headerButton(QStringLiteral("conversationTurnOutline"));
+  turns->setText(QStringLiteral("Turns"));
+  turns->setFixedWidth(62);
+  turns->setToolTip(QStringLiteral("Loaded turn prompts"));
+  auto* nextTurn = headerButton(QStringLiteral("conversationNextTurn"));
+  nextTurn->setText(QStringLiteral("↓"));
+  nextTurn->setToolTip(QStringLiteral("Next turn opening"));
+  auto* latest = headerButton(QStringLiteral("conversationLatest"));
+  latest->setText(QStringLiteral("↧"));
+  latest->setToolTip(QStringLiteral("Latest output; resume following"));
+  auto latestPolicy = latest->sizePolicy();
+  latestPolicy.setRetainSizeWhenHidden(true);
+  latest->setSizePolicy(latestPolicy);
+  for (auto* button : {firstTurn, previousTurn, turns, nextTurn, latest}) {
+      button->setAccessibleName(button->toolTip());
+  }
+  auto* outline = new QFrame(turns, Qt::Popup | Qt::FramelessWindowHint);
+  outline->setObjectName(QStringLiteral("conversationTurnMenu"));
+  auto* list = new QListWidget(outline);
+  list->setObjectName(QStringLiteral("conversationTurnList"));
+  list->setAccessibleName(QStringLiteral("Loaded turn prompts"));
+  list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+  list->setUniformItemSizes(true);
+  auto* popupLayout = new QVBoxLayout(outline);
+  popupLayout->setContentsMargins(6, 6, 6, 6);
+  popupLayout->setSpacing(4);
+  auto* count = new QLabel(outline);
+  count->setObjectName(QStringLiteral("conversationTurnCount"));
+  auto* load = new QPushButton(QStringLiteral("Load earlier turns"), outline);
+  load->setObjectName(QStringLiteral("conversationTurnLoadEarlier"));
+  popupLayout->addWidget(count);
+  popupLayout->addWidget(load);
+  popupLayout->addWidget(list);
+  popupLayout->setSizeConstraint(QLayout::SetFixedSize);
+  connect(load, &QPushButton::clicked, this, [this, outline] {
+      outline->close();
+      conversationView->loadEarlier();
+  });
+  connect(firstTurn, &QToolButton::clicked, this, [this] {
+      conversationView->navigateToFirstTurn();
+  });
+  connect(previousTurn, &QToolButton::clicked, this, [this] {
+      conversationView->navigateToTurn(conversationView->navigationTarget(-1));
+  });
+  connect(nextTurn, &QToolButton::clicked, this, [this] {
+      conversationView->navigateToTurn(conversationView->navigationTarget(1));
+  });
+  connect(latest, &QToolButton::clicked, this, [this] {
+      conversationView->followLatest();
+  });
+  const auto activate = [this, list, outline] {
+      const auto* item = list->currentItem();
+      if (item && item->flags().testFlag(Qt::ItemIsEnabled)) {
+          const auto key = item->data(Qt::UserRole).toString().toStdString();
+          const auto thread = item->data(Qt::UserRole + 1).toString().toStdString();
+          outline->close();
+          if (conversationView->presentedThreadId() == thread) {
+              conversationView->navigateToTurn(key);
+          }
+      }
+  };
+  connect(list, &QListWidget::itemClicked, this, activate);
+  auto* accept = new QShortcut(list);
+  accept->setKeys({QKeySequence(Qt::Key_Return), QKeySequence(Qt::Key_Enter)});
+  accept->setContext(Qt::WidgetShortcut);
+  connect(accept, &QShortcut::activated, this, activate);
+  connect(turns, &QToolButton::clicked, this, [this, outline, list, turns, count, load, popupLayout] {
+      list->clear();
+      const auto destinations = conversationView->turnDestinations();
+      count->setText(QStringLiteral("%1 loaded").arg(destinations.size()));
+      const auto threadId = QString::fromStdString(conversationView->presentedThreadId());
+      const bool hasMore = conversationView->conversationModel()->hasMore();
+      load->setVisible(hasMore);
+      const auto* history = conversationView->findChild<QPushButton*>(QStringLiteral("conversationLoadMore"));
+      load->setEnabled(history && history->isEnabled());
+      const auto current = conversationView->navigationTarget();
+      for (const auto& destination : destinations) {
+          auto* item = new QListWidgetItem(destination.prompt, list);
+          item->setToolTip(destination.prompt);
+          item->setData(Qt::UserRole, QString::fromStdString(destination.key));
+          item->setData(Qt::UserRole + 1, threadId);
+          if (destination.key == current) {
+              list->setCurrentItem(item);
+          }
+      }
+      const auto available = turns->screen()->availableGeometry();
+      const int maximum = available.height() * 3 / 5;
+      const int rowHeight = std::max(30, list->fontMetrics().height() + 12);
+      for (int row = 0; row < list->count(); ++row) {
+          list->item(row)->setSizeHint(QSize(0, rowHeight));
+      }
+      outline->ensurePolished();
+      const auto margins = outline->contentsMargins() + popupLayout->contentsMargins();
+      const int chrome = margins.top() + margins.bottom() + count->sizeHint().height() + popupLayout->spacing() +
+                         (hasMore ? load->sizeHint().height() + popupLayout->spacing() : 0);
+      list->setFixedSize(std::min(420, available.width() - margins.left() - margins.right() - 12),
+                         std::max(1, std::min(maximum - chrome, list->count() * rowHeight)));
+      popupLayout->activate();
+      outline->adjustSize();
+      const auto below = turns->mapToGlobal(QPoint(0, turns->height()));
+      const int top =
+          below.y() + outline->height() <= available.bottom() + 1 ? below.y() : turns->mapToGlobal(QPoint()).y() - outline->height();
+      outline->move(std::clamp(below.x(), available.left(), available.right() - outline->width() + 1),
+                    std::clamp(top, available.top(), available.bottom() - outline->height() + 1));
+      outline->show();
+      list->doItemsLayout();
+      list->setFocus(Qt::PopupFocusReason);
+      list->scrollToItem(list->currentItem(), QAbstractItemView::PositionAtCenter);
+  });
+  const auto presentationToggle = [&headerButton](QString objectName, PresentationIcon icon) {
+      auto* button = headerButton(std::move(objectName));
+      button->setCheckable(true);
+      button->setIcon(presentationIcon(icon));
+      return button;
   };
   reasoningVisibility =
       presentationToggle(QStringLiteral("conversationReasoningToggle"),
@@ -313,6 +435,25 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationLayerLayout->setContentsMargins(0, 0, 0, 0);
   conversationLayerLayout->setSpacing(0);
   conversationView = new ConversationView(conversationLayer);
+  connect(conversationView, &ConversationView::navigationChanged, this, [this, firstTurn, previousTurn, turns, nextTurn, latest, outline] {
+      const bool available = !conversationView->navigationTarget().empty();
+      const auto* history = conversationView->findChild<QPushButton*>(QStringLiteral("conversationLoadMore"));
+      firstTurn->setEnabled(available && (!conversationView->conversationModel()->hasMore() || (history && history->isEnabled())));
+      previousTurn->setEnabled(available && !conversationView->navigationTarget(-1).empty());
+      nextTurn->setEnabled(available && !conversationView->navigationTarget(1).empty());
+      turns->setEnabled(available);
+      latest->setVisible(available && conversationView->mode() != ConversationView::Mode::Following);
+      if (!available) {
+          outline->close();
+      }
+  });
+  connect(conversationView->conversationModel(), &QAbstractItemModel::modelReset, outline, &QFrame::close);
+  connect(conversationView->conversationModel(), &QAbstractItemModel::rowsRemoved, outline, &QFrame::close);
+  firstTurn->setEnabled(false);
+  previousTurn->setEnabled(false);
+  nextTurn->setEnabled(false);
+  turns->setEnabled(false);
+  latest->hide();
   conversationView->setNoticeAction(
       [this](QString message, bool error) {
         showNotice(std::move(message), error);
@@ -494,137 +635,107 @@ void MiddleRegionWidget::setPaneVisibilityAction(
   paneVisibilityAction = std::move(action);
 }
 
-bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
-  if (!event || event->type() != QEvent::Wheel)
-    return false;
-  auto *target = qobject_cast<QWidget *>(watched);
-  if (!target)
-    return false;
-  if (scrollGestureRoute_ == ScrollGestureRoute::Dispatching) {
-    QAbstractScrollArea *const owner = scrollGestureArea_.data();
-    const bool withinOwner =
-        owner && (target == owner || owner->isAncestorOf(target));
-    if (!withinOwner)
-      event->accept();
-    return !withinOwner;
-  }
-  auto *wheel = static_cast<QWheelEvent *>(event);
-  if (wheel->phase() == Qt::ScrollBegin) {
-    scrollGestureRoute_ = ScrollGestureRoute::Inactive;
-    scrollGestureArea_.clear();
-  }
-  const bool inCenter =
-      target == conversationRegion || conversationRegion->isAncestorOf(target);
-  // Include the bare side margins beside the list, below its controls.
-  const bool inThreads =
-      (target == threadPane &&
-       QRect(0, threadPane->scrollArea()->y(), threadPane->width(), threadPane->scrollArea()->height())
-           .contains(threadPane->mapFromGlobal(wheel->globalPosition().toPoint()))) ||
-      target == threadPane->scrollArea() || threadPane->scrollArea()->isAncestorOf(target);
-  const bool onHandle =
-      target == splitter->handle(1) || target == splitter->handle(2);
-  const bool continuing = wheel->phase() != Qt::NoScrollPhase &&
-                          scrollGestureRoute_ != ScrollGestureRoute::Inactive;
-  if (!inCenter && !inThreads && !onHandle && !continuing)
-    return false;
-
-  QAbstractScrollArea* const outerArea =
-      (continuing ? scrollGestureArea_ && threadPane->isAncestorOf(scrollGestureArea_) : inThreads)
-          ? threadPane->scrollArea() : conversationView;
-  const bool inComposer = inCenter && (target == composerPane ||
-                                       composerPane->isAncestorOf(target));
-  const bool inConversation =
-      inCenter &&
-      (target == conversationView || target == conversationView->viewport() ||
-       conversationView->isAncestorOf(target));
-  const auto scrollAreaBefore = [](QWidget *from, QWidget *stop) {
-    for (QWidget *ancestor = from; ancestor && ancestor != stop;
-         ancestor = ancestor->parentWidget())
-      if (auto *area = qobject_cast<QAbstractScrollArea *>(ancestor))
-        return area;
-    return static_cast<QAbstractScrollArea *>(nullptr);
-  };
-  QAbstractScrollArea *const currentArea =
-      inComposer       ? scrollAreaBefore(target, composerPane)
-      : inConversation ? scrollAreaBefore(target, conversationView)
-      : inThreads      ? scrollAreaBefore(target, threadPane)
-                       : nullptr;
-  const auto dispatch = [this, wheel](QAbstractScrollArea *owner) {
-    wheel->accept();
-    if (!owner || !owner->viewport())
-      return true;
-    const QScopedValueRollback route(scrollGestureRoute_,
-                                     ScrollGestureRoute::Dispatching);
-    const QScopedValueRollback area(scrollGestureArea_,
-                                    QPointer<QAbstractScrollArea>(owner));
-    QWidget *const receiver = owner->viewport();
-    const QPointF local = receiver->mapFromGlobal(wheel->globalPosition());
-    QWheelEvent forwarded(local, wheel->globalPosition(), wheel->pixelDelta(),
-                          wheel->angleDelta(), wheel->buttons(),
-                          wheel->modifiers(), wheel->phase(), wheel->inverted(),
-                          wheel->source(), wheel->pointingDevice());
-    forwarded.setTimestamp(wheel->timestamp());
-    static_cast<void>(QApplication::sendEvent(receiver, &forwarded));
-    return true;
-  };
-
-  const int intent = verticalIntent(wheel);
-  if (wheel->phase() == Qt::NoScrollPhase) {
-    if (inComposer) {
-      if (currentArea)
-        return dispatch(currentArea);
-      event->accept();
-      return true;
+bool MiddleRegionWidget::routeScrollEvent(QObject* watched, QEvent* event) {
+    bool routed = false;
+    auto* target = event && event->type() == QEvent::Wheel ? qobject_cast<QWidget*>(watched) : nullptr;
+    // Popups are independent input surfaces even when parented below this region.
+    if (target && target->window() == window()) {
+        if (scrollGestureRoute_ == ScrollGestureRoute::Dispatching) {
+            QAbstractScrollArea* const owner = scrollGestureArea_.data();
+            routed = !owner || !(target == owner || owner->isAncestorOf(target));
+            if (routed) {
+                event->accept();
+            }
+        } else {
+            auto* wheel = static_cast<QWheelEvent*>(event);
+            if (wheel->phase() == Qt::ScrollBegin) {
+                scrollGestureRoute_ = ScrollGestureRoute::Inactive;
+                scrollGestureArea_.clear();
+            }
+            const bool inCenter = target == conversationRegion || conversationRegion->isAncestorOf(target);
+            const bool inThreads =
+                (target == threadPane && QRect(0, threadPane->scrollArea()->y(), threadPane->width(), threadPane->scrollArea()->height())
+                                             .contains(threadPane->mapFromGlobal(wheel->globalPosition().toPoint()))) ||
+                target == threadPane->scrollArea() || threadPane->scrollArea()->isAncestorOf(target);
+            const bool onHandle = target == splitter->handle(1) || target == splitter->handle(2);
+            const bool continuing = wheel->phase() != Qt::NoScrollPhase && scrollGestureRoute_ != ScrollGestureRoute::Inactive;
+            if (inCenter || inThreads || onHandle || continuing) {
+                routed = true;
+                QAbstractScrollArea* const outerArea =
+                    (continuing ? scrollGestureArea_ && threadPane->isAncestorOf(scrollGestureArea_) : inThreads) ? threadPane->scrollArea()
+                                                                                                                  : conversationView;
+                const bool inComposer = inCenter && (target == composerPane || composerPane->isAncestorOf(target));
+                const bool inConversation = inCenter && (target == conversationView || target == conversationView->viewport() ||
+                                                         conversationView->isAncestorOf(target));
+                const auto scrollAreaBefore = [](QWidget* from, QWidget* stop) {
+                    QAbstractScrollArea* result = nullptr;
+                    for (QWidget* ancestor = from; ancestor && ancestor != stop && !result; ancestor = ancestor->parentWidget()) {
+                        result = qobject_cast<QAbstractScrollArea*>(ancestor);
+                    }
+                    return result;
+                };
+                QAbstractScrollArea* const currentArea = inComposer       ? scrollAreaBefore(target, composerPane)
+                                                         : inConversation ? scrollAreaBefore(target, conversationView)
+                                                         : inThreads      ? scrollAreaBefore(target, threadPane)
+                                                                          : nullptr;
+                const auto dispatch = [this, wheel](QAbstractScrollArea* owner) {
+                    wheel->accept();
+                    if (owner && owner->viewport()) {
+                        const QScopedValueRollback route(scrollGestureRoute_, ScrollGestureRoute::Dispatching);
+                        const QScopedValueRollback area(scrollGestureArea_, QPointer<QAbstractScrollArea>(owner));
+                        QWidget* const receiver = owner->viewport();
+                        const QPointF local = receiver->mapFromGlobal(wheel->globalPosition());
+                        QWheelEvent forwarded(local,
+                                              wheel->globalPosition(),
+                                              wheel->pixelDelta(),
+                                              wheel->angleDelta(),
+                                              wheel->buttons(),
+                                              wheel->modifiers(),
+                                              wheel->phase(),
+                                              wheel->inverted(),
+                                              wheel->source(),
+                                              wheel->pointingDevice());
+                        forwarded.setTimestamp(wheel->timestamp());
+                        static_cast<void>(QApplication::sendEvent(receiver, &forwarded));
+                    }
+                };
+                const int intent = verticalIntent(wheel);
+                if (wheel->phase() == Qt::NoScrollPhase) {
+                    dispatch(inComposer ? currentArea : currentArea && canConsume(currentArea, intent) ? currentArea : outerArea);
+                } else {
+                    if (wheel->phase() == Qt::ScrollBegin || scrollGestureRoute_ == ScrollGestureRoute::Inactive) {
+                        scrollGestureArea_ = currentArea;
+                        if (inComposer) {
+                            scrollGestureRoute_ = ScrollGestureRoute::Native;
+                        } else if (currentArea) {
+                            scrollGestureRoute_ = ScrollGestureRoute::AwaitingNested;
+                        } else {
+                            scrollGestureArea_ = outerArea;
+                            scrollGestureRoute_ = ScrollGestureRoute::Outer;
+                        }
+                    }
+                    if (intent != 0 && scrollGestureRoute_ == ScrollGestureRoute::AwaitingNested) {
+                        if (!scrollGestureArea_ || canConsume(scrollGestureArea_, intent)) {
+                            scrollGestureRoute_ = ScrollGestureRoute::Native;
+                        } else {
+                            scrollGestureArea_ = outerArea;
+                            scrollGestureRoute_ = ScrollGestureRoute::Outer;
+                        }
+                    }
+                    if (scrollGestureRoute_ == ScrollGestureRoute::Native || scrollGestureRoute_ == ScrollGestureRoute::Outer) {
+                        dispatch(scrollGestureArea_);
+                    } else {
+                        event->accept();
+                    }
+                    if (wheel->phase() == Qt::ScrollEnd) {
+                        scrollGestureRoute_ = ScrollGestureRoute::Inactive;
+                        scrollGestureArea_.clear();
+                    }
+                }
+            }
+        }
     }
-    if (currentArea && canConsume(currentArea, intent))
-      return dispatch(currentArea);
-    return dispatch(outerArea);
-  }
-
-  if (wheel->phase() == Qt::ScrollBegin ||
-      scrollGestureRoute_ == ScrollGestureRoute::Inactive) {
-    scrollGestureArea_ = currentArea;
-    if (inComposer) {
-      scrollGestureRoute_ = ScrollGestureRoute::Native;
-    } else if (currentArea) {
-      scrollGestureRoute_ = ScrollGestureRoute::AwaitingNested;
-    } else {
-      scrollGestureArea_ = outerArea;
-      scrollGestureRoute_ = ScrollGestureRoute::Outer;
-    }
-  }
-
-  if (intent != 0 &&
-      scrollGestureRoute_ == ScrollGestureRoute::AwaitingNested) {
-    if (!scrollGestureArea_) {
-      scrollGestureRoute_ = ScrollGestureRoute::Native;
-    } else if (canConsume(scrollGestureArea_, intent)) {
-      scrollGestureRoute_ = ScrollGestureRoute::Native;
-    } else {
-      scrollGestureArea_ = outerArea;
-      scrollGestureRoute_ = ScrollGestureRoute::Outer;
-    }
-  }
-
-  switch (scrollGestureRoute_) {
-  case ScrollGestureRoute::AwaitingNested:
-    event->accept();
-    break;
-  case ScrollGestureRoute::Native:
-  case ScrollGestureRoute::Outer:
-    static_cast<void>(dispatch(scrollGestureArea_));
-    break;
-  case ScrollGestureRoute::Dispatching:
-  case ScrollGestureRoute::Inactive:
-    event->accept();
-    break;
-  }
-
-  if (wheel->phase() == Qt::ScrollEnd) {
-    scrollGestureRoute_ = ScrollGestureRoute::Inactive;
-    scrollGestureArea_.clear();
-  }
-  return true;
+    return routed;
 }
 
 } // namespace codexui::codex::middle

@@ -679,7 +679,12 @@ QString applicationStyleSheet() {
         QTabBar::tab:selected { background: %{tabSelectedSurface}; color: %{primary}; font-weight: 600; }
         QTabBar::tab:hover:!selected { background: %{hover}; color: %{primary}; }
         QTabBar::tab:focus { border: 1px solid %{focusBorder}; }
-        QMenu {
+        QListWidget#conversationTurnList { background: %{panel}; color: %{primary}; border: 0; }
+        QListWidget#conversationTurnList::item { padding: 0 10px; border-radius: 5px; }
+        QListWidget#conversationTurnList::item:selected { background: %{menuCheckedSurface}; color: %{menuCheckedText}; }
+        QListWidget#conversationTurnList::item:hover { background: %{hover}; }
+        QListWidget#conversationTurnList::item:disabled { color: %{placeholder}; }
+        QMenu, QFrame#conversationTurnMenu {
             background: %{panel};
             color: %{primary};
             border: 1px solid %{divider};

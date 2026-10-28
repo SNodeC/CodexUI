@@ -711,9 +711,7 @@ ConversationView::ConversationView(QWidget *parent)
   loadMore_->setFixedHeight(HistoryButtonHeight);
   loadMore_->hide();
   connect(loadMore_, &QPushButton::clicked, this, [this] {
-    const auto action = loadMoreAction_;
-    if (action)
-      action();
+      loadEarlier();
   });
 
   empty_ = makeEmptyLabel(viewport());
@@ -844,8 +842,127 @@ ConversationView::~ConversationView() {
   releaseAllCards();
 }
 
-void ConversationView::setLoadMoreAction(std::function<void()> action) {
-  loadMoreAction_ = std::move(action);
+void ConversationView::setLoadMoreAction(std::function<void(bool)> action) {
+    loadMoreAction_ = std::move(action);
+}
+
+std::vector<ConversationView::TurnDestination> ConversationView::turnDestinations() const {
+    std::vector<TurnDestination> result;
+    std::string previous;
+    for (int position = 0; position < model_->rowCount(); ++position) {
+        const auto* row = model_->row(position);
+        if (row && row->sectionKey != previous) {
+            previous = row->sectionKey;
+            const auto section = sectionRanges_.find(previous);
+            if (!row->card.turnId.empty() && section != sectionRanges_.end()) {
+                const auto opening = modelSectionRow(section->second.root.empty() ? section->second.first : section->second.root);
+                if (opening && rowPresented(*opening)) {
+                    const auto* card = model_->card(*opening);
+                    const auto* prompt = std::get_if<UserMessageData>(&card->payload);
+                    const QString label =
+                        prompt ? QString::fromStdString(prompt->text).simplified() : QStringLiteral("Turn without an opening prompt");
+                    result.push_back({model_->row(*opening)->stableKey, label.isEmpty() ? QStringLiteral("Attachment prompt") : label});
+                }
+            }
+        }
+    }
+    return result;
+}
+
+std::string ConversationView::navigationTarget(int direction) const {
+    std::string result;
+    if (!structuralStagingActive() && loadingThreadId_.empty()) {
+        const Anchor anchor = captureAnchor();
+        auto member = modelSectionRow(anchor.stableKey);
+        const auto* row = member ? model_->row(*member) : nullptr;
+        while (row && row->card.turnId.empty() && member && *member > 0) {
+            const auto previous = heights_.previousRowWithExtent(static_cast<std::size_t>(*member - 1));
+            member = previous < heights_.size() ? std::optional<int>(static_cast<int>(previous)) : std::nullopt;
+            row = member ? model_->row(*member) : nullptr;
+        }
+        auto section = row ? sectionRanges_.find(row->sectionKey) : sectionRanges_.end();
+        if (section != sectionRanges_.end() && !row->card.turnId.empty()) {
+            const auto opening = modelSectionRow(section->second.root.empty() ? section->second.first : section->second.root);
+            const bool atOpening = opening && anchor.stableKey == model_->row(*opening)->stableKey &&
+                                   (std::abs(rowRect(*opening).top()) <= 1 || (isAtBottom() && rowRect(*opening).top() >= 0));
+            if (direction > 0 || (direction < 0 && atOpening)) {
+                const auto edge = modelSectionRow(direction > 0 ? section->second.last : section->second.first);
+                std::size_t adjacent = heights_.size();
+                if (edge && direction > 0) {
+                    adjacent = heights_.nextRowWithExtent(static_cast<std::size_t>(*edge + 1));
+                } else if (edge && *edge > 0) {
+                    adjacent = heights_.previousRowWithExtent(static_cast<std::size_t>(*edge - 1));
+                }
+                const auto* next = adjacent < heights_.size() ? model_->row(static_cast<int>(adjacent)) : nullptr;
+                while (next && next->card.turnId.empty()) {
+                    adjacent = direction > 0  ? heights_.nextRowWithExtent(adjacent + 1)
+                               : adjacent > 0 ? heights_.previousRowWithExtent(adjacent - 1)
+                                              : heights_.size();
+                    next = adjacent < heights_.size() ? model_->row(static_cast<int>(adjacent)) : nullptr;
+                }
+                section = next && !next->card.turnId.empty() ? sectionRanges_.find(next->sectionKey) : sectionRanges_.end();
+            }
+            if (section != sectionRanges_.end()) {
+                result = section->second.root.empty() ? section->second.first : section->second.root;
+            }
+        }
+    }
+    return result;
+}
+
+void ConversationView::navigateToTurn(const std::string& key, bool focus) {
+    const auto position = modelSectionRow(key);
+    const auto* row = position ? model_->row(*position) : nullptr;
+    const auto section = row ? sectionRanges_.find(row->sectionKey) : sectionRanges_.end();
+    const bool opening = section != sectionRanges_.end() && !row->card.turnId.empty() &&
+                         key == (section->second.root.empty() ? section->second.first : section->second.root);
+    if (opening && position && rowPresented(*position) && !applying_ && !structuralStagingActive() && loadingThreadId_.empty()) {
+        stopFollowingAnimation();
+        mode_ = Mode::Paused;
+        pausedByCommandOutput_ = false;
+        auto& anchor = threadPresentations_[threadId_].scroll.anchor;
+        anchor = {key, 0, verticalScrollBar()->value()};
+        if (focus) {
+            setFocus(Qt::OtherFocusReason);
+        }
+        const bool autoScroll = hasAutoScroll();
+        setAutoScroll(false);
+        selectionModel()->setCurrentIndex(model_->index(*position), QItemSelectionModel::ClearAndSelect);
+        setAutoScroll(autoScroll);
+        restoreViewport(anchor);
+        updateMaterialization();
+        anchor.pixelOffset = rowRect(*position).top();
+        anchor.absoluteValue = verticalScrollBar()->value();
+        layoutMaterializedCards();
+    }
+}
+
+void ConversationView::navigateToFirstTurn() {
+    const auto destinations = turnDestinations();
+    if (!destinations.empty() && !navigationTarget().empty()) {
+        navigateToTurn(destinations.front().key);
+        mode_ = Mode::First;
+        loadEarlier(true);
+    }
+}
+
+void ConversationView::followLatest() {
+    if (!threadId_.empty() && !applying_ && !structuralStagingActive() && loadingThreadId_.empty()) {
+        stopFollowingAnimation();
+        pausedByCommandOutput_ = false;
+        mode_ = Mode::Following;
+        threadPresentations_[threadId_].scroll.anchor = {};
+        setScrollValue(verticalScrollBar()->maximum());
+        updateMaterialization();
+        setFocus(Qt::OtherFocusReason);
+    }
+}
+
+void ConversationView::loadEarlier(bool throughFirst) {
+    const auto action = loadMoreAction_;
+    if (loadMore_->isEnabled() && model_->hasMore() && action) {
+        action(throughFirst);
+    }
 }
 
 void ConversationView::setPromptMaterializedAction(
@@ -958,9 +1075,13 @@ void ConversationView::beginThreadSelection(const std::string &threadId,
   if (loadingThreadId_ == threadId && stagingOverlay_->isBusy())
     return;
   cancelStructuralStaging();
+  if (mode_ == Mode::First) {
+      mode_ = Mode::Paused;
+  }
   loadingThreadId_ = threadId;
   stagingOverlay_->setGeometry(viewport()->rect());
   stagingOverlay_->begin();
+  Q_EMIT navigationChanged();
 }
 
 ConversationItemModel::StructuralChangeResult
@@ -971,8 +1092,7 @@ ConversationView::reconcileOwned(ConversationSnapshot snapshot,
   const std::string previousThreadId = threadId_;
   const bool switchedThread = snapshot.threadId != threadId_;
   const Anchor currentAnchor = captureAnchor();
-  const ThreadScrollState outgoingState{mode_, currentAnchor,
-                                        pausedByCommandOutput_};
+  const ThreadScrollState outgoingState{mode_ == Mode::First ? Mode::Paused : mode_, currentAnchor, pausedByCommandOutput_};
   const auto saved = threadPresentations_.find(targetThreadId);
   const ThreadScrollState incomingState =
       switchedThread && saved != threadPresentations_.end()
@@ -1118,14 +1238,24 @@ void ConversationView::publishReconciliation(
   const auto finishedAction = reconciliationFinishedAction_;
   const auto materializedAction = promptMaterializedAction_;
   const QPointer<ConversationView> lifetime(this);
-  if (completedThread && finishedAction)
-    finishedAction(*completedThread, result, selectionCommitted);
-  if (!lifetime || !materializedAction)
-    return;
-  for (nodegraph::NodeRef &target : acknowledged) {
-    const bool accepted = materializedAction(std::move(target));
-    if (!lifetime || !accepted)
-      break;
+  if (mode_ == Mode::First) {
+      const auto* first = model_->row(0);
+      const auto section = first ? sectionRanges_.find(first->sectionKey) : sectionRanges_.end();
+      if (section != sectionRanges_.end()) {
+          const auto& key = section->second.root.empty() ? section->second.first : section->second.root;
+          if (captureAnchor().stableKey != key) {
+              navigateToTurn(key, false);
+              mode_ = Mode::First;
+          }
+      }
+  }
+  Q_EMIT navigationChanged();
+  if (lifetime && completedThread && finishedAction) {
+      finishedAction(*completedThread, result, selectionCommitted);
+  }
+  bool accepted = true;
+  for (std::size_t index = 0; lifetime && materializedAction && accepted && index < acknowledged.size(); ++index) {
+      accepted = materializedAction(std::move(acknowledged[index]));
   }
 }
 
@@ -1224,14 +1354,11 @@ void ConversationView::choosePendingStageRows() {
       2);
   std::size_t first = keys.size() > budget ? keys.size() - budget : 0;
   std::optional<Anchor> anchor;
-  if (pendingStructuralSnapshot_->threadId == threadId_ &&
-      mode_ == Mode::Paused) {
-    anchor = captureAnchor();
-  } else if (const auto saved = threadPresentations_.find(
-                 pendingStructuralSnapshot_->threadId);
-             saved != threadPresentations_.end() &&
-             saved->second.scroll.mode == Mode::Paused) {
-    anchor = saved->second.scroll.anchor;
+  if (pendingStructuralSnapshot_->threadId == threadId_ && mode_ != Mode::Following) {
+      anchor = captureAnchor();
+  } else if (const auto saved = threadPresentations_.find(pendingStructuralSnapshot_->threadId);
+             saved != threadPresentations_.end() && saved->second.scroll.mode != Mode::Following) {
+      anchor = saved->second.scroll.anchor;
   }
   if (anchor) {
     const auto found = std::ranges::find(keys, anchor->stableKey);
@@ -1359,14 +1486,13 @@ void ConversationView::cancelStructuralStaging() {
 }
 
 bool ConversationView::finishThreadSelection(const std::string &threadId) {
-  if (!loadingThreadId_.empty() && !threadId.empty() &&
-      loadingThreadId_ != threadId)
-    return false;
-  if (loadingThreadId_.empty() && !stagingOverlay_->isVisible())
-    return false;
-  loadingThreadId_.clear();
-  stagingOverlay_->finish();
-  return true;
+    const bool matching = loadingThreadId_.empty() || threadId.empty() || loadingThreadId_ == threadId;
+    const bool finished = matching && (!loadingThreadId_.empty() || stagingOverlay_->isVisible());
+    if (finished) {
+        loadingThreadId_.clear();
+        stagingOverlay_->finish();
+    }
+    return finished;
 }
 
 std::optional<PresentationImpact>
@@ -1880,8 +2006,10 @@ void ConversationView::setHistoryRequestPending(const std::string &threadId,
   if (current == pending)
     return;
   current = pending;
-  if (threadId_ == threadId)
-    updateHistoryControls();
+  if (threadId_ == threadId) {
+      updateHistoryControls();
+      Q_EMIT navigationChanged();
+  }
 }
 
 void ConversationView::setProviderHasMore(const std::string &threadId,
@@ -2886,57 +3014,50 @@ void ConversationView::updateMaterialization(bool admitOverscan) {
 }
 
 void ConversationView::layoutMaterializedCards() {
-  const QRect visibleRect = viewport()->rect();
-  ConversationCard *const focusedCard =
-      owningCard(*this, QApplication::focusWidget());
-  const auto [first, last] = materializationRows();
-  for (const auto &[key, card] : materializedCards_) {
-    const QModelIndex index = model_->indexForStableKey(key);
-    if (first >= 0 && index.isValid() && index.row() >= first &&
-        index.row() <= last)
-      continue;
-    const bool ownsFocus = card == focusedCard;
-    if (ownsFocus && index.isValid()) {
-      const QRect geometry = rowRect(index.row());
-      if (card->geometry() != geometry)
-        card->setGeometry(geometry);
+    const QRect visibleRect = viewport()->rect();
+    ConversationCard* const focusedCard = owningCard(*this, QApplication::focusWidget());
+    const auto [first, last] = materializationRows();
+    for (const auto& [key, card] : materializedCards_) {
+        const QModelIndex index = model_->indexForStableKey(key);
+        if (!(first >= 0 && index.isValid() && index.row() >= first && index.row() <= last)) {
+            const bool ownsFocus = card == focusedCard;
+            if (ownsFocus && index.isValid()) {
+                const QRect geometry = rowRect(index.row());
+                if (card->geometry() != geometry) {
+                    card->setGeometry(geometry);
+                }
+            }
+            card->setViewportVisible(false);
+            card->setVisible(ownsFocus);
+        }
     }
-    card->setViewportVisible(false);
-    card->setVisible(ownsFocus);
-  }
-  if (first < 0)
-    return;
-  std::size_t rowIndex = heights_.nextRowWithExtent(first);
-  qint64 top = rowIndex < heights_.size() ? heights_.top(rowIndex) : 0;
-  for (; rowIndex < heights_.size() &&
-         rowIndex <= static_cast<std::size_t>(last);
-       rowIndex = heights_.nextRowWithExtent(rowIndex + 1)) {
-    const ConversationItemModel::Row *row =
-        model_->row(static_cast<int>(rowIndex));
-    if (!row) {
-      top += heights_.height(rowIndex);
-      continue;
+    if (first >= 0) {
+        std::size_t rowIndex = heights_.nextRowWithExtent(first);
+        qint64 top = rowIndex < heights_.size() ? heights_.top(rowIndex) : 0;
+        for (; rowIndex < heights_.size() && rowIndex <= static_cast<std::size_t>(last);
+             rowIndex = heights_.nextRowWithExtent(rowIndex + 1)) {
+            const auto* row = model_->row(static_cast<int>(rowIndex));
+            if (row) {
+                const auto found = materializedCards_.find(row->stableKey);
+                if (found != materializedCards_.end()) {
+                    ConversationCard* card = found->second;
+                    const QRect geometry(row->nested ? NestedCardIndent : 0,
+                                         static_cast<int>(leadingChromeHeight() + top - verticalScrollBar()->value()),
+                                         rowWidth(*row),
+                                         std::max(0, heights_.height(rowIndex) - rowSpacing(rowIndex)));
+                    const bool visible = geometry.intersects(visibleRect);
+                    const bool ownsFocus = !visible && card == focusedCard;
+                    if (card->geometry() != geometry) {
+                        card->setGeometry(geometry);
+                    }
+                    card->setViewportVisible(visible);
+                    card->setVisible(visible || ownsFocus);
+                }
+            }
+            top += heights_.height(rowIndex);
+        }
     }
-    const auto found = materializedCards_.find(row->stableKey);
-    if (found == materializedCards_.end()) {
-      top += heights_.height(rowIndex);
-      continue;
-    }
-    ConversationCard *card = found->second;
-    const QRect geometry(row->nested ? NestedCardIndent : 0,
-                         static_cast<int>(leadingChromeHeight() + top -
-                                          verticalScrollBar()->value()),
-                         rowWidth(*row),
-                         std::max(0, heights_.height(rowIndex) -
-                                         rowSpacing(rowIndex)));
-    const bool visible = geometry.intersects(visibleRect);
-    const bool ownsFocus = !visible && card == focusedCard;
-    if (card->geometry() != geometry)
-      card->setGeometry(geometry);
-    card->setViewportVisible(visible);
-    card->setVisible(visible || ownsFocus);
-    top += heights_.height(rowIndex);
-  }
+    Q_EMIT navigationChanged();
 }
 
 ConversationCard *
@@ -3085,65 +3206,55 @@ ConversationView::modeForThread(const std::string &threadId) const noexcept {
                                              : saved->second.scroll.mode;
 }
 
-ConversationView::Anchor ConversationView::captureAnchor() const {
-  Anchor anchor;
-  anchor.absoluteValue = verticalScrollBar()->value();
-  if (model_->rowCount() == 0 || heights_.empty() ||
-      heights_.totalHeight() <= 0)
+ConversationView::Anchor ConversationView::captureAnchor(int scrollValue) const {
+    const int value = scrollValue < 0 ? verticalScrollBar()->value() : scrollValue;
+    Anchor anchor{{}, 0, value};
+    const auto saved = threadPresentations_.find(threadId_);
+    const auto retained = saved == threadPresentations_.end() ? std::nullopt : modelSectionRow(saved->second.scroll.anchor.stableKey);
+    if (scrollValue < 0 && mode_ != Mode::Following && retained && rowPresented(*retained)) {
+        anchor = saved->second.scroll.anchor;
+        anchor.absoluteValue = value;
+    } else if (model_->rowCount() > 0 && !heights_.empty() && heights_.totalHeight() > 0) {
+        const qint64 contentY = std::max<qint64>(0, static_cast<qint64>(value) - leadingChromeHeight());
+        const std::size_t position = heights_.nextRowWithExtent(heights_.rowAt(contentY));
+        const auto* row = position < heights_.size() ? model_->row(static_cast<int>(position)) : nullptr;
+        if (row) {
+            anchor.stableKey = row->stableKey;
+            anchor.pixelOffset = rowRect(static_cast<int>(position)).top() + verticalScrollBar()->value() - value;
+            // Continuous Turn surfaces retain the activity being read, unless an
+            // explicit navigation destination already owns the paused anchor above.
+            if (row->turnRoot && row->card.kind != CardKind::LocalPrompt && retainedHeight(*row)) {
+                std::size_t next = heights_.nextRowWithExtent(position + 1);
+                const auto* activity = next < heights_.size() ? model_->row(static_cast<int>(next)) : nullptr;
+                if (activity && activity->sectionKey == row->sectionKey) {
+                    const int top = rowRect(static_cast<int>(next)).top() + verticalScrollBar()->value() - value;
+                    if (top < viewport()->height()) {
+                        anchor.stableKey = activity->stableKey;
+                        anchor.pixelOffset = top;
+                    }
+                }
+            }
+        }
+    }
     return anchor;
-  const qint64 contentY =
-      std::max<qint64>(0, static_cast<qint64>(verticalScrollBar()->value()) -
-                              leadingChromeHeight());
-  const std::size_t rowIndex =
-      heights_.nextRowWithExtent(heights_.rowAt(contentY));
-  if (rowIndex >= heights_.size())
-    return anchor;
-  const ConversationItemModel::Row *row =
-      model_->row(static_cast<int>(rowIndex));
-  if (!row)
-    return anchor;
-  anchor.stableKey = row->stableKey;
-  anchor.pixelOffset = rowRect(static_cast<int>(rowIndex)).top();
-  if (!row->turnRoot || row->card.kind == CardKind::LocalPrompt ||
-      !retainedHeight(*row))
-    return anchor;
-
-  // The Turn root decorates the continuous surface that follows it. When that
-  // surface is visible, anchor its first child so provider-prepended rows do
-  // not move the activity the user was reading.
-  for (std::size_t next = heights_.nextRowWithExtent(rowIndex + 1);
-       next < heights_.size(); next = heights_.nextRowWithExtent(next + 1)) {
-    const ConversationItemModel::Row *activity =
-        model_->row(static_cast<int>(next));
-    if (!activity || activity->sectionKey != row->sectionKey)
-      break;
-    const int activityTop = rowRect(static_cast<int>(next)).top();
-    if (activityTop >= viewport()->height())
-      break;
-    anchor.stableKey = activity->stableKey;
-    anchor.pixelOffset = activityTop;
-    break;
-  }
-  return anchor;
 }
 
 void ConversationView::restoreAnchor(const Anchor &anchor, bool follow) {
   if (follow) {
     setScrollValue(verticalScrollBar()->maximum());
-    return;
+  } else {
+      int value = anchor.absoluteValue;
+      const auto position = modelSectionRow(anchor.stableKey);
+      if (position) {
+          const qint64 top = static_cast<qint64>(leadingChromeHeight()) + heights_.top(static_cast<std::size_t>(*position));
+          value = static_cast<int>(
+              std::clamp<qint64>(top - anchor.pixelOffset, verticalScrollBar()->minimum(), verticalScrollBar()->maximum()));
+      }
+      setScrollValue(value);
+      if (mode_ != Mode::Following && !threadId_.empty()) {
+          threadPresentations_[threadId_].scroll.anchor = position && rowPresented(*position) ? anchor : captureAnchor(value);
+      }
   }
-  int value = anchor.absoluteValue;
-  if (!anchor.stableKey.empty()) {
-    const QModelIndex index = model_->indexForStableKey(anchor.stableKey);
-    if (index.isValid()) {
-      const qint64 top = static_cast<qint64>(leadingChromeHeight()) +
-                         heights_.top(static_cast<std::size_t>(index.row()));
-      value = static_cast<int>(std::clamp<qint64>(
-          top - anchor.pixelOffset, verticalScrollBar()->minimum(),
-          verticalScrollBar()->maximum()));
-    }
-  }
-  setScrollValue(value);
 }
 
 void ConversationView::restoreViewport(const Anchor &anchor, bool follow) {
@@ -3167,39 +3278,34 @@ void ConversationView::stopFollowingAnimation() {
     followAnimation_->stop();
 }
 
-void ConversationView::handleCommandOutputFollowLatest(
-    const std::string &ownerThread, bool followsLatest) {
-  if (ownerThread != threadId_) {
-    auto saved = threadPresentations_.find(ownerThread);
-    if (!followsLatest || saved == threadPresentations_.end() ||
-        !saved->second.scroll.pausedByCommandOutput ||
-        hasDetachedCommandOutput(ownerThread))
-      return;
-    saved->second.scroll.pausedByCommandOutput = false;
-    if (saved->second.scroll.mode == Mode::Paused)
-      saved->second.scroll.mode = Mode::Following;
-    return;
-  }
-  if (!followsLatest) {
-    if (mode_ != Mode::Following && !pausedByCommandOutput_)
-      return;
-    if (!pausedByCommandOutput_) {
-      stopFollowingAnimation();
-      mode_ = Mode::Paused;
-      pausedByCommandOutput_ = true;
+void ConversationView::handleCommandOutputFollowLatest(const std::string& ownerThread, bool followsLatest) {
+    if (ownerThread != threadId_) {
+        auto saved = threadPresentations_.find(ownerThread);
+        if (followsLatest && saved != threadPresentations_.end() && saved->second.scroll.pausedByCommandOutput &&
+            !hasDetachedCommandOutput(ownerThread)) {
+            saved->second.scroll.pausedByCommandOutput = false;
+            if (saved->second.scroll.mode != Mode::Following) {
+                saved->second.scroll.mode = Mode::Following;
+            }
+        }
+    } else if (!followsLatest) {
+        if (mode_ == Mode::Following && !pausedByCommandOutput_) {
+            stopFollowingAnimation();
+            mode_ = Mode::Paused;
+            pausedByCommandOutput_ = true;
+        }
+    } else if (pausedByCommandOutput_ && !hasDetachedCommandOutput(ownerThread)) {
+        pausedByCommandOutput_ = false;
+        if (mode_ != Mode::Following) {
+            mode_ = Mode::Following;
+            if (applying_) {
+                setScrollValue(verticalScrollBar()->maximum());
+            } else {
+                animateToBottom(verticalScrollBar()->value());
+            }
+        }
     }
-    return;
-  }
-  if (!pausedByCommandOutput_ || hasDetachedCommandOutput(ownerThread))
-    return;
-  pausedByCommandOutput_ = false;
-  if (mode_ != Mode::Paused)
-    return;
-  mode_ = Mode::Following;
-  if (applying_)
-    setScrollValue(verticalScrollBar()->maximum());
-  else
-    animateToBottom(verticalScrollBar()->value());
+    Q_EMIT navigationChanged();
 }
 
 bool ConversationView::hasDetachedCommandOutput(
@@ -3248,6 +3354,10 @@ void ConversationView::handleUserScrollValue(int value) {
   pausedByCommandOutput_ = false;
   mode_ = value >= verticalScrollBar()->maximum() - 1 ? Mode::Following
                                                       : Mode::Paused;
+  if (!threadId_.empty()) {
+      threadPresentations_[threadId_].scroll.anchor = captureAnchor(value);
+  }
+  Q_EMIT navigationChanged();
 }
 
 QRect ConversationView::visualRect(const QModelIndex &index) const {
@@ -3262,28 +3372,28 @@ void ConversationView::scrollTo(const QModelIndex &index, ScrollHint hint) {
 
 void ConversationView::revealRow(const QModelIndex &index, ScrollHint hint,
                                  bool userInitiated) {
-  if (applying_)
-    return;
   const QRect geometry = visualRect(index);
-  if (geometry.isEmpty())
-    return;
-  int target = verticalScrollBar()->value();
-  if (hint == PositionAtTop)
-    target += geometry.top();
-  else if (hint == PositionAtBottom)
-    target += geometry.bottom() - viewport()->height() + 1;
-  else if (hint == PositionAtCenter)
-    target += geometry.center().y() - viewport()->height() / 2;
-  else if (geometry.top() < 0)
-    target += geometry.top();
-  else if (geometry.bottom() >= viewport()->height())
-    target += geometry.bottom() - viewport()->height() + 1;
-  // Explicit item navigation owns this scroll; height admission must not
-  // restore live-tail following over the row the user requested.
-  if (userInitiated && target != verticalScrollBar()->value())
-    handleUserScrollValue(target);
-  setScrollValue(target);
-  updateMaterialization();
+  if (!applying_ && !geometry.isEmpty()) {
+      int target = verticalScrollBar()->value();
+      if (hint == PositionAtTop) {
+          target += geometry.top();
+      } else if (hint == PositionAtBottom) {
+          target += geometry.bottom() - viewport()->height() + 1;
+      } else if (hint == PositionAtCenter) {
+          target += geometry.center().y() - viewport()->height() / 2;
+      } else if (geometry.top() < 0) {
+          target += geometry.top();
+      } else if (geometry.bottom() >= viewport()->height()) {
+          target += geometry.bottom() - viewport()->height() + 1;
+      }
+      if (userInitiated && target != verticalScrollBar()->value()) {
+          handleUserScrollValue(target);
+      }
+      target = std::clamp(target, verticalScrollBar()->minimum(), verticalScrollBar()->maximum());
+      threadPresentations_[threadId_].scroll.anchor = captureAnchor(target);
+      setScrollValue(target);
+      updateMaterialization();
+  }
 }
 
 QModelIndex ConversationView::indexAt(const QPoint &point) const {
@@ -3438,9 +3548,7 @@ void ConversationView::updateGeometries() {
 
 void ConversationView::scrollContentsBy(int dx, int dy) {
   if (!programmaticScroll_ && !applying_ && !adjustingScrollRange_) {
-    stopFollowingAnimation();
-    pausedByCommandOutput_ = false;
-    mode_ = isAtBottom() ? Mode::Following : Mode::Paused;
+      handleUserScrollValue(verticalScrollBar()->value());
   }
   scrollDirtyRegion(dx, dy);
   viewport()->scroll(dx, dy);

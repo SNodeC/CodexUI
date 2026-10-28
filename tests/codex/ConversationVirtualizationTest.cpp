@@ -6,15 +6,20 @@
 #include "codex/middle/ConversationView.h"
 #include "codex/ui/UiStyle.h"
 
-#include <QAccessible>
 #include <QAbstractTextDocumentLayout>
+#include <QAccessible>
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
-#include <QElapsedTimer>
 #include <QDesktopServices>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QFontInfo>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
@@ -35,7 +40,6 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QWheelEvent>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -2237,7 +2241,9 @@ bool providerPaginationControlReflectsGraphState() {
   auto *button =
       control.findChild<QPushButton *>(QStringLiteral("conversationLoadMore"));
   int invocations = 0;
-  control.setLoadMoreAction([&] { ++invocations; });
+  control.setLoadMoreAction([&](bool) {
+      ++invocations;
+  });
 #if QT_CONFIG(accessibility)
   QAccessibleInterface *initialAccessible =
       button ? QAccessible::queryAccessibleInterface(button) : nullptr;
@@ -7364,6 +7370,207 @@ bool collapsedInteractionDefersEveryHeavyCardBody() {
   return result;
 }
 
+bool turnHistoryNavigationPreservesItsAnchor() {
+    QFile fixture(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath() + QStringLiteral("/../fixtures/conversation-navigation.json"));
+    bool result = expect(fixture.open(QIODevice::ReadOnly), "navigation differential fixture opens");
+    const auto contract = QJsonDocument::fromJson(fixture.readAll()).object();
+    ConversationSnapshot snapshot;
+    snapshot.threadId = contract["threadId"].toString().toStdString();
+    snapshot.hasMore = true;
+    std::unordered_map<std::string, std::string> keys;
+    for (const auto entry : contract["turns"].toArray()) {
+        const auto turn = entry.toObject();
+        const auto id = turn["id"].toString().toStdString();
+        TurnSection section;
+        section.key = section.turnId = id;
+        VisibleCardData opening{AuthoritativeItemKey{snapshot.threadId, id, "opening"},
+                                CardKind::AgentMessage,
+                                snapshot.threadId,
+                                id,
+                                "opening",
+                                AgentMessageData{"Automatic turn", "final_answer"}};
+        if (turn["prompt"].isString()) {
+            opening.kind = CardKind::UserMessage;
+            opening.payload = UserMessageData{turn["prompt"].toString().toStdString()};
+            section.rootCardKey = opening.key;
+        }
+        keys[id] = stableKey(opening.key);
+        section.cards.push_back(opening);
+        if (id != "last") {
+            auto answer = opening;
+            answer.key = AuthoritativeItemKey{snapshot.threadId, id, "answer"};
+            answer.itemId = "answer";
+            answer.kind = CardKind::AgentMessage;
+            answer.payload = AgentMessageData{QString("Long response\n\n").repeated(35).toStdString(), "final_answer"};
+            section.cards.push_back(answer);
+        }
+        if (turn["steering"].isString()) {
+            auto steering = opening;
+            steering.key = AuthoritativeItemKey{snapshot.threadId, id, "steering"};
+            steering.itemId = "steering";
+            steering.payload = UserMessageData{turn["steering"].toString().toStdString()};
+            section.cards.push_back(steering);
+        }
+        snapshot.sections.push_back(section);
+    }
+    ConversationView view;
+    view.resize(820, 500);
+    view.show();
+    int loads = 0;
+    bool throughFirstRequested = false;
+    view.setLoadMoreAction([&](bool throughFirst) {
+        ++loads;
+        throughFirstRequested = throughFirst;
+    });
+    result &= expect(changed(view.reconcile(snapshot)), "navigation fixture reconciles");
+    settle();
+    const auto destinations = view.turnDestinations();
+    result &= expect(destinations.size() == 4 && destinations[1].prompt == destinations[2].prompt &&
+                         destinations[1].key != destinations[2].key && destinations.back().prompt == "Turn without an opening prompt",
+                     "outline uses actual turns, stable identities, duplicate prompts and a prompt-free fallback");
+    for (const auto entry : contract["transitions"].toArray()) {
+        const auto transition = entry.toObject();
+        const auto id = transition["turn"].toString().toStdString();
+        view.navigateToTurn(keys[id]);
+        settle();
+        const auto expected = transition["target"].isNull() ? std::string{} : keys[transition["target"].toString().toStdString()];
+        result &= expect(view.navigationTarget() == keys[id] && view.navigationTarget(transition["direction"].toInt()) == expected,
+                         "native transitions match the shared turn navigation contract");
+        result &= expect(view.mode() == ConversationView::Mode::Paused && view.hasFocus(),
+                         "an explicit turn jump pauses following and focuses the existing view");
+    }
+    view.navigateToTurn(keys["last"]);
+    settle();
+    const int clampedOffset = view.visualRect(view.currentIndex()).top();
+    result &= expect(view.isAtBottom() && clampedOffset > 1, "the short final turn is genuinely clamped");
+    view.navigateToTurn(view.navigationTarget(-1));
+    result &= expect(view.navigationTarget() == keys["third"], "Up after a clamped jump reaches the preceding opening");
+    view.navigateToTurn(view.navigationTarget(-1));
+    result &= expect(view.navigationTarget() == keys["second"], "a second Up continues through earlier turns");
+
+    view.verticalScrollBar()->setValue(view.verticalScrollBar()->value() + 90);
+    settle();
+    result &= expect(view.navigationTarget(-1) == keys["second"], "manual scrolling reclaims the reading anchor before Up");
+    view.navigateToTurn(view.navigationTarget(-1));
+    result &= expect(view.navigationTarget(-1) == keys["first"], "Up first restores the current opening, then offers the previous turn");
+
+    view.navigateToTurn(keys["last"]);
+    settle();
+    auto streamed = snapshot.sections.back().cards.front();
+    streamed.key = AuthoritativeItemKey{snapshot.threadId, "last", "stream"};
+    streamed.itemId = "stream";
+    streamed.payload = AgentMessageData{QString("New output\n\n").repeated(30).toStdString(), "final_answer"};
+    snapshot.sections.back().cards.push_back(streamed);
+    result &= expect(changed(view.reconcile(snapshot)), "streamed output reconciles after a clamped jump");
+    settle();
+    result &= expect(view.mode() == ConversationView::Mode::Paused && view.navigationTarget() == keys["last"] &&
+                         std::abs(view.visualRect(view.currentIndex()).top() - clampedOffset) <= 1,
+                     "streaming preserves the chosen key and achieved pixel even when the jump originally hit bottom");
+
+    const auto anchoredIndex = view.conversationModel()->indexForStableKey(keys["last"]);
+    const int beforePrepend = view.visualRect(anchoredIndex).top();
+    auto earlier = snapshot.sections.front();
+    earlier.key = earlier.turnId = "earlier";
+    earlier.cards.resize(1);
+    earlier.cards[0].key = AuthoritativeItemKey{snapshot.threadId, "earlier", "opening"};
+    earlier.cards[0].turnId = "earlier";
+    earlier.rootCardKey = earlier.cards[0].key;
+    snapshot.sections.insert(snapshot.sections.begin(), earlier);
+    result &= expect(changed(view.reconcile(snapshot)), "earlier history reconciles");
+    settle();
+    result &= expect(view.navigationTarget() == keys["last"] &&
+                         std::abs(view.visualRect(view.conversationModel()->indexForStableKey(keys["last"])).top() - beforePrepend) <= 1,
+                     "history prepend retains semantic selection and reading pixels");
+    const auto savedKey = view.navigationTarget();
+    result &= expect(changed(view.reconcile(conversation(8))), "another thread can be visited");
+    result &= expect(changed(view.reconcile(snapshot)), "returning to the original thread reconciles");
+    settle();
+    result &= expect(view.navigationTarget() == savedKey && view.mode() == ConversationView::Mode::Paused,
+                     "thread switching retains the existing per-thread anchor");
+    view.followLatest();
+    settle();
+    result &= expect(view.mode() == ConversationView::Mode::Following && view.isAtBottom(), "Latest explicitly resumes following");
+    view.navigateToTurn(keys["first"]);
+    auto* root = materializedCard(view, keys["first"]);
+    auto* disclosure = root ? root->findChild<QToolButton*>(QStringLiteral("cardDisclosureButton")) : nullptr;
+    if (disclosure) {
+        disclosure->click();
+    }
+    settle();
+    view.navigateToTurn(keys["first"]);
+    result &= expect(root && root->isCollapsed() && view.navigationTarget(1) == keys["second"],
+                     "navigation preserves folded turns and skips their hidden activity");
+    view.loadEarlier();
+    view.setHistoryRequestPending(snapshot.threadId, true);
+    view.loadEarlier();
+    result &= expect(loads == 1, "outline loading shares the existing pending-request gate");
+    view.setHistoryRequestPending(snapshot.threadId, false);
+    view.navigateToFirstTurn();
+    settle();
+    result &= expect(throughFirstRequested && loads == 2 && view.mode() == ConversationView::Mode::First &&
+                         view.navigationTarget() == stableKey(snapshot.sections.front().cards.front().key),
+                     "First pauses at the oldest loaded opening and requests paging through the actual beginning");
+    view.clearFocus();
+    auto oldest = earlier;
+    oldest.key = oldest.turnId = "oldest";
+    oldest.cards.front().turnId = "oldest";
+    oldest.cards.front().key = AuthoritativeItemKey{snapshot.threadId, "oldest", "opening"};
+    oldest.rootCardKey = oldest.cards.front().key;
+    snapshot.sections.insert(snapshot.sections.begin(), oldest);
+    snapshot.hasMore = false;
+    result &= expect(changed(view.reconcile(snapshot)), "First receives the final earlier page");
+    settle();
+    result &= expect(view.navigationTarget() == stableKey(oldest.cards.front().key) && !view.hasFocus(),
+                     "the requested beginning follows authoritative earlier openings without stealing focus");
+    view.verticalScrollBar()->setValue(60);
+    settle();
+    result &= expect(view.mode() == ConversationView::Mode::Paused, "manual scrolling cancels the pending First navigation intent");
+    view.followLatest();
+    snapshot.sections.erase(snapshot.sections.begin());
+    snapshot.hasMore = true;
+    static_cast<void>(view.reconcile(snapshot));
+    TurnSection queued;
+    queued.key = "unassigned-prompt";
+    VisibleCardData pending;
+    pending.key = LocalPromptKey{100};
+    pending.kind = CardKind::LocalPrompt;
+    pending.threadId = snapshot.threadId;
+    pending.payload = LocalPromptData{};
+    std::get<LocalPromptData>(pending.payload).prompt = QString("Waiting prompt\n\n").repeated(25).toStdString();
+    queued.rootCardKey = pending.key;
+    queued.cards.push_back(pending);
+    snapshot.sections.push_back(queued);
+    result &= expect(changed(view.reconcile(snapshot)), "an unassigned queued prompt reconciles");
+    view.scrollTo(view.conversationModel()->indexForStableKey(stableKey(pending.key)), QAbstractItemView::PositionAtTop);
+    settle();
+    result &= expect(view.navigationTarget() == keys["last"] && view.navigationTarget(1).empty() && view.turnDestinations().size() == 5,
+                     "unassigned prompts preserve access to real turns without becoming turn boundaries");
+    snapshot.sections.pop_back();
+    snapshot.sections.pop_back();
+    result &= expect(changed(view.reconcile(snapshot)), "removing a turn reconciles");
+    const int beforeStale = view.verticalScrollBar()->value();
+    view.navigateToTurn(keys["last"]);
+    result &= expect(view.verticalScrollBar()->value() == beforeStale, "a removed outline target is a no-op");
+    auto& hydrated = snapshot.sections[2];
+    auto opening = hydrated.cards.front();
+    opening.key = AuthoritativeItemKey{snapshot.threadId, hydrated.turnId, "hydrated-opening"};
+    opening.itemId = "hydrated-opening";
+    hydrated.rootCardKey = opening.key;
+    hydrated.cards.insert(hydrated.cards.begin(), opening);
+    result &= expect(changed(view.reconcile(snapshot)), "hydrating an earlier opening replaces the turn root");
+    const auto demoted = view.conversationModel()->indexForStableKey(keys["second"]);
+    const int beforeTransition = view.verticalScrollBar()->value();
+    view.navigateToTurn(keys["second"]);
+    result &= expect(demoted.isValid() && !demoted.data(ConversationItemModel::TurnRootRole).toBool() &&
+                         view.verticalScrollBar()->value() == beforeTransition,
+                     "an old opening still present as steering is no longer a valid outline destination");
+    view.beginThreadSelection("other");
+    view.navigateToTurn(keys["second"]);
+    result &= expect(view.verticalScrollBar()->value() == beforeTransition && view.navigationTarget().empty(),
+                     "thread transitions close navigation and reject outgoing targets");
+    return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -7401,6 +7608,7 @@ int main(int argc, char **argv) {
     result &= passed;
   };
   run("viewportProportionalFoundation", viewportProportionalFoundation);
+  run("turnHistoryNavigationPreservesItsAnchor", turnHistoryNavigationPreservesItsAnchor);
   run("exactStructuralRowsPreserveTheViewport",
       exactStructuralRowsPreserveTheViewport);
   run("rejectedDeltaTransactionsAreAtomic", rejectedDeltaTransactionsAreAtomic);

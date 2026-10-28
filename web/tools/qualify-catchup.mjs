@@ -182,7 +182,9 @@ export async function qualifyCatchup(devTools) {
     assert(await devTools.evaluate(`!document.querySelector("#thread-pane")`),"second Escape closes the drawer");
     await devTools.call("Emulation.setDeviceMetricsOverride",{width:1280,height:900,deviceScaleFactor:1,mobile:false});
     result.menus=true;
-    await devTools.evaluate(`(()=>{const {notify}=globalThis.codexuiCatchup;for(let i=0;i<200;i++)notify("thread/started",{thread:{id:"scroll-reference-"+i,name:"Scroll reference "+i,projectId:"p",section:{id:"s",name:"Review"},status:{type:"idle"}}});})()`);
+    // Standalone threads exercise the outer list; grouped threads now scroll
+    // inside their bounded project bodies instead.
+    await devTools.evaluate(`(()=>{const {notify}=globalThis.codexuiCatchup;for(let i=0;i<200;i++)notify("thread/started",{thread:{id:"scroll-reference-"+i,name:"Scroll reference "+i,status:{type:"idle"}}});})()`);
     await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
     const treeScroll=await devTools.evaluate(`(()=>{const p=document.querySelector(".thread-pane"),l=document.querySelector(".thread-list"),pr=p.getBoundingClientRect(),lr=l.getBoundingClientRect();l.scrollTop=l.scrollHeight;return {layout:getComputedStyle(p).display,height:l.clientHeight,content:l.scrollHeight,bottom:lr.bottom,paneBottom:pr.bottom,scrolled:l.scrollTop};})()`);
     assert.equal(treeScroll.layout,"flex","thread pane retains its shared flex layout");

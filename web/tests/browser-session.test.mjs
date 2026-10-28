@@ -187,6 +187,37 @@ test("observer hydration reads directly and the item-page ceiling is global acro
     session.dispose();
 });
 
+test("First uses the existing history pager through multiple pages and stops on failure", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "first-pagination");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "first-pages", status: {type: "idle"}}]});
+    await completeThreadDiscovery(socket);
+    session.selectThread("first-pages");
+    await completeControllerHydration(socket, {id: "first-pages", status: {type: "idle"}, turns: []}, "older-1");
+    session.loadMoreHistory("first-pages", session.threadVisualKey("first-pages"), true);
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: "older-2"});
+    await Promise.resolve(); await Promise.resolve();
+    const next = requests(socket, "thread/turns/list").at(-1);
+    assert.equal(next.payload.params.cursor, "older-2");
+    reject(socket, next, "paging failed");
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "thread/turns/list").length, 3);
+    assert.equal(session.historyPagePending("first-pages"), false);
+    session.loadMoreHistory("first-pages", session.threadVisualKey("first-pages"), true);
+    respond(socket, requests(socket, "thread/turns/list").at(-1), {data: [], nextCursor: "older-3"});
+    await Promise.resolve(); await Promise.resolve();
+    const last = requests(socket, "thread/turns/list").at(-1);
+    assert.equal(last.payload.params.cursor, "older-3");
+    respond(socket, last, {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "thread/turns/list").length, 5);
+    assert.equal(session.model.thread("first-pages")?.historyHasMore, false);
+    session.loadMoreHistory("first-pages", session.threadVisualKey("first-pages"), true);
+    assert.equal(requests(socket, "thread/turns/list").length, 5);
+    session.dispose();
+});
+
 test("turn history advances one explicit page at a time and retries the same cursor after failure", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

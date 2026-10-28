@@ -2565,45 +2565,41 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
   };
 
   loadHistory = [&](nodegraph::NodeAction action) {
-      if (!action.target || action.target->id().kind != nodegraph::NodeKind::Thread) {
-          rejectNodeAction(action, "The selected thread is no longer available");
-          return;
-      }
-      const nodegraph::NodeRef thread = action.target;
-      const std::shared_ptr<const nodegraph::NodeState> state = currentNodeState(thread);
-      const std::optional<std::string> threadId = currentThreadId(thread);
+      const nodegraph::NodeRef thread = action.target && action.target->id().kind == nodegraph::NodeKind::Thread ? action.target : nullptr;
+      const auto state = thread ? currentNodeState(thread) : nullptr;
+      const auto threadId = thread ? currentThreadId(thread) : std::nullopt;
       if (!state || !threadId) {
           rejectNodeAction(action, "The selected thread is no longer available");
-          return;
-      }
-      if (conversationSnapshotPending(thread))
-          return;
-      const std::string cursor = exactStringFromValue(valueMember(*state, "historyNextCursor"));
-      dispatchRequestHandled<codex::generated::client_requests::ThreadTurnsList>(
-          sdk,
-          turnPageParameters(*threadId, cursor),
-          workerLogic,
-          thread,
-          [](const nodegraph::ProtocolRequestId&) {
-          },
-          [&, thread, id = *threadId](RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
-              const std::vector<std::string> turnIds = outcome.ok ? turnIdsFromPage(decoded.payload) : std::vector<std::string>{};
-              const nodegraph::NodeRef expected = decoded.expectedNode;
-              const bool current = expected && currentNodeState(expected);
-              if (current) {
-                  static_cast<void>(
-                      workerLogic.completeThreadHydration(std::move(decoded), thread, outcome.ok ? "ready" : "failed", outcome.error));
-                  if (outcome.ok) {
-                      queueItemHydrations(thread, id, turnIds);
-                      const auto state = currentNodeState(thread);
-                      if (state && boolFromValue(valueMember(*state, "historyStale"))) {
-                          loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
+      } else if (!conversationSnapshotPending(thread)) {
+          const std::string cursor = exactStringFromValue(valueMember(*state, "historyNextCursor"));
+          const bool throughFirst = boolFromValue(valueMember(action.payload, "throughFirst"));
+          dispatchRequestHandled<codex::generated::client_requests::ThreadTurnsList>(
+              sdk,
+              turnPageParameters(*threadId, cursor),
+              workerLogic,
+              thread,
+              [](const nodegraph::ProtocolRequestId&) {
+              },
+              [&, thread, id = *threadId, cursor, throughFirst](RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
+                  const std::vector<std::string> turnIds = outcome.ok ? turnIdsFromPage(decoded.payload) : std::vector<std::string>{};
+                  const nodegraph::NodeRef expected = decoded.expectedNode;
+                  if (expected && currentNodeState(expected)) {
+                      static_cast<void>(
+                          workerLogic.completeThreadHydration(std::move(decoded), thread, outcome.ok ? "ready" : "failed", outcome.error));
+                      if (outcome.ok) {
+                          queueItemHydrations(thread, id, turnIds);
+                          const auto current = currentNodeState(thread);
+                          const auto next = current ? exactStringFromValue(valueMember(*current, "historyNextCursor")) : std::string{};
+                          if (current &&
+                              (boolFromValue(valueMember(*current, "historyStale")) || (throughFirst && !next.empty() && next != cursor))) {
+                              loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {{"throughFirst", throughFirst}}, {}});
+                          }
+                      } else {
+                          showNotice(outcome.error);
                       }
-                  } else {
-                      showNotice(outcome.error);
                   }
-              }
-          });
+              });
+      }
   };
 
   refreshRevertedHistory = [&](std::string id) {
