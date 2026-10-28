@@ -973,6 +973,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
     const historyPagePending = session.historyPagePending(projectionId, presentationKey);
+    const historyLoading = session.historyLoading(projectionId, presentationKey);
     const navigation = viewport.scroll(projectionId, presentationKey);
     const openingCards = turnOpenings(visibleSections);
     const anchoredCard = visibleSections.flatMap(section => section.cards)
@@ -983,6 +984,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         && (Math.abs(navigation.anchor.pixelOffset) <= 1 || (navigation.anchor.pixelOffset >= 0
             && Boolean(scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight <= 1)));
     const navigationEnabled = !threadTransitionActive && currentOpening !== undefined;
+    const atFirstOpening = currentOpening === openingCards[0] && anchoredCard === currentOpening && (navigation.anchor?.pixelOffset ?? -Infinity) >= -1;
     const loadEarlier = () => {
         if (!historyPagePending) {
             viewport.loadMore(projectionId, presentationKey);
@@ -1006,7 +1008,10 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 const anchor = {cardKey: key, pixelOffset: 0};
                 pendingGeometry.current = {presentationKey, following: false, anchor, focus: true, first};
                 viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, false, anchor);
-                if (first) { session.loadMoreHistory(projectionId, presentationKey, true); }
+                if (first) {
+                    pane.current?.focus({preventScroll: true});
+                    session.loadMoreHistory(projectionId, presentationKey, true);
+                }
                 forceCardState(value => value + 1);
             }
         }
@@ -1041,7 +1046,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
                     <div className="turn-navigation" aria-label="Turn navigation">
-                        <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || session.historyLoading(projectionId, presentationKey)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
+                        <button style={{visibility: navigationEnabled && !conversation.hasMore && !historyLoading && atFirstOpening ? "hidden" : "visible"}} aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
                         <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
                         <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
                             const openings = loadedOpenings();
@@ -1078,6 +1083,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 const anchor = conversationAnchor(element);
                 viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, anchor);
                 if (previous.following !== following || previous.anchor?.cardKey !== anchor?.cardKey
+                    || ((previous.anchor?.pixelOffset ?? -Infinity) >= -1) !== ((anchor?.pixelOffset ?? -Infinity) >= -1)
                     || (Math.abs(previous.anchor?.pixelOffset ?? Infinity) <= 1) !== (Math.abs(anchor?.pixelOffset ?? Infinity) <= 1)) {
                     forceCardState(value => value + 1);
                 }

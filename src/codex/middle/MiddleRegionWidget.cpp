@@ -207,6 +207,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   auto latestPolicy = latest->sizePolicy();
   latestPolicy.setRetainSizeWhenHidden(true);
   latest->setSizePolicy(latestPolicy);
+  firstTurn->setSizePolicy(latestPolicy);
   for (auto* button : {firstTurn, previousTurn, turns, nextTurn, latest}) {
       button->setAccessibleName(button->toolTip());
   }
@@ -268,8 +269,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       const auto threadId = QString::fromStdString(conversationView->presentedThreadId());
       const bool hasMore = conversationView->conversationModel()->hasMore();
       load->setVisible(hasMore);
-      const auto* history = conversationView->findChild<QPushButton*>(QStringLiteral("conversationLoadMore"));
-      load->setEnabled(history && history->isEnabled());
+      load->setEnabled(!conversationView->historyRequestPending());
       const auto current = conversationView->navigationTarget();
       for (const auto& destination : destinations) {
           auto* item = new QListWidgetItem(destination.prompt, list);
@@ -437,8 +437,10 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationView = new ConversationView(conversationLayer);
   connect(conversationView, &ConversationView::navigationChanged, this, [this, firstTurn, previousTurn, turns, nextTurn, latest, outline] {
       const bool available = !conversationView->navigationTarget().empty();
-      const auto* history = conversationView->findChild<QPushButton*>(QStringLiteral("conversationLoadMore"));
-      firstTurn->setEnabled(available && (!conversationView->conversationModel()->hasMore() || (history && history->isEnabled())));
+      const bool historyPending = conversationView->historyRequestPending();
+      firstTurn->setEnabled(available && !historyPending);
+      firstTurn->setVisible(!available || conversationView->conversationModel()->hasMore() || historyPending ||
+                            conversationView->verticalScrollBar()->value() > 1);
       previousTurn->setEnabled(available && !conversationView->navigationTarget(-1).empty());
       nextTurn->setEnabled(available && !conversationView->navigationTarget(1).empty());
       turns->setEnabled(available);

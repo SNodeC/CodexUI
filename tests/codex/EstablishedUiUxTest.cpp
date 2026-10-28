@@ -1651,6 +1651,11 @@ bool turnNavigationUsesTheExistingHeader() {
     result &= expect(outline && outline->isEnabled(), "navigation enables after staged history commits");
     if (first && previous && outline && next && latest && presentation) {
         const QRect header = presentation->geometry();
+        region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
+        QCoreApplication::processEvents();
+        result &= expect(first->isVisible(), "First stays available at the oldest loaded prompt while earlier history exists");
+        region.conversation().followLatest();
+        QCoreApplication::processEvents();
         result &= expect(!latest->isVisible(), "Latest is absent while following");
         previous->click();
         QCoreApplication::processEvents();
@@ -1796,11 +1801,28 @@ bool turnNavigationUsesTheExistingHeader() {
         qApp->removeEventFilter(&router);
         region.move(originalPosition);
         latest->click();
+        QCoreApplication::processEvents();
+        const QRect previousAtBottom = previous->geometry();
+        result &= expect(first->isVisible(), "First reappears away from the actual beginning");
         first->click();
         QCoreApplication::processEvents();
         result &= expect(region.conversation().navigationTarget() == stableKey(snapshot.sections.front().cards.front().key) &&
-                             latest->isVisible(),
-                         "the actual First header control lands at the beginning and pauses following");
+                             latest->isVisible() && !first->isVisible() && previous->geometry() == previousAtBottom,
+                         "First hides at the actual beginning and retains its header slot");
+        region.conversation().verticalScrollBar()->setValue(80);
+        QCoreApplication::processEvents();
+        result &= expect(first->isVisible(), "manual scrolling away from the beginning reveals First");
+        region.conversation().verticalScrollBar()->setValue(0);
+        QCoreApplication::processEvents();
+        result &= expect(!first->isVisible(), "manual scrolling to the beginning hides First");
+        region.conversation().setProviderHasMore(snapshot.threadId, true);
+        region.conversation().setHistoryRequestPending(snapshot.threadId, true);
+        QCoreApplication::processEvents();
+        result &= expect(first->isVisible() && !first->isEnabled(), "First remains visible but disabled while earlier history is pending");
+        region.conversation().setProviderHasMore(snapshot.threadId, false);
+        QCoreApplication::processEvents();
+        result &= expect(first->isVisible() && !first->isEnabled(), "First remains visible until final-page item hydration finishes");
+        region.conversation().setHistoryRequestPending(snapshot.threadId, false);
         if (!qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR").isEmpty()) {
             region.resize(1400, 850);
             region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
