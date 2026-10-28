@@ -588,6 +588,7 @@ const navigationCheck = `(async()=>{
     const sameRow=Math.abs(previous.getBoundingClientRect().top-presentation.getBoundingClientRect().top)<=1;
     const latestInitiallyHidden=getComputedStyle(latest).visibility==="hidden";
     await jump(0);const first=activeKey();
+    const firstAvailableForEarlierHistory=getComputedStyle(firstButton).visibility==="visible";
     next.click();await frame();const second=activeKey();
     scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
     previous.click();await frame();const currentOpeningFirst=activeKey()===second;
@@ -612,10 +613,23 @@ const navigationCheck = `(async()=>{
     await open();menu().querySelector("button").click();
     await waitFor(()=>document.querySelectorAll(".turn-section").length===5,"earlier page");await frame();
     const pagingAnchor=Math.abs(headerTop(last)-beforePaging)<=1;
+    const previousBeforeFirst=previous.getBoundingClientRect().left;
     firstButton.click();
     await waitFor(()=>document.querySelectorAll(".turn-section").length===6,"First loads through the beginning");await frame();
     const firstLoadsHistory=pages===2&&document.activeElement?.textContent.includes("The very first prompt")
         &&getComputedStyle(latest).visibility==="visible";
+    const oldestKey=activeKey();
+    const firstHidesAtBeginning=getComputedStyle(firstButton).visibility==="hidden";
+    const firstRetainsHeaderSlot=previous.getBoundingClientRect().left===previousBeforeFirst;
+    scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
+    const firstReappearsAfterScrolling=getComputedStyle(firstButton).visibility==="visible";
+    firstButton.focus();firstButton.click();await frame();
+    const firstDirectJumpKeepsFocus=getComputedStyle(firstButton).visibility==="hidden"&&activeKey()===oldestKey;
+    scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
+    scroll.scrollTop=0;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
+    const firstHidesAfterManualTop=getComputedStyle(firstButton).visibility==="hidden";
+    scroll.scrollTop=4;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
+    const firstStaysHiddenInTopPadding=getComputedStyle(firstButton).visibility==="hidden";
     await jump(5);
     const stableHeader=Math.abs(heading.getBoundingClientRect().height-height)<=1
         &&Math.abs(presentation.getBoundingClientRect().left-presentationLeft)<=1;
@@ -656,7 +670,8 @@ const navigationCheck = `(async()=>{
     socket.send=original;
     return {sameRow,latestInitiallyHidden,currentOpeningFirst,repeatedUp,clamped,visibleAtClamp,streamingAnchor,clampedUp,
         honestCount,loadFirst,selectedFocused,arrowFocus,pages,pagingAnchor,stableHeader,fallbackSelected,followingResumed,composerIsolated,
-        olderLoadedReachable,foldedPreserved,firstLoadsHistory,boundedOutline,topPromptReachable,scrollReachesTop};
+        olderLoadedReachable,foldedPreserved,firstLoadsHistory,boundedOutline,topPromptReachable,scrollReachesTop,
+        firstAvailableForEarlierHistory,firstHidesAtBeginning,firstRetainsHeaderSlot,firstReappearsAfterScrolling,firstHidesAfterManualTop,firstStaysHiddenInTopPadding,firstDirectJumpKeepsFocus};
 })()`;
 const turnRemovalCheck = `(async()=>{
     const geometry=${JSON.stringify(headerContract)};

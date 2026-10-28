@@ -114,6 +114,7 @@ public:
   // Provider pagination remains graph-owned; the view only projects whether
   // the current request is pending.
   void setHistoryRequestPending(const std::string &threadId, bool pending);
+  [[nodiscard]] bool historyRequestPending() const;
   void setProviderHasMore(const std::string &threadId, bool hasMore);
   void forgetThreadPresentation(const std::string &threadId,
                                 std::uint64_t incarnation = 0);

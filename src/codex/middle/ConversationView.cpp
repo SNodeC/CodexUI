@@ -2000,6 +2000,11 @@ void ConversationView::finishStructuralDelta(
   incrementProperty(this, "graphRefreshPasses");
 }
 
+bool ConversationView::historyRequestPending() const {
+    const auto history = threadPresentations_.find(threadId_);
+    return history != threadPresentations_.end() && history->second.historyRequestPending;
+}
+
 void ConversationView::setHistoryRequestPending(const std::string &threadId,
                                                 bool pending) {
   bool &current = threadPresentations_[threadId].historyRequestPending;
@@ -2060,9 +2065,7 @@ void ConversationView::forgetThreadPresentation(const std::string &threadId,
 
 void ConversationView::updateHistoryControls() {
   const bool hasMore = model_->hasMore();
-  const auto history = threadPresentations_.find(threadId_);
-  const bool pending = history != threadPresentations_.end() &&
-                       history->second.historyRequestPending;
+  const bool pending = historyRequestPending();
   const bool wasBusy = loadMore_->isVisible() && !loadMore_->isEnabled();
   QString label = QStringLiteral("Load more activities");
   QString toolTip;
