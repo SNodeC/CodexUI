@@ -233,6 +233,15 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
     if (std::ranges::find(route.rows, node) == route.rows.end())
       route.rows.push_back(node);
   }
+  // Family activity requires a complete presentation refresh, not action rejection.
+  route.structural = std::ranges::any_of(route.rows, [&](const auto& node) {
+      return std::ranges::any_of(std::array{nodegraph::RelationKind::StructuralChildThread,
+                                            nodegraph::RelationKind::AgentChildThread,
+                                            nodegraph::RelationKind::ForkChildThread},
+                                 [&](auto kind) {
+                                     return read->relatedCount(node, kind) != 0 || read->hasIncomingRelation(node, kind);
+                                 });
+  });
   return route;
 }
 

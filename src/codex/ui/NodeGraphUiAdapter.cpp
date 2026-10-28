@@ -1751,28 +1751,17 @@ TokenUsageSnapshot NodeGraphUiAdapter::tokenUsage(
   return result;
 }
 
-std::optional<ThreadListRow>
-NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
-  if (!graph_ || !thread || thread->id().kind != nodegraph::NodeKind::Thread)
-    return std::nullopt;
-  auto read = graph_->tryRead();
-  if (!read)
-    return std::nullopt;
-  // Family activity requires the full projection rather than an isolated row update.
-  if (!read->live(thread) || std::ranges::any_of(std::array{nodegraph::RelationKind::StructuralChildThread,
-                                                            nodegraph::RelationKind::AgentChildThread,
-                                                            nodegraph::RelationKind::ForkChildThread},
-                                                 [&](auto kind) {
-                                                     return read->relatedCount(thread, kind) != 0 ||
-                                                            read->hasIncomingRelation(thread, kind);
-                                                 })) {
-      return std::nullopt;
-  }
-  std::size_t pending = 0;
-  forEachPendingRequestThread(*read, [&](const nodegraph::NodeRef &owner) {
-    pending += owner == thread;
-  });
-  return projectThreadRow(*read, thread, pending);
+std::optional<ThreadListRow> NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef& thread) const {
+    std::optional<ThreadListRow> result;
+    auto read = graph_ && thread ? graph_->tryRead() : std::nullopt;
+    if (read && read->live(thread)) {
+        std::size_t pending = 0;
+        forEachPendingRequestThread(*read, [&](const nodegraph::NodeRef& owner) {
+            pending += owner == thread;
+        });
+        result = projectThreadRow(*read, thread, pending);
+    }
+    return result;
 }
 
 std::optional<ThreadListSnapshot>
