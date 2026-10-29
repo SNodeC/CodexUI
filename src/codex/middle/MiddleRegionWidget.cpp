@@ -204,10 +204,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   auto* latest = headerButton(QStringLiteral("conversationLatest"));
   latest->setText(QStringLiteral("↧"));
   latest->setToolTip(QStringLiteral("Latest output; resume following"));
-  auto latestPolicy = latest->sizePolicy();
-  latestPolicy.setRetainSizeWhenHidden(true);
-  latest->setSizePolicy(latestPolicy);
-  firstTurn->setSizePolicy(latestPolicy);
   for (auto* button : {firstTurn, previousTurn, turns, nextTurn, latest}) {
       button->setAccessibleName(button->toolTip());
   }
@@ -438,13 +434,12 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   connect(conversationView, &ConversationView::navigationChanged, this, [this, firstTurn, previousTurn, turns, nextTurn, latest, outline] {
       const bool available = !conversationView->navigationTarget().empty();
       const bool historyPending = conversationView->historyRequestPending();
-      firstTurn->setEnabled(available && !historyPending);
-      firstTurn->setVisible(!available || conversationView->conversationModel()->hasMore() || historyPending ||
-                            conversationView->verticalScrollBar()->value() > 1);
+      firstTurn->setEnabled(available && !historyPending &&
+                            (conversationView->conversationModel()->hasMore() || conversationView->verticalScrollBar()->value() > 1));
       previousTurn->setEnabled(available && !conversationView->navigationTarget(-1).empty());
       nextTurn->setEnabled(available && !conversationView->navigationTarget(1).empty());
       turns->setEnabled(available);
-      latest->setVisible(available && conversationView->mode() != ConversationView::Mode::Following);
+      latest->setEnabled(available && conversationView->mode() != ConversationView::Mode::Following);
       if (!available) {
           outline->close();
       }
@@ -455,7 +450,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   previousTurn->setEnabled(false);
   nextTurn->setEnabled(false);
   turns->setEnabled(false);
-  latest->hide();
+  latest->setEnabled(false);
   conversationView->setNoticeAction(
       [this](QString message, bool error) {
         showNotice(std::move(message), error);

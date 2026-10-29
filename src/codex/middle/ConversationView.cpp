@@ -3215,8 +3215,7 @@ ConversationView::Anchor ConversationView::captureAnchor(int scrollValue) const 
     const auto saved = threadPresentations_.find(threadId_);
     const auto retained = saved == threadPresentations_.end() ? std::nullopt : modelSectionRow(saved->second.scroll.anchor.stableKey);
     if (scrollValue < 0 && mode_ != Mode::Following && retained && rowPresented(*retained)) {
-        anchor = saved->second.scroll.anchor;
-        anchor.absoluteValue = value;
+        anchor = {saved->second.scroll.anchor.stableKey, rowRect(*retained).top(), value};
     } else if (model_->rowCount() > 0 && !heights_.empty() && heights_.totalHeight() > 0) {
         const qint64 contentY = std::max<qint64>(0, static_cast<qint64>(value) - leadingChromeHeight());
         const std::size_t position = heights_.nextRowWithExtent(heights_.rowAt(contentY));

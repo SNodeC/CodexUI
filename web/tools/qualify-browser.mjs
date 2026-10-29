@@ -586,9 +586,9 @@ const navigationCheck = `(async()=>{
     const heading=document.querySelector(".conversation-heading"),height=heading.getBoundingClientRect().height;
     const presentation=document.querySelector('.conversation-view-controls > button'),presentationLeft=presentation.getBoundingClientRect().left;
     const sameRow=Math.abs(previous.getBoundingClientRect().top-presentation.getBoundingClientRect().top)<=1;
-    const latestInitiallyHidden=getComputedStyle(latest).visibility==="hidden";
+    const latestInitiallyDisabled=getComputedStyle(latest).visibility==="visible"&&latest.disabled;
     await jump(0);const first=activeKey();
-    const firstAvailableForEarlierHistory=getComputedStyle(firstButton).visibility==="visible";
+    const firstAvailableForEarlierHistory=getComputedStyle(firstButton).visibility==="visible"&&!firstButton.disabled;
     next.click();await frame();const second=activeKey();
     scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
     previous.click();await frame();const currentOpeningFirst=activeKey()===second;
@@ -598,7 +598,7 @@ const navigationCheck = `(async()=>{
     socket.receive({kind:"appserver",payload:{method:"item/completed",params:{threadId:metadata.id,turnId:"last",
         item:{id:"stream",type:"agentMessage",phase:"final_answer",text:"Streaming after the jump.\\n\\n".repeat(30)}}}});
     await frame();
-    const streamingAnchor=Math.abs(headerTop(last)-before)<=1&&getComputedStyle(latest).visibility==="visible";
+    const streamingAnchor=Math.abs(headerTop(last)-before)<=1&&getComputedStyle(latest).visibility==="visible"&&!latest.disabled;
     previous.click();await frame();const third=activeKey();previous.click();await frame();
     const clampedUp=third!==last&&activeKey()===second;
     await open();
@@ -617,19 +617,19 @@ const navigationCheck = `(async()=>{
     firstButton.click();
     await waitFor(()=>document.querySelectorAll(".turn-section").length===6,"First loads through the beginning");await frame();
     const firstLoadsHistory=pages===2&&document.activeElement?.textContent.includes("The very first prompt")
-        &&getComputedStyle(latest).visibility==="visible";
+        &&getComputedStyle(latest).visibility==="visible"&&!latest.disabled;
     const oldestKey=activeKey();
-    const firstHidesAtBeginning=getComputedStyle(firstButton).visibility==="hidden";
+    const firstDisabledAtBeginning=getComputedStyle(firstButton).visibility==="visible"&&firstButton.disabled;
     const firstRetainsHeaderSlot=previous.getBoundingClientRect().left===previousBeforeFirst;
     scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
-    const firstReappearsAfterScrolling=getComputedStyle(firstButton).visibility==="visible";
+    const firstEnabledAfterScrolling=getComputedStyle(firstButton).visibility==="visible"&&!firstButton.disabled;
     firstButton.focus();firstButton.click();await frame();
-    const firstDirectJumpKeepsFocus=getComputedStyle(firstButton).visibility==="hidden"&&activeKey()===oldestKey;
+    const firstDirectJumpKeepsFocus=getComputedStyle(firstButton).visibility==="visible"&&firstButton.disabled&&activeKey()===oldestKey;
     scroll.scrollTop+=90;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
     scroll.scrollTop=0;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
-    const firstHidesAfterManualTop=getComputedStyle(firstButton).visibility==="hidden";
+    const firstDisabledAfterManualTop=getComputedStyle(firstButton).visibility==="visible"&&firstButton.disabled;
     scroll.scrollTop=4;scroll.dispatchEvent(new Event("scroll",{bubbles:true}));await frame();
-    const firstStaysHiddenInTopPadding=getComputedStyle(firstButton).visibility==="hidden";
+    const firstStaysDisabledInTopPadding=getComputedStyle(firstButton).visibility==="visible"&&firstButton.disabled;
     await jump(5);
     const stableHeader=Math.abs(heading.getBoundingClientRect().height-height)<=1
         &&Math.abs(presentation.getBoundingClientRect().left-presentationLeft)<=1;
@@ -637,7 +637,7 @@ const navigationCheck = `(async()=>{
     menu().dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));lastEntry.click();await frame();
     const fallbackSelected=activeKey()===last;
     latest.click();await frame();
-    const followingResumed=getComputedStyle(latest).visibility==="hidden"&&scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<=1;
+    const followingResumed=getComputedStyle(latest).visibility==="visible"&&latest.disabled&&scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<=1;
     const textarea=document.querySelector('textarea[aria-label="Message Codex"]');textarea.focus();
     const position=scroll.scrollTop;textarea.dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowUp",altKey:true,bubbles:true}));
     const composerIsolated=scroll.scrollTop===position&&document.activeElement===textarea;
@@ -668,10 +668,10 @@ const navigationCheck = `(async()=>{
     menu().scrollBy({top:-menu().scrollHeight,behavior:"instant"});await frame();
     const scrollReachesTop=menu().scrollTop===0&&entries()[0].getBoundingClientRect().top>=bounds.top;
     socket.send=original;
-    return {sameRow,latestInitiallyHidden,currentOpeningFirst,repeatedUp,clamped,visibleAtClamp,streamingAnchor,clampedUp,
+    return {sameRow,latestInitiallyDisabled,currentOpeningFirst,repeatedUp,clamped,visibleAtClamp,streamingAnchor,clampedUp,
         honestCount,loadFirst,selectedFocused,arrowFocus,pages,pagingAnchor,stableHeader,fallbackSelected,followingResumed,composerIsolated,
         olderLoadedReachable,foldedPreserved,firstLoadsHistory,boundedOutline,topPromptReachable,scrollReachesTop,
-        firstAvailableForEarlierHistory,firstHidesAtBeginning,firstRetainsHeaderSlot,firstReappearsAfterScrolling,firstHidesAfterManualTop,firstStaysHiddenInTopPadding,firstDirectJumpKeepsFocus};
+        firstAvailableForEarlierHistory,firstDisabledAtBeginning,firstRetainsHeaderSlot,firstEnabledAfterScrolling,firstDisabledAfterManualTop,firstStaysDisabledInTopPadding,firstDirectJumpKeepsFocus};
 })()`;
 const turnRemovalCheck = `(async()=>{
     const geometry=${JSON.stringify(headerContract)};
