@@ -1046,7 +1046,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
                     <div className="turn-navigation" aria-label="Turn navigation">
-                        <button style={{visibility: navigationEnabled && !conversation.hasMore && !historyLoading && atFirstOpening ? "hidden" : "visible"}} aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
+                        <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
                         <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
                         <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
                             const openings = loadedOpenings();
@@ -1057,7 +1057,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                                     {card.kind === "userMessage" ? (card.payload as UserMessageData).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
                         }}</Menu>
                         <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
-                        <button className="conversation-latest" style={{visibility: navigation.following || !navigationEnabled ? "hidden" : "visible"}} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
+                        <button className="conversation-latest" disabled={navigation.following || !navigationEnabled} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
                             pendingGeometry.current = {presentationKey, following: true, anchor: undefined, focus: true};
                             viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, true);
                             forceCardState(value => value + 1);

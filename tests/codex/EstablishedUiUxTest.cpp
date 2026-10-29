@@ -1603,6 +1603,10 @@ bool turnNavigationUsesTheExistingHeader() {
     auto* presentation = region.findChild<QToolButton*>(QStringLiteral("conversationReasoningToggle"));
     bool result = expect(first && previous && outline && next && latest && presentation,
                          "the established conversation header owns the navigation controls");
+    if (first && latest) {
+        result &= expect(first->isVisible() && !first->isEnabled() && latest->isVisible() && !latest->isEnabled(),
+                         "empty navigation keeps both endpoint controls visible and disabled");
+    }
     ConversationSnapshot snapshot;
     snapshot.threadId = "header-navigation";
     snapshot.hasMore = true;
@@ -1653,14 +1657,15 @@ bool turnNavigationUsesTheExistingHeader() {
         const QRect header = presentation->geometry();
         region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
         QCoreApplication::processEvents();
-        result &= expect(first->isVisible(), "First stays available at the oldest loaded prompt while earlier history exists");
+        result &= expect(first->isVisible() && first->isEnabled(),
+                         "First stays available at the oldest loaded prompt while earlier history exists");
         region.conversation().followLatest();
         QCoreApplication::processEvents();
-        result &= expect(!latest->isVisible(), "Latest is absent while following");
+        result &= expect(latest->isVisible() && !latest->isEnabled(), "Latest stays visible and disabled while following");
         previous->click();
         QCoreApplication::processEvents();
-        result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible(),
-                         "the actual Previous control pauses following and reveals Latest");
+        result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible() && latest->isEnabled(),
+                         "the actual Previous control pauses following and enables Latest");
         result &= expect(presentation->geometry() == header, "Latest retains its slot and never shifts presentation controls");
         for (int width : {820, 460, 340}) {
             region.resize(width, 700);
@@ -1702,7 +1707,7 @@ bool turnNavigationUsesTheExistingHeader() {
                    "a single outline click reaches its stable prompt destination and dismisses the popup");
         latest->click();
         QCoreApplication::processEvents();
-        result &= expect(region.conversation().mode() == ConversationView::Mode::Following && !latest->isVisible(),
+        result &= expect(region.conversation().mode() == ConversationView::Mode::Following && latest->isVisible() && !latest->isEnabled(),
                          "the actual Latest control restores following without a toolbar row");
         auto* commandOutput = region.conversation().findChild<CommandOutputView*>(QStringLiteral("commandOutputView"));
         result &= expect(commandOutput && commandOutput->verticalScrollBar()->maximum() > 0,
@@ -1710,7 +1715,7 @@ bool turnNavigationUsesTheExistingHeader() {
         if (commandOutput) {
             commandOutput->verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
             QCoreApplication::processEvents();
-            result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible(),
+            result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible() && latest->isEnabled(),
                              "command-owned follow pauses immediately update the same Latest control");
             latest->click();
         }
@@ -1803,18 +1808,19 @@ bool turnNavigationUsesTheExistingHeader() {
         latest->click();
         QCoreApplication::processEvents();
         const QRect previousAtBottom = previous->geometry();
-        result &= expect(first->isVisible(), "First reappears away from the actual beginning");
+        result &= expect(first->isVisible() && first->isEnabled(), "First enables away from the actual beginning");
         first->click();
         QCoreApplication::processEvents();
         result &= expect(region.conversation().navigationTarget() == stableKey(snapshot.sections.front().cards.front().key) &&
-                             latest->isVisible() && !first->isVisible() && previous->geometry() == previousAtBottom,
-                         "First hides at the actual beginning and retains its header slot");
+                             latest->isVisible() && latest->isEnabled() && first->isVisible() && !first->isEnabled() &&
+                             previous->geometry() == previousAtBottom,
+                         "First disables at the actual beginning and keeps both endpoint controls in place");
         region.conversation().verticalScrollBar()->setValue(80);
         QCoreApplication::processEvents();
-        result &= expect(first->isVisible(), "manual scrolling away from the beginning reveals First");
+        result &= expect(first->isVisible() && first->isEnabled(), "manual scrolling away from the beginning enables First");
         region.conversation().verticalScrollBar()->setValue(0);
         QCoreApplication::processEvents();
-        result &= expect(!first->isVisible(), "manual scrolling to the beginning hides First");
+        result &= expect(first->isVisible() && !first->isEnabled(), "manual scrolling to the beginning disables First");
         region.conversation().setProviderHasMore(snapshot.threadId, true);
         region.conversation().setHistoryRequestPending(snapshot.threadId, true);
         QCoreApplication::processEvents();
