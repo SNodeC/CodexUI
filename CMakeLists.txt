@@ -42,6 +42,7 @@ find_package(
     COMPONENTS net-rc-stream-legacy net-rc-stream-tls
 )
 find_package(Qt6 6.6 REQUIRED COMPONENTS Widgets Network)
+find_package(KF6Sonnet 6.13 REQUIRED)
 # Package upgrades can preserve header timestamps. Keep all Qt consumers on the
 # same header version by making that version part of their compilation command.
 target_compile_definitions(
@@ -246,7 +247,7 @@ target_link_libraries(
         codexui-ui-adapter
         codexui-ui-style
         Qt6::Widgets
-    PRIVATE codexui-build-options
+    PRIVATE codexui-build-options KF6::SonnetCore
 )
 
 add_library(
@@ -703,6 +704,33 @@ if(BUILD_TESTING)
                         "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${benchmark_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough"
             )
         endforeach()
+    endforeach()
+
+    qt_add_executable(
+        codexui-prompt-spelling-test tests/codex/PromptSpellCheckingTest.cpp
+    )
+    target_link_libraries(
+        codexui-prompt-spelling-test PRIVATE codexui-middle-ui KF6::SonnetCore
+                                             ${CMAKE_DL_LIBS}
+    )
+    foreach(spelling_dpr IN ITEMS 1 1.25 1.5 2)
+        string(REPLACE "." "_" spelling_dpr_name "${spelling_dpr}")
+        add_test(NAME codexui-prompt-spelling-dpr-${spelling_dpr_name}
+                 COMMAND codexui-prompt-spelling-test
+        )
+        set_tests_properties(
+            codexui-prompt-spelling-dpr-${spelling_dpr_name}
+            PROPERTIES TIMEOUT 30 ENVIRONMENT
+                       "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${spelling_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough"
+        )
+    endforeach()
+    foreach(spelling_state IN ITEMS unavailable missing-language)
+        add_test(NAME codexui-prompt-spelling-${spelling_state}
+                 COMMAND codexui-prompt-spelling-test --${spelling_state}
+        )
+        set_tests_properties(codexui-prompt-spelling-${spelling_state}
+                             PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        )
     endforeach()
 
     qt_add_executable(

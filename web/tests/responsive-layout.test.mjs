@@ -225,3 +225,8 @@ test("initial hierarchy exposes direct and indirect activity in thread and group
         assert.equal((markup.match(/class="thread-title"/gu) ?? []).length, 2, "new thread hierarchies start unfolded");
     } finally { session.dispose(); }
 });
+
+test("the controlled prompt explicitly enables browser spell checking", () => {
+    const markup = renderShellAt(1600);
+    assert.match(markup, /<textarea[^>]*spellcheck="true"[^>]*aria-label="Message Codex"/u);
+});

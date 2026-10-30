@@ -168,6 +168,7 @@ inline constexpr auto yellowText = "#5b5c26";
 // Vivid status accents are separate from the perceptually matched UI ramps.
 inline constexpr auto vividBlue = "#0066ff";
 inline constexpr auto vividGreen = "#00c853";
+inline constexpr auto vividRed = "#e00000";
 inline constexpr auto vividPurple = "#9333ea";
 inline constexpr auto vividPurpleHover = "#7e22ce";
 inline constexpr auto vividPurplePressed = "#6b21a8";
@@ -229,6 +230,7 @@ inline constexpr auto statusActive = Palette::vividBlue;
 inline constexpr auto statusIndirect = Palette::vividPurple;
 inline constexpr auto statusSuccess = Palette::vividGreen;
 inline constexpr auto statusDanger = Palette::red;
+inline constexpr auto spellingError = Palette::vividRed;
 inline constexpr auto activeGroupHeaderSurface = Palette::limeSurfaceHover;
 inline constexpr auto draftThreadBorder = Palette::orangeBorderStrong;
 inline constexpr auto draftThreadSurface = Palette::orangeSurface;
