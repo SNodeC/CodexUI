@@ -1194,7 +1194,7 @@ function Composer({session, presentationKey, active, options, prompt, onChange}:
         setPrompt("");
     };
     return <form className="composer" onSubmit={submit}>
-        <textarea ref={editor} value={prompt} onChange={event => setPrompt(event.target.value)}
+        <textarea ref={editor} spellCheck={true} value={prompt} onChange={event => setPrompt(event.target.value)}
             aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
             onKeyDown={event => { const composing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229; if (shouldSubmitPromptFromKey({
                 key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,

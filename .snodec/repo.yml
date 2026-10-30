@@ -4,6 +4,10 @@ ci:
   apt:
   - libgit2-dev
   - qt6-base-dev
+  - libkf6sonnet-dev
+  - sonnet6-plugins
+  - hunspell-en-us
+  - hunspell-de-at
   - xvfb
   - xauth
   deps:
