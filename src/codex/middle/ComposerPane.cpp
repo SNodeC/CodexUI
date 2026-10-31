@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ComposerPane.h"
-#include "codex/AttachmentInput.h"
 
+#include "codex/AttachmentInput.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/ui/ExpandingPromptEditor.h"
@@ -10,6 +10,7 @@
 
 #include <QDir>
 #include <QEvent>
+#include <QFileDialog>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -22,8 +23,8 @@
 #include <QScrollArea>
 #include <QStyle>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
-
 #include <algorithm>
 #include <string_view>
 #include <utility>
@@ -217,8 +218,23 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
       actions_.stop();
   });
   connect(attachmentButton_, &QToolButton::clicked, this, [this] {
-    if (actions_.attach)
-      actions_.attach();
+      auto* dialog = new QFileDialog(this, QStringLiteral("Attach files"), QDir::currentPath());
+      dialog->setAttribute(Qt::WA_DeleteOnClose);
+      dialog->setWindowModality(Qt::WindowModal);
+      dialog->setFileMode(QFileDialog::ExistingFiles);
+      dialog->setSupportedSchemes({QStringLiteral("file")});
+      connect(dialog, &QFileDialog::filesSelected, this, [this, generation = draftGeneration_](const QStringList& paths) {
+          if (generation == draftGeneration_) {
+              QList<QUrl> urls;
+              for (const auto& path : paths) {
+                  urls.push_back(QUrl::fromLocalFile(path));
+              }
+              QMimeData source;
+              source.setUrls(urls);
+              insertAttachments(&source);
+          }
+      });
+      dialog->open();
   });
 
   refreshAttachments();

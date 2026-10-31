@@ -16,12 +16,14 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QCursor>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFocusEvent>
 #include <QHelpEvent>
@@ -240,6 +242,99 @@ bool promptAttachmentAdmission() {
       expect(!appendAttachmentInput(draft, mixed).isEmpty() && draft.empty(),
              "mixed local and remote drops cannot silently lose files");
   return result;
+}
+
+bool promptFileDialogContract() {
+    QTemporaryDir files;
+    bool result = expect(files.isValid(), "picker fixture directory exists");
+    QStringList paths;
+    for (int index = 0; index < 17; ++index) {
+        const QString directory = files.filePath(QString::number(index));
+        result &= expect(QDir().mkpath(directory), "picker fixture subdirectory exists");
+        const QString path = directory + QStringLiteral("/file α %1.dat").arg(index);
+        QFile file(path);
+        result &= expect(file.open(QIODevice::WriteOnly) && file.write("data") == 4, "picker fixture file is readable");
+        paths.push_back(path);
+    }
+    ComposerPane composer;
+    composer.resize(900, 300);
+    composer.show();
+    composer.setCanSubmit(true);
+    composer.promptEditor()->setPlainText(QStringLiteral("Preserve this draft"));
+    QString error;
+    ComposerPane::Actions actions;
+    actions.attachmentError = [&](QString message) {
+        error = std::move(message);
+    };
+    composer.setActions(std::move(actions));
+    QToolButton* attach = nullptr;
+    for (auto* button : composer.findChildren<QToolButton*>()) {
+        if (button->accessibleName() == QStringLiteral("Attach files")) {
+            attach = button;
+        }
+    }
+    const auto open = [&] {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        if (attach) {
+            attach->click();
+        }
+        auto* dialog = composer.findChild<QFileDialog*>();
+        result &= expect(dialog && dialog->isVisible(), "Attach opens a standard file dialog");
+        if (dialog) {
+            result &= expect(!dialog->testOption(QFileDialog::DontUseNativeDialog), "picker permits native platform presentation");
+        }
+        return dialog;
+    };
+    const auto select = [&](QFileDialog* dialog, const QStringList& selected) {
+        error.clear();
+        if (dialog) {
+            QStringList quoted;
+            for (const auto& path : selected) {
+                quoted.push_back('"' + path + '"');
+            }
+            auto* filename = dialog->findChild<QLineEdit*>(QStringLiteral("fileNameEdit"));
+            result &= expect(filename != nullptr, "offscreen standard dialog exposes filename entry");
+            if (filename) {
+                filename->setText(quoted.join(' '));
+                QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
+            }
+        }
+        QElapsedTimer wait;
+        wait.start();
+        while (attach && !attach->isEnabled() && error.isEmpty() && wait.elapsed() < 5000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(1);
+        }
+        QCoreApplication::processEvents();
+    };
+    if (auto* dialog = open()) {
+        dialog->reject();
+    }
+    result &= expect(composer.attachments().empty(), "cancelling an empty picker adds nothing");
+    select(open(), {paths[0], paths[1]});
+    result &= expect(composer.attachments().size() == 2, "multiple chosen files reach the composer");
+    select(open(), {paths[1], paths[2]});
+    result &= expect(composer.attachments().size() == 3, "repeated selection accumulates across directories without duplicates");
+    const auto retained = composer.attachments();
+    if (auto* dialog = open()) {
+        dialog->reject();
+    }
+    result &= expect(composer.attachments() == retained, "cancelling a populated picker preserves attachments");
+    select(open(), paths);
+    result &=
+        expect(!error.isEmpty() && composer.attachments() == retained, "over-limit selection reports an error without partial admission");
+    result &= expect(composer.promptEditor()->toPlainText() == QStringLiteral("Preserve this draft"),
+                     "selection and cancellation retain authored text");
+    auto* stale = open();
+    composer.clearDraft();
+    select(stale, {paths[0]});
+    result &= expect(composer.attachments().empty(), "a retired draft cannot receive a pending selection");
+    error.clear();
+    auto* unavailable = open();
+    composer.setCanSubmit(false);
+    select(unavailable, {paths[0]});
+    result &= expect(!error.isEmpty() && composer.attachments().empty(), "lost submission readiness rejects a pending selection");
+    return result;
 }
 
 bool promptClipboardAndDropContract() {
@@ -1963,6 +2058,7 @@ int main(int argc, char **argv) {
   run("promptDropCursorContract", promptDropCursorContract);
   run("promptAttachmentAdmission", promptAttachmentAdmission);
   run("promptClipboardAndDropContract", promptClipboardAndDropContract);
+  run("promptFileDialogContract", promptFileDialogContract);
   if (argc == 2 && std::string(argv[1]) == "--attachment-input")
     return passed ? 0 : 1;
   run("turnSettingsAreStableAccessibleProjections",

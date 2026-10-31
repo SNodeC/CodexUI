@@ -37,7 +37,6 @@ public:
   struct Actions {
     std::function<bool(QString, std::vector<AttachmentDraft>)> submit;
     std::function<void()> stop;
-    std::function<void()> attach;
     std::function<void()> accept;
     std::function<void()> review;
     std::function<void()> deny;

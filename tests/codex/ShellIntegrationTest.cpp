@@ -8,12 +8,12 @@
 
 #include "AccessibilityEventProbe.h"
 #include "codex/Configuration.h"
-#include "codex/FileSelectionDialog.h"
 #include "codex/FrontendSession.h"
 #include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/ShellWidget.h"
 #include "codex/ThreadBrowser.h"
+#include "codex/WorkspaceDialog.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
@@ -6359,27 +6359,11 @@ void dialogControlsHaveSemanticLabels() {
                 accessible->text(QAccessible::Name) == name,
             "dialog control exposes its semantic accessible name and role");
   };
-  for (auto mode : {FileSelectionDialog::Mode::Workspace,
-                    FileSelectionDialog::Mode::Attachments}) {
-    FileSelectionDialog dialog(mode, QDir::tempPath());
-    if (mode == FileSelectionDialog::Mode::Workspace) {
-        named(dialog.findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")),
-              QStringLiteral("Proposed workspace"),
-              QAccessible::EditableText);
-        require(!dialog.findChild<QTreeView*>(), "app-server paths do not expose frontend filesystem browsing");
-    } else {
-        named(dialog.findChild<QTreeView*>(QStringLiteral("codexFileBrowser")), QStringLiteral("Filesystem browser"), QAccessible::Tree);
-    }
-    if (mode == FileSelectionDialog::Mode::Attachments) {
-      auto *list = dialog.findChild<QListWidget *>(QStringLiteral("codexAttachmentList"));
-      named(list, QStringLiteral("Selected files"), QAccessible::List);
-      require(std::ranges::any_of(dialog.findChildren<QLabel *>(),
-                  [list](const QLabel *label) {
-                    return label->buddy() == list &&
-                           label->text() == list->accessibleName();
-                  }), "attachment list name comes from its visible caption");
-    }
-  }
+  WorkspaceDialog workspaceDialog(QDir::tempPath());
+  named(workspaceDialog.findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")),
+        QStringLiteral("Proposed workspace"),
+        QAccessible::EditableText);
+  require(!workspaceDialog.findChild<QTreeView*>(), "app-server paths do not expose frontend filesystem browsing");
   for (auto purpose : {NewThreadDialog::Purpose::Create, NewThreadDialog::Purpose::Fork}) {
     NewThreadDialog dialog(NewThreadDraft{QDir::tempPath(), {}, {}, {}, false}, purpose);
     QLineEdit *workspace = nullptr;
