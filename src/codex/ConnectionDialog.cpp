@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ConnectionDialog.h"
+
 #include "codex/ui/UiStyle.h"
 
+#include <QDir>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -74,7 +77,26 @@ ConnectionDialog::ConnectionDialog(nlohmann::json settings, QWidget *parent)
 
   address = new QLineEdit;
   addressLabel = new QLabel;
-  form->addRow(addressLabel, address);
+  auto* endpoint = new QWidget;
+  auto* endpointLayout = new QHBoxLayout(endpoint);
+  endpointLayout->setContentsMargins(0, 0, 0, 0);
+  browse = new QPushButton(QStringLiteral("Browse local…"));
+  browse->setAccessibleName(QStringLiteral("Choose local Unix socket"));
+  endpointLayout->addWidget(address, 1);
+  endpointLayout->addWidget(browse);
+  form->addRow(addressLabel, endpoint);
+  addressLabel->setBuddy(address);
+  setTabOrder(address, browse);
+  connect(browse, &QPushButton::clicked, this, [this] {
+      auto* dialog = new QFileDialog(this, QStringLiteral("Choose local Unix socket"), address->text());
+      dialog->setAttribute(Qt::WA_DeleteOnClose);
+      dialog->setWindowModality(Qt::WindowModal);
+      dialog->setFileMode(QFileDialog::ExistingFile);
+      dialog->setFilter(dialog->filter() | QDir::System);
+      dialog->setSupportedSchemes({QStringLiteral("file")});
+      connect(dialog, &QFileDialog::fileSelected, address, &QLineEdit::setText);
+      dialog->open();
+  });
   port = new QSpinBox;
   port->setRange(1, 65535);
   portLabel = new QLabel(QStringLiteral("Port"));
@@ -154,6 +176,7 @@ void ConnectionDialog::loadTransport() {
   const std::string kind = stringValue(selected, "kind");
   const bool network = kind == "network" || kind == "websocket";
   const bool bluetooth = kind == "rfcomm";
+  browse->setVisible(kind == "unix");
   addressLabel->setText(kind == "unix" ? QStringLiteral("Socket path")
                         : bluetooth    ? QStringLiteral("Bluetooth address")
                                        : QStringLiteral("Host"));

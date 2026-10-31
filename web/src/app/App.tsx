@@ -1,7 +1,7 @@
 import {protocolTimes, targetTimes, timingSummary, timingDetails, tokenUsage} from "../presentation/PresentationTelemetry.js";
 import type {ProtocolTime, TimingTarget, TokenUsageText} from "../presentation/PresentationTelemetry.js";
 import {memo, useId, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
-import type {FormEvent, ReactNode, RefObject} from "react";
+import type {FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -18,6 +18,7 @@ import type {
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
+import type {AttachmentDraft} from "../conversation/PromptCoordinator.js";
 import {DraftThreadId} from "./BrowserFrontendSession.js";
 import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
 import type {WorkspaceGroup, AgentPresentation} from "../presentation/PresentationModel.js";
@@ -214,7 +215,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const connection = session.model.connection();
     const providerReady = connection.connected && connection.providerState === "ready";
     const invokeContextAction = (action: () => void) => { contextMenu?.trigger.focus(); setContextMenu(null); action(); };
-    const navigateContextMenu = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const navigateContextMenu = (event: ReactKeyboardEvent<HTMLDivElement>) => {
         if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
         const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
         if (buttons.length === 0) return;
@@ -392,6 +393,7 @@ export function GroupDialog({session, kind, group, readOnly, onClose}: {session:
     const [icon, setIcon] = useState(stringMember(member(group?.raw, "appearance", {}), "icon"));
     const [color, setColor] = useState(stringMember(member(group?.raw, "appearance", {}), "color"));
     const [error, setError] = useState("");
+    const [browsing, setBrowsing] = useState(false);
     const [saving, setSaving] = useState(false);
     const [idempotencyKey] = useState(() => Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, "0")).join(""));
     useEffect(() => {
@@ -415,17 +417,217 @@ export function GroupDialog({session, kind, group, readOnly, onClose}: {session:
         <header><h2 id="group-dialog-title">{group ? readOnly ? "Details" : "Edit" : "New"} {kind}</h2></header>
         <form onSubmit={event => void save(event)}>
             <label>Name<input autoFocus value={name} readOnly={readOnly} onChange={event => setName(event.target.value)} /></label>
-            {kind === "project" ? <><label>Roots<textarea value={roots} readOnly={readOnly} onChange={event => setRoots(event.target.value)} placeholder="One absolute app-server path per line" /></label>
+            {kind === "project" ? <><label>Roots<textarea value={roots} readOnly={readOnly} onChange={event => setRoots(event.target.value)} placeholder="One absolute app-server path per line" /></label>{!readOnly && <button className="subtle-button" type="button" disabled={!session.canSubmit()} onClick={() => setBrowsing(true)}>Add root…</button>}
                 <label>Description<textarea value={description} readOnly={readOnly} onChange={event => setDescription(event.target.value)} /></label><p>Descriptions organise work; they are not model instructions.</p></>
                 : <><label>Icon<input value={icon} readOnly={readOnly} onChange={event => setIcon(event.target.value)} /></label><label>Colour<input value={color} readOnly={readOnly} onChange={event => setColor(event.target.value)} /></label><p>Sections are shared across projects. Changes apply everywhere.</p></>}
             {readOnly && <pre className="state-json">{JSON.stringify(group?.raw, null, 2)}</pre>}
             {error && <p role="alert">{error}</p>}
             <footer><button type="button" onClick={onClose}>{readOnly ? "Close" : "Cancel"}</button>{!readOnly && <button type="submit" disabled={saving || !session.canSubmit()}>{saving ? "Saving…" : "Save"}</button>}</footer>
         </form>
+        {browsing && <FileSelectionDialog session={session} initial="/" onChoose={path => setRoots(current => current.split("\n").includes(path) ? current : current + (current.endsWith("\n") || !current ? "" : "\n") + path)} onClose={() => setBrowsing(false)} />}
     </dialog>;
 }
 
-export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "create", workspaceChoices = [], onCancel, onContinue}: {initialWorkspace: string; initialDraft?: NewThreadDraft; purpose?: "create" | "fork" | "workspace"; workspaceChoices?: readonly string[]; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
+const SelectionMimeTypes: Readonly<Record<string, string>> = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", avif: "image/avif",
+    bmp: "image/bmp", ico: "image/vnd.microsoft.icon", tif: "image/tiff", tiff: "image/tiff", svg: "image/svg+xml", heic: "image/heic", heif: "image/heif",
+    mp3: "audio/mpeg", wav: "audio/x-wav", ogg: "audio/ogg", oga: "audio/ogg", flac: "audio/flac", opus: "audio/ogg", m4a: "audio/mp4", aac: "audio/aac",
+    pdf: "application/pdf", txt: "text/plain", json: "application/json"};
+function selectionMimeType(name: string): string {
+    const extension = name.includes(".") ? name.split(".").at(-1)!.toLowerCase() : "";
+    return SelectionMimeTypes[extension] ?? "application/octet-stream";
+}
+function selectionFileType(name: string): string {
+    const mime = selectionMimeType(name), extension = name.includes(".") ? name.split(".").at(-1)!.toUpperCase() : "";
+    return mime.startsWith("image/") ? extension + " image" : mime.startsWith("audio/") ? extension + " audio" : mime.startsWith("text/") ? "Text document" : extension ? extension + " file" : "File";
+}
+function FileTypeIcon({entry}: {entry: SelectionEntry}) {
+    const kind = entry.fileName === ".." ? "parent" : entry.isDirectory ? "folder" : selectionMimeType(entry.fileName).split("/")[0];
+    return <svg className="file-type-icon" data-kind={kind} viewBox="0 0 24 24" aria-hidden="true"><path d={entry.fileName === ".." ? "M12 21V3m-7 7 7-7 7 7" : entry.isDirectory ? "M2 5h8l2 3h10v12H2Z" : "M5 2h9l5 5v15H5ZM14 2v6h5"} />{!entry.isDirectory && (kind === "image" ? <path d="m7 18 4-5 3 3 3-2M8 10h1" /> : kind === "audio" ? <path d="M15 11v7m0-6 3-1M15 18c-4-2-5 3-1 2Z" /> : <text x="12" y="17" textAnchor="middle">{entry.fileName.includes(".") ? entry.fileName.split(".").at(-1)!.slice(0, 3).toUpperCase() : ""}</text>)}</svg>;
+}
+type LocalDirectory = FileSystemDirectoryHandle & {values(): AsyncIterableIterator<FileSystemHandle>};
+type SelectionEntry = {fileName: string; isDirectory: boolean; isFile: boolean; handle?: FileSystemHandle};
+function FileSelectionDialog({session, initial, onChoose, onClose, onAttach, remaining = 16, localFiles}: {localFiles?: Map<FileSystemFileHandle, AttachmentDraft>; session: BrowserFrontendSession; initial: string; onChoose?: (path: string) => void; onClose: () => void; onAttach?: (files: AttachmentDraft[]) => void; remaining?: number}) {
+    const dialog = useRef<HTMLDialogElement>(null);
+    const access = useRef(session.filesystemAccess()).current;
+    const serial = useRef(0);
+    const list = useRef<HTMLDivElement>(null), anchor = useRef("");
+    const listId = useId();
+    const rowId = (name: string) => listId + "-" + encodeURIComponent(name);
+    const [focus, setFocus] = useState("");
+    const [showHidden, setShowHidden] = useState(false);
+    const [singleClick, setSingleClick] = useState(() => readBrowserStorage("codexui.fileSelection.singleClick") === "true");
+    const [context, setContext] = useState<{x: number; y: number}>();
+    const serverDirectory = useRef(initial || "/");
+    const [local, setLocal] = useState(false);
+    const [directories, setDirectories] = useState<LocalDirectory[]>([]);
+    const [path, setPath] = useState(initial || "/");
+    const [entries, setEntries] = useState<SelectionEntry[]>([]);
+    const [selected, setSelected] = useState<string[]>([]);
+    const [error, setError] = useState("");
+    const [busy, setBusy] = useState(false);
+    const load = async (directory: string, handles: LocalDirectory[] = directories, fromLocal = local) => {
+        const request = ++serial.current;
+        const current = () => request === serial.current;
+        setPath(directory); setBusy(true); setError(""); setEntries([]); setSelected([]);
+        try {
+            const items: SelectionEntry[] = [];
+            let single = false;
+            if (fromLocal) {
+                for await (const handle of handles.at(-1)!.values()) { items.push({fileName: handle.name, isDirectory: handle.kind === "directory", isFile: handle.kind === "file", handle}); }
+            } else {
+                const metadata = onAttach ? await access(directory, "getMetadata", undefined, current) : {};
+                single = metadata.isFile === true;
+                if (single) { items.push({fileName: directory.slice(directory.lastIndexOf("/") + 1), isDirectory: false, isFile: true}); }
+                else { items.push(...((await access(directory, "readDirectory", undefined, current)).entries as SelectionEntry[]).filter(entry => entry.fileName !== "." && entry.fileName !== "..")); }
+            }
+            if (request === serial.current) {
+                items.sort((a, b) => Number(!!b.isDirectory) - Number(!!a.isDirectory) || a.fileName.localeCompare(b.fileName));
+                if (fromLocal ? handles.length > 1 : directory !== "/") { items.unshift({fileName: "..", isDirectory: true, isFile: false}); }
+                setEntries(items); setFocus(""); anchor.current = "";
+                if (list.current) { list.current.scrollTop = 0; }
+                if (!fromLocal) {
+                    serverDirectory.current = single ? directory.replace(/\/[^/]+$/u, "") || "/" : directory;
+                    if (single) { const name = directory.slice(directory.lastIndexOf("/") + 1); setSelected([name]); setFocus(name); }
+                }
+            }
+        } catch (failure) { if (request === serial.current) { setError(String(failure)); } }
+        finally { if (request === serial.current) { setBusy(false); } }
+    };
+    const source = async (fromLocal: boolean) => {
+        const request = ++serial.current;
+        try {
+            if (fromLocal) {
+                const chooser = (window as Window & {showDirectoryPicker?: () => Promise<LocalDirectory>}).showDirectoryPicker;
+                if (!chooser) { throw new Error("Local directory access requires HTTPS or localhost and a browser with File System Access support."); }
+                const directory = await chooser.call(window);
+                if (request === serial.current) { setLocal(true); setDirectories([directory]); void load(directory.name, [directory], true); }
+            } else { setLocal(false); void load(serverDirectory.current, [], false); }
+        } catch (failure) { if (request === serial.current) { setError(String(failure)); } }
+    };
+    const close = () => { ++serial.current; onClose(); };
+    const parent = () => {
+        const handles = directories.slice(0, -1);
+        if (!local || handles.length > 0) { setDirectories(handles); void load(path.replace(/\/+$/u, "").replace(/\/[^/]+$/u, "") || "/", handles); }
+    };
+    const open = (entry: SelectionEntry) => {
+        if (entry.fileName === "..") { parent(); }
+        else if (entry.isDirectory) {
+            const handles = local ? [...directories, entry.handle as LocalDirectory] : [];
+            setDirectories(handles); void load(path.replace(/\/$/u, "") + "/" + entry.fileName, handles);
+        }
+    };
+    const rows = entries.filter(entry => (entry.isDirectory || onAttach) && (entry.fileName === ".." || showHidden || !entry.fileName.startsWith(".")));
+    const choose = (entry: SelectionEntry, toggle = false, range = false) => {
+        let names = [entry.fileName];
+        if (onAttach && range) {
+            const a = Math.max(0, rows.findIndex(item => item.fileName === anchor.current)), b = rows.indexOf(entry);
+            names = rows.slice(Math.min(a, b), Math.max(a, b) + 1).map(item => item.fileName);
+        } else if (onAttach && toggle) { names = selected.includes(entry.fileName) ? selected.filter(name => name !== entry.fileName) : [...selected, entry.fileName]; }
+        if (!range) { anchor.current = entry.fileName; }
+        names = rows.filter(item => names.includes(item.fileName)).map(item => item.fileName);
+        setSelected(names); setFocus(entry.fileName); list.current?.focus();
+        return names;
+    };
+    const attach = async (names = selected) => {
+        const request = ++serial.current;
+        setBusy(true); setError("");
+        try {
+            if (names.filter(name => entries.some(entry => entry.fileName === name && entry.isFile)).length > remaining) { throw new Error("A message can contain at most 16 attachments."); }
+            const files: AttachmentDraft[] = [];
+            const uploaded = new Map<FileSystemFileHandle, AttachmentDraft>();
+            for (const name of names.filter(name => entries.some(entry => entry.fileName === name && entry.isFile))) {
+                const entry = entries.find(item => item.fileName === name)!;
+                let previous: AttachmentDraft | undefined;
+                if (local) {
+                    for (const [handle, file] of localFiles ?? []) {
+                        if (!previous && await handle.isSameEntry(entry.handle!)) { previous = file; }
+                    }
+                }
+                if (previous) { files.push(previous); } else {
+                    let destination = serverDirectory.current.replace(/\/$/u, "") + "/" + name;
+                    let mimeType = selectionMimeType(name);
+                    let size = 0;
+                    if (local) {
+                        const file = await (entry.handle as FileSystemFileHandle).getFile();
+                        size = file.size;
+                        mimeType = file.type || mimeType;
+                        const data = await new Promise<string>((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(String(reader.result).split(",")[1]!);
+                            reader.onerror = () => reject(reader.error);
+                            reader.readAsDataURL(file);
+                        });
+                        destination = serverDirectory.current.replace(/\/$/u, "") + "/" + crypto.randomUUID() + "-" + name;
+                        await access(destination, "writeFile", data, () => request === serial.current);
+                    } else {
+                        const metadata = await access(destination, "getMetadata", undefined, () => request === serial.current);
+                        if (metadata.isFile !== true) {
+                            throw new Error("Selected file is no longer available.");
+                        }
+                    }
+                    const descriptor = {path: destination, name, mimeType, size};
+                    files.push(descriptor);
+                    if (local) { uploaded.set(entry.handle as FileSystemFileHandle, descriptor); }
+                }
+            }
+            if (request === serial.current) {
+                for (const [handle, file] of uploaded) { localFiles?.set(handle, file); }
+                onAttach?.(files); onClose();
+            }
+        } catch (failure) { if (request === serial.current) { setError(String(failure)); } }
+        finally { if (request === serial.current) { setBusy(false); } }
+    };
+    const workspacePath = selected[0] && !onAttach ? selected[0] === ".." ? path.replace(/\/+$/u, "").replace(/\/[^/]+$/u, "") || "/" : path.trim().replace(/\/$/u, "") + "/" + selected[0] : path.trim();
+    const activate = (entry: SelectionEntry, names = selected.includes(entry.fileName) ? selected : [entry.fileName]) => {
+        if (!busy) { if (entry.isDirectory) { open(entry); } else if (onAttach) { void attach(names); } }
+    };
+    const keyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (!busy) {
+            const index = Math.max(0, rows.findIndex(entry => entry.fileName === focus));
+            const entry = rows[index], control = event.ctrlKey || event.metaKey;
+            if ((event.altKey && event.key === "ArrowUp") || event.key === "Backspace") { event.preventDefault(); parent(); }
+            else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                event.preventDefault(); const target = rows[event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowUp" ? -1 : 1)))];
+                if (target) { if (control && !event.shiftKey) { setFocus(target.fileName); } else { choose(target, false, event.shiftKey); } }
+            } else if (entry && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); if (event.key === "Enter") { activate(entry); } else { choose(entry, true); } }
+            else if (control && event.key.toLowerCase() === "a") { event.preventDefault(); if (onAttach) { setSelected(rows.map(item => item.fileName)); } }
+            else if (event.key === "F5") { event.preventDefault(); void load(path); }
+            else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); setContext({x: rect.left, y: rect.top}); }
+        }
+    };
+    useBrowserLayoutEffect(() => { document.getElementById(rowId(focus))?.scrollIntoView({block: "nearest"}); }, [focus]);
+    useEffect(() => {
+        const previous = document.activeElement as HTMLElement | null;
+        dialog.current?.showModal(); void load(initial || "/");
+        return () => { ++serial.current; if (previous?.isConnected) { previous.focus(); } };
+    }, []);
+    return <dialog ref={dialog} className="new-thread-dialog file-selection-dialog" aria-label={onAttach ? "Attach files" : "Select app-server workspace"} onCancel={close} onKeyDown={event => event.stopPropagation()}>
+        <header><h2>{onAttach ? "Attach files" : "Select app-server workspace"}</h2>{onAttach && <label>Browse location<select value={local ? "local" : "server"} onChange={event => void source(event.target.value === "local")}><option value="local">This computer</option><option value="server">App-server</option></select></label>}<p className="selection-location" title={serverDirectory.current}>{local ? "This computer. Uploads remain in: " + serverDirectory.current : "App-server filesystem. Paths are used directly."}</p></header>
+        <form onSubmit={event => { event.preventDefault(); if (!busy) { if (onAttach) { void attach(); } else if (path.trim()) { onChoose?.(workspacePath); onClose(); } } }}>
+            <label>{local ? "Granted directory" : "App-server path"}<input autoFocus readOnly={local} value={path} onChange={event => { ++serial.current; setBusy(false); setError(""); setEntries([]); setSelected([]); setPath(event.target.value); }} /></label>
+            <div className="file-navigation"><button className="subtle-button" type="button" aria-label="Parent directory" title="Parent directory" disabled={busy || (local ? directories.length < 2 : path === "/")} onClick={parent}>↑</button><button className="subtle-button" type="button" disabled={busy} onClick={() => local ? void source(true) : void load(path)}>{local ? "Grant directory access…" : "Open directory"}</button>
+                <Menu className="file-selection-menu" label="Actions" role="menu" context={context} onClose={() => setContext(undefined)}>{() => <>
+                    <button role="menuitem" type="button" disabled={busy || !rows.some(entry => entry.fileName === (focus || rows[0]?.fileName))} onClick={() => activate(rows.find(entry => entry.fileName === (focus || rows[0]?.fileName))!)}>Open / use selection</button>
+                    <button role="menuitem" type="button" disabled={busy} onClick={() => void load(path)}>Refresh</button>
+                    <button role="menuitemcheckbox" type="button" aria-checked={showHidden} onClick={() => { setShowHidden(!showHidden); setSelected([]); setFocus(""); }}>Show hidden files</button>
+                    <button role="menuitem" type="button" onClick={() => void writeCardClipboard({text: selected.length ? selected.map(name => name === ".." ? path.replace(/\/[^/]+$/u, "") || "/" : (local ? path : serverDirectory.current).replace(/\/$/u, "") + "/" + name).join("\n") : path, markdown: false})}>Copy displayed path</button>
+                </>}</Menu></div>
+            <label>Activate items with<select aria-label="Item activation" value={singleClick ? "single" : "double"} onChange={event => { const value = event.target.value === "single"; setSingleClick(value); writeBrowserStorage("codexui.fileSelection.singleClick", String(value)); }}><option value="single">Single click</option><option value="double">Double click</option></select></label>
+            <div className="file-view"><div className="file-browser-heading" aria-hidden="true"><span>Name</span><span>Type</span></div>
+            <div ref={list} className="file-browser" role="listbox" aria-label={onAttach ? "Files and directories" : "App-server directories"} aria-multiselectable={!!onAttach} aria-busy={busy} aria-disabled={busy} tabIndex={0} aria-activedescendant={rows.length ? rowId(focus || rows[0]!.fileName) : undefined} onKeyDown={keyboard} onContextMenu={event => { event.preventDefault(); setContext({x: event.clientX, y: event.clientY}); }}>
+                {!rows.length && <p>{busy ? "Loading…" : "No entries"}</p>}
+                {rows.map(entry => <div id={rowId(entry.fileName)} key={entry.fileName} role="option" data-file-name={entry.fileName} aria-selected={selected.includes(entry.fileName)} data-focused={(focus || rows[0]?.fileName) === entry.fileName} onContextMenu={() => { if (!busy && !selected.includes(entry.fileName)) { choose(entry); } }} onClick={event => { if (!busy) { const names = choose(entry, event.ctrlKey || event.metaKey, event.shiftKey); if (singleClick && !event.ctrlKey && !event.metaKey && !event.shiftKey) { activate(entry, names); } } }} onDoubleClick={event => { if (!busy && !singleClick && !event.ctrlKey && !event.shiftKey) { activate(entry); } }}>
+                    <span><FileTypeIcon entry={entry} /><span title={entry.fileName}>{entry.fileName}</span></span><span>{entry.fileName === ".." ? "Parent directory" : entry.isDirectory ? "Folder" : selectionFileType(entry.fileName)}</span>
+                </div>)}
+            </div></div>
+            {error && <p role="alert">{error}</p>}
+            <footer><button className="subtle-button" type="button" onClick={close}>Cancel</button><button type="submit" disabled={busy || (onAttach ? !selected.some(name => entries.some(entry => entry.fileName === name && entry.isFile)) : !path.trim())}>{onAttach ? local ? "Upload and attach" : "Attach selected files" : "Select workspace"}</button></footer>
+        </form>
+    </dialog>;
+}
+
+export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "create", workspaceChoices = [], session, onCancel, onContinue}: {session?: BrowserFrontendSession; initialWorkspace: string; initialDraft?: NewThreadDraft; purpose?: "create" | "fork" | "workspace"; workspaceChoices?: readonly string[]; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
+    const [browsing, setBrowsing] = useState(false);
     const dialog = useRef<HTMLElement>(null);
     const workspaceInput = useRef<HTMLInputElement>(null);
     const [workspace, setWorkspace] = useState(initialDraft?.workspace ?? initialWorkspace);
@@ -459,8 +661,8 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
     return <div className="modal-backdrop"><section ref={dialog} className="new-thread-dialog" role="dialog" aria-modal="true" aria-labelledby="thread-options-title" onKeyDown={keyDown}>
         <header><h2 id="thread-options-title">{title}</h2><p>{purpose === "workspace" ? `Thread: ${initialDraft?.name ?? ""}` : purpose === "fork" ? "Adjust the copied thread context." : "Set thread context."}</p><p>Workspace paths refer to the app-server filesystem.</p></header>
         <form onSubmit={submit}>
-            {purpose === "workspace" && <label>Current workspace<input readOnly value={initialWorkspace || "Workspace not reported"} /></label>}
             <label><span>{purpose === "workspace" ? "Proposed workspace" : "Workspace"}</span><input list={workspaceChoices.length ? "workspace-roots" : undefined} ref={workspaceInput} value={workspace} onChange={event => { setWorkspace(event.target.value); setError(""); }} placeholder="App-server directory path" /></label>
+            {session && <button className="subtle-button" type="button" onClick={() => setBrowsing(true)}>Browse app-server…</button>}
             {workspaceChoices.length > 0 && <datalist id="workspace-roots">{workspaceChoices.map(path => <option key={path} value={path} />)}</datalist>}
             {purpose !== "workspace" && <><label><span>Name</span><input value={name} disabled={ephemeral} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>
             <label><span>Base instructions</span><textarea value={baseInstructions} onChange={event => setBaseInstructions(event.target.value)} placeholder="Optional base instructions" /></label>
@@ -469,6 +671,7 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
             {error && <p className="dialog-error" role="alert">{error}</p>}
             <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">{purpose === "workspace" ? "Change workspace" : "Continue"}</button></footer>
         </form>
+        {browsing && session && <FileSelectionDialog session={session} initial={workspace} onChoose={setWorkspace} onClose={() => setBrowsing(false)} />}
     </section></div>;
 }
 
@@ -847,9 +1050,11 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     }, [presentationKey, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const draftGeneration = session.composerVisualKey();
-    const [authored, setAuthored] = useState({generation: draftGeneration, text: ""});
+    const [authored, setAuthored] = useState({generation: draftGeneration, text: "", attachments: snapshot.newThreadDraft?.attachments ?? [] as AttachmentDraft[]});
     const prompt = authored.generation === draftGeneration ? authored.text : "";
-    const setPrompt = (text: string) => setAuthored({generation: session.composerVisualKey(), text});
+    const attachments = authored.generation === draftGeneration ? authored.attachments : snapshot.newThreadDraft?.attachments ?? [];
+    const setPrompt = (text: string) => setAuthored(current => ({generation: session.composerVisualKey(), text, attachments: current.generation === session.composerVisualKey() ? current.attachments : session.getSnapshot().newThreadDraft?.attachments ?? []}));
+    const setAttachments = (files: AttachmentDraft[]) => setAuthored({generation: draftGeneration, text: prompt, attachments: files});
     const attention = [...session.model.pendingRequestPresentations().values()][0];
     const settingsDrafts = session.settingDrafts;
     const [settingsStateRevision, forceSettingsState] = useState(0);
@@ -1028,7 +1233,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 if (turn) { setTurnRemoval({threadId: card.threadId, turnId: card.turnId, presentationKey, turn, position, stage: "menu", cardKey: key, opener}); }
             }}
             onTiming={() => onInspect("timing", {threadId: card.threadId, turnId: card.turnId, ...(card.itemId ? {itemId: card.itemId} : {})})}
-            onRestore={() => { if (card.kind === "localPrompt") { const text = session.restorePrompt(projectionId, (card.payload as LocalPromptData).submissionId, presentationKey, prompt); if (text !== undefined) { setPrompt(text); queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message Codex']")?.focus()); } } }}
+            onRestore={() => { if (card.kind === "localPrompt") { const text = session.restorePrompt(projectionId, (card.payload as LocalPromptData).submissionId, presentationKey, prompt, attachments); if (text !== undefined) { setPrompt(text); queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message Codex']")?.focus()); } } }}
             {...(card.kind === "commandExecution" ? {commandScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:command`, false), outputScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:output`, true)} : {})} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
@@ -1116,7 +1321,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                     settingsDraft.settingStamps, field, value);
                 forceSettingsState(revision => revision + 1);
             }} />
-            <Composer key={`shared-composer:${draftGeneration}`} session={session} presentationKey={presentationKey}
+            <Composer key={`shared-composer:${draftGeneration}`} attachments={attachments} onAttachments={setAttachments} session={session} presentationKey={presentationKey}
                 active={Boolean(thread || projectionId === DraftThreadId) && session.canSubmit()} options={settingsOptions} prompt={prompt} onChange={setPrompt} />
         </div>
     </main>;
@@ -1144,20 +1349,32 @@ const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange
     </div>;
 }, (previous, current) => previous.draft === current.draft && previous.presentation === current.presentation);
 
-function Menu({label, className, children, disabled = false}: {label: string; className: string; children: ReactNode | (() => ReactNode); disabled?: boolean}) {
+function Menu({label, className, children, disabled = false, context, onClose, role = "dialog"}: {label: string; className: string; children: ReactNode | (() => ReactNode); disabled?: boolean; context?: {x: number; y: number} | undefined; onClose?: () => void; role?: "dialog" | "menu"}) {
     const id = useId();
     const popover = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     useEffect(() => {
         const element = popover.current;
-        const toggle = () => setOpen(element?.matches(":popover-open") ?? false);
+        const toggle = () => { const visible = element?.matches(":popover-open") ?? false; setOpen(visible); if (!visible) { onClose?.(); } };
         element?.addEventListener("toggle", toggle);
         return () => element?.removeEventListener("toggle", toggle);
-    }, []);
+    }, [onClose]);
+    useBrowserLayoutEffect(() => {
+        const element = popover.current;
+        if (context && element) {
+            if (!element.matches(":popover-open")) { element.showPopover(); }
+            const rect = element.getBoundingClientRect();
+            element.style.left = Math.max(0, Math.min(context.x, innerWidth - rect.width)) + "px";
+            element.style.top = Math.max(0, Math.min(context.y, innerHeight - rect.height)) + "px";
+            element.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+        } else if (element) { element.style.left = ""; element.style.top = ""; }
+    }, [context, open]);
     useEffect(() => { if (disabled) { popover.current?.hidePopover(); } }, [disabled]);
-    return <div className={className}><button type="button" disabled={disabled} {...{popovertarget: id}}>{label}</button><div ref={popover} id={id} className="menu-popover" {...{popover: "auto"}} role="dialog" aria-label={label} onWheel={event => event.stopPropagation()} onClick={event => { if ((event.target as HTMLElement).closest("button")) { event.currentTarget.hidePopover(); } }}
+    return <div className={className + (context ? " context-open" : "")}><button type="button" disabled={disabled} aria-haspopup={role === "menu" ? "menu" : undefined} {...{popovertarget: id}}>{label}</button><div ref={popover} id={id} className="menu-popover" {...{popover: "auto"}} role={role} aria-label={label} onWheel={event => event.stopPropagation()} onClick={event => { if ((event.target as HTMLElement).closest("button")) { event.currentTarget.hidePopover(); } }}
         onKeyDown={event => {
-            if (typeof children === "function" && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+            if (role === "menu" && event.key === "Escape") {
+                event.preventDefault(); event.stopPropagation(); event.currentTarget.hidePopover();
+            } else if (typeof children === "function" && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
                 const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
                 const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
                 const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current + (event.key === "ArrowUp" ? -1 : 1);
@@ -1178,9 +1395,10 @@ function resizePromptEditor(element: HTMLTextAreaElement) {
     if (element.scrollHeight <= maximum) element.scrollTop = 0;
 }
 
-function Composer({session, presentationKey, active, options, prompt, onChange}: {prompt: string; onChange: (text: string) => void; session: BrowserFrontendSession;
+function Composer({session, presentationKey, active, options, prompt, onChange: setPrompt, attachments, onAttachments: setAttachments}: {attachments: AttachmentDraft[]; onAttachments: (files: AttachmentDraft[]) => void; prompt: string; onChange: (text: string) => void; session: BrowserFrontendSession;
     presentationKey: string; active: boolean; options: ReturnType<typeof settingPromptOptions>}) {
-    const setPrompt = onChange;
+    const localFiles = useRef(new Map<FileSystemFileHandle, AttachmentDraft>());
+    const [browsing, setBrowsing] = useState(false);
     const editor = useRef<HTMLTextAreaElement>(null);
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     useBrowserLayoutEffect(() => {
@@ -1188,12 +1406,12 @@ function Composer({session, presentationKey, active, options, prompt, onChange}:
     }, [prompt]);
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (!active || prompt.trim() === "" || !session.canSubmit(presentationKey)) return;
-        const value = prompt;
-        void session.submitPrompt(value, [], options.turn, options.thread, presentationKey);
-        setPrompt("");
+        if (active && !browsing && (prompt.trim() !== "" || attachments.length > 0) && session.canSubmit(presentationKey)) {
+            void session.submitPrompt(prompt, attachments, options.turn, options.thread, presentationKey);
+            localFiles.current.clear(); setAttachments([]); setPrompt("");
+        }
     };
-    return <form className="composer" onSubmit={submit}>
+    return <><form className="composer" onSubmit={submit}>
         <textarea ref={editor} spellCheck={true} value={prompt} onChange={event => setPrompt(event.target.value)}
             aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
             onKeyDown={event => { const composing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229; if (shouldSubmitPromptFromKey({
@@ -1204,10 +1422,11 @@ function Composer({session, presentationKey, active, options, prompt, onChange}:
             else if (event.key === "Enter" && event.repeat && !event.shiftKey && !composing) event.preventDefault(); }}
             onWheel={event => event.stopPropagation()}
             placeholder="Message Codex" rows={1} />
+        {attachments.length > 0 && <div className="composer-attachments" role="group" aria-label="Attachments">{attachments.map(file => <button className="subtle-button" type="button" key={file.path} aria-label={"Remove attachment " + file.name} disabled={!active} onClick={() => { for (const [handle, item] of localFiles.current) { if (item.path === file.path) { localFiles.current.delete(handle); } } setAttachments(attachments.filter(item => item.path !== file.path)); }}>{file.name} ×</button>)}</div>}
         <div className="composer-actions"><span id="composer-keyboard-hint" className="visually-hidden">Enter to send · Shift+Enter for a new line</span>
-            <span className="composer-submit-actions"><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || prompt.trim() === ""}>{running ? "Steer" : "Send"}</button>
+            <span className="composer-submit-actions"><button className="subtle-button" type="button" disabled={!active || browsing || attachments.length >= 16} onClick={() => setBrowsing(true)}>Attach files</button><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || browsing || (prompt.trim() === "" && attachments.length === 0)}>{running ? "Steer" : "Send"}</button>
                 {running && <button type="button" className="stop-button" onClick={() => session.interrupt(presentationKey)}>Stop</button>}</span></div>
-    </form>;
+    </form>{browsing && <FileSelectionDialog session={session} initial={session.getSnapshot().newThreadDraft?.workspace ?? session.model.thread(session.getSnapshot().selectedThreadId)?.cwd ?? "/"} remaining={16 - attachments.length} localFiles={localFiles.current} onAttach={files => { if (session.canSubmit()) { setAttachments([...attachments, ...files.filter(file => !attachments.some(item => item.path === file.path))]); } }} onClose={() => setBrowsing(false)} />}</>;
 }
 
 export function inspectorPlainState(selected: ThreadPresentation | undefined, enabled: boolean) {
@@ -1405,6 +1624,10 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const [newThreadDialog, setNewThreadDialog] = useState(false);
     const [groupDraft, setGroupDraft] = useState<NewThreadDraft>();
     const [groupDialog, setGroupDialog] = useState<{kind: "project" | "section"; group?: WorkspaceGroup; readOnly: boolean}>();
+    const projectWorkspaceRoots = (projectId: string | undefined) => {
+        const roots = member(session.model.projects.get(projectId ?? "")?.raw, "roots", []);
+        return Array.isArray(roots) ? roots.map(root => stringMember(root, "path")) : [];
+    };
     const [optionsTarget, setOptionsTarget] = useState<(ThreadPresentationTarget & {purpose: "fork" | "workspace"}) | null>(null);
     const shell = useRef<HTMLDivElement>(null);
     const resizeStart = useRef<{x: number; width: number; side: "left" | "right"}>();
@@ -1533,7 +1756,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
         {activeDrawer === "threads" && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} onRequestWorkspace={requestWorkspace} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
         {activeDrawer === "inspector" && <Inspector session={session} inspection={inspection} onInspect={setInspection} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
         {groupDialog && <GroupDialog session={session} {...groupDialog} onClose={() => setGroupDialog(current => current === groupDialog ? undefined : current)} />}
-        {newThreadDialog && <NewThreadDialog {...(groupDraft ? {initialDraft: groupDraft} : {})} initialWorkspace="" workspaceChoices={(() => { const roots = member(session.model.projects.get(groupDraft?.projectId ?? "")?.raw, "roots", []); return Array.isArray(roots) ? roots.map(root => stringMember(root, "path")) : []; })()} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
-        {activeOptionsTarget && <NewThreadDialog purpose={activeOptionsTarget.purpose} initialWorkspace={session.model.thread(activeOptionsTarget.threadId)?.cwd ?? ""} initialDraft={activeOptionsTarget.purpose === "fork" ? session.forkDraft(activeOptionsTarget.threadId) : {workspace: session.model.thread(activeOptionsTarget.threadId)?.cwd ?? "", name: session.model.thread(activeOptionsTarget.threadId)?.title ?? "", baseInstructions: "", developerInstructions: "", ephemeral: false}} onCancel={() => setOptionsTarget(null)} onContinue={forkThreadWithOptions} />}
+        {newThreadDialog && <NewThreadDialog session={session} {...(groupDraft ? {initialDraft: groupDraft} : {})} initialWorkspace="" workspaceChoices={projectWorkspaceRoots(groupDraft?.projectId)} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
+        {activeOptionsTarget && <NewThreadDialog session={session} workspaceChoices={projectWorkspaceRoots(session.model.thread(activeOptionsTarget.threadId)?.projectId)} purpose={activeOptionsTarget.purpose} initialWorkspace={session.model.thread(activeOptionsTarget.threadId)?.cwd ?? ""} initialDraft={activeOptionsTarget.purpose === "fork" ? session.forkDraft(activeOptionsTarget.threadId) : {workspace: session.model.thread(activeOptionsTarget.threadId)?.cwd ?? "", name: session.model.thread(activeOptionsTarget.threadId)?.title ?? "", baseInstructions: "", developerInstructions: "", ephemeral: false}} onCancel={() => setOptionsTarget(null)} onContinue={forkThreadWithOptions} />}
     </div>;
 }

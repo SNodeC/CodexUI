@@ -3,6 +3,7 @@
 #ifndef CODEXUI_CODEX_NEWTHREADDIALOG_H
 #define CODEXUI_CODEX_NEWTHREADDIALOG_H
 
+#include "codex/FileSelectionDialog.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QString>
@@ -31,12 +32,15 @@ public:
   enum class Purpose { Create, Fork };
 
   explicit NewThreadDialog(QString initialWorkspace, QWidget *parent = nullptr);
-  NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose, QWidget* parent = nullptr, QStringList workspaceChoices = {});
+  NewThreadDialog(NewThreadDraft initialDraft,
+                  Purpose purpose,
+                  QWidget* parent = nullptr,
+                  QStringList workspaceChoices = {},
+                  FileSelectionDialog::Access filesystem = {});
 
   [[nodiscard]] NewThreadDraft draft() const;
 
-private:
-  void chooseWorkspace();
+  private:
   void acceptDraft();
 
   QLineEdit *workspace = nullptr;

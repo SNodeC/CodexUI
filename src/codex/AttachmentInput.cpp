@@ -3,6 +3,7 @@
 #include "codex/AttachmentInput.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QImageWriter>
@@ -25,27 +26,36 @@ bool isAttachmentInput(const QMimeData &source) {
 QString appendAttachmentFiles(std::vector<AttachmentDraft> &draft,
                               const QStringList &paths) {
   auto next = draft;
+  QString error;
   QMimeDatabase database;
-  for (const QString &path : paths) {
-    const QFileInfo file(path);
-    const std::string absolute = file.absoluteFilePath().toUtf8().toStdString();
-    if (std::ranges::find(next, absolute, &AttachmentDraft::path) != next.end())
-      continue;
-    if (next.size() >= MaximumAttachments)
-      return QStringLiteral("A message can contain at most %1 attachments.")
-          .arg(MaximumAttachments);
-    if (!file.isFile() || !file.isReadable())
-      return QStringLiteral("Cannot attach unreadable file: %1").arg(path);
-    next.push_back(
-        {absolute, file.fileName().toUtf8().toStdString(),
-         database.mimeTypeForFile(file, QMimeDatabase::MatchExtension)
-             .name()
-             .toUtf8()
-             .toStdString(),
-         file.size()});
+  for (const QString& path : paths) {
+      const QFileInfo file(path);
+      const auto absolute = file.absoluteFilePath().toUtf8().toStdString();
+      if (error.isEmpty() && std::ranges::find(next, absolute, &AttachmentDraft::path) == next.end()) {
+          QFile content(path);
+          if (next.size() >= MaximumAttachments) {
+              error = QStringLiteral("A message can contain at most %1 attachments.").arg(MaximumAttachments);
+          } else if (!file.isFile() || !file.isReadable() || !content.open(QIODevice::ReadOnly)) {
+              error = QStringLiteral("Cannot attach unreadable file: %1").arg(path);
+          } else {
+              const auto data = content.readAll();
+              if (content.error() != QFileDevice::NoError) {
+                  error = content.errorString();
+              } else {
+                  next.push_back({absolute,
+                                  file.fileName().toStdString(),
+                                  database.mimeTypeForFile(file, QMimeDatabase::MatchExtension).name().toStdString(),
+                                  file.size(),
+                                  data.toBase64().toStdString(),
+                                  absolute});
+              }
+          }
+      }
   }
-  draft = std::move(next);
-  return {};
+  if (error.isEmpty()) {
+      draft = std::move(next);
+  }
+  return error;
 }
 
 QString appendAttachmentInput(std::vector<AttachmentDraft> &draft,

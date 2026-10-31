@@ -72,6 +72,21 @@ namespace codexui::nodegraph {
         return reason;
     }
 
+    ChannelSendStatus WorkerLogic::filesystemState(std::string key, Value::Object fields) {
+        auto write = graph_.write();
+        auto node = write.find({NodeKind::Catalog, key});
+        if (fields.empty()) {
+            if (node) {
+                write.remove(node);
+            }
+        } else if (node || valueMember(fields, "pending")) {
+            NodeState state;
+            state.fields = std::move(fields);
+            write.replaceState(write.upsert({NodeKind::Catalog, std::move(key)}), std::move(state));
+        }
+        return publish(write.finish());
+    }
+
 ChannelSendStatus WorkerLogic::threadBrowserState(std::string key,
                                                   Value::Object fields) {
   auto write = graph_.write();

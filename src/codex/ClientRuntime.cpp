@@ -305,47 +305,49 @@ std::string_view
 runtimeActionDiagnosticSubject(nodegraph::RuntimeActionKind kind) {
   using enum nodegraph::RuntimeActionKind;
   switch (kind) {
-  case RefreshThreads:
-  case LoadMoreThreads:
-    return "thread/list";
-  case CreateThread:
-    return "thread/start";
-  case Connect:
-    return "connection/connect";
-  case Disconnect:
-    return "connection/disconnect";
-  case Reconnect:
-    return "connection/reconnect";
-  case ConfigureConnection:
-    return "connection/configure";
-  case ClaimController:
-    return "connection/controller/claim";
-  case ReleaseController:
-    return "connection/controller/release";
-  case RefreshCatalogs:
-    return "catalog/refresh";
-  case RefreshThreadGroups:
-    return "thread-groups/refresh";
-  case LoadThreadGroup:
-    return "thread-groups/page";
-  case CreateProject:
-    return "project/create";
-  case UpdateProject:
-    return "project/update";
-  case DeleteProject:
-    return "project/delete";
-  case MoveProject:
-    return "project/move";
-  case CreateSection:
-    return "threadSection/create";
-  case UpdateSection:
-    return "threadSection/update";
-  case DeleteSection:
-    return "threadSection/delete";
-  case AssignProject:
-    return "thread/metadata/update";
-  case AssignSection:
-    return "thread/section/move";
+      case Filesystem:
+          return "fs/request";
+      case RefreshThreads:
+      case LoadMoreThreads:
+          return "thread/list";
+      case CreateThread:
+          return "thread/start";
+      case Connect:
+          return "connection/connect";
+      case Disconnect:
+          return "connection/disconnect";
+      case Reconnect:
+          return "connection/reconnect";
+      case ConfigureConnection:
+          return "connection/configure";
+      case ClaimController:
+          return "connection/controller/claim";
+      case ReleaseController:
+          return "connection/controller/release";
+      case RefreshCatalogs:
+          return "catalog/refresh";
+      case RefreshThreadGroups:
+          return "thread-groups/refresh";
+      case LoadThreadGroup:
+          return "thread-groups/page";
+      case CreateProject:
+          return "project/create";
+      case UpdateProject:
+          return "project/update";
+      case DeleteProject:
+          return "project/delete";
+      case MoveProject:
+          return "project/move";
+      case CreateSection:
+          return "threadSection/create";
+      case UpdateSection:
+          return "threadSection/update";
+      case DeleteSection:
+          return "threadSection/delete";
+      case AssignProject:
+          return "thread/metadata/update";
+      case AssignSection:
+          return "thread/section/move";
   }
   return "local/runtime-action";
 }
@@ -3267,6 +3269,41 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
     case RefreshThreadGroups:
       refreshThreadGroups();
       return;
+    case Filesystem: {
+        auto payload = jsonObject(std::move(action.payload));
+        const auto method = payload.value("method", "");
+        const auto key = action.correlation;
+        if (method.empty()) {
+            static_cast<void>(workerLogic.filesystemState(key, {}));
+        } else {
+            static_cast<void>(workerLogic.filesystemState(key, {{"pending", true}}));
+            const auto published = [](const nodegraph::ProtocolRequestId&) {
+            };
+            const auto complete = [&, key](RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
+                static_cast<void>(workerLogic.filesystemState(key, {{"result", decoded.payload}, {"error", outcome.error}}));
+                static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+            };
+            const auto connection = currentNodeState(currentNode({nodegraph::NodeKind::Connection, "connection"}));
+            const auto authority =
+                connection ? nodegraph::unsignedIntegerFromValue(valueMember(*connection, "providerAuthorityRevision")).value_or(0) : 0;
+            if (!sdk.providerReady() || !sdk.isController() || payload.value("authority", std::uint64_t(0)) != authority) {
+                static_cast<void>(workerLogic.filesystemState(key, {{"error", "App-server controller access is required."}}));
+            } else {
+                using namespace codex::generated::client_requests;
+                const auto parameters = payload.value("parameters", nlohmann::json::object());
+                if (method == "fs/readDirectory") {
+                    dispatchRequestHandled<FsReadDirectory>(sdk, parameters, workerLogic, {}, published, complete);
+                } else if (method == "fs/getMetadata") {
+                    dispatchRequestHandled<FsGetMetadata>(sdk, parameters, workerLogic, {}, published, complete);
+                } else if (method == "fs/writeFile") {
+                    dispatchRequestHandled<FsWriteFile>(sdk, parameters, workerLogic, {}, published, complete);
+                } else {
+                    static_cast<void>(workerLogic.filesystemState(key, {{"error", "Unsupported filesystem operation."}}));
+                }
+            }
+        }
+        break;
+    }
     case LoadThreadGroup: {
       if (!sdk.providerReady())
         return;

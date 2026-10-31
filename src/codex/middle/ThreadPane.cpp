@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ThreadPane.h"
-#include "codex/ui/TimingPresentation.h"
 
+#include "codex/FileSelectionDialog.h"
 #include "codex/ThreadBrowser.h"
 #include "codex/UiStatus.h"
 #include "codex/middle/MiddleTypes.h"
+#include "codex/ui/TimingPresentation.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractItemView>
@@ -22,21 +23,21 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
-#include <QKeyEvent>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLinearGradient>
-#include <QMenu>
 #include <QMargins>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPersistentModelIndex>
 #include <QPlainTextEdit>
 #include <QPointer>
-#include <QPersistentModelIndex>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -51,7 +52,6 @@
 #include <QUuid>
 #include <QVBoxLayout>
 #include <QVariant>
-
 #include <algorithm>
 #include <functional>
 #include <limits>
@@ -1787,6 +1787,21 @@ void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
     roots->setPlaceholderText(
         QStringLiteral("Absolute workspace paths, one per line"));
     form->addRow(QStringLiteral("Roots"), roots);
+    auto* addRoot = new QPushButton(QStringLiteral("Add root…"));
+    addRoot->setObjectName(QStringLiteral("addProjectRoot"));
+    addRoot->setAccessibleName(QStringLiteral("Add project workspace root"));
+    addRoot->setEnabled(!readOnly && canControl && bool(actions.manage));
+    form->addRow(QString{}, addRoot);
+    connect(addRoot, &QPushButton::clicked, &dialog, [&, roots] {
+        FileSelectionDialog selection({}, &dialog, {}, {}, actions.filesystem ? actions.filesystem() : FileSelectionDialog::Filesystem{});
+        if (selection.exec() == QDialog::Accepted && canControl && actions.manage && !roots->isReadOnly()) {
+            const auto path = selection.selectedDirectory();
+            const auto paths = roots->toPlainText().split('\n', Qt::SkipEmptyParts);
+            if (!paths.contains(path)) {
+                roots->appendPlainText(path);
+            }
+        }
+    });
     description = new UiStyle::DialogTextEdit;
     description->setObjectName(QStringLiteral("projectDescription"));
     description->setProperty("kind", "dialogEditor");

@@ -4,11 +4,11 @@
 #define CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H
 
 #include "codex/AttachmentDraft.h"
+#include "codex/FileSelectionDialog.h"
 #include "codex/TurnSettingsPolicy.h"
 
 #include <QThreadPool>
 #include <QWidget>
-
 #include <cstddef>
 #include <functional>
 #include <vector>
@@ -35,12 +35,14 @@ namespace middle {
 class ComposerPane final : public QWidget {
 public:
   struct Actions {
-    std::function<bool(QString, std::vector<AttachmentDraft>)> submit;
-    std::function<void()> stop;
-    std::function<void()> accept;
-    std::function<void()> review;
-    std::function<void()> deny;
-    std::function<void(QString)> attachmentError;
+      FileSelectionDialog::Access filesystem;
+      std::function<QString()> workspace;
+      std::function<bool(QString, std::vector<AttachmentDraft>)> submit;
+      std::function<void()> stop;
+      std::function<void()> accept;
+      std::function<void()> review;
+      std::function<void()> deny;
+      std::function<void(QString)> attachmentError;
   };
 
   explicit ComposerPane(QWidget *parent = nullptr);
@@ -75,8 +77,14 @@ private:
   void refreshAdaptiveLayout();
   void refreshActionStyle();
   void refreshSubmissionEnabled();
-  void insertAttachments(const QMimeData *source);
+  void insertAttachments(const QMimeData* source, QString directory = {}, FileSelectionDialog::Filesystem access = {});
   void finishAttachmentInput(QString error);
+  void finishAttachmentPreparation(QString error, std::uint64_t generation);
+  void uploadAttachments(std::shared_ptr<std::vector<AttachmentDraft>> prepared,
+                         std::size_t index,
+                         QString directory,
+                         std::uint64_t generation,
+                         FileSelectionDialog::Filesystem access);
 
   QFrame *attention_ = nullptr;
   QLabel *attentionTitle_ = nullptr;
@@ -101,6 +109,7 @@ private:
   std::vector<AttachmentDraft> attachments_;
   QThreadPool attachmentPool_;
   std::uint64_t draftGeneration_ = 0;
+  std::uint64_t attachmentOrder_ = 0;
   std::size_t preparingAttachments_ = 0;
   bool activeTurn_ = false;
   bool canSubmit_ = false;

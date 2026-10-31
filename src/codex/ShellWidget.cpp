@@ -3,6 +3,7 @@
 #include "codex/ShellWidget.h"
 
 #include "codex/ConnectionDialog.h"
+#include "codex/FileSelectionDialog.h"
 #include "codex/ForkNaming.h"
 #include "codex/FrontendSession.h"
 #include "codex/NewThreadDialog.h"
@@ -10,7 +11,6 @@
 #include "codex/PendingRequestDialog.h"
 #include "codex/PendingRequestPolicy.h"
 #include "codex/UiStatus.h"
-#include "codex/WorkspaceDialog.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
@@ -571,6 +571,7 @@ struct ShellWidget::Impl final {
   void hydrateSelectedThreadIfNeeded(nodegraph::NodeRef thread);
   [[nodiscard]] std::optional<ui::ThreadListSnapshot>
   threadSnapshot(std::uint64_t *revision = nullptr);
+  [[nodiscard]] QStringList projectWorkspaceRoots(const std::string& project);
   void beginThreadDraft(NewThreadDraft draft);
   void beginNewThreadDialog(std::string project = {}, std::string section = {});
   [[nodiscard]] std::optional<NewThreadDraft>
@@ -920,9 +921,18 @@ void ShellWidget::Impl::connectUi() {
     if (thread)
       confirmDeleteThread(thread);
   };
+  const FileSelectionDialog::Access filesystem = [this] {
+      return session.filesystemAccess();
+  };
+  threadActions.filesystem = filesystem;
   middleRegion->threads().setActions(std::move(threadActions));
 
   middle::ComposerPane::Actions composerActions;
+  composerActions.filesystem = filesystem;
+  composerActions.workspace = [this] {
+      const auto row = uiAdapter.threadRow(boundGraphThread);
+      return row ? text(row->cwd) : newThreadDraft ? newThreadDraft->workspace : QString{};
+  };
   composerActions.submit = [this](QString prompt,
                                   std::vector<AttachmentDraft> attachments) {
     return submitPrompt(std::move(prompt), std::move(attachments));
@@ -2414,12 +2424,30 @@ void ShellWidget::Impl::beginThreadDraft(NewThreadDraft draft) {
     middleRegion->threads().refresh(*threads);
 }
 
+QStringList ShellWidget::Impl::projectWorkspaceRoots(const std::string& project) {
+    QStringList choices;
+    if (!project.empty()) {
+        if (const auto snapshot = threadSnapshot()) {
+            const auto found = std::ranges::find(snapshot->projects, project, &ui::ThreadGroup::id);
+            if (found != snapshot->projects.end()) {
+                for (const auto& root : found->fields.value("roots", nlohmann::json::array())) {
+                    if (root.is_object() && root.contains("path") && root["path"].is_string()) {
+                        choices.push_back(text(root["path"].get<std::string>()));
+                    }
+                }
+            }
+        }
+    }
+    return choices;
+}
+
 void ShellWidget::Impl::changeWorkspaceDialog(const nodegraph::NodeRef& thread) {
     const auto row = uiAdapter.threadRow(thread);
     if (!row || !row->workspaceChangeUnavailable.empty()) {
         showNotice(row ? text(row->workspaceChangeUnavailable) : QStringLiteral("Thread state is unavailable."));
     } else {
-        WorkspaceDialog dialog(text(row->cwd), owner, text(row->title), text(row->cwd));
+        FileSelectionDialog dialog(
+            text(row->cwd), owner, text(row->title), projectWorkspaceRoots(row->projectId), session.filesystemAccess());
         if (dialog.exec() == QDialog::Accepted && dialog.selectedDirectory() != text(row->cwd)) {
             nodegraph::NodeAction action{
                 thread, nodegraph::NodeActionKind::ChangeWorkspace, {}, {}, {{"cwd", utf8(dialog.selectedDirectory())}}, {}};
@@ -2433,22 +2461,12 @@ void ShellWidget::Impl::beginNewThreadDialog(std::string project, std::string se
         showNotice(QStringLiteral("A new-thread draft is already active. Select another thread to abandon it before starting another."),
                    false);
     } else {
-        QStringList choices;
-        if (!project.empty()) {
-            if (const auto snapshot = threadSnapshot()) {
-                const auto found = std::ranges::find(snapshot->projects, project, &ui::ThreadGroup::id);
-                if (found != snapshot->projects.end()) {
-                    for (const auto& root : found->fields.value("roots", nlohmann::json::array())) {
-                        if (root.is_object() && root.contains("path") && root["path"].is_string()) {
-                            choices.push_back(text(root["path"].get<std::string>()));
-                        }
-                    }
-                }
-            }
-        }
+        const auto choices = projectWorkspaceRoots(project);
         NewThreadDraft initial;
         initial.workspace = choices.size() == 1 ? choices.front() : QString{};
-        NewThreadDialog dialog(initial, NewThreadDialog::Purpose::Create, owner, choices);
+        NewThreadDialog dialog(initial, NewThreadDialog::Purpose::Create, owner, choices, [this] {
+            return session.filesystemAccess();
+        });
         if (dialog.exec() == QDialog::Accepted) {
             NewThreadDraft draft = dialog.draft();
             draft.projectId = std::move(project);
@@ -2520,21 +2538,24 @@ void ShellWidget::Impl::forkThread(const nodegraph::NodeRef &thread,
       QStringLiteral("Thread fork was not admitted; try again.")));
 }
 
-void ShellWidget::Impl::beginForkThreadDialog(
-    const nodegraph::NodeRef &thread) {
-  std::optional<NewThreadDraft> draft = suggestedForkDraft(thread);
-  if (!draft) {
-    showNotice(
-        QStringLiteral("Thread state is busy; try Fork with options again."));
-    return;
-  }
-  NewThreadDialog dialog(*draft, NewThreadDialog::Purpose::Fork, owner);
-  if (dialog.exec() != QDialog::Accepted)
-    return;
-  NewThreadDraft selected = dialog.draft();
-  if (selected.name.trimmed().isEmpty())
-    selected.name = draft->name;
-  forkThread(thread, std::move(selected), true);
+void ShellWidget::Impl::beginForkThreadDialog(const nodegraph::NodeRef& thread) {
+    const auto draft = suggestedForkDraft(thread);
+    if (!draft) {
+        showNotice(QStringLiteral("Thread state is busy; try Fork with options again."));
+    } else {
+        const auto row = uiAdapter.threadRow(thread);
+        NewThreadDialog dialog(
+            *draft, NewThreadDialog::Purpose::Fork, owner, projectWorkspaceRoots(row ? row->projectId : std::string{}), [this] {
+                return session.filesystemAccess();
+            });
+        if (dialog.exec() == QDialog::Accepted) {
+            auto selected = dialog.draft();
+            if (selected.name.trimmed().isEmpty()) {
+                selected.name = draft->name;
+            }
+            forkThread(thread, std::move(selected), true);
+        }
+    }
 }
 
 void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {

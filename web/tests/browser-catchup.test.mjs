@@ -274,3 +274,56 @@ test("manual project sorting retires an old catalog read before admitting its re
     respond(socket, current, {data: [{id: "new", name: "Current", position: 1}]}); await flush();
     assert.equal(session.model.projects.has("old"), false); assert.equal(session.model.projects.has("new"), true);
 });
+
+
+test("filesystem browsing keeps server identity across provider changes", async t => {
+    const {socket, session} = await setup(t);
+    const access = session.filesystemAccess();
+    const listing = access("/server-only");
+    const request = requests(socket, "fs/readDirectory").at(-1);
+    assert.equal(request.payload.params.path, "/server-only");
+    respond(socket, request, {entries: [{fileName: "project", isDirectory: true}]});
+    assert.deepEqual(await listing, {entries: [{fileName: "project", isDirectory: true}]});
+    session.disconnect();
+    await assert.rejects(access("/server-only"), /changed|unavailable/u);
+});
+
+test("filesystem writes preserve bytes and reject cancelled or retired access", async t => {
+    const {socket, session} = await setup(t);
+    const access = session.filesystemAccess();
+    const writing = access("/server-only/upload.png", "writeFile", "cGl4ZWxz");
+    const request = requests(socket, "fs/writeFile").at(-1);
+    assert.deepEqual(request.payload.params, {path: "/server-only/upload.png", dataBase64: "cGl4ZWxz"});
+    respond(socket, request, {}); assert.deepEqual(await writing, {});
+    await assert.rejects(access("/never-written", "writeFile", "", () => false), /changed|unavailable/u);
+    assert.equal(requests(socket, "fs/writeFile").length, 1);
+    let current = true;
+    const pending = access("/server-only/second.png", "writeFile", "Ynl0ZXM=", () => current);
+    const second = requests(socket, "fs/writeFile").at(-1);
+    current = false; respond(socket, second, {});
+    await assert.rejects(pending);
+    session.disconnect();
+    await assert.rejects(access("/wrong-server", "writeFile", ""));
+    assert.equal(requests(socket, "fs/writeFile").length, 2);
+});
+
+test("failed attachment-only drafts restore file descriptors and original text without duplicate links", async t => {
+    const {socket, session} = await setup(t);
+    const files = [{path: "/server-only/photo.png", name: "photo.png", mimeType: "image/png", size: 6},
+        {path: "/server-only/notes.txt", name: "notes.txt", mimeType: "text/plain", size: 4}];
+    session.beginNewThread({workspace: "/w", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false});
+    const sending = session.submitPrompt("", files);
+    const create = requests(socket, "thread/start").at(-1);
+    assert.ok(create, "attachments alone admit a prompt");
+    reject(socket, create, "offline"); await sending;
+    const submission = session.prompts.submissions(DraftThreadId)[0];
+    assert.equal(session.restorePrompt(DraftThreadId, submission.id, session.threadVisualKey(DraftThreadId), "", files), undefined);
+    const restored = session.restorePrompt(DraftThreadId, submission.id, session.threadVisualKey(DraftThreadId), "");
+    assert.equal(restored, "");
+    assert.deepEqual(session.getSnapshot().newThreadDraft.attachments, files);
+    const retry = session.submitPrompt(restored, session.getSnapshot().newThreadDraft.attachments);
+    reject(socket, requests(socket, "thread/start").at(-1), "still offline"); await retry;
+    const retried = session.prompts.submissions(DraftThreadId)[0];
+    assert.equal(retried.prompt, submission.prompt);
+    assert.deepEqual(retried.attachments, files);
+});

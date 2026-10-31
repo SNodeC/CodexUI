@@ -10,7 +10,7 @@
 
 #include <QDir>
 #include <QEvent>
-#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -18,12 +18,14 @@
 #include <QImage>
 #include <QLabel>
 #include <QMimeData>
+#include <QMimeDatabase>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QStyle>
 #include <QToolButton>
 #include <QUrl>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <string_view>
@@ -195,8 +197,9 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
   surfacesLayout->addWidget(composer_);
 
   connect(sendButton_, &QPushButton::clicked, this, [this] { submitDraft(); });
-  connect(promptEditor_, &ExpandingPromptEditor::attachmentInput, this,
-          &ComposerPane::insertAttachments);
+  connect(promptEditor_, &ExpandingPromptEditor::attachmentInput, this, [this](const QMimeData* source) {
+      insertAttachments(source);
+  });
   connect(promptEditor_, &codexui::ExpandingPromptEditor::submitRequested, this,
           [this] { submitDraft(); });
   connect(promptEditor_, &QPlainTextEdit::textChanged, this, [this] {
@@ -218,20 +221,42 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
       actions_.stop();
   });
   connect(attachmentButton_, &QToolButton::clicked, this, [this] {
-      auto* dialog = new QFileDialog(this, QStringLiteral("Attach files"), QDir::currentPath());
+      auto* dialog = new FileSelectionDialog(actions_.workspace ? actions_.workspace() : QString{},
+                                             this,
+                                             {},
+                                             {},
+                                             actions_.filesystem ? actions_.filesystem() : FileSelectionDialog::Filesystem{},
+                                             true);
       dialog->setAttribute(Qt::WA_DeleteOnClose);
       dialog->setWindowModality(Qt::WindowModal);
-      dialog->setFileMode(QFileDialog::ExistingFiles);
-      dialog->setSupportedSchemes({QStringLiteral("file")});
-      connect(dialog, &QFileDialog::filesSelected, this, [this, generation = draftGeneration_](const QStringList& paths) {
-          if (generation == draftGeneration_) {
-              QList<QUrl> urls;
-              for (const auto& path : paths) {
-                  urls.push_back(QUrl::fromLocalFile(path));
+      connect(dialog, &QDialog::accepted, this, [this, dialog, generation = draftGeneration_] {
+          const auto paths = dialog->selectedFiles();
+          if (generation == draftGeneration_ && canSubmit_ && paths.size() + attachments_.size() <= MaximumAttachments) {
+              if (dialog->localFiles()) {
+                  QMimeData source;
+                  QList<QUrl> urls;
+                  for (const auto& path : paths) {
+                      urls.push_back(QUrl::fromLocalFile(path));
+                  }
+                  source.setUrls(urls);
+                  insertAttachments(&source, dialog->uploadDirectory(), dialog->access());
+              } else {
+                  for (const auto& path : paths) {
+                      const auto value = path.toStdString();
+                      if (std::ranges::find(attachments_, value, &AttachmentDraft::path) == attachments_.end()) {
+                          attachments_.push_back({value,
+                                                  QFileInfo(path).fileName().toStdString(),
+                                                  QMimeDatabase().mimeTypeForFile(path, QMimeDatabase::MatchExtension).name().toStdString(),
+                                                  0,
+                                                  {},
+                                                  {},
+                                                  ++attachmentOrder_});
+                      }
+                  }
+                  finishAttachmentInput({});
               }
-              QMimeData source;
-              source.setUrls(urls);
-              insertAttachments(&source);
+          } else if (generation == draftGeneration_) {
+              finishAttachmentInput("Cannot attach: controller access was lost or the attachment limit was exceeded.");
           }
       });
       dialog->open();
@@ -247,48 +272,99 @@ ComposerPane::~ComposerPane() {
   delete turnSettings_;
 }
 
-void ComposerPane::insertAttachments(const QMimeData *source) {
-  if (!canSubmit_ || preparingAttachments_ >= MaximumAttachments) {
-    finishAttachmentInput(
-        QStringLiteral("Cannot add attachments now; wait for "
-                       "pending images or session readiness."));
-    return;
-  }
-  const auto urls = source->urls();
-  const QImage image =
-      urls.isEmpty() ? qvariant_cast<QImage>(source->imageData()) : QImage{};
-  const auto generation = draftGeneration_;
-  ++preparingAttachments_;
-  refreshSubmissionEnabled();
-  presentation::announce(*promptEditor_,
-                         QStringLiteral("Preparing attachments"));
-  // One queue preserves paste/drop order, including mixed image/file input.
-  attachmentPool_.start([this, urls, image, generation] {
-    QMimeData mime;
-    if (urls.isEmpty())
-      mime.setImageData(image);
-    else
-      mime.setUrls(urls);
-    std::vector<AttachmentDraft> prepared;
-    const QString error = appendAttachmentInput(prepared, mime);
-    QMetaObject::invokeMethod(
-        this,
-        [this, generation, prepared, error] {
-          --preparingAttachments_;
-          refreshSubmissionEnabled();
-          if (generation != draftGeneration_)
-            return;
-          QString failure = error;
-          if (failure.isEmpty()) {
-            QStringList paths;
-            for (const auto &attachment : prepared)
-              paths.push_back(QString::fromStdString(attachment.path));
-            failure = appendAttachmentFiles(attachments_, paths);
-          }
-          finishAttachmentInput(failure);
-        },
-        Qt::QueuedConnection);
-  });
+void ComposerPane::insertAttachments(const QMimeData* source, QString directory, FileSelectionDialog::Filesystem access) {
+    if (!access && actions_.filesystem) {
+        access = actions_.filesystem();
+    }
+    if (directory.isEmpty() && actions_.workspace) {
+        directory = actions_.workspace();
+    }
+    if (!canSubmit_ || preparingAttachments_ >= MaximumAttachments) {
+        finishAttachmentInput(QStringLiteral("Cannot add attachments now; wait for "
+                                             "pending images or session readiness."));
+    } else {
+        const auto urls = source->urls();
+        const QImage image = urls.isEmpty() ? qvariant_cast<QImage>(source->imageData()) : QImage{};
+        const auto generation = draftGeneration_;
+        const auto order = ++attachmentOrder_;
+        ++preparingAttachments_;
+        refreshSubmissionEnabled();
+        presentation::announce(*promptEditor_, QStringLiteral("Preparing attachments"));
+        // Preparation stays off the UI thread; admission retains input order.
+        attachmentPool_.start([this, urls, image, generation, order, directory, access] {
+            QMimeData mime;
+            if (urls.isEmpty()) {
+                mime.setImageData(image);
+            } else {
+                mime.setUrls(urls);
+            }
+            std::vector<AttachmentDraft> prepared;
+            const QString error = appendAttachmentInput(prepared, mime);
+            for (auto& file : prepared) {
+                file.order = order;
+            }
+            QMetaObject::invokeMethod(
+                this,
+                [this, generation, directory, access, prepared = std::move(prepared), error]() mutable {
+                    if (!error.isEmpty()) {
+                        finishAttachmentPreparation(error, generation);
+                    } else {
+                        uploadAttachments(
+                            std::make_shared<std::vector<AttachmentDraft>>(std::move(prepared)), 0, directory, generation, access);
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+    }
+}
+
+void ComposerPane::uploadAttachments(std::shared_ptr<std::vector<AttachmentDraft>> prepared,
+                                     std::size_t index,
+                                     QString directory,
+                                     std::uint64_t generation,
+                                     FileSelectionDialog::Filesystem access) {
+    const bool current = generation == draftGeneration_ && canSubmit_;
+    if (!current || directory.isEmpty() || !access || prepared->size() + attachments_.size() > MaximumAttachments) {
+        finishAttachmentPreparation("Cannot upload: choose an app-server workspace and ensure controller access.", generation);
+    } else if (index == prepared->size()) {
+        for (auto& item : *prepared) {
+            if (std::ranges::none_of(attachments_, [&](const auto& existing) {
+                    return existing.path == item.path || (!item.localPath.empty() && existing.localPath == item.localPath);
+                })) {
+                attachments_.push_back(std::move(item));
+            }
+        }
+        std::ranges::stable_sort(attachments_, {}, &AttachmentDraft::order);
+        finishAttachmentPreparation({}, generation);
+    } else if (std::ranges::any_of(attachments_, [&](const auto& existing) {
+                   return existing.localPath == prepared->at(index).localPath;
+               })) {
+        uploadAttachments(prepared, index + 1, directory, generation, access);
+    } else {
+        auto& file = prepared->at(index);
+        const auto destination =
+            (directory + '/' + QUuid::createUuid().toString(QUuid::WithoutBraces) + '-' + QString::fromStdString(file.name)).toStdString();
+        access(this,
+               "fs/writeFile",
+               {{"path", destination}, {"dataBase64", file.dataBase64}},
+               [this, prepared, index, directory, generation, destination, access](nlohmann::json, std::string error) {
+                   if (!error.empty()) {
+                       finishAttachmentPreparation(QString::fromStdString(error), generation);
+                   } else {
+                       prepared->at(index).path = destination;
+                       prepared->at(index).dataBase64.clear();
+                       uploadAttachments(prepared, index + 1, directory, generation, access);
+                   }
+               });
+    }
+}
+
+void ComposerPane::finishAttachmentPreparation(QString error, std::uint64_t generation) {
+    --preparingAttachments_;
+    refreshSubmissionEnabled();
+    if (generation == draftGeneration_) {
+        finishAttachmentInput(error);
+    }
 }
 
 void ComposerPane::finishAttachmentInput(QString error) {

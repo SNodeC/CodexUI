@@ -11,6 +11,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <span>
 #include <thread>
 #include <unordered_map>
@@ -18,6 +19,7 @@
 
 class QSocketNotifier;
 class QTimer;
+class QObject;
 
 namespace codexui::codex {
 
@@ -45,6 +47,10 @@ public:
   void wait();
   void shutdown();
 
+  using FilesystemCompletion = std::function<void(nlohmann::json, std::string)>;
+  using Filesystem = std::function<void(QObject*, std::string, nlohmann::json, FilesystemCompletion)>;
+  [[nodiscard]] Filesystem filesystemAccess();
+
   void setRuntimeStoppedHandler(RuntimeStoppedHandler handler);
   void setGraphChangedHandler(GraphChangedHandler handler);
   void setProtocolDiagnosticHandler(ProtocolDiagnosticHandler handler);
@@ -68,6 +74,7 @@ public:
 private:
   friend class FrontendSessionTestPeer;
 
+  bool deliverFilesystem();
   void drainWorkerMessages();
   [[nodiscard]] bool graphDeliveryQuiescent() const noexcept;
   void scheduleWorkerMessageDrain();
@@ -101,6 +108,7 @@ private:
   bool rescanRetirementPending = false;
   bool retirementScanGenerationKnown = false;
   std::uint64_t nextUiActionCorrelation = 1;
+  std::unordered_map<std::string, std::pair<std::uint64_t, FilesystemCompletion>> filesystemRequests;
   Configuration &configuration;
 };
 

@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
@@ -1050,8 +1051,7 @@ private slots:
         p.frontend.transport = "tls-ipv4";
         p.frontend.certificate = chosen;
         p.frontend.privateKey = chosen;
-        p.provider.transport = "websocket-ipv4";
-        p.appServer.ownership = Ownership::External;
+        p.provider.transport = "unix";
         ProfileEditor editor(p, {});
         editor.show();
         QComboBox* frontend = nullptr;
@@ -1075,46 +1075,54 @@ private slots:
                         tabs->setCurrentIndex(tab);
                     }
                 }
-                editor.activateWindow();
-                QTRY_VERIFY_WITH_TIMEOUT(editor.isActiveWindow(), 1000);
-                field->setFocus(Qt::TabFocusReason);
-                QTRY_VERIFY_WITH_TIMEOUT(field->hasFocus(), 1000);
-                QVERIFY(browse->isVisible());
-                QVERIFY(browse->focusPolicy() != Qt::NoFocus);
-                QTest::keyClick(field, Qt::Key_Tab);
-                QVERIFY2(browse->hasFocus(),
-                         qPrintable(label + ": focus=" +
-                                    (QApplication::focusWidget() ? QApplication::focusWidget()->metaObject()->className() : "none")));
-                const bool directory = label == "CODEX_HOME";
-                const QString path = directory                                ? p.codexHome
-                                     : label == "CodexUI executable"          ? tools.dir.filePath("codex-ui")
-                                     : label == "Readiness client executable" ? tools.dir.filePath("probe")
-                                                                              : chosen;
-                const auto previous = field->text();
-                QTest::mouseClick(browse, Qt::LeftButton);
-                QPointer<QFileDialog> dialog = field->findChild<QFileDialog*>();
-                QVERIFY(dialog && dialog->isVisible());
-                QVERIFY(!dialog->testOption(QFileDialog::DontUseNativeDialog));
-                QCOMPARE(dialog->fileMode(), directory ? QFileDialog::Directory : QFileDialog::ExistingFile);
-                dialog->reject();
-                QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-                QVERIFY(dialog.isNull());
-                QCOMPARE(field->text(), previous);
-                QTest::mouseClick(browse, Qt::LeftButton);
-                dialog = field->findChild<QFileDialog*>();
-                QVERIFY(dialog);
-                dialog->selectFile(path);
-                QVERIFY(QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection));
-                QTRY_COMPARE(field->text(), path);
-                QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-                QVERIFY(dialog.isNull());
-                if (label.endsWith("executable")) {
-                    QVERIFY(!frontend->isEnabled());
+                if (browse->isVisible()) {
+                    editor.activateWindow();
+                    QTRY_VERIFY_WITH_TIMEOUT(editor.isActiveWindow(), 1000);
+                    field->setFocus(Qt::TabFocusReason);
+                    QTRY_VERIFY_WITH_TIMEOUT(field->hasFocus(), 1000);
+                    QVERIFY(browse->isVisible());
+                    QVERIFY(browse->focusPolicy() != Qt::NoFocus);
+                    QTest::keyClick(field, Qt::Key_Tab);
+                    QVERIFY2(browse->hasFocus(),
+                             qPrintable(label + ": focus=" +
+                                        (QApplication::focusWidget() ? QApplication::focusWidget()->metaObject()->className() : "none")));
+                    const bool directory = label == "CODEX_HOME" || label == "Working directory";
+                    const bool socket = label == "Unix socket";
+                    const QString previous = field->text();
+                    const QString path = socket                                   ? tools.dir.filePath("chosen.sock")
+                                         : label == "Executable"                  ? tools.dir.filePath(QFileInfo(previous).fileName())
+                                         : directory                              ? p.codexHome
+                                         : label == "CodexUI executable"          ? tools.dir.filePath("codex-ui")
+                                         : label == "Readiness client executable" ? tools.dir.filePath("probe")
+                                                                                  : chosen;
+                    QTest::mouseClick(browse, Qt::LeftButton);
+                    QPointer<QFileDialog> dialog = field->findChild<QFileDialog*>();
+                    QVERIFY(dialog && dialog->isVisible());
+                    QVERIFY(!dialog->testOption(QFileDialog::DontUseNativeDialog));
+                    QCOMPARE(dialog->fileMode(),
+                             directory ? QFileDialog::Directory
+                             : socket  ? QFileDialog::AnyFile
+                                       : QFileDialog::ExistingFile);
+                    dialog->reject();
+                    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+                    QVERIFY(dialog.isNull());
+                    QCOMPARE(field->text(), previous);
+                    QTest::mouseClick(browse, Qt::LeftButton);
+                    dialog = field->findChild<QFileDialog*>();
+                    QVERIFY(dialog);
+                    dialog->selectFile(path);
+                    QVERIFY(QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection));
+                    QTRY_COMPARE(field->text(), path);
+                    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+                    QVERIFY(dialog.isNull());
+                    if (label.endsWith("executable")) {
+                        QVERIFY(!frontend->isEnabled());
+                    }
+                    ++selections;
                 }
-                ++selections;
             }
         }
-        QCOMPARE(selections, 6);
+        QCOMPARE(selections, 13);
         auto* check = editor.findChild<QPushButton*>();
         for (auto* button : editor.findChildren<QPushButton*>()) {
             if (button->text() == "Check installed transports") {
@@ -1143,6 +1151,113 @@ private slots:
         QCOMPARE(editor.profile().frontend.caCertificate, chosen);
         QCOMPARE(editor.profile().uiExecutable, tools.dir.filePath("codex-ui"));
         QCOMPARE(editor.profile().probeExecutable, tools.dir.filePath("probe"));
+    }
+    void hostPathBrowsingTracksLiveOwnership() {
+        FixtureTools tools;
+        auto p = Profile::create("Locality");
+        p.codexHome = tools.dir.filePath("home");
+        ProfileEditor editor(p, {});
+        editor.show();
+        QGroupBox* bridge = nullptr;
+        QGroupBox* app = nullptr;
+        QComboBox* provider = nullptr;
+        for (auto* group : editor.findChildren<QGroupBox*>()) {
+            if (group->title() == "Bridge process") {
+                bridge = group;
+            } else if (group->title().contains("app-server executable")) {
+                app = group;
+            }
+        }
+        for (auto* combo : editor.findChildren<QComboBox*>()) {
+            if (combo->findData("stdio") >= 0) {
+                provider = combo;
+            }
+        }
+        QVERIFY(bridge && app && provider);
+        const auto field = [](QWidget* parent, const QString& label) {
+            QLineEdit* found = nullptr;
+            for (auto* edit : parent->findChildren<QLineEdit*>()) {
+                if (edit->accessibleName() == label) {
+                    found = edit;
+                }
+            }
+            return found;
+        };
+        auto* bridgeTarget = field(bridge, "Host / SSH alias");
+        auto* appTarget = field(app, "Host / SSH alias");
+        auto* home = field(&editor, "CODEX_HOME");
+        auto* bridgeExecutable = field(bridge, "Executable");
+        auto* appExecutable = field(app, "Executable");
+        auto* bridgeOwner = bridge->findChild<QComboBox*>();
+        auto* appOwner = app->findChild<QComboBox*>();
+        QVERIFY(bridgeTarget && appTarget && home && bridgeExecutable && appExecutable && bridgeOwner && appOwner);
+        const auto browse = [](QLineEdit* edit) {
+            return edit->parentWidget()->findChild<QPushButton*>();
+        };
+        for (const auto& mode : {QString("stdio"), QString("unix")}) {
+            provider->setCurrentIndex(provider->findData(mode));
+            for (auto bridgeMode : {Ownership::Local, Ownership::Ssh, Ownership::External}) {
+                bridgeOwner->setCurrentIndex(bridgeOwner->findData(int(bridgeMode)));
+                bridgeTarget->setText(bridgeMode == Ownership::Ssh ? "bridge.example" : "");
+                for (auto appMode : {Ownership::Local, Ownership::Ssh, Ownership::External}) {
+                    appOwner->setCurrentIndex(appOwner->findData(int(appMode)));
+                    appTarget->setText(appMode == Ownership::Ssh ? "app.example" : "");
+                    const bool bridgeLocal = bridgeMode == Ownership::Local;
+                    const bool effectiveLocal = mode == "stdio" ? bridgeLocal : appMode == Ownership::Local;
+                    QCOMPARE(!browse(bridgeExecutable)->isHidden(), bridgeLocal);
+                    QCOMPARE(!browse(appExecutable)->isHidden(), effectiveLocal);
+                    QCOMPARE(!browse(home)->isHidden(), effectiveLocal);
+                }
+            }
+        }
+        provider->setCurrentIndex(provider->findData("stdio"));
+        bridgeOwner->setCurrentIndex(bridgeOwner->findData(int(Ownership::Local)));
+        bridgeTarget->setText("remote.example");
+        QVERIFY(browse(home)->isHidden());
+        bridgeTarget->clear();
+        QVERIFY(!browse(home)->isHidden());
+        for (auto* group : editor.findChildren<QGroupBox*>()) {
+            if (group->title() == "CodexUI ↔ bridge" || group->title() == "Bridge ↔ app-server") {
+                auto* transport = group->findChild<QComboBox*>();
+                for (int index = 0; index < transport->count(); ++index) {
+                    transport->setCurrentIndex(index);
+                    const auto mode = transport->currentData().toString();
+                    const bool secured = mode.contains("tls") || mode.startsWith("wss");
+                    for (auto* edit : group->findChildren<QLineEdit*>()) {
+                        const auto label = edit->accessibleName();
+                        if (!label.isEmpty()) {
+                            const bool expected =
+                                label == "Unix socket"      ? mode == "unix"
+                                : label == "WebSocket path" ? mode.contains("websocket") || mode.startsWith("wss")
+                                : label.startsWith("Bridge TLS") || label == "Client CA certificate" || label == "TLS server name (SNI)"
+                                    ? secured
+                                    : mode != "stdio" && mode != "unix";
+                            QCOMPARE(edit->isVisibleTo(group), expected);
+                        }
+                    }
+                }
+            }
+        }
+        provider->setCurrentIndex(provider->findData("stdio"));
+        const auto evidence = qEnvironmentVariable("CODEXMANAGER_EVIDENCE_DIR");
+        auto* tabs = editor.findChild<QTabWidget*>();
+        for (int tab = 0; tab < tabs->count(); ++tab) {
+            if (tabs->widget(tab)->isAncestorOf(bridge)) {
+                tabs->setCurrentIndex(tab);
+            }
+        }
+        bridgeExecutable->setText("/local/" + QString("long-directory/").repeated(30));
+        for (const auto width : {560, 780}) {
+            editor.resize(width, 700);
+            QCoreApplication::processEvents();
+            QVERIFY(browse(bridgeExecutable)->width() >= browse(bridgeExecutable)->minimumSizeHint().width());
+            if (!evidence.isEmpty()) {
+                QDir().mkpath(evidence);
+                QVERIFY(editor.grab().save(evidence + "/host-paths-" + QString::number(width) + ".png"));
+            }
+        }
+        QCOMPARE(editor.profile().bridge.sshTarget, p.bridge.sshTarget);
+        QCOMPARE(editor.profile().appServer.ownership, p.appServer.ownership);
     }
     void closeDuringDiscoveryAndSupervision() {
         FixtureTools tools;

@@ -3,11 +3,11 @@
 #ifndef CODEXUI_CODEX_MIDDLE_THREADPANE_H
 #define CODEXUI_CODEX_MIDDLE_THREADPANE_H
 
+#include "codex/FileSelectionDialog.h"
 #include "codex/nodegraph/Messages.h"
 #include "codex/ui/UiViewState.h"
 
 #include <QFrame>
-
 #include <array>
 #include <functional>
 #include <optional>
@@ -39,23 +39,24 @@ public:
   };
 
   struct Actions {
-    std::function<void()> newThread;
-    std::function<void()> loadMore;
-    std::function<void()> hide;
-    ThreadAction select;
-    ThreadAction reload;
-    ThreadAction rename;
-    ThreadAction changeWorkspace;
-    ThreadAction fork;
-    ThreadAction forkWithOptions;
-    ThreadAction toggleArchive;
-    ThreadAction remove;
-    ThreadAction timing;
-    std::function<void()> browserChanged;
-    std::function<void()> refreshGroups;
-    std::function<void(nlohmann::json)> browse;
-    std::function<void(nodegraph::RuntimeActionKind, nlohmann::json)> manage;
-    std::function<void(std::string, std::string)> newGroupedThread;
+      FileSelectionDialog::Access filesystem;
+      std::function<void()> newThread;
+      std::function<void()> loadMore;
+      std::function<void()> hide;
+      ThreadAction select;
+      ThreadAction reload;
+      ThreadAction rename;
+      ThreadAction changeWorkspace;
+      ThreadAction fork;
+      ThreadAction forkWithOptions;
+      ThreadAction toggleArchive;
+      ThreadAction remove;
+      ThreadAction timing;
+      std::function<void()> browserChanged;
+      std::function<void()> refreshGroups;
+      std::function<void(nlohmann::json)> browse;
+      std::function<void(nodegraph::RuntimeActionKind, nlohmann::json)> manage;
+      std::function<void(std::string, std::string)> newGroupedThread;
   };
 
   explicit ThreadPane(QWidget *parent = nullptr);

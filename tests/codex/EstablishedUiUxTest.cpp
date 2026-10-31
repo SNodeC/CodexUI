@@ -2,6 +2,9 @@
 
 #include "TimingPolicy.h"
 #include "codex/AttachmentInput.h"
+#include "codex/ConnectionDialog.h"
+#include "codex/FileSelectionDialog.h"
+#include "codex/NewThreadDialog.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
@@ -14,6 +17,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QCoreApplication>
 #include <QCursor>
 #include <QDir>
@@ -33,17 +37,21 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocalServer>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QProxyStyle>
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QStyleFactory>
 #include <QTemporaryDir>
 #include <QTextCursor>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QUrl>
@@ -60,13 +68,14 @@
 namespace codexui::codex::middle {
 namespace {
 
+    ComposerPane::Actions attachmentActions();
 
-bool expect(bool condition, const char *message) {
-  if (condition)
-    return true;
-  std::cerr << "FAILED: " << message << '\n';
-  return false;
-}
+    bool expect(bool condition, const char* message) {
+        if (condition)
+            return true;
+        std::cerr << "FAILED: " << message << '\n';
+        return false;
+    }
 
 bool changed(ConversationView::ReconciliationResult result) {
   return result == ConversationView::ReconciliationResult::Changed;
@@ -244,32 +253,60 @@ bool promptAttachmentAdmission() {
   return result;
 }
 
+ComposerPane::Actions attachmentActions() {
+    static QTemporaryDir server;
+    ComposerPane::Actions actions;
+    actions.workspace = [] {
+        return server.path();
+    };
+    actions.filesystem = [] {
+        return [](QObject*, std::string method, nlohmann::json parameters, auto complete) {
+            QString error;
+            nlohmann::json result = {{"entries", nlohmann::json::array()}};
+            const auto path = QString::fromStdString(parameters.at("path"));
+            if (method == "fs/writeFile") {
+                QFile file(path);
+                const auto bytes = QByteArray::fromBase64(QByteArray::fromStdString(parameters.at("dataBase64")));
+                if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size()) {
+                    error = "Upload failed";
+                }
+            } else if (method == "fs/getMetadata") {
+                result = {{"isFile", QFileInfo(path).isFile()}};
+            } else {
+                for (const auto& entry : QDir(path).entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)) {
+                    result["entries"].push_back(
+                        {{"fileName", entry.fileName().toStdString()}, {"isDirectory", entry.isDir()}, {"isFile", entry.isFile()}});
+                }
+            }
+            complete(result, error.toStdString());
+        };
+    };
+    return actions;
+}
+
 bool promptFileDialogContract() {
     QTemporaryDir files;
-    bool result = expect(files.isValid(), "picker fixture directory exists");
     QStringList paths;
+    bool result = true;
     for (int index = 0; index < 17; ++index) {
-        const QString directory = files.filePath(QString::number(index));
-        result &= expect(QDir().mkpath(directory), "picker fixture subdirectory exists");
-        const QString path = directory + QStringLiteral("/file α %1.dat").arg(index);
+        const auto path = files.filePath(QString("image-%1.png").arg(index));
         QFile file(path);
-        result &= expect(file.open(QIODevice::WriteOnly) && file.write("data") == 4, "picker fixture file is readable");
+        result &= expect(file.open(QIODevice::WriteOnly) && file.write("pixels") == 6, "local picker fixture exists");
         paths.push_back(path);
     }
     ComposerPane composer;
-    composer.resize(900, 300);
     composer.show();
     composer.setCanSubmit(true);
-    composer.promptEditor()->setPlainText(QStringLiteral("Preserve this draft"));
+    composer.promptEditor()->setPlainText("Retain this prompt");
     QString error;
-    ComposerPane::Actions actions;
-    actions.attachmentError = [&](QString message) {
-        error = std::move(message);
+    auto actions = attachmentActions();
+    actions.attachmentError = [&](QString value) {
+        error = value;
     };
-    composer.setActions(std::move(actions));
+    composer.setActions(actions);
     QToolButton* attach = nullptr;
     for (auto* button : composer.findChildren<QToolButton*>()) {
-        if (button->accessibleName() == QStringLiteral("Attach files")) {
+        if (button->accessibleName() == "Attach files") {
             attach = button;
         }
     }
@@ -278,30 +315,41 @@ bool promptFileDialogContract() {
         if (attach) {
             attach->click();
         }
-        auto* dialog = composer.findChild<QFileDialog*>();
-        result &= expect(dialog && dialog->isVisible(), "Attach opens a standard file dialog");
-        if (dialog) {
-            result &= expect(!dialog->testOption(QFileDialog::DontUseNativeDialog), "picker permits native platform presentation");
-        }
-        return dialog;
+        auto* selection = dynamic_cast<FileSelectionDialog*>(QApplication::activeModalWidget());
+        result &= expect(selection != nullptr, "Attach opens the shared selection dialog");
+        return selection;
     };
-    const auto select = [&](QFileDialog* dialog, const QStringList& selected) {
-        error.clear();
-        if (dialog) {
-            QStringList quoted;
-            for (const auto& path : selected) {
-                quoted.push_back('"' + path + '"');
+    const auto choose = [&](FileSelectionDialog* selection, QStringList chosen, bool local) {
+        if (selection) {
+            selection->findChild<QComboBox*>("selectionSource")->setCurrentIndex(local ? 0 : 1);
+            auto* field = selection->findChild<QLineEdit*>("codexWorkspaceDirectory");
+            field->setText(local ? files.path() : actions.workspace());
+            for (auto* button : selection->findChildren<QPushButton*>()) {
+                if (button->accessibleName() == "Open entered directory") {
+                    button->click();
+                }
             }
-            auto* filename = dialog->findChild<QLineEdit*>(QStringLiteral("fileNameEdit"));
-            result &= expect(filename != nullptr, "offscreen standard dialog exposes filename entry");
-            if (filename) {
-                filename->setText(quoted.join(' '));
-                QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
+            auto* list = selection->findChild<QTreeWidget*>();
+            QElapsedTimer listing;
+            listing.start();
+            while (list->topLevelItemCount() == 0 && listing.elapsed() < 2000) {
+                QCoreApplication::processEvents();
+                QThread::msleep(1);
+            }
+
+            for (int index = 0; index < list->topLevelItemCount(); ++index) {
+                auto* row = list->topLevelItem(index);
+                row->setSelected(chosen.contains(row->data(0, Qt::UserRole).toString()));
+            }
+            for (auto* button : selection->findChildren<QPushButton*>()) {
+                if (button->text() == "Upload and attach" || button->text() == "Attach selected files") {
+                    button->click();
+                }
             }
         }
-        QElapsedTimer wait;
-        wait.start();
-        while (attach && !attach->isEnabled() && error.isEmpty() && wait.elapsed() < 5000) {
+        QElapsedTimer timer;
+        timer.start();
+        while (attach && !attach->isEnabled() && error.isEmpty() && timer.elapsed() < 2000) {
             QCoreApplication::processEvents();
             QThread::msleep(1);
         }
@@ -310,30 +358,593 @@ bool promptFileDialogContract() {
     if (auto* dialog = open()) {
         dialog->reject();
     }
-    result &= expect(composer.attachments().empty(), "cancelling an empty picker adds nothing");
-    select(open(), {paths[0], paths[1]});
-    result &= expect(composer.attachments().size() == 2, "multiple chosen files reach the composer");
-    select(open(), {paths[1], paths[2]});
-    result &= expect(composer.attachments().size() == 3, "repeated selection accumulates across directories without duplicates");
+    result &= expect(composer.attachments().empty(), "cancel adds no attachments");
+    choose(open(), paths, true);
+    result &= expect(composer.attachments().empty() && !error.isEmpty(), "over-limit selection admits no partial batch");
+    error.clear();
+    choose(open(), {paths[0], paths[1]}, true);
+    result &= expect(error.isEmpty() && composer.attachments().size() == 2, "local files upload before admission");
+    for (const auto& attachment : composer.attachments()) {
+        result &= expect(attachment.path.starts_with(actions.workspace().toStdString()) && attachment.dataBase64.empty() &&
+                             !attachment.localPath.empty(),
+                         "admitted files have server paths and no upload payload");
+        QFile uploaded(QString::fromStdString(attachment.path));
+        result &=
+            expect(uploaded.open(QIODevice::ReadOnly) && uploaded.readAll() == "pixels", "uploaded file bytes match the local selection");
+    }
     const auto retained = composer.attachments();
+    auto* observer = open();
+    composer.setCanSubmit(false);
+    choose(observer, {paths[2]}, true);
+    result &= expect(composer.attachments() == retained && !error.isEmpty(), "loss of control preserves populated attachments");
+    composer.setCanSubmit(true);
+    error.clear();
+    choose(open(), {paths[0]}, true);
+    result &= expect(composer.attachments() == retained, "selecting a local file again does not duplicate the attachment");
     if (auto* dialog = open()) {
         dialog->reject();
     }
-    result &= expect(composer.attachments() == retained, "cancelling a populated picker preserves attachments");
-    select(open(), paths);
-    result &=
-        expect(!error.isEmpty() && composer.attachments() == retained, "over-limit selection reports an error without partial admission");
-    result &= expect(composer.promptEditor()->toPlainText() == QStringLiteral("Preserve this draft"),
-                     "selection and cancellation retain authored text");
+    result &= expect(composer.attachments() == retained, "cancel preserves populated attachments");
     auto* stale = open();
     composer.clearDraft();
-    select(stale, {paths[0]});
-    result &= expect(composer.attachments().empty(), "a retired draft cannot receive a pending selection");
+    choose(stale, {paths[2]}, true);
+    result &= expect(composer.attachments().empty(), "retired drafts reject pending selections");
+    auto failure = attachmentActions();
+    failure.filesystem = [] {
+        return [](QObject*, std::string, nlohmann::json, auto complete) {
+            complete({}, "Server denied access");
+        };
+    };
+    failure.attachmentError = [&](QString value) {
+        error = value;
+    };
+    composer.setActions(failure);
     error.clear();
-    auto* unavailable = open();
-    composer.setCanSubmit(false);
-    select(unavailable, {paths[0]});
-    result &= expect(!error.isEmpty() && composer.attachments().empty(), "lost submission readiness rejects a pending selection");
+    choose(open(), {paths[0]}, true);
+    result &= expect(composer.attachments().empty() && !error.isEmpty(), "failed upload remains unsent and visible");
+    result &= expect(composer.promptEditor()->toPlainText().isEmpty(), "a retired draft remains retired through selection");
+    return result;
+}
+
+bool uploadCompletionPreservesInputOrder() {
+    QTemporaryDir files;
+    QStringList paths;
+    bool result = true;
+    for (const auto* name : {"first.png", "second.png"}) {
+        QFile file(files.filePath(name));
+        result &= expect(file.open(QIODevice::WriteOnly) && file.write("pixels") == 6, "ordered upload fixture exists");
+        paths.push_back(file.fileName());
+    }
+    ComposerPane composer;
+    composer.setCanSubmit(true);
+    auto actions = attachmentActions();
+    std::vector<std::function<void(nlohmann::json, std::string)>> completions;
+    actions.filesystem = [&] {
+        return [&](QObject*, std::string method, nlohmann::json, auto complete) {
+            result &= expect(method == "fs/writeFile", "paste uploads use the server write operation");
+            completions.push_back(std::move(complete));
+        };
+    };
+    composer.setActions(actions);
+    for (const auto& path : paths) {
+        QMimeData source;
+        source.setUrls({QUrl::fromLocalFile(path)});
+        composer.promptEditor()->attachmentInput(&source);
+    }
+    QElapsedTimer timer;
+    timer.start();
+    while (completions.size() < 2 && timer.elapsed() < 2000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    result &= expect(completions.size() == 2 && composer.attachments().empty(), "independent uploads are admitted only after completion");
+    if (completions.size() == 2) {
+        completions[1]({}, "");
+        completions[0]({}, "");
+        result &= expect(composer.attachments().size() == 2 && composer.attachments()[0].name == "first.png" &&
+                             composer.attachments()[1].name == "second.png",
+                         "reversed network completion retains authored attachment order");
+    }
+    return result;
+}
+
+bool failedUploadBatchIsAtomic() {
+    QTemporaryDir files;
+    QList<QUrl> urls;
+    bool result = true;
+    for (const auto* name : {"first.png", "second.png"}) {
+        QFile file(files.filePath(name));
+        result &= expect(file.open(QIODevice::WriteOnly) && file.write("pixels") == 6, "atomic upload fixture exists");
+        urls.push_back(QUrl::fromLocalFile(file.fileName()));
+    }
+    ComposerPane composer;
+    composer.setCanSubmit(true);
+    composer.promptEditor()->setPlainText("Keep authored text");
+    auto actions = attachmentActions();
+    std::vector<std::function<void(nlohmann::json, std::string)>> completions;
+    QString error;
+    actions.attachmentError = [&](QString value) {
+        error = value;
+    };
+    actions.filesystem = [&] {
+        return [&](QObject*, std::string, nlohmann::json, auto complete) {
+            completions.push_back(std::move(complete));
+        };
+    };
+    composer.setActions(actions);
+    QMimeData source;
+    source.setUrls(urls);
+    composer.promptEditor()->attachmentInput(&source);
+    QElapsedTimer timer;
+    timer.start();
+    while (completions.empty() && timer.elapsed() < 2000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    result &= expect(completions.size() == 1 && composer.attachments().empty(), "an upload batch is not admitted while pending");
+    if (completions.size() == 1) {
+        auto first = completions[0];
+        first({}, "");
+        result &=
+            expect(completions.size() == 2 && composer.attachments().empty(), "a successful first upload does not admit a partial batch");
+        if (completions.size() == 2) {
+            auto second = completions[1];
+            second({}, "Second upload denied");
+        }
+    }
+    result &= expect(composer.attachments().empty() && error == "Second upload denied" &&
+                         composer.promptEditor()->toPlainText() == "Keep authored text",
+                     "a later upload failure preserves the draft and admits none of the batch");
+    return result;
+}
+
+bool manualWorkspaceDoesNotWaitForBrowsing() {
+    std::function<void(nlohmann::json, std::string)> pending;
+    FileSelectionDialog dialog("/old", nullptr, {}, {}, [&](QObject*, std::string, nlohmann::json, auto complete) {
+        pending = std::move(complete);
+    });
+    dialog.show();
+    auto* path = dialog.findChild<QLineEdit*>("codexWorkspaceDirectory");
+    path->setText("/typed-on-server");
+    bool result = expect(dialog.selectedDirectory() == "/typed-on-server", "manual workspace overrides a pending listing");
+    for (auto* button : dialog.findChildren<QPushButton*>()) {
+        if (button->text() == "Select workspace") {
+            result &= expect(button->isEnabled(), "manual workspace admission does not await filesystem browsing");
+            button->click();
+        }
+    }
+    result &= expect(dialog.result() == QDialog::Accepted, "Return/default acceptance remains independent of obsolete browsing");
+    if (pending) {
+        pending({{"entries", {{{"fileName", "stale"}, {"isDirectory", true}}}}}, "");
+    }
+    result &= expect(dialog.selectedDirectory() == "/typed-on-server" && dialog.findChild<QTreeWidget*>()->topLevelItemCount() == 0,
+                     "an obsolete listing cannot replace a manually entered workspace");
+    return result;
+}
+
+bool sharedFileSelectionContract() {
+    QFile source(CODEXUI_FILE_SELECTION_CONTRACT_PATH);
+    bool result = expect(source.open(QIODevice::ReadOnly), "shared file-selection fixture opens");
+    const auto fixture = nlohmann::json::parse(source.readAll().toStdString());
+    const auto directory = fixture.at("serverDirectory").get<std::string>();
+    const auto local = fixture.at("local");
+    std::vector<nlohmann::json> writes;
+    ComposerPane composer;
+    composer.show();
+    composer.setCanSubmit(true);
+    auto actions = attachmentActions();
+    actions.workspace = [&] {
+        return QString::fromStdString(directory);
+    };
+    actions.filesystem = [&] {
+        return [&](QObject*, std::string method, nlohmann::json parameters, auto complete) {
+            if (method == "fs/readDirectory") {
+                complete({{"entries", fixture.at("entries")}}, "");
+            } else if (method == "fs/getMetadata") {
+                complete({{"isFile", parameters.at("path").get<std::string>() != directory}}, "");
+            } else {
+                writes.push_back(parameters);
+                complete(nlohmann::json::object(), "");
+            }
+        };
+    };
+    composer.setActions(actions);
+    QToolButton* attach = nullptr;
+    for (auto* button : composer.findChildren<QToolButton*>()) {
+        if (button->accessibleName() == "Attach files") {
+            attach = button;
+        }
+    }
+    if (attach) {
+        attach->click();
+    }
+    auto* picker = dynamic_cast<FileSelectionDialog*>(QApplication::activeModalWidget());
+    result &= expect(picker != nullptr, "shared fixture opens the native attachment picker");
+    if (picker) {
+        auto* list = picker->findChild<QTreeWidget*>();
+        for (int index = 0; index < list->topLevelItemCount(); ++index) {
+            auto* row = list->topLevelItem(index);
+            row->setSelected(!row->data(0, Qt::UserRole + 1).toBool());
+        }
+        for (auto* button : picker->findChildren<QPushButton*>()) {
+            if (button->text() == "Attach selected files") {
+                button->click();
+            }
+        }
+    }
+    nlohmann::json selected = nlohmann::json::array();
+    for (const auto& file : composer.attachments()) {
+        selected.push_back({{"path", file.path}, {"name", file.name}, {"mimeType", file.mimeType}, {"size", file.size}});
+    }
+    result &= expect(selected == fixture.at("attachments") && writes.empty(),
+                     "native remote descriptors match the shared fixture without uploading");
+    composer.clearDraft();
+    QTemporaryDir files;
+    QFile file(files.filePath(QString::fromStdString(local.at("name").get<std::string>())));
+    const auto bytes = QByteArray::fromBase64(QByteArray::fromStdString(local.at("dataBase64").get<std::string>()));
+    result &= expect(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), "shared local bytes exist");
+    file.close();
+    QMimeData input;
+    input.setUrls({QUrl::fromLocalFile(file.fileName())});
+    composer.promptEditor()->attachmentInput(&input);
+    QElapsedTimer timer;
+    timer.start();
+    while (composer.attachments().empty() && timer.elapsed() < 2000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    result &=
+        expect(writes.size() == 1 && writes[0].at("dataBase64") == local.at("dataBase64"), "native upload matches the shared byte fixture");
+    if (!composer.attachments().empty()) {
+        const auto& uploaded = composer.attachments().front();
+        result &=
+            expect(uploaded.name == local.at("name").get<std::string>() && uploaded.mimeType == local.at("mimeType").get<std::string>() &&
+                       uploaded.size == local.at("size").get<std::int64_t>() && uploaded.path.starts_with(directory + '/') &&
+                       uploaded.dataBase64.empty(),
+                   "native local upload matches the shared descriptor contract");
+    }
+    return result;
+}
+
+bool selectionSourcesShareOneView() {
+    QTemporaryDir local;
+    QFile localFile(local.filePath("local.png"));
+    bool result = expect(localFile.open(QIODevice::WriteOnly) && localFile.write("local bytes") == 11, "local source fixture exists");
+    localFile.close();
+    std::vector<std::string> requests;
+    FileSelectionDialog::Filesystem access = [&](QObject*, std::string method, nlohmann::json parameters, auto complete) {
+        requests.push_back(method);
+        const auto path = parameters.value("path", "");
+        if (method == "fs/getMetadata") {
+            complete({{"isFile", path.ends_with("remote.png")}}, "");
+        } else {
+            complete({{"entries", {{{"fileName", "project"}, {"isDirectory", true}}, {{"fileName", "remote.png"}, {"isFile", true}}}}}, "");
+        }
+    };
+    FileSelectionDialog picker("/server-only", nullptr, {}, {}, access, true);
+    picker.show();
+    auto* source = picker.findChild<QComboBox*>("selectionSource");
+    auto* view = picker.findChild<QTreeWidget*>();
+    auto* path = picker.findChild<QLineEdit*>("codexWorkspaceDirectory");
+    result &= expect(source && source->currentText() == "App-server" && view && view->topLevelItemCount() == 3,
+                     "server listing is populated through the server API");
+    if (view && source && path) {
+        view->findItems("remote.png", Qt::MatchExactly, 0).first()->setSelected(true);
+        result &= expect(picker.selectedFiles() == QStringList{"/server-only/remote.png"} && !QFileInfo::exists("/server-only/remote.png"),
+                         "remote files can be selected without opening frontend paths");
+        const auto sheet = view->styleSheet();
+        const auto headers = view->headerItem()->text(0);
+        source->setCurrentIndex(0);
+        path->setText(local.path());
+        for (auto* button : picker.findChildren<QPushButton*>()) {
+            if (button->accessibleName() == "Open entered directory") {
+                button->click();
+            }
+        }
+        QElapsedTimer timer;
+        timer.start();
+        while (view->topLevelItemCount() == 0 && timer.elapsed() < 2000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(1);
+        }
+        result &= expect(picker.findChild<QTreeWidget*>() == view && view->styleSheet() == sheet && view->headerItem()->text(0) == headers,
+                         "switching source retains the same view and styling");
+        result &= expect(source->currentText() == "This computer" && picker.uploadDirectory() == "/server-only",
+                         "local browsing names its machine and preserves the explicit server upload destination");
+        if (view->topLevelItemCount()) {
+            view->findItems("local.png", Qt::MatchExactly, 0).first()->setSelected(true);
+        }
+        result &= expect(picker.selectedFiles() == QStringList{localFile.fileName()}, "local source selects local files");
+        const auto evidence = qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR");
+        if (!evidence.isEmpty()) {
+            QDir().mkpath(evidence);
+            result &= expect(picker.grab().save(evidence + "/picker-local.png"), "local picker evidence saved");
+        }
+        source->setCurrentIndex(1);
+        if (!evidence.isEmpty()) {
+            result &= expect(picker.grab().save(evidence + "/picker-server.png"), "server picker evidence saved");
+        }
+        path->setText("/server-only/remote.png");
+        for (auto* button : picker.findChildren<QPushButton*>()) {
+            if (button->accessibleName() == "Open entered directory") {
+                button->click();
+            }
+        }
+        result &= expect(picker.selectedFiles() == QStringList{"/server-only/remote.png"},
+                         "a manually entered server filename is resolved through metadata");
+        for (auto* button : picker.findChildren<QPushButton*>()) {
+            if (button->text() == "Attach selected files") {
+                button->click();
+            }
+        }
+        result &= expect(picker.result() == QDialog::Accepted, "a server file can be accepted without uploading it");
+    }
+    FileSelectionDialog workspace("/server-only", nullptr, "Target", {}, access);
+    auto* directories = workspace.findChild<QTreeWidget*>();
+    auto* ownership = workspace.findChild<QComboBox*>("selectionSource");
+    result &= expect(directories && directories->topLevelItemCount() == 2 && !ownership && !workspace.localFiles(),
+                     "workspace selection shows only app-server directories with no source switch");
+    if (directories && directories->topLevelItemCount()) {
+        directories->findItems("project", Qt::MatchExactly, 0).first()->setSelected(true);
+    }
+    result &= expect(workspace.selectedDirectory() == "/server-only/project", "the chosen workspace is an app-server path");
+    return result;
+}
+
+bool desktopFileBrowserContract() {
+    class ActivationStyle final : public QProxyStyle {
+    public:
+        explicit ActivationStyle(bool single)
+            : QProxyStyle(QStyleFactory::create("Fusion"))
+            , single(single) {
+        }
+        int styleHint(StyleHint hint, const QStyleOption* option, const QWidget* widget, QStyleHintReturn* data) const override {
+            return hint == SH_ItemView_ActivateItemOnSingleClick ? int(single) : QProxyStyle::styleHint(hint, option, widget, data);
+        }
+        bool single;
+    };
+    bool result = true;
+    QTemporaryDir theme;
+    const auto oldPaths = QIcon::themeSearchPaths();
+    const auto oldTheme = QIcon::themeName();
+    QDir().mkpath(theme.filePath("test/32x32/types"));
+    QFile index(theme.filePath("test/index.theme"));
+    result &= expect(index.open(QIODevice::WriteOnly), "isolated icon-theme fixture opens");
+    index.write("[Icon Theme]\nName=Test\nDirectories=32x32/types\n[32x32/types]\nSize=32\nType=Fixed\nContext=MimeTypes\n");
+    index.close();
+    for (const auto& entry :
+         {std::pair{"folder", QColor(Qt::yellow)}, {"application-pdf", QColor(Qt::red)}, {"image-png", QColor(Qt::green)}}) {
+        QImage image(32, 32, QImage::Format_ARGB32);
+        image.fill(entry.second);
+        result &= expect(image.save(theme.filePath(QString("test/32x32/types/%1.png").arg(entry.first))), "theme file-type icon saved");
+    }
+    QIcon::setThemeSearchPaths({theme.path()});
+    QIcon::setThemeName("test");
+    for (const bool single : {false, true}) {
+        auto filesystem = [](QObject*, std::string method, nlohmann::json parameters, auto complete) {
+            if (method == "fs/getMetadata") {
+                complete({{"isFile", parameters.at("path").get<std::string>().ends_with(".pdf")}}, "");
+            } else {
+                complete({{"entries",
+                           {{{"fileName", "child"}, {"isDirectory", true}},
+                            {{"fileName", "document.pdf"}, {"isFile", true}},
+                            {{"fileName", "picture.png"}, {"isFile", true}},
+                            {{"fileName", ".private"}, {"isFile", true}}}}},
+                         "");
+            }
+        };
+        FileSelectionDialog picker("/server-only", nullptr, {}, {}, filesystem, true);
+        picker.show();
+        auto* view = picker.findChild<QTreeWidget*>();
+        auto* style = new ActivationStyle(single);
+        style->setParent(view);
+        view->setStyle(style);
+        QCoreApplication::processEvents();
+        const auto row = [&](const QString& name) {
+            return view->findItems(name, Qt::MatchExactly, 0).value(0);
+        };
+        result &= expect(row("..") && !row(".private"), "parent navigation is visible while hidden entries are initially hidden");
+        result &= expect(row("child") && row("document.pdf") && row("picture.png"), "directory and file rows are present");
+        if (row("child") && row("document.pdf") && row("picture.png")) {
+            result &= expect(row("child")->icon(0).pixmap(16, 16).toImage().pixelColor(8, 8) == QColor(Qt::yellow) &&
+                                 row("document.pdf")->icon(0).pixmap(16, 16).toImage().pixelColor(8, 8) == QColor(Qt::red) &&
+                                 row("picture.png")->icon(0).pixmap(16, 16).toImage().pixelColor(8, 8) == QColor(Qt::green),
+                             "local desktop theme supplies folder, PDF and image icons for server-only paths");
+            const auto point = view->visualItemRect(row("child")).center();
+            const auto send = [&](QEvent::Type type, Qt::MouseButtons buttons) {
+                QMouseEvent event(
+                    type, QPointF(point), QPointF(view->viewport()->mapToGlobal(point)), Qt::LeftButton, buttons, Qt::NoModifier);
+                QCoreApplication::sendEvent(view->viewport(), &event);
+            };
+            send(QEvent::MouseButtonPress, Qt::LeftButton);
+            send(QEvent::MouseButtonRelease, Qt::NoButton);
+            auto* path = picker.findChild<QLineEdit*>("codexWorkspaceDirectory");
+            result &= expect(path->text() == (single ? "/server-only/child" : "/server-only"),
+                             "single-click navigation follows the platform style preference");
+            if (!single) {
+                send(QEvent::MouseButtonDblClick, Qt::LeftButton);
+                send(QEvent::MouseButtonRelease, Qt::NoButton);
+            }
+            result &= expect(path->text() == "/server-only/child", "configured activation opens the directory");
+            view->setCurrentItem(row(".."));
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &enter);
+            result &= expect(path->text() == "/server-only", "Enter activates the parent-directory entry");
+            bool menuSeen = false;
+            QTimer::singleShot(0, &picker, [&] {
+                auto* menu = dynamic_cast<QMenu*>(QApplication::activePopupWidget());
+                menuSeen = menu != nullptr;
+                if (menu) {
+                    for (auto* action : menu->actions()) {
+                        if (action->text() == "Show hidden files") {
+                            action->trigger();
+                        }
+                    }
+                    menu->close();
+                }
+            });
+            const auto target = view->visualItemRect(row("document.pdf")).center();
+            QContextMenuEvent context(QContextMenuEvent::Mouse, target, view->viewport()->mapToGlobal(target));
+            QCoreApplication::sendEvent(view->viewport(), &context);
+            result &= expect(menuSeen && row(".private"), "standard context menu toggles hidden files");
+            view->setCurrentItem(row("document.pdf"));
+            QCoreApplication::sendEvent(view, &enter);
+            result &= expect(picker.result() == QDialog::Accepted && picker.selectedFiles() == QStringList{"/server-only/document.pdf"},
+                             "Enter uses a selected server file without editing its name");
+        }
+    }
+    QIcon::setThemeSearchPaths(oldPaths);
+    QIcon::setThemeName(oldTheme);
+    return result;
+}
+
+bool workspaceAndSocketSelectionContract() {
+    bool result = true;
+    const auto capture = [&](QDialog& dialog, const QString& name) {
+        const auto evidence = qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR");
+        dialog.show();
+        const auto width = dialog.width();
+        for (const auto target : {dialog.minimumWidth(), width}) {
+            dialog.resize(target, dialog.height());
+            QCoreApplication::processEvents();
+            for (auto* button : dialog.findChildren<QPushButton*>()) {
+                if (button->isVisible()) {
+                    result &= expect(dialog.rect().contains(QRect(button->mapTo(&dialog, QPoint{}), button->size())),
+                                     "dialog buttons stay within narrow and default geometry");
+                }
+            }
+            if (!evidence.isEmpty()) {
+                QDir().mkpath(evidence);
+                result &= expect(dialog.grab().save(evidence + '/' + name + '-' + QString::number(target) + ".png"),
+                                 "dialog geometry evidence saved");
+            }
+        }
+    };
+
+    const QStringList choices{QStringLiteral("/project/first"), QStringLiteral("/project/second")};
+    for (const auto& roots : {QStringList{}, choices}) {
+        FileSelectionDialog dialog(QStringLiteral("/remote/manual"), nullptr, QStringLiteral("Target thread"), roots);
+        dialog.show();
+        auto* field = dialog.findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory"));
+        auto* combo = roots.isEmpty() ? nullptr : dialog.findChild<QComboBox*>("workspaceRoots");
+        result &=
+            expect(field && field->text() == QStringLiteral("/remote/manual"), "workspace retains a manual override over project roots");
+        result &= expect(dialog.findChildren<QLineEdit*>().size() == 1, "workspace has one editable path and no duplicate current field");
+        result &= expect(bool(combo) == !roots.isEmpty(), "workspace offers exactly the supplied project roots");
+        if (combo) {
+            combo->setCurrentIndex(1);
+            result &= expect(dialog.selectedDirectory() == choices[1], "choosing a project root updates the proposed workspace");
+        }
+        QPushButton* accept = nullptr;
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("Change workspace")) {
+                accept = button;
+            }
+        }
+        if (field && accept) {
+            field->clear();
+            result &= expect(!accept->isEnabled(), "an empty workspace cannot be accepted");
+            field->setText(QStringLiteral("/remote/explicit"));
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(field, &enter);
+            result &= expect(dialog.result() == QDialog::Accepted && dialog.selectedDirectory() == QStringLiteral("/remote/explicit"),
+                             "Return accepts an explicitly entered workspace");
+        }
+        if (field) {
+            field->setText("/remote/" + QString("long-directory/").repeated(30));
+        }
+        capture(dialog, roots.isEmpty() ? "workspace-manual" : "workspace-roots");
+        dialog.reject();
+        result &= expect(dialog.result() == QDialog::Rejected, "workspace cancellation does not submit a selection");
+    }
+    for (auto purpose : {NewThreadDialog::Purpose::Create, NewThreadDialog::Purpose::Fork}) {
+        NewThreadDialog dialog(NewThreadDraft{QStringLiteral("/remote/manual"), {}, {}, {}, false}, purpose, nullptr, choices);
+        auto* field = dialog.findChild<QLineEdit*>();
+        result &= expect(field && field->accessibleName() == "Workspace" && dialog.draft().workspace == "/remote/manual",
+                         "Create/Fork preserve their labelled workspace field");
+        if (field) {
+            field->setText("/remote/custom");
+        }
+        result &= expect(dialog.draft().workspace == "/remote/custom", "Create/Fork retain a manually entered override");
+        capture(dialog, purpose == NewThreadDialog::Purpose::Create ? "new-thread" : "fork");
+        QPushButton* browse = nullptr;
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            result &= expect(button->text() != QStringLiteral("Browse"), "no Browse button opens a second text editor");
+            if (button->accessibleName() == "Choose app-server workspace") {
+                browse = button;
+            }
+        }
+        result &= expect(browse != nullptr, "Create/Fork exposes actual app-server browsing");
+        if (browse) {
+            // Enter the nested modal loop before interacting with its picker.
+            QTimer::singleShot(0, &dialog, [&] {
+                auto* picker = dynamic_cast<FileSelectionDialog*>(QApplication::activeModalWidget());
+                result &= expect(picker != nullptr, "Create/Fork opens the shared selection dialog");
+                if (picker) {
+                    auto* roots = picker->findChild<QComboBox*>("workspaceRoots");
+                    result &= expect(roots && roots->count() == choices.size(), "Create/Fork browsing retains project-root choices");
+                    if (roots) {
+                        roots->setCurrentIndex(1);
+                    }
+                    for (auto* accept : picker->findChildren<QPushButton*>()) {
+                        if (accept->text() == "Select workspace") {
+                            accept->click();
+                        }
+                    }
+                }
+            });
+            browse->click();
+            result &= expect(dialog.draft().workspace == choices[1] && dialog.result() != QDialog::Accepted,
+                             "choosing a root updates the workspace without creating or forking");
+            QTimer::singleShot(0, &dialog, [&] {
+                if (auto* picker = dynamic_cast<FileSelectionDialog*>(QApplication::activeModalWidget())) {
+                    picker->reject();
+                }
+            });
+            browse->click();
+            result &= expect(dialog.draft().workspace == choices[1], "cancelling browsing retains the chosen workspace");
+            field->setText("/remote/manual-after-root");
+            result &= expect(dialog.draft().workspace == "/remote/manual-after-root", "manual entry still overrides a browsed root");
+        }
+    }
+    QTemporaryDir fixture;
+    QLocalServer server;
+    const QString socket = fixture.filePath(QStringLiteral("bridge.sock"));
+    result &= expect(server.listen(socket), "Unix socket fixture listens");
+    ConnectionDialog connection({{"selected", "unix"},
+                                 {"available",
+                                  {{{"key", "unix"}, {"kind", "unix"}, {"label", "Unix"}, {"path", socket.toStdString()}},
+                                   {{"key", "ipv4"}, {"kind", "network"}, {"label", "IPv4"}, {"host", "127.0.0.1"}, {"port", 4500}}}}});
+    connection.show();
+    QPushButton* browse = nullptr;
+    for (auto* button : connection.findChildren<QPushButton*>()) {
+        if (button->accessibleName() == QStringLiteral("Choose local Unix socket")) {
+            browse = button;
+        }
+    }
+    result &= expect(browse && browse->isVisible(), "Unix connection offers local socket selection");
+    if (browse) {
+        browse->click();
+        auto* picker = connection.findChild<QFileDialog*>();
+        result &= expect(picker && picker->isVisible() && !picker->testOption(QFileDialog::DontUseNativeDialog),
+                         "socket browsing opens a native-capable standard dialog");
+        if (picker) {
+            result &= expect(picker->filter().testFlag(QDir::System), "socket chooser includes special filesystem entries");
+            picker->selectFile(socket);
+            QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+            result &= expect(connection.selection().at("path") == socket.toStdString() && connection.result() == QDialog::Rejected,
+                             "socket selection updates only the endpoint field");
+        }
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        browse->click();
+        if (auto* cancelled = connection.findChild<QFileDialog*>()) {
+            cancelled->reject();
+        }
+        result &= expect(connection.selection().at("path") == socket.toStdString(), "socket cancellation preserves the endpoint");
+        connection.findChild<QComboBox*>()->setCurrentIndex(1);
+        result &= expect(!browse->isVisible() && connection.selection().at("host") == "127.0.0.1",
+                         "network hosts retain text entry without a socket chooser");
+    }
     return result;
 }
 
@@ -351,7 +962,7 @@ bool promptClipboardAndDropContract() {
   bool admit = false;
   int submissions = 0;
   std::vector<AttachmentDraft> submitted;
-  ComposerPane::Actions actions;
+  auto actions = attachmentActions();
   actions.attachmentError = [&](QString message) {
     error = std::move(message);
   };
@@ -414,7 +1025,7 @@ bool promptClipboardAndDropContract() {
     result &= expect(QImage(path) == image &&
                          composer.attachments().front().mimeType == "image/png",
                      "the saved image preserves pixels and is typed as PNG");
-    const auto permissions = QFile::permissions(path);
+    const auto permissions = QFile::permissions(QString::fromStdString(composer.attachments().front().localPath));
     result &= expect(!(permissions & (QFile::ReadGroup | QFile::ReadOther)),
                      "pasted image data is private to the user");
     sendKey(*editor, Qt::Key_Return);
@@ -2059,6 +2670,13 @@ int main(int argc, char **argv) {
   run("promptAttachmentAdmission", promptAttachmentAdmission);
   run("promptClipboardAndDropContract", promptClipboardAndDropContract);
   run("promptFileDialogContract", promptFileDialogContract);
+  run("workspaceAndSocketSelectionContract", workspaceAndSocketSelectionContract);
+  run("desktopFileBrowserContract", desktopFileBrowserContract);
+  run("selectionSourcesShareOneView", selectionSourcesShareOneView);
+  run("sharedFileSelectionContract", sharedFileSelectionContract);
+  run("manualWorkspaceDoesNotWaitForBrowsing", manualWorkspaceDoesNotWaitForBrowsing);
+  run("failedUploadBatchIsAtomic", failedUploadBatchIsAtomic);
+  run("uploadCompletionPreservesInputOrder", uploadCompletionPreservesInputOrder);
   if (argc == 2 && std::string(argv[1]) == "--attachment-input")
     return passed ? 0 : 1;
   run("turnSettingsAreStableAccessibleProjections",

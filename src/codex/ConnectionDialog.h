@@ -11,6 +11,7 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
+class QPushButton;
 
 namespace codexui::codex {
 
@@ -27,6 +28,7 @@ private:
   nlohmann::json settings;
   QComboBox *transport = nullptr;
   QLineEdit *address = nullptr;
+  QPushButton* browse = nullptr;
   QSpinBox *port = nullptr;
   QLineEdit *webSocketPath = nullptr;
   QLabel *addressLabel = nullptr;

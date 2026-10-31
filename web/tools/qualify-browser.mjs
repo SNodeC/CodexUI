@@ -10,6 +10,7 @@ import {fileURLToPath} from "node:url";
 import {timingLimit} from "./timing-policy.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
+const selectionFixture = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/file-selection.json"), "utf8"));
 const artifactDirectory = process.env.CODEXUI_WEB_ARTIFACT_DIR
     ? resolve(process.env.CODEXUI_WEB_ARTIFACT_DIR) : resolve(toolDirectory, "../app-dist");
 const wait = milliseconds => new Promise(complete => setTimeout(complete, milliseconds));
@@ -170,6 +171,7 @@ function checkTiming(condition, message) {
 }
 
 const applicationProfileSetup = `(async()=>{
+    globalThis.codexuiSelectionFixture=${JSON.stringify(selectionFixture)};
     const delay=milliseconds=>new Promise(complete=>setTimeout(complete,milliseconds));
     const waitFor=async(predicate,description)=>{for(let attempt=0;attempt<400;++attempt){
         if(predicate())return;await delay(5);}throw new Error("Timed out waiting for "+description);};
@@ -196,7 +198,11 @@ const applicationProfileSetup = `(async()=>{
                         defaultServiceTier:"fast",supportsPersonality:true},
                     {id:"gpt-b",model:"gpt-b",displayName:"GPT B",description:"No style model",
                         supportedReasoningEfforts:[{reasoningEffort:"medium"}],supportsPersonality:false}]}
-                :payload.method==="permissionProfile/list"?{data:[{id:":workspace",description:"Workspace access"}]}:{data:[]};
+                :payload.method==="permissionProfile/list"?{data:[{id:":workspace",description:"Workspace access"}]}
+                :payload.method==="fs/getMetadata"?{isFile:globalThis.codexuiSelectionFixture.entries.some(entry=>entry.isFile&&payload.params.path.endsWith("/"+entry.fileName)),isDirectory:!globalThis.codexuiSelectionFixture.entries.some(entry=>entry.isFile&&payload.params.path.endsWith("/"+entry.fileName)),isSymlink:false,createdAtMs:0,modifiedAtMs:0}
+                :payload.method==="fs/writeFile"?{}
+                :payload.method==="fs/readDirectory"?{entries:globalThis.codexuiSelectionFixture.entries}
+                :payload.method==="project/list"?{data:[{id:"workspace-project",name:"Workspace project",roots:[{path:"/server/first"},{path:"/server/second"}]}]}:{data:[]};
             if(payload.method==="model/list"||payload.method==="permissionProfile/list"){
                 this.pendingCatalogs.push({id:payload.id,result});return;}
             queueMicrotask(()=>this.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:payload.id,result}}));}
@@ -478,7 +484,30 @@ const workspaceDomContract = `(async()=>{
     editor.dispatchEvent(new Event("input",{bubbles:true}));await frame();
     heading().click();await frame();
     let dialog=document.querySelector(".new-thread-dialog");
-    const currentVisible=dialog?.textContent.includes("Current workspace")&&dialog?.textContent.includes("Proposed workspace");
+    const singleWorkspaceField=!dialog?.textContent.includes("Current workspace")&&dialog?.textContent.includes("Proposed workspace")&&dialog?.querySelectorAll("input").length===1&&dialog?.querySelector("input").value===(initial==="Workspace not reported"?"":initial);
+    [...dialog.querySelectorAll("button")].find(button=>button.textContent==="Browse app-server…")?.click();await frame();
+    let picker=document.querySelector('dialog[aria-label="Select app-server workspace"]');
+    const pickerSource=!!picker&&!picker.querySelector('option[value="local"]')&&!picker.textContent.includes("This computer")&&picker.querySelector("h2").textContent==="Select app-server workspace";
+    const pickerFolders=picker?.querySelector('[role="listbox"][aria-label="App-server directories"]').textContent.includes("project")
+        &&!picker?.querySelector('[role="listbox"][aria-label="App-server directories"]').textContent.includes("image.png");
+    const selectedDirectory=picker.querySelector('input').value;
+    [...picker.querySelectorAll('[role="option"]')].find(item=>item.dataset.fileName==="project").click();await frame();picker.querySelector('form').requestSubmit();await frame();
+    const selectedFolder=dialog.querySelector('input:not([readonly])').value===(selectedDirectory.endsWith("/")?selectedDirectory.slice(0,-1):selectedDirectory)+"/project"&&requests().length===0;
+    [...dialog.querySelectorAll("button")].find(button=>button.textContent==="Browse app-server…").click();await frame();picker=document.querySelector('dialog[aria-label="Select app-server workspace"]');
+    const originalSend=socket.send.bind(socket),pendingReads=[];
+    socket.send=data=>{const message=JSON.parse(data);if(message.payload?.method==="fs/readDirectory"){socket.sent.push(message);pendingReads.push(message.payload);}else originalSend(data);};
+    inputValue(picker.querySelector("input"),"/obsolete-listing");await frame();
+    [...picker.querySelectorAll("button")].find(button=>button.textContent==="Open directory").click();await frame();
+    inputValue(picker.querySelector("input"),"/chosen-on-server");await frame();
+    const manualPending=pendingReads.length===1&&!picker.querySelector('button[type="submit"]').disabled;
+    picker.querySelector("form").requestSubmit();await frame();socket.send=originalSend;
+    socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:pendingReads[0].id,result:{entries:[{fileName:"stale",isDirectory:true,isFile:false}]}}});await frame();
+    const browsedOnly=dialog.querySelector('input:not([readonly])').value==="/chosen-on-server"&&requests().length===0;
+    [...dialog.querySelectorAll("button")].find(button=>button.textContent==="Browse app-server…")?.click();await frame();
+    picker=document.querySelector('dialog[aria-label="Select app-server workspace"]');
+    picker.dispatchEvent(new Event("cancel",{cancelable:true}));await frame();
+    const pickerCancelled=dialog.isConnected&&!document.querySelector('dialog[aria-label="Select app-server workspace"]');
+
     dialog?.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));await frame();
     const cancelled=requests().length===0&&!document.querySelector(".new-thread-dialog");
     heading().click();await frame();dialog=document.querySelector(".new-thread-dialog");
@@ -489,13 +518,17 @@ const workspaceDomContract = `(async()=>{
     const pending=heading().disabled&&heading().textContent===initial&&heading().title.includes("pending");
     notify("thread/settings/updated",{threadId:"profile",threadSettings:{cwd:change.payload.params.cwd}});await frame();
     const confirmed=!heading().disabled&&heading().title.startsWith(change.payload.params.cwd)&&heading().scrollWidth>heading().clientWidth;
-    notify("thread/started",{thread:{id:"workspace-other",name:"Workspace B",cwd:"/other",status:{type:"idle"}}});await frame();
+    notify("thread/started",{thread:{id:"workspace-other",projectId:"workspace-project",name:"Workspace B",cwd:"/other",status:{type:"idle"}}});await frame();
     const row=[...document.querySelectorAll('[role="treeitem"]')].find(row=>row.getAttribute("aria-label")?.includes("Workspace B"));
     row?.querySelector(".thread-menu-trigger")?.click();await frame();
     const menu=document.querySelector('[role="menu"]');
     [...menu.querySelectorAll("button")].find(button=>button.textContent==="Change workspace…")?.click();await frame();
     dialog=document.querySelector(".new-thread-dialog");
     const exactTarget=dialog?.textContent.includes("Thread: Workspace B");
+    const roots=[...dialog.querySelectorAll("datalist option")].map(option=>option.value);
+    const workspaceRoots=JSON.stringify(roots)===JSON.stringify(["/server/first","/server/second"]);
+    inputValue(dialog.querySelector('input:not([readonly])'),roots[1]);await frame();
+    const selectedRoot=dialog.querySelector('input:not([readonly])').value==="/server/second";
     inputValue(dialog.querySelector('input:not([readonly])'),"/other-proposed");await frame();
     dialog.querySelector("form").requestSubmit();await frame();
     const other=requests().at(-1);
@@ -503,11 +536,155 @@ const workspaceDomContract = `(async()=>{
     const failure=document.querySelector('[role="alert"]')?.textContent.includes("workspace denied");
     const ownership=other.payload.params.threadId==="workspace-other"&&heading().title.startsWith(change.payload.params.cwd)
         &&editor.value==="retained workspace draft";
+    row?.querySelector(".thread-menu-trigger")?.click();await frame();
+    [...document.querySelectorAll('[role="menu"] button')].find(button=>button.textContent==="Fork with options…")?.click();await frame();
+    const fork=document.querySelector(".new-thread-dialog");
+    const forkRoots=JSON.stringify([...fork.querySelectorAll("datalist option")].map(option=>option.value))===JSON.stringify(roots);
+    inputValue(fork.querySelector('input'),"/server/fork-manual");await frame();
+    const forkManual=fork.querySelector('input').value==="/server/fork-manual";
+    fork.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));await frame();
     const grid=document.querySelector(".settings-grid");
     const labels=[...grid.querySelectorAll(":scope > label")].map(label=>label.querySelector("span")?.textContent);
     const moved=labels[4]==="Collaboration mode"&&!labels.includes("Workspace")&&!document.querySelector(".workspace-breadcrumb")
         &&![...document.querySelectorAll(".additional-settings label")].some(label=>label.textContent.includes("Collaboration mode"));
-    return {activeDisabled,currentVisible,cancelled,pending,confirmed,exactTarget,failure,ownership,moved};
+    return {activeDisabled,singleWorkspaceField,cancelled,pending,confirmed,exactTarget,failure,ownership,moved,workspaceRoots,selectedRoot,forkRoots,forkManual,pickerSource,pickerFolders,selectedFolder,manualPending,browsedOnly,pickerCancelled};
+})()`;
+
+const attachmentDomContract = `(async()=>{
+    const socket=globalThis.codexuiApplicationProfile.socket, fixture=globalThis.codexuiSelectionFixture;
+    const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
+    const waitFor=async(predicate,label)=>{for(let i=0;i<200;++i){if(predicate())return;await new Promise(done=>setTimeout(done,5));}throw new Error("Attachment check timed out: "+label);};
+    const picker=()=>document.querySelector('dialog[aria-label="Attach files"]');
+    const buttons=(root,text)=>[...root.querySelectorAll("button")].find(button=>button.textContent===text);
+    const inputValue=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,value);input.dispatchEvent(new Event("input",{bubbles:true}));};
+    const writes=()=>socket.sent.filter(message=>message.payload?.method==="fs/writeFile");
+    const chips=()=>[...document.querySelectorAll('.composer-attachments button')];
+    const open=async()=>{buttons(document.querySelector('.composer'),"Attach files").click();await waitFor(()=>picker()?.querySelector('[role="listbox"][aria-label="Files and directories"] [role="option"]'),"listing");await frame();};
+    const server=async()=>{await open();inputValue(picker().querySelector('input'),fixture.serverDirectory);await frame();buttons(picker(),"Open directory").click();await frame();};
+    const select=async(names)=>{const rows=[...picker().querySelectorAll('[role="option"]')].filter(row=>names.includes(row.dataset.fileName));
+        for(const [index,row] of rows.entries()){row.dispatchEvent(new MouseEvent("click",{bubbles:true,ctrlKey:index>0}));await frame();}};
+    const attach=async()=>{picker().querySelector('form').requestSubmit();await waitFor(()=>!picker(),"attachment admission");await frame();};
+    const source=async(value)=>{const choice=picker().querySelector('header select');choice.value=value;choice.dispatchEvent(new Event("change",{bubbles:true}));await frame();};
+    const removeAll=async()=>{while(chips().length){chips()[0].click();await frame();}};
+    localStorage.setItem("codexui.fileSelection.singleClick","false");
+    await server(); const serverView=picker().querySelector('[role="listbox"][aria-label="Files and directories"]');
+    const geometry=serverView.getBoundingClientRect();
+    const selectedFiles=fixture.attachments.map(file=>file.name);await select(selectedFiles);await frame();
+    const remoteWriteCount=writes().length;await attach();
+    const remoteFiles=chips().map(chip=>chip.textContent.replace(/ ×$/u,""));
+    const remoteWithoutUpload=JSON.stringify(remoteFiles)===JSON.stringify(selectedFiles)&&writes().length===remoteWriteCount;
+    await server();await select([selectedFiles[0]]);await frame();await attach();
+    const remoteDeduplicated=chips().length===selectedFiles.length;
+    await removeAll();
+    await server();inputValue(picker().querySelector('input'),fixture.attachments[0].path);await frame();buttons(picker(),"Open directory").click();await frame();
+    const typedFile=picker().querySelector('[role="listbox"][aria-label="Files and directories"]').querySelector('[role="option"][aria-selected="true"]')?.dataset.fileName===fixture.attachments[0].name;
+    await attach();await removeAll();
+    const file={kind:"file",name:fixture.local.name,getFile:async()=>new File([Uint8Array.from(atob(fixture.local.dataBase64),c=>c.charCodeAt(0))],fixture.local.name,{type:fixture.local.mimeType}),isSameEntry:async function(other){return this===other;}};
+    const secondFile={...file,name:"second.png"};
+    const nested={kind:"directory",name:"Nested",async *values(){yield file;}};
+    const root={kind:"directory",name:"Granted local directory",async *values(){yield nested;yield file;yield secondFile;}};
+    const originalChooser=window.showDirectoryPicker;
+    window.showDirectoryPicker=async()=>root;
+    await server();const view=picker().querySelector('[role="listbox"][aria-label="Files and directories"]');const beforeStyle=getComputedStyle(view).backgroundColor;
+    await source("local");
+    const sameView=picker().querySelector('[role="listbox"][aria-label="Files and directories"]')===view&&getComputedStyle(view).backgroundColor===beforeStyle;
+    const localExplicit=picker().querySelector('header select').value==="local"&&picker().textContent.includes("Uploads remain in: "+fixture.serverDirectory)&&picker().querySelector('input').readOnly;
+    await select(["Nested"]);await frame();picker().querySelector('[role="listbox"]').dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));await frame();
+    const descended=picker().querySelector('input').value.endsWith("/Nested");picker().querySelector('button[aria-label="Parent directory"]').click();await frame();
+    const parent=picker().querySelector('input').value==="Granted local directory"&&picker().querySelector('button[aria-label="Parent directory"]').disabled;
+    await select([file.name]);await frame();const previousWrites=writes().length;await attach();
+    const upload=writes().at(-1).payload.params;
+    const localBytes=writes().length===previousWrites+1&&upload.dataBase64===fixture.local.dataBase64&&upload.path.startsWith(fixture.serverDirectory+"/")&&upload.path.endsWith("-"+file.name);
+    const localAdmitted=chips().length===1&&chips()[0].textContent===file.name+" ×";
+    await server();await source("local");await select([file.name]);await frame();await attach();
+    const localDeduplicated=chips().length===1&&writes().length===previousWrites+1;
+    await open();buttons(picker(),"Cancel").click();await frame();const cancelRetains=chips().length===1&&!picker();
+    await removeAll();
+    const originalSend=socket.send.bind(socket);const deferred=[];
+    socket.send=data=>{const message=JSON.parse(data);if(message.payload?.method==="fs/writeFile"){socket.sent.push(message);deferred.push(message.payload);}else originalSend(data);};
+    await server();await source("local");await select([file.name]);await frame();picker().querySelector('form').requestSubmit();await waitFor(()=>deferred.length===1,"pending upload");
+    const pendingBlocksAdmission=chips().length===0&&picker().querySelector('button[type="submit"]').disabled&&!picker().querySelector('header select').disabled;
+    buttons(picker(),"Cancel").click();await frame();socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:deferred[0].id,result:{}}});await frame();
+    const cancelledUpload=chips().length===0&&!picker();
+    await server();await source("local");await select([file.name,secondFile.name]);await frame();picker().querySelector('form').requestSubmit();await waitFor(()=>deferred.length===2,"failed upload");
+    socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:deferred[1].id,result:{}}});await waitFor(()=>deferred.length===3,"second batch upload");
+    const atomicBatch=chips().length===0;
+    socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:deferred[2].id,error:{code:-32000,message:"Upload denied"}}});await frame();
+    const failedUpload=chips().length===0&&picker().querySelector('[role="alert"]').textContent.includes("Upload denied")&&!picker().querySelector('button[type="submit"]').disabled;
+    buttons(picker(),"Cancel").click();await frame();socket.send=originalSend;
+    window.showDirectoryPicker=async()=>({kind:"directory",name:"Too many files",async *values(){for(let i=0;i<17;++i)yield {...file,name:"limit-"+i+".png"};}});
+    await server();await source("local");await select(Array.from({length:17},(_,i)=>"limit-"+i+".png"));await frame();const limitWrites=writes().length;
+    picker().querySelector('form').requestSubmit();await frame();
+    const limit=chips().length===0&&writes().length===limitWrites&&picker().querySelector('[role="alert"]').textContent.includes("at most 16");
+    buttons(picker(),"Cancel").click();await frame();
+    window.showDirectoryPicker=undefined;await open();await source("local");
+    const unsupported=picker().querySelector('[role="alert"]').textContent.includes("requires HTTPS or localhost")&&picker().querySelector('header select').value==="server";
+    buttons(picker(),"Cancel").click();await frame();window.showDirectoryPicker=originalChooser;
+    await server();await select(selectedFiles);await frame();await attach();
+    const editor=document.querySelector('.composer textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set.call(editor,"");editor.dispatchEvent(new Event("input",{bubbles:true}));await frame();
+    socket.send=data=>{const message=JSON.parse(data);if(message.payload?.method==="turn/start"){socket.sent.push(message);}else originalSend(data);};
+    const startCount=socket.sent.filter(message=>message.payload?.method==="turn/start").length;
+    document.querySelector('.composer').requestSubmit();await frame();
+    const sent=socket.sent.filter(message=>message.payload?.method==="turn/start").at(-1);
+    const sentFiles=sent.payload.params.input;
+    const exactInput=socket.sent.filter(message=>message.payload?.method==="turn/start").length===startCount+1
+        &&sentFiles.some(item=>item.type==="localImage"&&item.path===fixture.attachments[0].path)
+        &&sentFiles.some(item=>item.type==="localAudio"&&item.path===fixture.attachments.find(file=>file.mimeType.startsWith("audio/")).path)
+        &&sentFiles[0].text.includes("file:///server-only/notes.txt")&&!JSON.stringify(sent).includes("dataBase64");
+    const cleared=chips().length===0&&editor.value==="";
+    socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",id:sent.payload.id,error:{code:-32000,message:"Attachment turn rejected"}}});await frame();
+    const restore=[...document.querySelectorAll('button')].find(button=>button.textContent.includes("Restore"));
+    restore?.click();await frame();
+    const recovered=chips().length===fixture.attachments.length&&document.querySelector('.composer textarea').value==="";
+    socket.send=originalSend;
+    return {remoteWithoutUpload,remoteDeduplicated,typedFile,atomicBatch,limit,sameView,localExplicit,descended,parent,localBytes,localAdmitted,localDeduplicated,cancelRetains,pendingBlocksAdmission,cancelledUpload,failedUpload,unsupported,exactInput,cleared,recovered};
+})()`;
+
+const desktopBrowserContract = `(async()=>{
+    const fixture=globalThis.codexuiSelectionFixture,oldEntries=fixture.entries;
+    fixture.entries=[...oldEntries,{fileName:"document.pdf",isFile:true},{fileName:"space image.png",isFile:true},{fileName:".private.txt",isFile:true}];
+    const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
+    const picker=()=>document.querySelector('dialog[aria-label="Attach files"]');
+    const button=(text,root=picker())=>[...root.querySelectorAll('button')].find(item=>item.textContent===text);
+    const row=name=>[...picker().querySelectorAll('[role="option"]')].find(item=>item.dataset.fileName===name);
+    const list=()=>picker().querySelector('[role="listbox"]');
+    const selected=()=>[...picker().querySelectorAll('[role="option"][aria-selected="true"]')].map(item=>item.dataset.fileName);
+    const click=async(name,options={})=>{row(name).dispatchEvent(new MouseEvent('click',{bubbles:true,...options}));await frame();};
+    const key=async(key,options={})=>{list().dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,...options}));await frame();};
+    const menu=()=>picker().querySelector('.file-selection-menu .menu-popover');
+    const open=async()=>{button('Attach files',document.querySelector('.composer')).click();await frame();
+        const input=picker().querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,fixture.serverDirectory);input.dispatchEvent(new Event('input',{bubbles:true}));await frame();button('Open directory').click();await frame();};
+    const preference=async(value)=>{const select=picker().querySelector('[aria-label="Item activation"]');select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));await frame();};
+    const path=()=>picker().querySelector('input').value;
+    await open();await preference('double');
+    const names=[...list().querySelectorAll('[role="option"]')].map(item=>item.dataset.fileName);
+    const sorted=names[0]==='..'&&names[1]==='project'&&!names.includes('.private.txt');
+    const icons=[...list().querySelectorAll('svg.file-type-icon')];
+    const typeIcons=icons.length===names.length&&row('project').querySelector('svg').dataset.kind==='folder'
+        &&row('image.png').querySelector('svg').dataset.kind==='image'&&row('sound.mp3').querySelector('svg').dataset.kind==='audio'
+        &&row('document.pdf').querySelector('svg text').textContent==='PDF';
+    await click('project');const doubleSelects=path()===fixture.serverDirectory&&selected()[0]==='project';
+    row('project').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await frame();const doubleOpens=path()===fixture.serverDirectory+'/project';
+    await click('..');await key('Enter');const parent=path()===fixture.serverDirectory;
+    await preference('single');await click('project');const singleOpens=path()===fixture.serverDirectory+'/project';
+    await click('..');const singleParent=path()===fixture.serverDirectory;
+    button('Cancel').click();await frame();await open();const persisted=picker().querySelector('[aria-label="Item activation"]').value==='single';
+    await preference('double');
+    await click('image.png');await key('ArrowDown',{shiftKey:true});const range=selected().length===2&&selected().includes('image.png')&&selected().includes('notes.txt');
+    await key('ArrowDown',{ctrlKey:true});const controlMoves=selected().length===2;
+    await key(' ',{ctrlKey:true});const spaceToggles=selected().length===3;
+    await click('space image.png');const focusId=list().getAttribute('aria-activedescendant');
+    const spacedAccessible=focusId&&!focusId.includes(' ')&&document.getElementById(focusId)?.dataset.fileName==='space image.png';
+    row('document.pdf').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:innerWidth-2,clientY:innerHeight-2}));await frame();
+    const bounds=menu().getBoundingClientRect();const contextBounded=menu().matches(':popover-open')&&bounds.right<=innerWidth&&bounds.bottom<=innerHeight;
+    const contextFocus=document.activeElement?.getAttribute('role')==='menuitem';
+    button('Show hidden files',menu()).click();await frame();const hidden=!!row('.private.txt');
+    const originalWrite=navigator.clipboard.writeText;let copied='';navigator.clipboard.writeText=async text=>{copied=text;};
+    row('document.pdf').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:100,clientY:100}));await frame();button('Copy displayed path',menu()).click();await frame();
+    navigator.clipboard.writeText=originalWrite;const copy=copied===fixture.serverDirectory+'/document.pdf';
+    await key('ContextMenu');const keyboardMenu=menu().matches(':popover-open');
+    fixture.entries=oldEntries;
+    return {sorted,typeIcons,doubleSelects,doubleOpens,parent,singleOpens,singleParent,persisted,range,controlMoves,spaceToggles,spacedAccessible,contextBounded,contextFocus,hidden,copy,keyboardMenu};
 })()`;
 
 const fullTopBarMeasurement = `(()=>{
@@ -928,8 +1105,8 @@ try {
         `paused anchor moved ${detachedResult.anchorTopDelta}px across an above-anchor stream update`);
 
     const workspaceDom = await devTools.evaluate(workspaceDomContract);
-    assert.deepEqual(workspaceDom, {activeDisabled: true, currentVisible: true, cancelled: true,
-        pending: true, confirmed: true, exactTarget: true, failure: true, ownership: true, moved: true});
+    assert.deepEqual(workspaceDom, {activeDisabled: true, singleWorkspaceField: true, cancelled: true,
+        pending: true, confirmed: true, exactTarget: true, failure: true, ownership: true, moved: true, workspaceRoots: true, selectedRoot: true, forkRoots: true, forkManual: true, pickerSource: true, pickerFolders: true, selectedFolder: true, manualPending: true, browsedOnly: true, pickerCancelled: true});
     const workspaceGeometry = [];
     if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
         await mkdir(process.env.CODEXUI_BROWSER_SCREENSHOTS, {recursive: true});
@@ -1017,7 +1194,54 @@ try {
         const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
         await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, "browser-turn-removal.png"), Buffer.from(screenshot.data, "base64"));
     }
-    console.log(JSON.stringify({navigation, navigationGeometry, touchNavigation, turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: false});
+    await setWidth(devTools, 1280);
+    const attachments = await devTools.evaluate(attachmentDomContract);
+    console.log(JSON.stringify({attachmentChecks: attachments}));
+    for (const [name, passed] of Object.entries(attachments)) { assert.equal(passed, true, `Attachment picker: ${name}`); }
+    const desktopBrowser = await devTools.evaluate(desktopBrowserContract);
+    console.log(JSON.stringify({desktopBrowser}));
+    for (const [name, passed] of Object.entries(desktopBrowser)) { assert.equal(passed, true, `Desktop file browser: ${name}`); }
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27});
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27});
+    await waitUntil(devTools, `!document.querySelector('.file-selection-menu .menu-popover')?.matches(':popover-open')`, "file context menu dismissed");
+    assert(await devTools.evaluate(`!!document.querySelector('dialog[aria-label="Attach files"]')`), "Escape dismisses the menu before the selection dialog");
+    await devTools.evaluate(`[...document.querySelector('dialog[aria-label="Attach files"]').querySelectorAll('button')].find(button=>button.textContent==="Cancel").click()`);
+    const attachmentGeometry = [];
+    for (const dpr of [1, 1.25, 1.5, 2]) {
+        for (const width of [360, 680]) {
+            await devTools.call("Emulation.setDeviceMetricsOverride", {width, height: 900, deviceScaleFactor: dpr, mobile: false});
+            for (const source of ["server", "local"]) {
+                const geometry = await devTools.evaluate(`(async()=>{
+                    const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
+                    [...document.querySelectorAll('.composer button')].find(button=>button.textContent==="Attach files").click();await frame();
+                    const dialog=document.querySelector('dialog[aria-label="Attach files"]');
+                    const input=dialog.querySelector('input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,"/server/"+"long-directory-".repeat(40));input.dispatchEvent(new Event("input",{bubbles:true}));await frame();
+                    [...dialog.querySelectorAll('button')].find(button=>button.textContent==="Open directory").click();await frame();
+                    const original=window.showDirectoryPicker;
+                    if(${JSON.stringify(source)}==="local"){
+                        window.showDirectoryPicker=async()=>({name:"local-"+"long-directory-".repeat(40),kind:"directory",async *values(){yield {name:"long-file-".repeat(40)+".png",kind:"file"};}});
+                        const choice=dialog.querySelector('header select');choice.value="local";choice.dispatchEvent(new Event("change",{bubbles:true}));await frame();
+                    }
+                    const rect=dialog.getBoundingClientRect(),list=dialog.querySelector('[role="listbox"][aria-label="Files and directories"]').getBoundingClientRect();
+                    const controls=[...dialog.querySelectorAll('button,input,select')].map(element=>element.getBoundingClientRect());
+                    const result={overflow:document.documentElement.scrollWidth-innerWidth,dialogOverflow:dialog.scrollWidth-dialog.clientWidth,
+                        contained:rect.left>=0&&rect.right<=innerWidth&&list.left>=rect.left&&list.right<=rect.right,
+                        usable:controls.every(control=>control.width>=24&&control.height>=24&&control.left>=rect.left&&control.right<=rect.right),
+                        source:dialog.querySelector('header select').value};
+                    window.showDirectoryPicker=original;return result;
+                })()`);
+                assert.deepEqual(geometry, {overflow: 0, dialogOverflow: 0, contained: true, usable: true, source}, `Attachment layout DPR ${dpr}, ${width}px, ${source}`);
+                attachmentGeometry.push({dpr, width, ...geometry});
+                if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
+                    const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+                    await writeFile(join(process.env.CODEXUI_BROWSER_SCREENSHOTS, `picker-${source}-${dpr}-${width}.png`), Buffer.from(screenshot.data, "base64"));
+                }
+                await devTools.evaluate(`[...document.querySelector('dialog[aria-label="Attach files"]').querySelectorAll('button')].find(button=>button.textContent==="Cancel").click()`);
+            }
+        }
+    }
+    console.log(JSON.stringify({desktopBrowser, attachments, attachmentGeometry, navigation, navigationGeometry, touchNavigation, turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

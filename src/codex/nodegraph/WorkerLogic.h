@@ -95,6 +95,8 @@ public:
   [[nodiscard]] ChannelSendStatus threadBrowserState(std::string key,
                                                      Value::Object fields);
 
+  [[nodiscard]] ChannelSendStatus filesystemState(std::string key, Value::Object fields);
+
   [[nodiscard]] ChannelSendStatus threadHydration(const NodeRef &thread,
                                                   std::string state,
                                                   std::string error = {});
