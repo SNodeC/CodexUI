@@ -3,11 +3,12 @@
 #include "codex/FrontendSession.h"
 
 #include "codex/ClientRuntime.h"
+#include "codex/NodeGraphJson.h"
 
 #include <QElapsedTimer>
+#include <QPointer>
 #include <QSocketNotifier>
 #include <QTimer>
-
 #include <algorithm>
 #include <cerrno>
 #include <system_error>
@@ -90,6 +91,79 @@ void FrontendSession::shutdown() {
   workerNotifier.reset();
   workerWakeRecoveryTimer.reset();
   channels.close();
+}
+
+FrontendSession::Filesystem FrontendSession::filesystemAccess() {
+    std::uint64_t authority = 0;
+    bool readable = false;
+    if (auto read = graph.tryRead()) {
+        readable = true;
+        if (auto connection = read->find({nodegraph::NodeKind::Connection, "connection"})) {
+            authority = nodegraph::unsignedIntegerFromValue(nodegraph::valueMember(*read->state(connection), "providerAuthorityRevision"))
+                            .value_or(0);
+        }
+    }
+    return [this, authority, readable](QObject* receiver, std::string method, nlohmann::json parameters, FilesystemCompletion completed) {
+        const auto key = "filesystem:" + std::to_string(nextUiActionCorrelation++);
+        nodegraph::RuntimeAction action{
+            nodegraph::RuntimeActionKind::Filesystem,
+            {{"method", method}, {"authority", authority}, {"parameters", *valueFromJson(parameters).asObject()}},
+            key,
+            {},
+            {}};
+        if (readable && nodegraph::messageAdmitted(channels.sendRuntimeAction(action))) {
+            filesystemRequests.emplace(key,
+                                       std::make_pair(authority,
+                                                      [receiver = QPointer<QObject>(receiver),
+                                                       completed = std::move(completed)](nlohmann::json result, std::string error) {
+                                                          if (receiver) {
+                                                              completed(std::move(result), std::move(error));
+                                                          }
+                                                      }));
+        } else {
+            completed({}, "Filesystem request was not admitted; try again.");
+        }
+    };
+}
+
+bool FrontendSession::deliverFilesystem() {
+    std::vector<std::pair<FilesystemCompletion, nlohmann::json>> ready;
+    bool available = filesystemRequests.empty();
+    if (!available) {
+        auto read = graph.tryRead();
+        available = bool(read);
+        if (read) {
+            auto connection = read->find({nodegraph::NodeKind::Connection, "connection"});
+            const auto authority =
+                connection
+                    ? nodegraph::unsignedIntegerFromValue(nodegraph::valueMember(*read->state(connection), "providerAuthorityRevision"))
+                          .value_or(0)
+                    : 0;
+            for (auto it = filesystemRequests.begin(); it != filesystemRequests.end();) {
+                const auto result = read->find({nodegraph::NodeKind::Catalog, it->first});
+                nlohmann::json fields = result ? jsonFromValue(nodegraph::Value(read->state(result)->fields)) : nlohmann::json::object();
+                if (it->second.first != authority || workerFinished.load(std::memory_order_acquire)) {
+                    fields = {{"error", "App-server changed; select the file again."}};
+                }
+                if (!fields.empty() && !fields.value("pending", false)) {
+                    nodegraph::RuntimeAction release{nodegraph::RuntimeActionKind::Filesystem, {}, it->first, {}, {}};
+                    if (workerFinished.load(std::memory_order_acquire) || nodegraph::messageAdmitted(channels.sendRuntimeAction(release))) {
+                        ready.emplace_back(std::move(it->second.second), std::move(fields));
+                        it = filesystemRequests.erase(it);
+                    } else {
+                        available = false;
+                        ++it;
+                    }
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+    for (auto& [completed, fields] : ready) {
+        completed(fields.value("result", nlohmann::json::object()), fields.value("error", ""));
+    }
+    return available;
 }
 
 void FrontendSession::setRuntimeStoppedHandler(RuntimeStoppedHandler handler) {
@@ -191,19 +265,23 @@ void FrontendSession::drainWorkerMessages() {
         [this](auto &payload) {
           using Message = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Message, nodegraph::GraphChanged>) {
-            if (graphChangedHandler) {
-              try {
-                if (!graphChangedHandler(payload))
+              if (!deliverFilesystem()) {
                   deferredGraphChanges.push_front(std::move(payload));
-              } catch (...) {
+              } else {
+                  if (graphChangedHandler) {
+                      try {
+                          if (!graphChangedHandler(payload))
+                              deferredGraphChanges.push_front(std::move(payload));
+                      } catch (...) {
+                      }
+                  }
+                  if (!graphChangedHandler)
+                      queueRetirementAcknowledgements(payload.removed);
+                  if (payload.rescanRequired) {
+                      requireRescanRetirementCollection();
+                      collectRescanRetirements();
+                  }
               }
-            }
-            if (!graphChangedHandler)
-              queueRetirementAcknowledgements(payload.removed);
-            if (payload.rescanRequired) {
-              requireRescanRetirementCollection();
-              collectRescanRetirements();
-            }
           } else if constexpr (std::is_same_v<
                                    Message, nodegraph::ProtocolDiagnostic>) {
             if (protocolDiagnosticHandler) {
@@ -394,6 +472,7 @@ void FrontendSession::notifyRuntimeStopped() noexcept {
   if (runtimeStopReported)
     return;
   runtimeStopReported = true;
+  static_cast<void>(deliverFilesystem());
   if (runtimeStoppedHandler) {
     try {
       runtimeStoppedHandler();

@@ -2,7 +2,6 @@
 
 #include "codex/NewThreadDialog.h"
 
-#include "codex/WorkspaceDialog.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QCheckBox>
@@ -49,7 +48,8 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
           NewThreadDraft{std::move(initialWorkspace), {}, {}, {}, false},
           Purpose::Create, parent) {}
 
-NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose, QWidget* parent, QStringList workspaceChoices)
+NewThreadDialog::NewThreadDialog(
+    NewThreadDraft initialDraft, Purpose purpose, QWidget* parent, QStringList workspaceChoices, FileSelectionDialog::Access filesystem)
     : UiStyle::ScrollFormDialog(parent) {
     setModal(true);
     const bool forFork = purpose == Purpose::Fork;
@@ -73,28 +73,23 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose, Q
     form->setContentsMargins(0, 2, 8, 2);
     form->setSpacing(16);
 
-    QComboBox* roots = nullptr;
-    if (!workspaceChoices.isEmpty()) {
-        roots = new QComboBox;
-        roots->setEditable(true);
-        roots->addItems(workspaceChoices);
-        roots->setCurrentIndex(-1);
-        workspace = roots->lineEdit();
-        workspace->setText(initialDraft.workspace);
-        roots->setAccessibleName(QStringLiteral("Project workspace root or explicit override"));
-    } else {
-        workspace = new QLineEdit(std::move(initialDraft.workspace));
-    }
+    workspace = new QLineEdit(std::move(initialDraft.workspace));
     workspace->setPlaceholderText(QStringLiteral("App-server directory path"));
     auto* workspaceRow = new QWidget;
     auto* workspaceLayout = new QHBoxLayout(workspaceRow);
     workspaceLayout->setContentsMargins(0, 0, 0, 0);
-    workspaceLayout->setSpacing(8);
-    auto* browse = new QPushButton(QStringLiteral("Browse"));
-    browse->setMinimumHeight(34);
-    workspaceLayout->addWidget(roots ? static_cast<QWidget*>(roots) : workspace, 1);
+    auto* browse = new QPushButton("Browse app-server…");
+    browse->setAccessibleName("Choose app-server workspace");
+    workspaceLayout->addWidget(workspace, 1);
     workspaceLayout->addWidget(browse);
-    form->addWidget(field(QStringLiteral("Workspace"), workspaceRow, workspace));
+    form->addWidget(field("Workspace", workspaceRow, workspace));
+    connect(browse, &QPushButton::clicked, this, [this, filesystem, workspaceChoices] {
+        FileSelectionDialog selection(
+            workspace->text(), this, {}, workspaceChoices, filesystem ? filesystem() : FileSelectionDialog::Filesystem{});
+        if (selection.exec() == QDialog::Accepted) {
+            workspace->setText(selection.selectedDirectory());
+        }
+    });
 
     name = new QLineEdit;
     name->setPlaceholderText(QStringLiteral("Optional thread name"));
@@ -152,9 +147,6 @@ NewThreadDialog::NewThreadDialog(NewThreadDraft initialDraft, Purpose purpose, Q
     footer->addWidget(create);
     root->addLayout(footer);
 
-    connect(browse, &QPushButton::clicked, this, [this] {
-        chooseWorkspace();
-    });
     connect(ephemeral, &QCheckBox::toggled, this, [this](bool checked) {
         name->setEnabled(!checked);
     });
@@ -183,13 +175,6 @@ NewThreadDraft NewThreadDialog::draft() const {
             baseInstructions->toPlainText().trimmed(),
             developerInstructions->toPlainText().trimmed(),
             ephemeral->isChecked()};
-}
-
-void NewThreadDialog::chooseWorkspace() {
-    WorkspaceDialog dialog(draft().workspace, this);
-    if (dialog.exec() == QDialog::Accepted) {
-        workspace->setText(dialog.selectedDirectory());
-    }
 }
 
 void NewThreadDialog::acceptDraft() {

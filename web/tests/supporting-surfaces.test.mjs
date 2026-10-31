@@ -82,15 +82,23 @@ test("workspace options form supports explicit root choices and one deliberate c
     assert.match(creation, /value=""/u);
     for (const path of rootChoices) assert.ok(creation.includes(`value="${path}"`));
     const change = renderToStaticMarkup(createElement(NewThreadDialog, {
-        purpose: "workspace", initialWorkspace: "/remote/old", initialDraft: {
+        purpose: "workspace", workspaceChoices: rootChoices, initialWorkspace: "/remote/old", initialDraft: {
             workspace: "/remote/old", name: "Target B", baseInstructions: "", developerInstructions: "", ephemeral: false,
         }, ...callbacks,
     }));
+    for (const purpose of ["workspace", "fork"]) {
+        const markup = renderToStaticMarkup(createElement(NewThreadDialog, {
+            purpose, workspaceChoices: rootChoices, initialWorkspace: "/remote/manual", ...callbacks,
+        }));
+        for (const path of rootChoices) assert.ok(markup.includes(`value="${path}"`));
+        assert.ok(markup.includes('value="/remote/manual"'));
+    }
     assert.match(change, /Change workspace…/u);
     assert.match(change, /Thread: Target B/u);
-    assert.match(change, /Current workspace/u);
+    assert.doesNotMatch(change, /Current workspace|readonly/u);
     assert.match(change, /Proposed workspace/u);
     assert.doesNotMatch(change, /Temporary thread|Developer instructions|Base instructions/u);
     const unknown = renderToStaticMarkup(createElement(NewThreadDialog, {purpose: "workspace", initialWorkspace: "", ...callbacks}));
-    assert.match(unknown, /Workspace not reported/u);
+    assert.match(unknown, /Proposed workspace/u);
+    assert.doesNotMatch(unknown, /Current workspace|Workspace not reported/u);
 });

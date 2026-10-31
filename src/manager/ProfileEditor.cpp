@@ -4,6 +4,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -37,11 +38,11 @@ namespace codexui::manager {
         }
         QLineEdit* line(QFormLayout* form,
                         const QString& label,
-                        const QString& value,
-                        std::function<void(QString)> setter,
+                        QString& value,
                         QVector<std::function<void(Profile&)>>& readers,
                         const QString& placeholder = {},
-                        std::optional<QFileDialog::FileMode> localSelection = std::nullopt) {
+                        std::optional<QFileDialog::FileMode> localSelection = std::nullopt,
+                        QList<QPushButton*>* hostPaths = nullptr) {
             auto* edit = new QLineEdit(value, form->parentWidget());
             edit->setPlaceholderText(placeholder);
             edit->setAccessibleName(label);
@@ -52,6 +53,9 @@ namespace codexui::manager {
                 auto* browse = new QPushButton("Browse local…", row);
                 browse->setAccessibleName("Choose local " + label);
                 browse->setToolTip(browse->accessibleName());
+                if (hostPaths) {
+                    hostPaths->push_back(browse);
+                }
                 layout->addWidget(edit, 1);
                 layout->addWidget(browse);
                 QWidget::setTabOrder(edit, browse);
@@ -63,6 +67,8 @@ namespace codexui::manager {
                     dialog->setAttribute(Qt::WA_DeleteOnClose);
                     dialog->setWindowModality(Qt::WindowModal);
                     dialog->setFileMode(mode);
+                    dialog->setAcceptMode(mode == QFileDialog::AnyFile ? QFileDialog::AcceptSave : QFileDialog::AcceptOpen);
+                    dialog->setFilter(dialog->filter() | QDir::System);
                     dialog->setOption(QFileDialog::ShowDirsOnly, mode == QFileDialog::Directory);
                     dialog->setSupportedSchemes({"file"});
                     QObject::connect(dialog, &QFileDialog::fileSelected, edit, &QLineEdit::setText);
@@ -71,8 +77,8 @@ namespace codexui::manager {
             } else {
                 form->addRow(label, edit);
             }
-            readers.push_back([edit, setter = std::move(setter)](Profile&) {
-                setter(edit->text().trimmed());
+            readers.push_back([edit, &value](Profile&) {
+                value = edit->text().trimmed();
             });
             return edit;
         }
@@ -90,36 +96,14 @@ namespace codexui::manager {
         auto* tabs = new QTabWidget(this);
         layout->addWidget(tabs, 1);
         QVBoxLayout* content;
+        QList<QPushButton*> bridgePaths, appPaths;
         auto* identity = page(tabs, "Identity", &content);
         auto* form = new QFormLayout;
         form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
         content->addLayout(form);
-        line(
-            form,
-            "Name",
-            profile_.name,
-            [this](QString v) {
-                profile_.name = v;
-            },
-            readers_);
-        line(
-            form,
-            "Description",
-            profile_.description,
-            [this](QString v) {
-                profile_.description = v;
-            },
-            readers_);
-        line(
-            form,
-            "CODEX_HOME",
-            profile_.codexHome,
-            [this](QString v) {
-                profile_.codexHome = v;
-            },
-            readers_,
-            "Absolute path on the app-server host",
-            QFileDialog::Directory);
+        line(form, "Name", profile_.name, readers_);
+        line(form, "Description", profile_.description, readers_);
+        line(form, "CODEX_HOME", profile_.codexHome, readers_, "Absolute path on the app-server host", QFileDialog::Directory, &appPaths);
         auto* accent = new QComboBox(identity);
         for (const auto& key : {"blue", "green", "purple", "teal", "amber", "orange"}) {
             accent->addItem(QString::fromLatin1(key), QString::fromLatin1(key));
@@ -142,73 +126,57 @@ namespace codexui::manager {
             identity));
         content->addStretch();
 
-        auto hostForm =
-            [this](
-                QVBoxLayout* box, Host& host, const QString& title, const QString& executable, std::function<void(QString)> setExecutable) {
-                auto* group = new QGroupBox(title, this);
-                auto* f = new QFormLayout(group);
-                box->addWidget(group);
-                auto* ownership = new QComboBox(group);
-                for (auto mode : {Ownership::Local, Ownership::Ssh, Ownership::External}) {
-                    ownership->addItem(ownershipLabel(mode), int(mode));
-                }
-                ownership->setCurrentIndex(ownership->findData(int(host.ownership)));
-                f->addRow("Process ownership", ownership);
-                readers_.push_back([ownership, &host](Profile&) {
-                    host.ownership = Ownership(ownership->currentData().toInt());
-                });
-                line(
-                    f,
-                    "Host / SSH alias",
-                    host.sshTarget,
-                    [&host](QString v) {
-                        host.sshTarget = v;
-                    },
-                    readers_,
-                    "Empty for this machine; user@host or SSH alias for remote");
-                line(
-                    f,
-                    "SSH identity file",
-                    host.identityFile,
-                    [&host](QString v) {
-                        host.identityFile = v;
-                    },
-                    readers_,
-                    "Optional local key path; SSH config and agent are also supported",
-                    QFileDialog::ExistingFile);
-                line(f, "Executable", executable, std::move(setExecutable), readers_);
-                line(
-                    f,
-                    "Working directory",
-                    host.workingDirectory,
-                    [&host](QString v) {
-                        host.workingDirectory = v;
-                    },
-                    readers_,
-                    "Optional absolute path on this component's host");
-                auto* environment = new QPlainTextEdit(group);
-                QStringList variables;
-                for (auto it = host.environment.cbegin(); it != host.environment.cend(); ++it) {
-                    variables << it.key() + '=' + it.value();
-                }
-                environment->setPlainText(variables.join('\n'));
-                environment->setMaximumHeight(110);
-                environment->setPlaceholderText("Non-secret KEY=value entries, one per line");
-                environment->setAccessibleName(title + " environment");
-                f->addRow("Environment", environment);
-                readers_.push_back([environment, &host](Profile&) {
-                    host.environment.clear();
-                    for (const auto& entry : environment->toPlainText().split('\n')) {
-                        const auto separator = entry.indexOf('=');
-                        if (!entry.trimmed().isEmpty()) {
-                            host.environment.insert(separator > 0 ? entry.left(separator).trimmed() : entry,
-                                                    separator > 0 ? entry.mid(separator + 1) : QString{});
-                        }
+        auto hostForm = [this](QVBoxLayout* box, Host& host, const QString& title, QString& executable, QList<QPushButton*>& paths) {
+            auto* group = new QGroupBox(title, this);
+            auto* f = new QFormLayout(group);
+            box->addWidget(group);
+            auto* ownership = new QComboBox(group);
+            for (auto mode : {Ownership::Local, Ownership::Ssh, Ownership::External}) {
+                ownership->addItem(ownershipLabel(mode), int(mode));
+            }
+            ownership->setCurrentIndex(ownership->findData(int(host.ownership)));
+            f->addRow("Process ownership", ownership);
+            readers_.push_back([ownership, &host](Profile&) {
+                host.ownership = Ownership(ownership->currentData().toInt());
+            });
+            line(f, "Host / SSH alias", host.sshTarget, readers_, "Empty for this machine; user@host or SSH alias for remote");
+            line(f,
+                 "SSH identity file",
+                 host.identityFile,
+                 readers_,
+                 "Optional local key path; SSH config and agent are also supported",
+                 QFileDialog::ExistingFile);
+            line(f, "Executable", executable, readers_, {}, QFileDialog::ExistingFile, &paths);
+            line(f,
+                 "Working directory",
+                 host.workingDirectory,
+                 readers_,
+                 "Optional absolute path on this component's host",
+                 QFileDialog::Directory,
+                 &paths);
+            auto* environment = new QPlainTextEdit(group);
+            QStringList variables;
+            for (auto it = host.environment.cbegin(); it != host.environment.cend(); ++it) {
+                variables << it.key() + '=' + it.value();
+            }
+            environment->setPlainText(variables.join('\n'));
+            environment->setMaximumHeight(110);
+            environment->setPlaceholderText("Non-secret KEY=value entries, one per line");
+            environment->setAccessibleName(title + " environment");
+            f->addRow("Environment", environment);
+            readers_.push_back([environment, &host](Profile&) {
+                host.environment.clear();
+                for (const auto& entry : environment->toPlainText().split('\n')) {
+                    const auto separator = entry.indexOf('=');
+                    if (!entry.trimmed().isEmpty()) {
+                        host.environment.insert(separator > 0 ? entry.left(separator).trimmed() : entry,
+                                                separator > 0 ? entry.mid(separator + 1) : QString{});
                     }
-                });
-                return group;
-            };
-        auto endpointForm = [this](QVBoxLayout* box, Endpoint& e, bool provider) {
+                }
+            });
+            return group;
+        };
+        auto endpointForm = [this, &bridgePaths, &appPaths](QVBoxLayout* box, Endpoint& e, bool provider) {
             auto* group = new QGroupBox(provider ? "Bridge ↔ app-server" : "CodexUI ↔ bridge", this);
             auto* f = new QFormLayout(group);
             box->addWidget(group);
@@ -222,23 +190,8 @@ namespace codexui::manager {
             readers_.push_back([transport, &e](Profile&) {
                 e.transport = transport->currentData().toString();
             });
-            line(
-                f,
-                "Connect host / Bluetooth address",
-                e.host,
-                [&e](QString v) {
-                    e.host = v;
-                },
-                readers_);
-            line(
-                f,
-                "Listener bind host",
-                e.bindHost,
-                [&e](QString v) {
-                    e.bindHost = v;
-                },
-                readers_,
-                "Listener-side address; independent of the client's connect host");
+            line(f, "Connect host / Bluetooth address", e.host, readers_);
+            line(f, "Listener bind host", e.bindHost, readers_, "Listener-side address; independent of the client's connect host");
             auto* port = new QSpinBox(group);
             port->setRange(1, 65535);
             port->setValue(e.port);
@@ -246,59 +199,30 @@ namespace codexui::manager {
             readers_.push_back([port, &e](Profile&) {
                 e.port = port->value();
             });
-            line(
-                f,
-                "Unix socket",
-                e.socketPath,
-                [&e](QString v) {
-                    e.socketPath = v;
-                },
-                readers_);
-            line(
-                f,
-                "WebSocket path",
-                e.webSocketPath,
-                [&e](QString v) {
-                    e.webSocketPath = v;
-                },
-                readers_);
+            line(f, "Unix socket", e.socketPath, readers_, {}, QFileDialog::AnyFile, provider ? &appPaths : &bridgePaths);
+            line(f, "WebSocket path", e.webSocketPath, readers_);
             if (!provider) {
-                line(
-                    f,
-                    "Bridge TLS certificate",
-                    e.certificate,
-                    [&e](QString v) {
-                        e.certificate = v;
-                    },
-                    readers_,
-                    "Path on the bridge host");
-                line(
-                    f,
-                    "Bridge TLS private key",
-                    e.privateKey,
-                    [&e](QString v) {
-                        e.privateKey = v;
-                    },
-                    readers_,
-                    "Path on the bridge host; never paste key material");
-                line(
-                    f,
-                    "Client CA certificate",
-                    e.caCertificate,
-                    [&e](QString v) {
-                        e.caCertificate = v;
-                    },
-                    readers_,
-                    "Local path used by CodexUI and the readiness client",
-                    QFileDialog::ExistingFile);
-                line(
-                    f,
-                    "TLS server name (SNI)",
-                    e.serverName,
-                    [&e](QString v) {
-                        e.serverName = v;
-                    },
-                    readers_);
+                line(f,
+                     "Bridge TLS certificate",
+                     e.certificate,
+                     readers_,
+                     "Path on the bridge host",
+                     QFileDialog::ExistingFile,
+                     &bridgePaths);
+                line(f,
+                     "Bridge TLS private key",
+                     e.privateKey,
+                     readers_,
+                     "Path on the bridge host; never paste key material",
+                     QFileDialog::ExistingFile,
+                     &bridgePaths);
+                line(f,
+                     "Client CA certificate",
+                     e.caCertificate,
+                     readers_,
+                     "Local path used by CodexUI and the readiness client",
+                     QFileDialog::ExistingFile);
+                line(f, "TLS server name (SNI)", e.serverName, readers_);
                 auto* channel = new QSpinBox(group);
                 channel->setRange(1, 30);
                 channel->setValue(e.channel);
@@ -332,57 +256,57 @@ namespace codexui::manager {
             return transport;
         };
         auto* bridgePage = page(tabs, "Bridge", &content);
-        hostForm(content, profile_.bridge, "Bridge process", profile_.bridgeExecutable, [this](QString v) {
-            profile_.bridgeExecutable = v;
-        });
+        auto* bridgeHost = hostForm(content, profile_.bridge, "Bridge process", profile_.bridgeExecutable, bridgePaths);
         auto* frontendTransport = endpointForm(content, profile_.frontend, false);
         content->addStretch();
         auto* serverPage = page(tabs, "App-server", &content);
         auto* provider = endpointForm(content, profile_.provider, true);
         auto* appHost =
-            hostForm(content, profile_.appServer, "App-server process (non-stdio modes)", profile_.appServerExecutable, [this](QString v) {
-                profile_.appServerExecutable = v;
-            });
+            hostForm(content, profile_.appServer, "App-server process (non-stdio modes)", profile_.appServerExecutable, appPaths);
         auto* appInfo = UiStyle::makeLabel("Stdio: the bridge owns its child and uses CODEX_HOME from Identity. The executable below still "
                                            "selects that child. For Unix or network connections, choose who owns the separate app-server. "
                                            "SSH management requires systemd user services and a verified SSH host key.",
                                            "meta",
                                            serverPage);
         content->addWidget(appInfo);
-        const auto updateAppHost = [appHost, provider] {
+        auto* bridgeForm = qobject_cast<QFormLayout*>(bridgeHost->layout());
+        const auto updateAppHost = [appHost, provider, bridgeForm, bridgePaths, appPaths] {
             const bool stdio = provider->currentData() == "stdio";
             appHost->setTitle(stdio ? "Bridge-owned app-server executable (host follows bridge)" : "App-server process");
             auto* form = qobject_cast<QFormLayout*>(appHost->layout());
             for (int row = 0; row < form->rowCount(); ++row) {
                 form->setRowVisible(row, !stdio || row == 3);
             }
+            const auto local = [](QFormLayout* host) {
+                return qobject_cast<QComboBox*>(host->itemAt(0, QFormLayout::FieldRole)->widget())->currentData() ==
+                           int(Ownership::Local) &&
+                       qobject_cast<QLineEdit*>(host->itemAt(1, QFormLayout::FieldRole)->widget())->text().trimmed().isEmpty();
+            };
+            for (auto* browse : bridgePaths) {
+                browse->setVisible(local(bridgeForm));
+            }
+            for (auto* browse : appPaths) {
+                browse->setVisible(local(stdio ? bridgeForm : form));
+            }
         };
         connect(provider, &QComboBox::currentIndexChanged, appHost, updateAppHost);
+        for (auto* host : {bridgeForm, qobject_cast<QFormLayout*>(appHost->layout())}) {
+            connect(qobject_cast<QComboBox*>(host->itemAt(0, QFormLayout::FieldRole)->widget()),
+                    &QComboBox::currentIndexChanged,
+                    appHost,
+                    updateAppHost);
+            connect(qobject_cast<QLineEdit*>(host->itemAt(1, QFormLayout::FieldRole)->widget()),
+                    &QLineEdit::textChanged,
+                    appHost,
+                    updateAppHost);
+        }
         updateAppHost();
         content->addStretch();
         auto* tools = page(tabs, "Local tools", &content);
         auto* tf = new QFormLayout;
         content->addLayout(tf);
-        auto* uiExecutable = line(
-            tf,
-            "CodexUI executable",
-            profile_.uiExecutable,
-            [this](QString v) {
-                profile_.uiExecutable = v;
-            },
-            readers_,
-            {},
-            QFileDialog::ExistingFile);
-        auto* probeExecutable = line(
-            tf,
-            "Readiness client executable",
-            profile_.probeExecutable,
-            [this](QString v) {
-                profile_.probeExecutable = v;
-            },
-            readers_,
-            {},
-            QFileDialog::ExistingFile);
+        auto* uiExecutable = line(tf, "CodexUI executable", profile_.uiExecutable, readers_, {}, QFileDialog::ExistingFile);
+        auto* probeExecutable = line(tf, "Readiness client executable", profile_.probeExecutable, readers_, {}, QFileDialog::ExistingFile);
         auto* capabilities = new QLabel("Checking locally installed frontend transports…", tools);
         capabilities->setWordWrap(true);
         content->addWidget(capabilities);

@@ -8,12 +8,12 @@
 
 #include "AccessibilityEventProbe.h"
 #include "codex/Configuration.h"
+#include "codex/FileSelectionDialog.h"
 #include "codex/FrontendSession.h"
 #include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/ShellWidget.h"
 #include "codex/ThreadBrowser.h"
-#include "codex/WorkspaceDialog.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
@@ -3255,6 +3255,21 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
     makeReady(worker);
     applyThread(worker, "workspace-a", "Selected workspace thread");
     applyThread(worker, "workspace-b", "Unselected workspace thread");
+    {
+        auto write = FrontendSessionTestPeer::graph(session).write();
+        NodeState project;
+        project.fields = {{"name", "Workspace project"},
+                          {"roots", Value::Array{Value::Object{{"path", "/remote/root-a"}}, Value::Object{{"path", "/remote/root-b"}}}}};
+        const auto group = write.upsert({NodeKind::Project, "workspace-project"}, std::move(project));
+        write.relate(write.find({NodeKind::Thread, "workspace-b"}), RelationKind::ProjectMembership, group);
+        for (const auto* method : {"project/list", "threadSection/list"}) {
+            NodeState catalog;
+            catalog.fields = {{"loaded", true}, {"unsupported", false}};
+            static_cast<void>(write.upsert({NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}, std::move(catalog)));
+        }
+        require(messageAdmitted(channels.sendGraphChanged(write.finish())), "workspace project roots reach the shell");
+    }
+
     markThreadReady(session, worker, "workspace-a");
     markThreadReady(session, worker, "workspace-b");
     auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
@@ -3278,10 +3293,29 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
         QTimer::singleShot(0, &shell, [&, target, proposed, cancel] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             auto* input = dialog ? dialog->findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")) : nullptr;
+            for (const auto& message : takeQtMessages(channels)) {
+                if (const auto* action = std::get_if<RuntimeAction>(&message);
+                    action && action->kind == RuntimeActionKind::Filesystem && !action->payload.empty()) {
+                    static_cast<void>(worker.filesystemState(action->correlation, {{"pending", true}}));
+                    static_cast<void>(
+                        worker.filesystemState(action->correlation, {{"result", Value::Object{{"entries", Value::Array{}}}}}));
+                }
+            }
+            spin(10);
+
             dialogTargetCorrect = input && std::ranges::any_of(dialog->findChildren<QLabel*>(), [&](const QLabel* label) {
                                       return label->text() == target;
                                   });
             if (input) {
+                auto* roots = dialog->findChild<QComboBox*>("workspaceRoots");
+                if (target == "Unselected workspace thread") {
+                    require(roots && roots->count() == 2 && roots->itemText(1) == "/remote/root-b",
+                            "Change workspace receives the target thread project's authoritative roots");
+                    if (roots) {
+                        roots->setCurrentIndex(1);
+                        require(input->text() == "/remote/root-b", "choosing a server root edits only the proposed workspace");
+                    }
+                }
                 input->setText(proposed);
             }
             if (dialog) {
@@ -3313,6 +3347,20 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
                                                             return action && action->kind == NodeActionKind::ChangeWorkspace;
                                                         }),
             "heading cancellation mutates neither workspace nor outgoing actions");
+    if (heading && heading->isEnabled()) {
+        scheduleDialog("Selected workspace thread", "/tmp", false);
+        heading->click();
+    }
+    messages = takeQtMessages(channels);
+    require(std::ranges::none_of(messages,
+                                 [](const auto& message) {
+                                     const auto* action = std::get_if<NodeAction>(&message);
+                                     return action && action->kind == NodeActionKind::ChangeWorkspace;
+                                 }),
+            "accepting an unchanged workspace emits no action");
+    list->expandAll();
+    list->scrollToItem(threadItem(list, "workspace-b"));
+    spin(20);
     const QPoint point = list->visualItemRect(threadItem(list, "workspace-b")).center();
     QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, point));
     QPointer<QMenu> menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
@@ -3333,6 +3381,12 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
         menu->close();
     }
     messages = takeQtMessages(channels);
+    require(std::ranges::count_if(messages,
+                                  [](const auto& message) {
+                                      const auto* action = std::get_if<NodeAction>(&message);
+                                      return action && action->kind == NodeActionKind::ChangeWorkspace;
+                                  }) == 1,
+            "a changed workspace emits exactly one action");
     NodeRef target;
     for (const auto& message : messages) {
         if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::ChangeWorkspace) {
@@ -6359,11 +6413,13 @@ void dialogControlsHaveSemanticLabels() {
                 accessible->text(QAccessible::Name) == name,
             "dialog control exposes its semantic accessible name and role");
   };
-  WorkspaceDialog workspaceDialog(QDir::tempPath());
+  FileSelectionDialog workspaceDialog(QDir::tempPath());
   named(workspaceDialog.findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")),
         QStringLiteral("Proposed workspace"),
         QAccessible::EditableText);
-  require(!workspaceDialog.findChild<QTreeView*>(), "app-server paths do not expose frontend filesystem browsing");
+  auto* source = workspaceDialog.findChild<QComboBox*>("selectionSource");
+  require(source && source->currentIndex() == 1 && !source->model()->flags(source->model()->index(0, 0)).testFlag(Qt::ItemIsEnabled),
+          "workspace browsing is explicitly app-server-owned; local workspace selection remains unavailable");
   for (auto purpose : {NewThreadDialog::Purpose::Create, NewThreadDialog::Purpose::Fork}) {
     NewThreadDialog dialog(NewThreadDraft{QDir::tempPath(), {}, {}, {}, false}, purpose);
     QLineEdit *workspace = nullptr;

@@ -3145,6 +3145,73 @@ void endpointReconfigurationUsesTheSelectedAddress(UnixBridge &bridge,
   }
 }
 
+void filesystemRequestsRetainResultsUntilCollected(UnixBridge& bridge, RunningRuntime& runtime) {
+    std::uint64_t authority = 0;
+    {
+        auto read = runtime.graph().tryRead();
+        const auto connection = read ? read->find({NodeKind::Connection, "connection"}) : NodeRef{};
+        if (connection) {
+            authority = unsignedIntegerFromValue(valueMember(*read->state(connection), "providerAuthorityRevision")).value_or(0);
+        }
+    }
+    const auto result = [&](const std::string& key) {
+        auto read = runtime.graph().tryRead();
+        const auto node = read ? read->find({NodeKind::Catalog, key}) : NodeRef{};
+        return node ? jsonFromValue(Value(read->state(node)->fields)) : nlohmann::json::object();
+    };
+    for (const auto& method : {"fs/readDirectory", "fs/getMetadata", "fs/writeFile"}) {
+        const std::string key = std::string("filesystem:") + method;
+        nlohmann::json parameters = {{"path", "/only-on-server/photo.png"}};
+        if (std::string_view(method) == "fs/writeFile") {
+            parameters["dataBase64"] = "cGl4ZWxz";
+        }
+        RuntimeAction action;
+        action.kind = RuntimeActionKind::Filesystem;
+        action.correlation = key;
+        action.payload = objectFromJson({{"method", method}, {"parameters", parameters}, {"authority", authority}});
+        expect(sendAction(runtime.channels(), action), "filesystem request enters the existing worker queue");
+        const auto request = bridge.receiveAppServer();
+        expect(request && request->value("method", "") == method && request->at("params") == parameters,
+               "filesystem request uses the exact app-server wire path and payload");
+        if (request) {
+            const auto reply = std::string_view(method) == "fs/readDirectory"
+                                   ? nlohmann::json{{"entries", {{{"fileName", "photo.png"}, {"isFile", true}, {"isDirectory", false}}}}}
+                               : std::string_view(method) == "fs/getMetadata" ? nlohmann::json{{"isFile", true},
+                                                                                               {"isDirectory", false},
+                                                                                               {"isSymlink", false},
+                                                                                               {"createdAtMs", 0},
+                                                                                               {"modifiedAtMs", 0}}
+                                                                              : nlohmann::json::object();
+            expect(bridge.reply(*request, reply), "filesystem result reaches the real runtime");
+            expect(waitUntil([&] {
+                       return result(key).contains("result");
+                   }) &&
+                       result(key).at("result") == reply,
+                   "filesystem results survive until the UI explicitly collects them");
+            expect(operationRetired(runtime.graph(), request->at("id")),
+                   "the wire operation is retired without losing the pending UI result");
+        }
+        action.payload.clear();
+        expect(sendAction(runtime.channels(), action) && waitUntil([&] {
+                   return result(key).empty();
+               }),
+               "collected filesystem results are removed");
+    }
+    RuntimeAction stale;
+    stale.kind = RuntimeActionKind::Filesystem;
+    stale.correlation = "filesystem:stale";
+    stale.payload = {{"method", "fs/writeFile"},
+                     {"authority", authority + 1},
+                     {"parameters", Value::Object{{"path", "/wrong-host"}, {"dataBase64", ""}}}};
+    expect(sendAction(runtime.channels(), stale) && waitUntil([&] {
+               return result(stale.correlation).contains("error");
+           }),
+           "a stale server binding is rejected visibly");
+    expect(!bridge.receiveAppServer(100ms), "a stale binding cannot write to a replacement server");
+    stale.payload.clear();
+    expect(sendAction(runtime.channels(), stale), "stale error state is collected");
+}
+
 void workspaceChangesUseAcknowledgedThreadContext(UnixBridge& bridge, RunningRuntime& runtime) {
     expect(bridge.appServerNotification(
                "thread/started",
@@ -3454,6 +3521,7 @@ int main(int argc, char **argv) {
     codexui::codex::removingTurnsUsesOneAuthoritativeWireOperation(bridge, runtime);
     codexui::codex::cachedSettingsRefreshDoesNotReloadHistory(bridge, runtime);
     codexui::codex::workspaceChangesUseAcknowledgedThreadContext(bridge, runtime);
+    codexui::codex::filesystemRequestsRetainResultsUntilCollected(bridge, runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
     codexui::codex::remainingUiCommandFamiliesUseExactWirePaths(bridge,
                                                                 runtime);

@@ -219,8 +219,8 @@ add_library(
     codexui-middle-ui STATIC
     src/codex/AttachmentInput.cpp
     src/codex/AttachmentInput.h
-    src/codex/WorkspaceDialog.cpp
-    src/codex/WorkspaceDialog.h
+    src/codex/FileSelectionDialog.cpp
+    src/codex/FileSelectionDialog.h
     src/codex/TurnSettingsWidget.cpp
     src/codex/TurnSettingsWidget.h
     src/codex/ui/ExpandingPromptEditor.cpp
@@ -740,6 +740,11 @@ if(BUILD_TESTING)
     target_compile_features(
         codexui-application-layout-test PRIVATE cxx_std_20
     )
+    target_compile_definitions(
+        codexui-application-layout-test
+        PRIVATE
+            CODEXUI_FILE_SELECTION_CONTRACT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/file-selection.json"
+    )
     target_include_directories(codexui-application-layout-test PRIVATE src)
     target_link_libraries(
         codexui-application-layout-test
@@ -748,12 +753,14 @@ if(BUILD_TESTING)
             codexui-conversation-ui
             codexui-diff-viewer
             codexui-middle-ui
+            codexui-shell-ui
             codexui-conversation-height-index
             codexui-nodegraph
             codexui-pending-request-policy
             codexui-turn-settings-policy
             PkgConfig::LIBGIT2
             Qt6::Widgets
+            Qt6::Network
     )
     add_test(
         NAME codexui-application-layout

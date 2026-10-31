@@ -45,6 +45,7 @@ function retainedProtocolFrame(frame: JsonObject): unknown {
 }
 
 const actionMethods = {
+    "fs.readDirectory": "fs/readDirectory", "fs.getMetadata": "fs/getMetadata", "fs.writeFile": "fs/writeFile",
     "threads.list": "thread/list", "thread.read": "thread/read", "thread.create": "thread/start",
     "thread.workspace": "thread/settings/update", "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
     "thread.turns.list": "thread/turns/list", "thread.items.list": "thread/items/list",
@@ -69,7 +70,7 @@ export interface BrowserSessionSnapshot {
     readonly notice: string;
     readonly bridgeUrl: string;
 }
-export interface NewThreadDraft extends PromptRecoveryContext {}
+export interface NewThreadDraft extends PromptRecoveryContext {attachments?: AttachmentDraft[]}
 
 export type ThreadSortCriterion = "alphanumeric" | "created" | "recent" | "section";
 export interface ThreadBrowserOptions {
@@ -360,6 +361,7 @@ export class BrowserFrontendSession {
             workspace: draft.workspace.trim(), name: draft.ephemeral ? "" : draft.name.trim(),
             baseInstructions: draft.baseInstructions.trim(), developerInstructions: draft.developerInstructions.trim(),
             ephemeral: draft.ephemeral,
+            ...(draft.attachments ? {attachments: draft.attachments} : {}),
             ...(draft.projectId ? {projectId: draft.projectId} : {}),
             ...(draft.sectionId ? {sectionId: draft.sectionId} : {}),
         };
@@ -468,7 +470,7 @@ export class BrowserFrontendSession {
             this.setNotice("History removal is pending; wait before sending.");
             return false;
         }
-        if (prompt.trim() === "") return false;
+        if (prompt.trim() === "" && attachments.length === 0) return false;
         const canonicalPrompt = promptWithFileLinks(prompt, attachments);
         if (!this.canSubmit(presentationKey)) {
             if (!this.canSubmit())
@@ -538,16 +540,25 @@ export class BrowserFrontendSession {
         return true;
     }
 
-    restorePrompt(threadId: string, submissionId: number, presentationKey: string, currentDraft: string): string | undefined {
+    restorePrompt(threadId: string, submissionId: number, presentationKey: string, currentDraft: string, currentAttachments: readonly AttachmentDraft[] = []): string | undefined {
         const submission = this.prompts.submission(threadId, submissionId);
-        if (!this.matchesThreadPresentation(threadId, presentationKey) || !submission || submission.state !== "failed") return;
-        if (currentDraft !== "") { this.setNotice("Clear or send the current draft before restoring this prompt. The preserved prompt was not changed.", false); return; }
-        const text = submission.prompt;
-        if (this.newThreadCreationInFlight) { this.setNotice("The current new thread is still being created.", false); return; }
-        this.beginNewThread(submission.recoveryContext);
-        this.setNotice("The unsent prompt was restored to a new-thread draft.", false);
+        let text: string | undefined;
+        if (this.matchesThreadPresentation(threadId, presentationKey) && submission?.state === "failed") {
+            if (currentDraft !== "" || currentAttachments.length > 0) {
+                this.setNotice("Clear or send the current draft before restoring this prompt. The preserved prompt was not changed.", false);
+            } else if (this.newThreadCreationInFlight) {
+                this.setNotice("The current new thread is still being created.", false);
+            } else {
+                const suffix = promptWithFileLinks("", submission.attachments);
+                text = suffix && submission.prompt.endsWith(suffix) ? submission.prompt.slice(0, -suffix.length) : submission.prompt;
+                this.beginNewThread({workspace: "", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false,
+                    ...submission.recoveryContext, attachments: submission.attachments});
+                this.setNotice("The unsent prompt was restored to a new-thread draft.", false);
+            }
+        }
         return text;
     }
+
     interrupt(presentationKey?: string): void {
         const threadId = this.selectedThreadId;
         const targetKey = presentationKey ?? this.threadVisualKey(threadId);
@@ -1006,6 +1017,16 @@ export class BrowserFrontendSession {
             else deliver();
         });
         return correlation;
+    }
+    filesystemAccess() {
+        const epoch = this.lifecycleEpoch;
+        return async (path: string, operation: "readDirectory" | "getMetadata" | "writeFile" = "readDirectory", dataBase64?: string, valid = () => true) => {
+            const current = () => epoch === this.lifecycleEpoch && this.canSubmit() && valid();
+            if (!current()) { throw new Error("App-server changed or controller access is unavailable."); }
+            const response = await this.requestPromise(`fs.${operation}`, dataBase64 === undefined ? {path} : {path, dataBase64}, current);
+            if (!response.ok || !current()) { throw new Error(this.errorMessage(response)); }
+            return response.data as JsonObject;
+        };
     }
     private requestPromise(action: Action, parameters: JsonObject,
         acceptResult: () => boolean = () => true, normalize = true): Promise<OperationResponse> {

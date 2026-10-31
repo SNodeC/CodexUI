@@ -2,6 +2,7 @@
 
 #include "AccessibilityEventProbe.h"
 #include "TimingPolicy.h"
+#include "codex/FileSelectionDialog.h"
 #include "codex/ForkNaming.h"
 #include "codex/NodeGraphJson.h"
 #include "codex/ThreadBrowser.h"
@@ -887,16 +888,52 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
             require(mutations.size() == beforeCreate && dialog->isVisible(),
                     "relative project roots are rejected before dispatch");
         roots->setPlainText("/workspace/new\n/workspace/second");
+        auto* add = dialog->findChild<QPushButton*>("addProjectRoot");
+        passed &= require(add && add->isEnabled(), "a controller can add project roots");
+        if (add) {
+            const auto choose = [&](QString path, bool accept) {
+                QTimer::singleShot(0, dialog, [&, path, accept] {
+                    auto* selection = dynamic_cast<FileSelectionDialog*>(QApplication::activeModalWidget());
+                    passed &= require(selection != nullptr, "Add root opens the existing workspace dialog");
+                    if (selection) {
+                        selection->findChild<QLineEdit*>("codexWorkspaceDirectory")->setText(path);
+                        if (accept) {
+                            selection->accept();
+                        } else {
+                            selection->reject();
+                        }
+                    }
+                });
+                add->click();
+            };
+            choose("/workspace/third", true);
+            choose("/workspace/fourth", true);
+            choose("/workspace/third", true);
+            choose("/cancelled", false);
+            passed &= require(roots->toPlainText() == "/workspace/new\n/workspace/second\n/workspace/third\n/workspace/fourth" &&
+                                  mutations.size() == beforeCreate,
+                              "root additions preserve manual lines, reject duplicates and leave cancellation unsent");
+        }
+
         dialog->findChild<QPlainTextEdit *>("projectDescription")
             ->setPlainText("Description 日本語");
       }
-      if (const QString prefix =
-              qEnvironmentVariable("CODEXUI_GROUP_CREATE_SCREENSHOT");
-          !prefix.isEmpty())
-        passed &=
-            require(dialog->grab().save(
-                        prefix + (project ? "-project.png" : "-section.png")),
-                    "group creation dialog screenshot saved");
+      if (const QString prefix = qEnvironmentVariable("CODEXUI_GROUP_CREATE_SCREENSHOT"); !prefix.isEmpty()) {
+          auto* roots = dialog->findChild<QPlainTextEdit*>("projectRoots");
+          const auto original = roots ? roots->toPlainText() : QString{};
+          if (roots) {
+              roots->appendPlainText("/server/" + QString("long-directory/").repeated(30));
+          }
+          for (const auto width : {dialog->minimumSizeHint().width(), 520}) {
+              dialog->resize(width, dialog->height());
+              QApplication::processEvents();
+              passed &= require(dialog->grab().save(prefix + (project ? "-project-" : "-section-") + QString::number(width) + ".png"),
+                                "group creation dialog screenshot saved");
+          }
+          if (roots) {
+              roots->setPlainText(original);
+          }
+      }
       save->click();
     });
     for (auto *action : groupControl->menu()->actions())
@@ -913,12 +950,10 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
       continue;
     const auto &parameters = mutations.back().second;
     if (project)
-      passed &= require(
-          parameters.at("roots").size() == 2 &&
-              parameters.at("metadata").at(ProjectDescriptionKey) ==
-                  "Description 日本語" &&
-              !parameters.value("idempotencyKey", "").empty(),
-          "project creation retains roots, description and idempotency key");
+        passed &=
+            require(parameters.at("roots").size() == 4 && parameters.at("metadata").at(ProjectDescriptionKey) == "Description 日本語" &&
+                        !parameters.value("idempotencyKey", "").empty(),
+                    "project creation retains roots, description and idempotency key");
     passed &= require(!threadItem(tree, id),
                       "creation does not invent an optimistic group");
     // Deliver the authoritative entity, as the separately tested runtime
@@ -983,6 +1018,40 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
   }
   snapshot->canControl = false;
   pane.refresh(*snapshot);
+  const auto observerPoint =
+      tree->visualItemRect(threadItem(tree, "project-a")).topLeft() + QPoint(40, UiStyle::projectCardEdgePadding + 12);
+  QMetaObject::invokeMethod(tree, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, observerPoint));
+  QPointer<QMenu> observerMenu;
+  QAction* details = nullptr;
+  for (auto* menu : tree->findChildren<QMenu*>()) {
+      if (menu->isVisible()) {
+          observerMenu = menu;
+          for (auto* action : menu->actions()) {
+              if (action->text() == "Details…") {
+                  details = action;
+              }
+          }
+      }
+  }
+  passed &= require(details != nullptr, "observer project menu offers details");
+  if (details) {
+      QTimer::singleShot(0, &pane, [&] {
+          auto* dialog = pane.findChild<QDialog*>("threadGroupDialog");
+          passed &= require(dialog != nullptr, "observer can inspect project details");
+          if (dialog) {
+              auto* add = dialog->findChild<QPushButton*>("addProjectRoot");
+              auto* roots = dialog->findChild<QPlainTextEdit*>("projectRoots");
+              passed &= require(add && !add->isEnabled() && roots && roots->isReadOnly(),
+                                "observer project roots cannot be edited through text or Add root");
+              dialog->reject();
+          }
+      });
+      details->trigger();
+  }
+  if (observerMenu) {
+      observerMenu->close();
+  }
+
   QMetaObject::invokeMethod(groupControl->menu(), "aboutToShow",
                             Qt::DirectConnection);
   for (auto *action : groupControl->menu()->actions())

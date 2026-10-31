@@ -1,0 +1,51 @@
+{
+  "serverDirectory": "/server-only",
+  "entries": [
+    {
+      "fileName": "project",
+      "isDirectory": true,
+      "isFile": false
+    },
+    {
+      "fileName": "image.png",
+      "isDirectory": false,
+      "isFile": true
+    },
+    {
+      "fileName": "sound.mp3",
+      "isDirectory": false,
+      "isFile": true
+    },
+    {
+      "fileName": "notes.txt",
+      "isDirectory": false,
+      "isFile": true
+    }
+  ],
+  "attachments": [
+    {
+      "path": "/server-only/image.png",
+      "name": "image.png",
+      "mimeType": "image/png",
+      "size": 0
+    },
+    {
+      "path": "/server-only/notes.txt",
+      "name": "notes.txt",
+      "mimeType": "text/plain",
+      "size": 0
+    },
+    {
+      "path": "/server-only/sound.mp3",
+      "name": "sound.mp3",
+      "mimeType": "audio/mpeg",
+      "size": 0
+    }
+  ],
+  "local": {
+    "name": "local.png",
+    "mimeType": "image/png",
+    "dataBase64": "cGl4ZWxz",
+    "size": 6
+  }
+}
