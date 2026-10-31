@@ -2,7 +2,7 @@
 
 #include "codex/NewThreadDialog.h"
 
-#include "codex/FileSelectionDialog.h"
+#include "codex/WorkspaceDialog.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QCheckBox>
@@ -186,11 +186,10 @@ NewThreadDraft NewThreadDialog::draft() const {
 }
 
 void NewThreadDialog::chooseWorkspace() {
-  FileSelectionDialog dialog(FileSelectionDialog::Mode::Workspace,
-                             draft().workspace, {}, this);
-  if (dialog.exec() == QDialog::Accepted) {
-      workspace->setText(dialog.selectedDirectory());
-  }
+    WorkspaceDialog dialog(draft().workspace, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        workspace->setText(dialog.selectedDirectory());
+    }
 }
 
 void NewThreadDialog::acceptDraft() {

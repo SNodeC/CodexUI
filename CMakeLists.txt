@@ -219,8 +219,8 @@ add_library(
     codexui-middle-ui STATIC
     src/codex/AttachmentInput.cpp
     src/codex/AttachmentInput.h
-    src/codex/FileSelectionDialog.cpp
-    src/codex/FileSelectionDialog.h
+    src/codex/WorkspaceDialog.cpp
+    src/codex/WorkspaceDialog.h
     src/codex/TurnSettingsWidget.cpp
     src/codex/TurnSettingsWidget.h
     src/codex/ui/ExpandingPromptEditor.cpp

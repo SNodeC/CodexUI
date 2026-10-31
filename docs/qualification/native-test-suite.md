@@ -238,7 +238,9 @@ Apply these conditions across the sections below:
 
 ## 14. Attachments: picker, paste and drag/drop
 
-- Attach one and multiple images through the picker.
+- Attach one and multiple images through the standard Qt file dialog, with native presentation enabled when available.
+- Cancel with empty and populated drafts; repeat selections across directories and retain existing attachments.
+- Retire the draft or lose submission readiness while selection is open; prevent stale admission.
 - Attach supported non-image files and mixed file selections.
 - Paste image MIME data representing screenshot clipboard content.
 - Paste file URLs and ordinary text; distinguish attachments from text correctly.
@@ -484,7 +486,7 @@ The behavior inventory in sections 1–21 still applies in full.
 | Approval, Style and Additional | Correct selected/disabled appearance; unsupported Style has an explanatory tooltip, not an apparently broken blank control. |
 | Additional settings popup | Permission profile, Approval reviewer, Service tier, Reasoning summary and Collaboration mode all visible/reachable with aligned labels and controls. |
 | New-thread/fork dialog | Workspace, Name, Base instructions, Developer instructions, Temporary thread control/explanation and relevant fork options readable; long editors scroll; validation and Continue/Cancel remain reachable. |
-| File/workspace picker | Location, Up, Go, file/directory listing, selection summary, Add selected/Remove where applicable, validation and accept/cancel all fit and indicate current selection. |
+| File/workspace selection | Attach uses the standard Qt file dialog; selected-file labels and removal stay in the composer. App-server workspace entry retains its target, current/proposed paths, validation and accept/cancel controls. |
 
 ### 22.7 Inspector and review surfaces
 

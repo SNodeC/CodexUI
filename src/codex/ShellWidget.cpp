@@ -3,7 +3,6 @@
 #include "codex/ShellWidget.h"
 
 #include "codex/ConnectionDialog.h"
-#include "codex/FileSelectionDialog.h"
 #include "codex/ForkNaming.h"
 #include "codex/FrontendSession.h"
 #include "codex/NewThreadDialog.h"
@@ -11,6 +10,7 @@
 #include "codex/PendingRequestDialog.h"
 #include "codex/PendingRequestPolicy.h"
 #include "codex/UiStatus.h"
+#include "codex/WorkspaceDialog.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
@@ -584,7 +584,6 @@ struct ShellWidget::Impl final {
   void showTurnMenu(nodegraph::NodeRef item, QPoint position);
   [[nodiscard]] bool submitPrompt(QString prompt,
                                   std::vector<AttachmentDraft> attachments);
-  void chooseAttachments();
   void recoverPrompt(const nodegraph::NodeRef &prompt);
   void presentPending(PendingRequestDescriptor request);
   void reviewPending(const nodegraph::NodeRef &target);
@@ -941,7 +940,6 @@ void ShellWidget::Impl::connectUi() {
         std::move(action),
         QStringLiteral("Stop request was not admitted; try again.")));
   };
-  composerActions.attach = [this] { chooseAttachments(); };
   composerActions.attachmentError = [this](QString error) {
     showNotice(std::move(error));
   };
@@ -2421,7 +2419,7 @@ void ShellWidget::Impl::changeWorkspaceDialog(const nodegraph::NodeRef& thread) 
     if (!row || !row->workspaceChangeUnavailable.empty()) {
         showNotice(row ? text(row->workspaceChangeUnavailable) : QStringLiteral("Thread state is unavailable."));
     } else {
-        FileSelectionDialog dialog(FileSelectionDialog::Mode::Workspace, text(row->cwd), {}, owner, text(row->title), text(row->cwd));
+        WorkspaceDialog dialog(text(row->cwd), owner, text(row->title), text(row->cwd));
         if (dialog.exec() == QDialog::Accepted && dialog.selectedDirectory() != text(row->cwd)) {
             nodegraph::NodeAction action{
                 thread, nodegraph::NodeActionKind::ChangeWorkspace, {}, {}, {{"cwd", utf8(dialog.selectedDirectory())}}, {}};
@@ -2783,13 +2781,6 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
         "No destination thread is selected. Your message was not sent."));
   }
   return admitted;
-}
-
-void ShellWidget::Impl::chooseAttachments() {
-    const QString initial = QDir::currentPath();
-    FileSelectionDialog dialog(FileSelectionDialog::Mode::Attachments, initial, middleRegion->composer().attachments(), owner);
-    if (dialog.exec() == QDialog::Accepted)
-        middleRegion->composer().setAttachments(dialog.selectedAttachments());
 }
 
 void ShellWidget::Impl::recoverPrompt(const nodegraph::NodeRef &prompt) {

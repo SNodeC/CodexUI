@@ -15,6 +15,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -22,6 +23,7 @@
 #include <QLineEdit>
 #include <QLocalSocket>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
@@ -1037,6 +1039,110 @@ private slots:
         QCOMPARE(editor.result(), int(QDialog::Accepted));
         QCOMPARE(editor.profile().name, QString("After & independent"));
         QCOMPARE(editor.profile().frontend.transport, QString("websocket-ipv6"));
+    }
+    void editorLocalPathSelection() {
+        FixtureTools tools;
+        auto p = Profile::create("Picker fixture");
+        p.codexHome = tools.dir.filePath("home α");
+        QVERIFY(QDir().mkpath(p.codexHome));
+        const auto chosen = tools.dir.filePath("key α.pem");
+        writeFile(chosen, "fixture");
+        p.frontend.transport = "tls-ipv4";
+        p.frontend.certificate = chosen;
+        p.frontend.privateKey = chosen;
+        p.provider.transport = "websocket-ipv4";
+        p.appServer.ownership = Ownership::External;
+        ProfileEditor editor(p, {});
+        editor.show();
+        QComboBox* frontend = nullptr;
+        for (auto* combo : editor.findChildren<QComboBox*>()) {
+            if (combo->findData("rfcomm-tls") >= 0) {
+                frontend = combo;
+            }
+        }
+        QVERIFY(frontend);
+        QCoreApplication::processEvents();
+        QTRY_VERIFY_WITH_TIMEOUT(frontend->isEnabled(), 5000);
+        int selections = 0;
+        for (auto* field : editor.findChildren<QLineEdit*>()) {
+            const auto label = field->accessibleName();
+            auto* browse = field->parentWidget()->findChild<QPushButton*>();
+            if (browse && browse->accessibleName() == "Choose local " + label) {
+                auto* tabs = editor.findChild<QTabWidget*>();
+                QVERIFY(tabs);
+                for (int tab = 0; tab < tabs->count(); ++tab) {
+                    if (tabs->widget(tab)->isAncestorOf(field)) {
+                        tabs->setCurrentIndex(tab);
+                    }
+                }
+                editor.activateWindow();
+                QTRY_VERIFY_WITH_TIMEOUT(editor.isActiveWindow(), 1000);
+                field->setFocus(Qt::TabFocusReason);
+                QTRY_VERIFY_WITH_TIMEOUT(field->hasFocus(), 1000);
+                QVERIFY(browse->isVisible());
+                QVERIFY(browse->focusPolicy() != Qt::NoFocus);
+                QTest::keyClick(field, Qt::Key_Tab);
+                QVERIFY2(browse->hasFocus(),
+                         qPrintable(label + ": focus=" +
+                                    (QApplication::focusWidget() ? QApplication::focusWidget()->metaObject()->className() : "none")));
+                const bool directory = label == "CODEX_HOME";
+                const QString path = directory                                ? p.codexHome
+                                     : label == "CodexUI executable"          ? tools.dir.filePath("codex-ui")
+                                     : label == "Readiness client executable" ? tools.dir.filePath("probe")
+                                                                              : chosen;
+                const auto previous = field->text();
+                QTest::mouseClick(browse, Qt::LeftButton);
+                QPointer<QFileDialog> dialog = field->findChild<QFileDialog*>();
+                QVERIFY(dialog && dialog->isVisible());
+                QVERIFY(!dialog->testOption(QFileDialog::DontUseNativeDialog));
+                QCOMPARE(dialog->fileMode(), directory ? QFileDialog::Directory : QFileDialog::ExistingFile);
+                dialog->reject();
+                QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+                QVERIFY(dialog.isNull());
+                QCOMPARE(field->text(), previous);
+                QTest::mouseClick(browse, Qt::LeftButton);
+                dialog = field->findChild<QFileDialog*>();
+                QVERIFY(dialog);
+                dialog->selectFile(path);
+                QVERIFY(QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection));
+                QTRY_COMPARE(field->text(), path);
+                QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+                QVERIFY(dialog.isNull());
+                if (label.endsWith("executable")) {
+                    QVERIFY(!frontend->isEnabled());
+                }
+                ++selections;
+            }
+        }
+        QCOMPARE(selections, 6);
+        auto* check = editor.findChild<QPushButton*>();
+        for (auto* button : editor.findChildren<QPushButton*>()) {
+            if (button->text() == "Check installed transports") {
+                check = button;
+            }
+        }
+        QVERIFY(check);
+        QVERIFY(check->isEnabled());
+        check->click();
+        QTRY_VERIFY_WITH_TIMEOUT(frontend->isEnabled(), 5000);
+        auto* buttons = editor.findChild<QDialogButtonBox*>();
+        QVERIFY(buttons);
+        QString warning;
+        QTimer::singleShot(0, &editor, [&] {
+            if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                warning = dialog->text();
+                dialog->accept();
+            }
+        });
+        buttons->button(QDialogButtonBox::Save)->click();
+        QVERIFY2(warning.isEmpty(), qPrintable(warning));
+        QCOMPARE(editor.result(), int(QDialog::Accepted));
+        QCOMPARE(editor.profile().codexHome, p.codexHome);
+        QCOMPARE(editor.profile().bridge.identityFile, chosen);
+        QCOMPARE(editor.profile().appServer.identityFile, chosen);
+        QCOMPARE(editor.profile().frontend.caCertificate, chosen);
+        QCOMPARE(editor.profile().uiExecutable, tools.dir.filePath("codex-ui"));
+        QCOMPARE(editor.profile().probeExecutable, tools.dir.filePath("probe"));
     }
     void closeDuringDiscoveryAndSupervision() {
         FixtureTools tools;

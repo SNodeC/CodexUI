@@ -7,6 +7,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
@@ -18,6 +19,7 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <optional>
 
 namespace codexui::manager {
     namespace {
@@ -38,11 +40,37 @@ namespace codexui::manager {
                         const QString& value,
                         std::function<void(QString)> setter,
                         QVector<std::function<void(Profile&)>>& readers,
-                        const QString& placeholder = {}) {
+                        const QString& placeholder = {},
+                        std::optional<QFileDialog::FileMode> localSelection = std::nullopt) {
             auto* edit = new QLineEdit(value, form->parentWidget());
             edit->setPlaceholderText(placeholder);
             edit->setAccessibleName(label);
-            form->addRow(label, edit);
+            if (localSelection) {
+                auto* row = new QWidget(form->parentWidget());
+                auto* layout = new QHBoxLayout(row);
+                layout->setContentsMargins(0, 0, 0, 0);
+                auto* browse = new QPushButton("Browse local…", row);
+                browse->setAccessibleName("Choose local " + label);
+                browse->setToolTip(browse->accessibleName());
+                layout->addWidget(edit, 1);
+                layout->addWidget(browse);
+                QWidget::setTabOrder(edit, browse);
+                auto* caption = new QLabel(label);
+                caption->setBuddy(edit);
+                form->addRow(caption, row);
+                QObject::connect(browse, &QPushButton::clicked, edit, [edit, label, mode = *localSelection] {
+                    auto* dialog = new QFileDialog(edit, "Choose local " + label, edit->text());
+                    dialog->setAttribute(Qt::WA_DeleteOnClose);
+                    dialog->setWindowModality(Qt::WindowModal);
+                    dialog->setFileMode(mode);
+                    dialog->setOption(QFileDialog::ShowDirsOnly, mode == QFileDialog::Directory);
+                    dialog->setSupportedSchemes({"file"});
+                    QObject::connect(dialog, &QFileDialog::fileSelected, edit, &QLineEdit::setText);
+                    dialog->open();
+                });
+            } else {
+                form->addRow(label, edit);
+            }
             readers.push_back([edit, setter = std::move(setter)](Profile&) {
                 setter(edit->text().trimmed());
             });
@@ -90,17 +118,8 @@ namespace codexui::manager {
                 profile_.codexHome = v;
             },
             readers_,
-            "Absolute path on the app-server host");
-        auto* browse = new QPushButton("Choose an existing local Codex home…", identity);
-        content->addWidget(browse);
-        // The home field remains authoritative; browsing fills it without copying credentials.
-        auto* homeEdit = qobject_cast<QLineEdit*>(form->itemAt(2, QFormLayout::FieldRole)->widget());
-        connect(browse, &QPushButton::clicked, this, [this, homeEdit] {
-            const auto directory = QFileDialog::getExistingDirectory(this, "Register existing Codex home", homeEdit->text());
-            if (!directory.isEmpty()) {
-                homeEdit->setText(directory);
-            }
-        });
+            "Absolute path on the app-server host",
+            QFileDialog::Directory);
         auto* accent = new QComboBox(identity);
         for (const auto& key : {"blue", "green", "purple", "teal", "amber", "orange"}) {
             accent->addItem(QString::fromLatin1(key), QString::fromLatin1(key));
@@ -155,7 +174,8 @@ namespace codexui::manager {
                         host.identityFile = v;
                     },
                     readers_,
-                    "Optional local key path; SSH config and agent are also supported");
+                    "Optional local key path; SSH config and agent are also supported",
+                    QFileDialog::ExistingFile);
                 line(f, "Executable", executable, std::move(setExecutable), readers_);
                 line(
                     f,
@@ -269,7 +289,8 @@ namespace codexui::manager {
                         e.caCertificate = v;
                     },
                     readers_,
-                    "Local path used by CodexUI and the readiness client");
+                    "Local path used by CodexUI and the readiness client",
+                    QFileDialog::ExistingFile);
                 line(
                     f,
                     "TLS server name (SNI)",
@@ -349,7 +370,9 @@ namespace codexui::manager {
             [this](QString v) {
                 profile_.uiExecutable = v;
             },
-            readers_);
+            readers_,
+            {},
+            QFileDialog::ExistingFile);
         auto* probeExecutable = line(
             tf,
             "Readiness client executable",
@@ -357,7 +380,9 @@ namespace codexui::manager {
             [this](QString v) {
                 profile_.probeExecutable = v;
             },
-            readers_);
+            readers_,
+            {},
+            QFileDialog::ExistingFile);
         auto* capabilities = new QLabel("Checking locally installed frontend transports…", tools);
         capabilities->setWordWrap(true);
         content->addWidget(capabilities);
@@ -438,7 +463,7 @@ namespace codexui::manager {
                     });
         }
         for (auto* edit : {uiExecutable, probeExecutable}) {
-            connect(edit, &QLineEdit::textEdited, this, [frontendTransport, capabilities] {
+            connect(edit, &QLineEdit::textChanged, this, [frontendTransport, capabilities] {
                 frontendTransport->setEnabled(false);
                 capabilities->setText("Executable changed. Check installed transports before saving.");
             });
