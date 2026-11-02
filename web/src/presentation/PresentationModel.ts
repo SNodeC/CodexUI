@@ -548,7 +548,10 @@ export class PresentationModel {
                 if (thread) {
                     const turn = this.upsertTurn(thread, objectMember(data, "turn"), false);
                     turn.itemsComplete = true;
-                    if (turn.id !== "" && !isTerminalTurnStatus(turn.status)) thread.activeTurnId = turn.id;
+                    if (turn.id !== "" && !isTerminalTurnStatus(turn.status)) {
+                        thread.activeTurnId = turn.id;
+                        thread.membershipSequence.set("status", sequence);
+                    }
                 }
             } else if (action === "models.list") {
                 const listed = member(data, "models", []);
@@ -607,6 +610,7 @@ export class PresentationModel {
             if (thread) {
                 thread.status = statusFromValue(member(data, "status"));
                 thread.raw.status = clone(member(data, "status"));
+                thread.membershipSequence.set("status", sequence);
                 if (!isActiveStatus(thread.status)) delete thread.activeTurnId;
                 this.updateOwningAgentStatus(thread.id, thread.status);
             }
@@ -620,6 +624,7 @@ export class PresentationModel {
                 else if (lifecycle === "closed") {
                     thread.status = statusFromValue("notLoaded");
                     thread.raw.status = "notLoaded";
+                    thread.membershipSequence.set("status", sequence);
                     delete thread.activeTurnId;
                     this.updateOwningAgentStatus(thread.id, thread.status);
                 }
@@ -696,6 +701,7 @@ export class PresentationModel {
             else if (lifecycle === "started" && isEmptyStatus(incomingStatus))
                 turn.status = "running";
             const updated = this.upsertTurn(thread, turn, false);
+            thread.membershipSequence.set("status", sequence);
             if (lifecycle === "started") { updated.itemsComplete = true; }
             if (isActiveStatus(updated.status)) thread.activeTurnId = updated.id;
             else if (thread.activeTurnId === updated.id) delete thread.activeTurnId;
@@ -843,10 +849,13 @@ export class PresentationModel {
     }
 
     private refreshActiveTurn(thread: ThreadPresentation): void {
-        const active = [...thread.turnOrder].reverse().find(
-            turnId => isActiveStatus(thread.turns.get(turnId)?.status ?? UnknownStatus));
-        if (active) thread.activeTurnId = active;
-        else delete thread.activeTurnId;
+        const latest = thread.turnOrder.at(-1);
+        if (latest && isActiveStatus(thread.turns.get(latest)?.status ?? UnknownStatus)
+            && (thread.activeTurnId === latest || isActiveStatus(thread.status))) {
+            thread.activeTurnId = latest;
+        } else {
+            delete thread.activeTurnId;
+        }
     }
 
     private mergeItemPage(threadId: string, listedEntries: unknown, direction: string, cursor: string,
@@ -894,7 +903,7 @@ export class PresentationModel {
         for (const key of ["forkedFromId", "parentThreadId"] as const) {
             if (incoming[key] === null && incoming.lineageKnown !== true) { delete incoming[key]; }
         }
-        for (const key of ["projectId", "section", "archived", "forkedFromId", "parentThreadId"] as const) {
+        for (const key of ["projectId", "section", "archived", "forkedFromId", "parentThreadId", "status"] as const) {
             if (preserveSettingsAfter !== undefined && (result.membershipSequence.get(key) ?? 0) >= preserveSettingsAfter) {
                 delete incoming[key];
             } else if (Object.hasOwn(incoming, key)) result.membershipSequence.set(key, this.lastSequence);
@@ -923,7 +932,10 @@ export class PresentationModel {
         else if (preview !== "") result.title = preview.slice(0, 80);
         else if (result.title === "") result.title = id.slice(0, 12);
         if (preview !== "") result.preview = preview;
-        if (Object.hasOwn(raw, "status")) result.status = statusFromValue(raw.status);
+        if (Object.hasOwn(raw, "status")) {
+            result.status = statusFromValue(raw.status);
+            if (!isActiveStatus(result.status)) { delete result.activeTurnId; }
+        }
         if (typeof raw.createdAt === "number" && Number.isInteger(raw.createdAt))
             result.createdAt = raw.createdAt;
         const updatedAt = raw.updatedAt;

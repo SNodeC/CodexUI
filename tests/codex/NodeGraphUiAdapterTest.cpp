@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ui/NodeGraphUiAdapter.h"
+
 #include "TimingPolicy.h"
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
-#include "codex/TurnSettingsPolicy.h"
 #include "codex/ProtocolTiming.h"
+#include "codex/TurnSettingsPolicy.h"
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
-
-#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <unordered_map>
 
@@ -62,6 +63,61 @@ NodeState itemState(std::string id, std::string type, std::string text) {
   state.fields.emplace("type", std::move(type));
   state.fields.emplace("text", std::move(text));
   return state;
+}
+
+bool activeTurnLifecycleUsesCurrentAuthority() {
+    using namespace nodegraph;
+    std::ifstream input(std::filesystem::path(CODEXUI_PRESENTATION_CONTRACT_PATH).parent_path() / "active-turn-lifecycle.json");
+    bool passed = require(input.good(), "active-turn lifecycle fixture is readable");
+    nlohmann::json fixture;
+    if (input) {
+        input >> fixture;
+    }
+    for (const auto& scenario : fixture.value("cases", nlohmann::json::array())) {
+        NodeGraph graph;
+        ProtocolUpdater updater(graph);
+        NodeGraphUiAdapter adapter(graph);
+        std::unordered_map<std::string, NodeRef> requests;
+        for (const auto& name : scenario.at("steps")) {
+            const auto& step = fixture.at("actions").at(name.get<std::string>());
+            const std::string kind = step.at("kind");
+            DecodedMessage message;
+            message.method = step.at("method");
+            message.payload = objectFromJson(step.at("payload"));
+            if (kind == "notification") {
+                message.kind = DecodedMessageKind::ServerNotification;
+            } else {
+                const std::string id = step.at("id");
+                message.requestId = ProtocolRequestId(id);
+                if (kind == "request") {
+                    message.kind = DecodedMessageKind::ClientRequest;
+                } else {
+                    message.kind = DecodedMessageKind::ClientResult;
+                    message.expectedNode = requests.at(id);
+                }
+            }
+            const auto applied = updater.apply(std::move(message));
+            if (kind == "request") {
+                requests[step.at("id").get<std::string>()] = applied.primary;
+            }
+        }
+        auto read = graph.tryRead();
+        const NodeRef thread = read->find({NodeKind::Thread, fixture.at("threadId").get<std::string>()});
+        const std::string id = scenario.at("id");
+        if (scenario.contains("status")) {
+            const Value expected = valueFromJson(scenario.at("status"));
+            passed &= require(read->state(thread)->status == nodeStatusFromValue(&expected),
+                              (id + ": thread status preserves newer lifecycle facts").c_str());
+        }
+        read.reset();
+        const auto conversation = adapter.conversation(thread);
+        const std::optional<std::string> expected = scenario.at("activeTurnId").is_null()
+                                                        ? std::nullopt
+                                                        : std::optional<std::string>(scenario.at("activeTurnId").get<std::string>());
+        passed &= require(conversation && conversation->activeTurnId == expected,
+                          (id + ": conversation activity comes from the current turn").c_str());
+    }
+    return passed;
 }
 
 bool tokenUsageUsesAccountAndSelectedThreadSnapshots() {
@@ -3530,6 +3586,7 @@ bool frontendPresentationContractIsShared() {
 int main() {
   using namespace codexui::codex::ui;
   bool passed = true;
+  passed &= activeTurnLifecycleUsesCurrentAuthority();
   passed &= genericActivityDetailPreservesUtf8Boundaries();
   passed &= tokenUsageUsesAccountAndSelectedThreadSnapshots();
   passed &= tokenUsageProjectionAggregatesAvailableThreads();

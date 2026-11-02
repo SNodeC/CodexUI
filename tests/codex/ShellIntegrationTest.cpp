@@ -3062,6 +3062,46 @@ void inactiveThreadNeverReactivatesAStaleTurn(Configuration &configuration) {
               }),
           "idle thread state cannot emit an interrupt for a stale turn");
 
+  const ProtocolRequestId resumeId("inactive-resume");
+  const auto resume = worker.applyDetailed(
+      {DecodedMessageKind::ClientRequest, "thread/resume", resumeId, {{"threadId", "inactive-thread"}, {"excludeTurns", true}}});
+  static_cast<void>(
+      worker.apply({DecodedMessageKind::ClientResult,
+                    "thread/resume",
+                    resumeId,
+                    {{"thread", Value(Value::Object{{"id", "inactive-thread"}, {"status", "idle"}, {"turns", Value(Value::Array{})}})}},
+                    resume.primary}));
+  markThreadReady(session, worker, "inactive-thread");
+  auto* model = shell.findChild<QComboBox*>(QStringLiteral("codexModel"));
+  if (editor) {
+      editor->setPlainText(QStringLiteral("new task after reload"));
+  }
+  require(spinUntil([&] {
+              return send && send->text() == QStringLiteral("Send") && send->isEnabled() && stopButton && !stopButton->isVisible() &&
+                     model && model->isEnabled();
+          }),
+          "metadata reload leaves Send available, Stop hidden and settings enabled despite unfinished history");
+  static_cast<void>(takeQtMessages(channels));
+  if (send) {
+      const QPointF local(send->rect().center());
+      const QPointF global(send->mapToGlobal(send->rect().center()));
+      QMouseEvent press(QEvent::MouseButtonPress, local, global, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+      QMouseEvent release(QEvent::MouseButtonRelease, local, global, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(send, &press);
+      QApplication::sendEvent(send, &release);
+  }
+  auto newActions = takeQtMessages(channels);
+  const auto next = std::ranges::find_if(newActions, [](const QtToWorkerMessage& entry) {
+      const auto* action = std::get_if<NodeAction>(&entry);
+      return action && action->kind == NodeActionKind::SubmitPrompt;
+  });
+  require(next != newActions.end(), "Send admits the new prompt after history reload");
+  if (next != newActions.end()) {
+      const auto admission = worker.admitPrompt(std::move(std::get<NodeAction>(*next)));
+      require(admission.command && admission.command->kind == PromptCommandKind::StartTurn,
+              "the new prompt starts a turn rather than steering unfinished history");
+  }
+
   static_cast<void>(worker.apply(
       {DecodedMessageKind::ServerNotification,
        "turn/started",

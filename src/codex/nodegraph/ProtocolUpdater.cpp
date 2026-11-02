@@ -382,31 +382,27 @@ NodeRef ensureTurn(NodeGraph::WriteAccess &write, const NodeRef &thread,
   return turn;
 }
 
-bool isActiveTurn(const NodeState &state) {
-  return state.status == NodeStatus::Running;
-}
-
-void updateActiveTurn(NodeGraph::WriteAccess &write, const NodeRef &thread,
-                      const NodeRef &turn) {
-  if (!thread || !turn)
-    return;
-  if (isActiveTurn(*write.state(turn))) {
-    const std::array<NodeRef, 1> active{turn};
-    write.replaceRelated(thread, RelationKind::ActiveTurn, active);
-    return;
-  }
-  write.unrelate(thread, RelationKind::ActiveTurn, turn);
+void updateActiveTurn(NodeGraph::WriteAccess& write, const NodeRef& thread, const NodeRef& turn) {
+    if (thread && turn) {
+        if (write.state(turn)->status == NodeStatus::Running) {
+            const std::array<NodeRef, 1> active{turn};
+            write.replaceRelated(thread, RelationKind::ActiveTurn, active);
+        } else {
+            write.unrelate(thread, RelationKind::ActiveTurn, turn);
+        }
+    }
 }
 
 void refreshActiveTurn(NodeGraph::WriteAccess &write, const NodeRef &thread) {
   NodeRef active;
   const std::vector<NodeRef> turns = write.children(thread);
-  for (auto iterator = turns.rbegin(); iterator != turns.rend(); ++iterator) {
-    if (*iterator && (*iterator)->id().kind == NodeKind::Turn &&
-        isActiveTurn(*write.state(*iterator))) {
-      active = *iterator;
-      break;
-    }
+  const auto current = write.related(thread, RelationKind::ActiveTurn);
+  const auto latest = std::find_if(turns.rbegin(), turns.rend(), [](const NodeRef& turn) {
+      return turn && turn->id().kind == NodeKind::Turn;
+  });
+  if (latest != turns.rend() && write.state(*latest)->status == NodeStatus::Running &&
+      ((!current.empty() && current.front() == *latest) || write.state(thread)->status == NodeStatus::Running)) {
+      active = *latest;
   }
   if (active) {
     const std::array<NodeRef, 1> current{std::move(active)};
@@ -3208,7 +3204,13 @@ NodeRef ProtocolUpdater::ingestThread(
     return !snapshotBoundary ||
            write.fieldChangedRevision(thread, field) <= *snapshotBoundary;
   };
+  const auto current = write.related(thread, RelationKind::ActiveTurn);
+  const bool acceptsStatus = valueMember(object, "status") && acceptsField("status") &&
+                             (current.empty() || !snapshotBoundary || write.changedRevision(current.front()) <= *snapshotBoundary);
   mergeObject(write, thread, object, "turns", snapshotBoundary, true);
+  if (acceptsStatus && write.state(thread)->status != NodeStatus::Running) {
+      write.replaceRelated(thread, RelationKind::ActiveTurn, std::span<const NodeRef>{});
+  }
   mergeThreadSettings(write, thread, object, 0, preserveChangesAfter);
   if (const Value *providerName = valueMember(object, "name")) {
     const std::string confirmedName = scalarTextFromValue(providerName);
@@ -3263,11 +3265,10 @@ NodeRef ProtocolUpdater::ingestThread(
     ordered.reserve(turns->size());
     for (const Value &value : *turns) {
       if (const Value::Object *turnObject = value.asObject()) {
-        NodeRef turn = ingestTurn(write, *turnObject, thread, {}, replaceTurns,
-                                  snapshotBoundary, true);
-        if (turn && arrayMember(*turnObject, "items")) {
-            write.setField(turn, "itemsHistoryHasMore", Value(false));
-        }
+          NodeRef turn = ingestTurn(write, *turnObject, thread, {}, replaceTurns, snapshotBoundary);
+          if (turn && arrayMember(*turnObject, "items")) {
+              write.setField(turn, "itemsHistoryHasMore", Value(false));
+          }
         if (turn && ordered.insert(turn.get()).second)
           order.emplace_back(std::move(turn));
       }
@@ -3287,47 +3288,39 @@ NodeRef ProtocolUpdater::ingestThread(
   return thread;
 }
 
-NodeRef
-ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
-                            const Value::Object &object, const NodeRef &thread,
-                            std::string_view fallbackId, bool replaceItems,
-                            std::optional<std::uint64_t> preserveChangesAfter,
-                            bool updateCurrentRelation) {
-  const std::string id = nestedId(object, fallbackId);
-  if (id.empty() || !thread)
-    return {};
-  NodeRef turn = ensureTurn(write, thread, id);
-  mergeObject(write, turn, object, "items", preserveChangesAfter);
-  if (const Value::Array *items = arrayMember(object, "items")) {
-    std::vector<NodeRef> order;
-    order.reserve(items->size());
-    std::unordered_set<const Node *> ordered;
-    ordered.reserve(items->size());
-    for (const Value &value : *items) {
-      if (const Value::Object *itemObject = value.asObject()) {
-        NodeRef item =
-            ingestItem(write, *itemObject, turn, {}, preserveChangesAfter);
-        if (item && ordered.insert(item.get()).second)
-          order.emplace_back(std::move(item));
-      }
+NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess& write,
+                                    const Value::Object& object,
+                                    const NodeRef& thread,
+                                    std::string_view fallbackId,
+                                    bool replaceItems,
+                                    std::optional<std::uint64_t> preserveChangesAfter) {
+    const std::string id = nestedId(object, fallbackId);
+    if (id.empty() || !thread)
+        return {};
+    NodeRef turn = ensureTurn(write, thread, id);
+    mergeObject(write, turn, object, "items", preserveChangesAfter);
+    if (const Value::Array* items = arrayMember(object, "items")) {
+        std::vector<NodeRef> order;
+        order.reserve(items->size());
+        std::unordered_set<const Node*> ordered;
+        ordered.reserve(items->size());
+        for (const Value& value : *items) {
+            if (const Value::Object* itemObject = value.asObject()) {
+                NodeRef item = ingestItem(write, *itemObject, turn, {}, preserveChangesAfter);
+                if (item && ordered.insert(item.get()).second)
+                    order.emplace_back(std::move(item));
+            }
+        }
+        if (replaceItems) {
+            const std::vector<NodeRef> previousRoots = write.related(turn, RelationKind::TurnRootItem);
+            const std::vector<NodeRef> existing = mergeExistingTail(write.children(turn), previousRoots);
+            std::vector<NodeRef> replacement = replaceAuthoritativeChildren(write, turn, std::move(order), existing, preserveChangesAfter);
+            const NodeRef root = replacementTurnRoot(write, replacement, previousRoots);
+            write.replaceChildren(turn, replacement);
+            replaceSingleRelation(write, turn, RelationKind::TurnRootItem, root);
+        }
     }
-    if (replaceItems) {
-      const std::vector<NodeRef> previousRoots =
-          write.related(turn, RelationKind::TurnRootItem);
-      const std::vector<NodeRef> existing =
-          mergeExistingTail(write.children(turn),
-                            previousRoots);
-      std::vector<NodeRef> replacement = replaceAuthoritativeChildren(
-          write, turn, std::move(order), existing, preserveChangesAfter);
-      const NodeRef root =
-          replacementTurnRoot(write, replacement, previousRoots);
-      write.replaceChildren(turn, replacement);
-      replaceSingleRelation(write, turn, RelationKind::TurnRootItem, root);
-    }
-  }
-  if (updateCurrentRelation)
-    updateActiveTurn(write, thread, turn);
-  return turn;
+    return turn;
 }
 
 NodeRef

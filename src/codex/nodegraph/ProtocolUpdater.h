@@ -135,12 +135,12 @@ private:
   ingestThread(NodeGraph::WriteAccess &write, const Value::Object &object,
                std::string_view fallbackId = {}, bool replaceTurns = false,
                std::optional<std::uint64_t> preserveChangesAfter = {});
-  [[nodiscard]] NodeRef
-  ingestTurn(NodeGraph::WriteAccess &write, const Value::Object &object,
-             const NodeRef &thread, std::string_view fallbackId = {},
-             bool replaceItems = false,
-             std::optional<std::uint64_t> preserveChangesAfter = {},
-             bool updateCurrentRelation = true);
+  [[nodiscard]] NodeRef ingestTurn(NodeGraph::WriteAccess& write,
+                                   const Value::Object& object,
+                                   const NodeRef& thread,
+                                   std::string_view fallbackId = {},
+                                   bool replaceItems = false,
+                                   std::optional<std::uint64_t> preserveChangesAfter = {});
   [[nodiscard]] NodeRef
   ingestItem(NodeGraph::WriteAccess &write, const Value::Object &object,
              const NodeRef &turn, std::string_view fallbackId = {},
