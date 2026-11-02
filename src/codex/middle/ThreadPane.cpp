@@ -171,6 +171,16 @@ public:
     using QTreeView::QTreeView;
 
 protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        auto* outer = static_cast<QTreeWidget*>(parentWidget()->parentWidget());
+        const bool outerAutoScroll = outer->hasAutoScroll();
+        const bool bodyAutoScroll = hasAutoScroll();
+        outer->setAutoScroll(false);
+        setAutoScroll(false);
+        QTreeView::mousePressEvent(event);
+        setAutoScroll(bodyAutoScroll);
+        outer->setAutoScroll(outerAutoScroll);
+    }
     bool viewportEvent(QEvent* event) override {
         return contextMouseEvent(event) || QTreeView::viewportEvent(event);
     }
@@ -425,6 +435,13 @@ public:
 #endif
 
   protected:
+      void mousePressEvent(QMouseEvent* event) override {
+          const bool autoScroll = hasAutoScroll();
+          setAutoScroll(false);
+          QTreeWidget::mousePressEvent(event);
+          setAutoScroll(autoScroll);
+      }
+
   bool viewportEvent(QEvent* event) override {
       bool handled = contextMouseEvent(event);
       if (!handled && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)) {
