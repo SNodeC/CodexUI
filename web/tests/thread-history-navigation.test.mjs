@@ -68,7 +68,10 @@ test("chosen anchor survives streaming and lifetime changes through the existing
 test("empty browser header offers disabled navigation alongside existing presentation controls", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("offline fixture"); });
     const markup = renderToStaticMarkup(createElement(App, {session}));
-    assert.match(markup, /class="conversation-view-controls"[\s\S]*class="turn-navigation"/u);
+    assert.match(markup, /class="thread-heading-context"[\s\S]*class="turn-navigation"[\s\S]*class="thread-workspace-copy"[\s\S]*class="thread-workspace"/u);
+    const presentation = markup.match(/<div class="conversation-view-controls"[^>]*>([\s\S]*?)<\/div>/u)?.[1];
+    assert.ok(presentation);
+    assert.doesNotMatch(presentation, /class="turn-navigation"/u);
     assert.match(markup, /aria-label="Turn opening; previous turn when already there"[^>]*disabled/u);
     assert.match(markup, /aria-label="First turn; load earlier history if needed"[^>]*disabled/u);
     assert.match(markup, /aria-label="Next turn opening"[^>]*disabled/u);

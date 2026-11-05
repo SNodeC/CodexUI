@@ -475,7 +475,9 @@ const workspaceDomContract = `(async()=>{
     const inputValue=(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,value);
         input.dispatchEvent(new Event("input",{bubbles:true}));};
     const heading=()=>document.querySelector(".thread-workspace");
+    notify("turn/started",{threadId:"profile",turn:{id:"workspace-active",status:"inProgress"}});await frame();
     const activeDisabled=heading().disabled;
+    notify("turn/completed",{threadId:"profile",turn:{id:"workspace-active",status:"completed"}});
     notify("turn/completed",{threadId:"profile",turn:{id:"turn-79",status:"completed"}});
     notify("thread/status/changed",{threadId:"profile",status:{type:"idle"}});await frame();
     const initial=heading().textContent;
@@ -762,7 +764,8 @@ const navigationCheck = `(async()=>{
     const headerTop=key=>card(key).querySelector(":scope > header").getBoundingClientRect().top-scroll.getBoundingClientRect().top;
     const heading=document.querySelector(".conversation-heading"),height=heading.getBoundingClientRect().height;
     const presentation=document.querySelector('.conversation-view-controls > button'),presentationLeft=presentation.getBoundingClientRect().left;
-    const sameRow=Math.abs(previous.getBoundingClientRect().top-presentation.getBoundingClientRect().top)<=1;
+    const sameRow=Math.abs(previous.getBoundingClientRect().top-document.querySelector(".thread-workspace-copy").getBoundingClientRect().top)<=1
+        &&presentation.getBoundingClientRect().bottom<=previous.getBoundingClientRect().top;
     const latestInitiallyDisabled=getComputedStyle(latest).visibility==="visible"&&latest.disabled;
     await jump(0);const first=activeKey();
     const firstAvailableForEarlierHistory=getComputedStyle(firstButton).visibility==="visible"&&!firstButton.disabled;
@@ -1170,17 +1173,23 @@ try {
         await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, "browser-thread-navigation.png"), Buffer.from(screenshot.data, "base64"));
     }
     await devTools.evaluate(`document.querySelector('.turn-outline .menu-popover:popover-open')?.hidePopover()`);
+    await devTools.evaluate(`document.querySelectorAll('.conversation-view-controls > button').item(4).focus()`);
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "Tab", windowsVirtualKeyCode: 9});
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "Tab", windowsVirtualKeyCode: 9});
+    const headerKeyboardOrder = await devTools.evaluate(`document.activeElement?.getAttribute('aria-label') === 'First turn; load earlier history if needed'`);
+    assert.equal(headerKeyboardOrder, true, "Tab proceeds from presentation controls to thread navigation");
+    await devTools.evaluate(`(async()=>{const socket=globalThis.codexuiApplicationProfile.socket,threadId=socket.sent.filter(message=>message.payload?.method==='thread/resume').at(-1).payload.params.threadId;socket.receive({kind:'appserver',payload:{method:'thread/name/updated',params:{threadId,threadName:'A long thread name that must yield space to navigation and workspace Copy '.repeat(6)}}});await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));})()`);
     const navigationGeometry = [];
     for (const width of [1280, 760, 521, 360, 320]) {
         await setWidth(devTools, width);
         await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
-        const geometry = await devTools.evaluate(`(()=>{const group=document.querySelector('.conversation-view-controls'),nav=document.querySelector('.turn-navigation'),heading=document.querySelector('.eyebrow'),buttons=[...group.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),r=nav.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth-innerWidth,singleRow:buttons.every(button=>Math.abs(button.getBoundingClientRect().top-r.top)<=1),labelClear:heading.getBoundingClientRect().bottom<=r.top+1||heading.getBoundingClientRect().right<=r.left};})()`);
+        const geometry = await devTools.evaluate(`(()=>{const nav=document.querySelector('.turn-navigation'),heading=document.querySelector('.eyebrow'),title=document.querySelector('.thread-heading-context h1'),copy=document.querySelector('.thread-workspace-copy'),status=document.querySelector('.conversation-state'),workspace=document.querySelector('.thread-workspace'),buttons=[...nav.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),r=nav.getBoundingClientRect(),t=title.getBoundingClientRect(),c=copy.getBoundingClientRect(),s=status.getBoundingClientRect(),w=workspace.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth-innerWidth,singleRow:[...buttons,copy,status].every(button=>Math.abs(button.getBoundingClientRect().top+button.getBoundingClientRect().height/2-r.top-r.height/2)<=1),labelClear:heading.getBoundingClientRect().bottom<=r.top+1,titleBeforeNavigation:t.right<=r.left,copyAndStatusAfterNavigation:r.right<=c.left&&c.right<=s.left,workspaceBelowTitle:w.top>=t.bottom&&Math.abs(w.left-t.left)<=1};})()`);
         navigationGeometry.push({width, ...geometry});
-        assert.deepEqual(geometry, {overflow: 0, singleRow: true, labelClear: true}, `Navigation header at ${width}px`);
+        assert.deepEqual(geometry, {overflow: 0, singleRow: true, labelClear: true, titleBeforeNavigation: true, copyAndStatusAfterNavigation: true, workspaceBelowTitle: true}, `Navigation header at ${width}px`);
     }
     await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: true, maxTouchPoints: 1});
     await waitUntil(devTools, `matchMedia('(pointer: coarse)').matches`, "touch navigation");
-    const touchNavigation = await devTools.evaluate(`(async()=>{const group=document.querySelector('.conversation-view-controls'),buttons=[...group.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),height=group.getBoundingClientRect().height,frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));buttons.at(-1).focus();await frame();const last=buttons.at(-1).getBoundingClientRect(),lastReachable=last.left>=0&&last.right<=innerWidth;buttons[0].focus();await frame();const first=buttons[0].getBoundingClientRect();return {lastReachable,firstReachable:first.left>=0&&first.right<=innerWidth,sameHeight:group.getBoundingClientRect().height===height,hitTargets:buttons.every(button=>button.getBoundingClientRect().width>=44&&button.getBoundingClientRect().height>=44)};})()`);
+    const touchNavigation = await devTools.evaluate(`(async()=>{const group=document.querySelector('.thread-heading-context'),buttons=[...group.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),height=group.getBoundingClientRect().height,frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));buttons.at(-1).focus();await frame();const last=buttons.at(-1).getBoundingClientRect(),lastReachable=last.left>=0&&last.right<=innerWidth;buttons[0].focus();await frame();const first=buttons[0].getBoundingClientRect();return {lastReachable,firstReachable:first.left>=0&&first.right<=innerWidth,sameHeight:group.getBoundingClientRect().height===height,hitTargets:buttons.every(button=>button.getBoundingClientRect().width>=44&&button.getBoundingClientRect().height>=44)};})()`);
     assert.deepEqual(touchNavigation, {lastReachable: true, firstReachable: true, sameHeight: true, hitTargets: true});
     await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: false});
     await setWidth(devTools, 1280);
@@ -1241,7 +1250,7 @@ try {
             }
         }
     }
-    console.log(JSON.stringify({desktopBrowser, attachments, attachmentGeometry, navigation, navigationGeometry, touchNavigation, turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
+    console.log(JSON.stringify({desktopBrowser, attachments, attachmentGeometry, navigation, headerKeyboardOrder, navigationGeometry, touchNavigation, turnRemoval, workspaceDom, workspaceGeometry, catchup, browser: browserVersion.product, widths: [760, 521, 360], overflow: 0,
         drawerFocus: "qualified", focusTrap: "qualified", breakpointFallback: "qualified", coarseTargets: "44px",
         appPerformance: {limits: applicationPerformanceLimits, hydrate: {...hydrateResult, ...hydratePerformance},
             idle: idlePerformance, semanticNoOp: {...noOpResult, ...noOpPerformance},

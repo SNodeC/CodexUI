@@ -179,13 +179,12 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   context->addWidget(sectionTitle);
   context->addStretch();
   const QSettings settings;
-  const auto headerButton = [&context](QString objectName) {
+  const auto headerButton = [](QString objectName) {
       auto* button = new QToolButton;
       button->setObjectName(std::move(objectName));
       button->setProperty("kind", "presentationToggle");
       button->setIconSize(QSize(presentation::CardHeaderMetrics::IconSize, presentation::CardHeaderMetrics::IconSize));
       button->setFixedSize(presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight);
-      context->addWidget(button);
       return button;
   };
   auto* firstTurn = headerButton(QStringLiteral("conversationFirstTurn"));
@@ -204,9 +203,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   auto* latest = headerButton(QStringLiteral("conversationLatest"));
   latest->setText(QStringLiteral("↧"));
   latest->setToolTip(QStringLiteral("Latest output; resume following"));
-  for (auto* button : {firstTurn, previousTurn, turns, nextTurn, latest}) {
-      button->setAccessibleName(button->toolTip());
-  }
   auto* outline = new QFrame(turns, Qt::Popup | Qt::FramelessWindowHint);
   outline->setObjectName(QStringLiteral("conversationTurnMenu"));
   auto* list = new QListWidget(outline);
@@ -300,10 +296,11 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       list->setFocus(Qt::PopupFocusReason);
       list->scrollToItem(list->currentItem(), QAbstractItemView::PositionAtCenter);
   });
-  const auto presentationToggle = [&headerButton](QString objectName, PresentationIcon icon) {
+  const auto presentationToggle = [&headerButton, &context](QString objectName, PresentationIcon icon) {
       auto* button = headerButton(std::move(objectName));
       button->setCheckable(true);
       button->setIcon(presentationIcon(icon));
+      context->addWidget(button);
       return button;
   };
   reasoningVisibility =
@@ -363,7 +360,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   contentLayout->setContentsMargins(14, 0, 14, 0);
   contentLayout->setSpacing(0);
   auto *threadHeading = new QHBoxLayout;
-  threadHeading->setSpacing(10);
+  threadHeading->setSpacing(4);
   conversationTitle =
       makeLabel(QStringLiteral("No synchronized thread"), "heading");
   conversationTitle->setObjectName(QStringLiteral("conversationTitle"));
@@ -378,18 +375,21 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
                                    QSizePolicy::Preferred);
   conversationTokens->setAlignment(Qt::AlignRight | Qt::AlignTop);
   threadHeading->addWidget(conversationTitle, 2);
-  conversationWorkspace = new QToolButton;
+  for (auto* button : {firstTurn, previousTurn, turns, nextTurn, latest}) {
+      button->setAccessibleName(button->toolTip());
+      threadHeading->addWidget(button);
+  }
+  auto* metadata = new QHBoxLayout;
+  conversationWorkspace = new QPushButton;
   conversationWorkspace->setObjectName(QStringLiteral("conversationWorkspace"));
   conversationWorkspace->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-  conversationWorkspace->setMinimumWidth(0);
   conversationWorkspace->setMaximumWidth(300);
-  conversationWorkspace->setAutoRaise(true);
   conversationWorkspace->installEventFilter(this);
-  threadHeading->addWidget(conversationWorkspace, 1);
+  metadata->addWidget(conversationWorkspace, 1, Qt::AlignTop);
   workspaceCopy = new presentation::CopyButton(QStringLiteral("Copy thread workspace"));
   workspaceCopy->setObjectName(QStringLiteral("copyThreadWorkspace"));
   threadHeading->addWidget(workspaceCopy);
-  connect(conversationWorkspace, &QToolButton::clicked, this, [this] {
+  connect(conversationWorkspace, &QPushButton::clicked, this, [this] {
       if (workspaceAction) {
           workspaceAction();
       }
@@ -399,7 +399,8 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   });
   threadHeading->addWidget(conversationState);
   contentLayout->addLayout(threadHeading);
-  contentLayout->addWidget(conversationTokens);
+  metadata->addWidget(conversationTokens, 2);
+  contentLayout->addLayout(metadata);
   contentLayout->addSpacing(7);
   contentLayout->addWidget(divider());
   contentLayout->addSpacing(7);

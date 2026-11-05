@@ -16,6 +16,7 @@ class QLabel;
 class QSplitter;
 class QTimer;
 class QToolButton;
+class QPushButton;
 
 namespace codexui::UiStyle { class TokenUsageLabel; }
 
@@ -77,7 +78,7 @@ private:
   ThreadPane *threadPane = nullptr;
   QFrame *conversationRegion = nullptr;
   QLabel *conversationTitle = nullptr;
-  QToolButton* conversationWorkspace = nullptr;
+  QPushButton* conversationWorkspace = nullptr;
   presentation::CopyButton* workspaceCopy = nullptr;
   QString workspacePath;
   std::function<void()> workspaceAction;

@@ -2297,17 +2297,21 @@ bool tokenDetailsRemainVisible() {
 bool turnNavigationUsesTheExistingHeader() {
     MiddleRegionWidget region;
     region.setStyleSheet(UiStyle::applicationStyleSheet());
-    region.showSidebar(false);
-    region.showInspector(false);
     region.resize(820, 700);
     region.show();
+    region.showSidebar(false);
+    region.showInspector(false);
     auto* first = region.findChild<QToolButton*>(QStringLiteral("conversationFirstTurn"));
     auto* previous = region.findChild<QToolButton*>(QStringLiteral("conversationPreviousTurn"));
     auto* outline = region.findChild<QToolButton*>(QStringLiteral("conversationTurnOutline"));
     auto* next = region.findChild<QToolButton*>(QStringLiteral("conversationNextTurn"));
     auto* latest = region.findChild<QToolButton*>(QStringLiteral("conversationLatest"));
     auto* presentation = region.findChild<QToolButton*>(QStringLiteral("conversationReasoningToggle"));
-    bool result = expect(first && previous && outline && next && latest && presentation,
+    auto* title = region.findChild<QLabel*>(QStringLiteral("conversationTitle"));
+    auto* workspace = region.findChild<QAbstractButton*>(QStringLiteral("conversationWorkspace"));
+    auto* copy = region.findChild<QToolButton*>(QStringLiteral("copyThreadWorkspace"));
+    auto* state = region.findChild<QLabel*>(QStringLiteral("conversationState"));
+    bool result = expect(first && previous && outline && next && latest && presentation && title && workspace && copy && state,
                          "the established conversation header owns the navigation controls");
     if (first && latest) {
         result &= expect(first->isVisible() && !first->isEnabled() && latest->isVisible() && !latest->isEnabled(),
@@ -2359,7 +2363,7 @@ bool turnNavigationUsesTheExistingHeader() {
     }
     QCoreApplication::processEvents();
     result &= expect(outline && outline->isEnabled(), "navigation enables after staged history commits");
-    if (first && previous && outline && next && latest && presentation) {
+    if (first && previous && outline && next && latest && presentation && title && workspace && copy && state) {
         const QRect header = presentation->geometry();
         region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
         QCoreApplication::processEvents();
@@ -2373,17 +2377,44 @@ bool turnNavigationUsesTheExistingHeader() {
         result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible() && latest->isEnabled(),
                          "the actual Previous control pauses following and enables Latest");
         result &= expect(presentation->geometry() == header, "Latest retains its slot and never shifts presentation controls");
-        for (int width : {820, 460, 340}) {
+        const int minimumWidth = region.minimumSizeHint().width();
+        const QString longTitle = QStringLiteral("A long thread title ").repeated(12);
+        const QString longPath = QStringLiteral("/remote/project/") + QStringLiteral("long-directory/").repeated(30);
+        bool workspaceOpened = false;
+        region.setThreadHeading(longTitle, {"Tokens 87.4M | In 86.9M | Out 408.5k", "Full usage"}, "Last activity: 15:30:49", "completed");
+        region.setThreadWorkspace(longPath, {}, [&workspaceOpened] {
+            workspaceOpened = true;
+        });
+        const auto bounds = [&region](QWidget* widget) {
+            return QRect(widget->mapTo(&region, QPoint()), widget->size());
+        };
+        for (int width : {1100, 820, 460, 340}) {
             region.resize(width, 700);
             QCoreApplication::processEvents();
-            int right = 0;
-            for (auto* button : {first, previous, outline, next, latest, presentation}) {
-                result &= expect(button->geometry().top() == presentation->geometry().top() && button->height() == presentation->height() &&
-                                     !button->accessibleName().isEmpty() && button->geometry().left() >= right,
-                                 "navigation and presentation share one accessible header row at every width");
-                right = button->geometry().right();
+            int right = bounds(title).right();
+            for (auto* button : {first, previous, outline, next, latest, copy}) {
+                result &= expect(std::abs(bounds(button).center().y() - bounds(title).center().y()) <= 1 &&
+                                     !button->accessibleName().isEmpty() && bounds(button).left() > right,
+                                 "navigation and workspace Copy follow the title in one accessible row");
+                right = bounds(button).right();
+            }
+            result &= expect(region.minimumSizeHint().width() == minimumWidth && region.width() == std::max(width, minimumWidth) &&
+                                 bounds(state).left() > right && std::abs(bounds(state).center().y() - bounds(title).center().y()) <= 1 &&
+                                 bounds(workspace).left() == bounds(title).left() && bounds(workspace).top() > bounds(title).bottom() &&
+                                 bounds(presentation).bottom() < bounds(first).top() && title->toolTip() == longTitle &&
+                                 workspace->toolTip().startsWith(longPath) && workspace->isEnabled(),
+                             "long title and path fit without moving status below navigation or workspace away from the left edge");
+            if (!qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR").isEmpty()) {
+                region.grab().save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") +
+                                   QStringLiteral("/native-thread-header-%1.png").arg(width));
             }
         }
+        workspace->click();
+        copy->click();
+        result &= expect(workspaceOpened && QApplication::clipboard()->text() == longPath,
+                         "the relocated workspace action and Copy keep their full semantic path");
+        region.setThreadHeading(QStringLiteral("History navigation fixture"), {}, {}, QStringLiteral("completed"));
+        region.setThreadWorkspace(QStringLiteral("/workspace"), QStringLiteral("Test fixture"), {});
         auto* menu = region.findChild<QFrame*>(QStringLiteral("conversationTurnMenu"));
         outline->click();
         QCoreApplication::processEvents();
