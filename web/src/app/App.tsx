@@ -1238,36 +1238,10 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         {turnRemoval && <TurnRemovalSurface session={session} target={turnRemoval} onClose={() => setTurnRemoval(undefined)} onConfirm={() => setTurnRemoval({...turnRemoval, stage: "confirm"})} />}
-        <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">CONVERSATION</span>
-            <div className="conversation-lockup"><div className="thread-heading-context"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
-                <button className="thread-workspace" disabled={!thread || session.workspaceChangeUnavailable(projectionId, presentationKey) !== ""} title={`${thread?.cwd || "Workspace not reported"}\n${session.workspaceChangeUnavailable(projectionId, presentationKey) || "Change workspace…"}`} aria-label={`Thread workspace: ${thread?.cwd || "Workspace not reported"}`} onClick={() => onRequestWorkspace({threadId: projectionId, presentationKey})}>{thread?.cwd || "Workspace not reported"}</button>
-                <button className="thread-workspace-copy" aria-label="Copy thread workspace" disabled={!thread?.cwd} onClick={() => { if (thread?.cwd) { void writeCardClipboard({text: thread.cwd, markdown: false}); } }}><CopyIcon checked={false} /></button></div>
-                {!thread && <p className="conversation-meta">{projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>}
-                {thread && <span className={`conversation-state ${statusTone(thread.status)}`}>{displayStatus(thread.status)}</span>}
-                <div className="conversation-facts"><TokenUsage content={usage} />
-                {thread && <button className="thread-timing" onClick={() => onInspect("timing", {threadId: projectionId})} aria-label="Thread timing" title={timingDetails(protocolTimes(thread.raw, "Thread"))}>◷</button>}
-                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)}</p>}</div></div></div>
+        <div className="conversation-heading"><span className="eyebrow">CONVERSATION</span>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
-                    <div className="turn-navigation" aria-label="Turn navigation">
-                        <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
-                        <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
-                        <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
-                            const openings = loadedOpenings();
-                            return <><div className="turn-outline-count">{openings.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
-                                {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier turns…" : "Load earlier turns"}</button>}
-                                {openings.map(card => <button key={stableKey(card.key)} aria-current={card.turnId === currentOpening?.turnId ? "true" : undefined}
-                                    autoFocus={card.turnId === currentOpening?.turnId} onClick={() => navigateTo(card)} title={card.kind === "userMessage" ? (card.payload as UserMessageData).text : "Turn without an opening prompt"}>
-                                    {card.kind === "userMessage" ? (card.payload as UserMessageData).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
-                        }}</Menu>
-                        <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
-                        <button className="conversation-latest" disabled={navigation.following || !navigationEnabled} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
-                            pendingGeometry.current = {presentationKey, following: true, anchor: undefined, focus: true};
-                            viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, true);
-                            forceCardState(value => value + 1);
-                        }}>↧</button>
-                    </div>
                     <button className={presentation.showReasoning ? "active" : ""} aria-label={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} data-tooltip={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} aria-pressed={presentation.showReasoning} onClick={() => updatePresentation({showReasoning: !presentation.showReasoning})}><PresentationIcon kind="reasoning" /></button>
                     <button className={presentation.showCodexUpdates ? "active" : ""} aria-label={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} data-tooltip={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} aria-pressed={presentation.showCodexUpdates} onClick={() => updatePresentation({showCodexUpdates: !presentation.showCodexUpdates})}><PresentationIcon kind="updates" /></button>
                     <button className={presentation.commandsInitiallyExpanded ? "active" : ""} aria-label={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} data-tooltip={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} aria-pressed={presentation.commandsInitiallyExpanded} onClick={() => updatePresentation({commandsInitiallyExpanded: !presentation.commandsInitiallyExpanded})}><PresentationIcon kind="command" /></button>
@@ -1275,6 +1249,32 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                     <button className={presentation.imagesInitiallyExpanded ? "active" : ""} aria-label={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} data-tooltip={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} aria-pressed={presentation.imagesInitiallyExpanded} onClick={() => updatePresentation({imagesInitiallyExpanded: !presentation.imagesInitiallyExpanded})}><PresentationIcon kind="image" /></button>
                 </div>
             </div>
+            <div className="conversation-lockup"><div className="thread-heading-context"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
+                <div className="turn-navigation" aria-label="Turn navigation">
+                    <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
+                    <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
+                    <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
+                        const openings = loadedOpenings();
+                        return <><div className="turn-outline-count">{openings.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
+                            {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier turns…" : "Load earlier turns"}</button>}
+                            {openings.map(card => <button key={stableKey(card.key)} aria-current={card.turnId === currentOpening?.turnId ? "true" : undefined}
+                                autoFocus={card.turnId === currentOpening?.turnId} onClick={() => navigateTo(card)} title={card.kind === "userMessage" ? (card.payload as UserMessageData).text : "Turn without an opening prompt"}>
+                                {card.kind === "userMessage" ? (card.payload as UserMessageData).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
+                    }}</Menu>
+                    <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
+                    <button className="conversation-latest" disabled={navigation.following || !navigationEnabled} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
+                        pendingGeometry.current = {presentationKey, following: true, anchor: undefined, focus: true};
+                        viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, true);
+                        forceCardState(value => value + 1);
+                    }}>↧</button>
+                </div>
+                <button className="thread-workspace-copy" aria-label="Copy thread workspace" disabled={!thread?.cwd} onClick={() => { if (thread?.cwd) { void writeCardClipboard({text: thread.cwd, markdown: false}); } }}><CopyIcon checked={false} /></button>
+                {thread && <span className={`conversation-state ${statusTone(thread.status)}`}>{displayStatus(thread.status)}</span>}</div>
+                <button className="thread-workspace" disabled={!thread || session.workspaceChangeUnavailable(projectionId, presentationKey) !== ""} title={`${thread?.cwd || "Workspace not reported"}\n${session.workspaceChangeUnavailable(projectionId, presentationKey) || "Change workspace…"}`} aria-label={`Thread workspace: ${thread?.cwd || "Workspace not reported"}`} onClick={() => onRequestWorkspace({threadId: projectionId, presentationKey})}>{thread?.cwd || "Workspace not reported"}</button>
+                {!thread && <p className="conversation-meta">{projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>}
+                <div className="conversation-facts"><TokenUsage content={usage} />
+                {thread && <button className="thread-timing" onClick={() => onInspect("timing", {threadId: projectionId})} aria-label="Thread timing" title={timingDetails(protocolTimes(thread.raw, "Thread"))}>◷</button>}
+                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)}</p>}</div></div>
         </div>
         <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
             aria-busy={threadTransitionActive || undefined} onScroll={event => {

@@ -250,11 +250,11 @@ void tokenUsageUpdatesBothShellSurfaces(Configuration &configuration) {
   require(selectThread(list, "usage-a"), "usage test selects first thread");
   require(spinUntil([&] { return thread && thread->accessibleName() == "Tokens 100"; }),
           "selected usage appears in the message header");
-  auto* workspace = shell.findChild<QToolButton*>(QStringLiteral("conversationWorkspace"));
+  auto* workspace = shell.findChild<QAbstractButton*>(QStringLiteral("conversationWorkspace"));
   require(workspace && workspace->accessibleName() == "Thread workspace: /tmp" &&
               !shell.findChild<QLineEdit*>(QStringLiteral("codexWorkspace")) &&
               !shell.findChild<QLabel*>(QStringLiteral("workspaceBreadcrumb")),
-          "confirmed workspace appears beside the title and leaves turn settings");
+          "confirmed workspace appears in the thread header and leaves turn settings");
   publish("usage-b", 400);
   require(spinUntil([&] {
     return overall->accessibleName() == "Overall tokens 500" &&
@@ -3318,7 +3318,7 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
             }) &&
                 selectThread(list, "workspace-a"),
             "workspace action fixture selects A");
-    auto* heading = shell.findChild<QToolButton*>(QStringLiteral("conversationWorkspace"));
+    auto* heading = shell.findChild<QAbstractButton*>(QStringLiteral("conversationWorkspace"));
     auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
     require(spinUntil([&] {
                 return heading && heading->isEnabled() && heading->accessibleName() == "Thread workspace: /tmp";

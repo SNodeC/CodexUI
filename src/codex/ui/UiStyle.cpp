@@ -384,6 +384,7 @@ QString applicationStyleSheet() {
           background: %{hover};
           border-color: %{dividerStrong};
         }
+        QPushButton#conversationWorkspace { text-align: left; background: transparent; border: 0; padding: 0; }
         QToolButton[kind="composerAction"] {
             background: %{panel};
             border: 1px solid %{divider};

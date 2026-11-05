@@ -145,7 +145,8 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.image-ribbon\s*\{[^}]*align-items:\s*center[^}]*padding:\s*4px[^}]*background:\s*#111827/u);
     assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*animation-duration:\s*\.001ms/u);
     assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*transition-duration:\s*\.001ms/u);
-    assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.conversation-lockup\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/u);
+    assert.match(css, /\.thread-heading-context\s*\{[^}]*grid-column:\s*1 \/ -1/u);
+    assert.match(css, /\.conversation-facts\s*\{[^}]*grid-column:\s*2/u);
     assert.match(css, /\.composer-dock\s*\{[^}]*bottom:\s*24px[^}]*padding:\s*8px 10px 0[^}]*background:\s*#f6f8fb/u);
     assert.doesNotMatch(css, /\.composer-dock::(?:before|after)/u, "composer has one divider owner");
     assert.match(css, /\.composer-dock\s*\{[^}]*border-top:\s*1px solid #d7dee8/u);
