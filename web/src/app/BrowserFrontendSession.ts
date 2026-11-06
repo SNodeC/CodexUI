@@ -254,12 +254,28 @@ export class BrowserFrontendSession {
         this.snapshot = this.makeSnapshot();
     }
 
+    static navigationBridgeUrl(): string | undefined {
+        let result: string | undefined;
+        if (typeof window !== "undefined") {
+            const selected = new URLSearchParams(window.location.search || "").get("bridge");
+            if (selected && URL.canParse(selected)) {
+                const target = new URL(selected);
+                if ((target.protocol === "ws:" || target.protocol === "wss:") && target.host === window.location.host &&
+                    !target.username && !target.password) {
+                    result = target.href;
+                }
+            }
+        }
+        return result;
+    }
     static defaultBridgeUrl(): string {
-        if (typeof window === "undefined") return "ws://127.0.0.1:8080/codex";
-        const configured = readBrowserStorage("codexui.bridgeUrl");
-        if (configured) return configured;
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return `${protocol}//${window.location.host || "127.0.0.1:8080"}/codex`;
+        let result = "ws://127.0.0.1:8080/codex";
+        if (typeof window !== "undefined") {
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            result = this.navigationBridgeUrl() || readBrowserStorage("codexui.bridgeUrl") ||
+                `${protocol}//${window.location.host || "127.0.0.1:8080"}/codex`;
+        }
+        return result;
     }
 
     subscribe = (listener: () => void): (() => void) => {

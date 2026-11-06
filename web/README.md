@@ -8,7 +8,7 @@
 
 CodexWUI is the static browser frontend of Codex(W)UI. It connects directly to an AISuite `codex-bridge` WebSocket endpoint with the `codex` subprotocol. It contains no web server, bridge router, controller authority, or persistent Codex state. Its build and browser qualification require Node.js 22 or newer and Chrome or Chromium. Set `CHROME_BIN` to its executable if it is outside the usual system paths.
 
-[CodexManager](../docs/guides/profile-manager.md) is the companion native Qt application for profile supervision, app-server sign-in and guarded profile deletion. It launches native CodexUI windows; the browser frontend continues to connect to a configured bridge WebSocket endpoint.
+[CodexManager](../docs/guides/profile-manager.md) is the companion Qt application for profile supervision, app-server sign-in and guarded profile deletion. Its optional SNode.C Express web interface offers profile management and links to each profile’s CodexWUI; native windows and browser clients use the same profile environment.
 
 ## Build workspace
 
@@ -34,7 +34,7 @@ cmake --install package-build --component CodexWebUI
 
 The combined CodexUI build includes this packaging project by default; select the built artifact with `CODEXUI_WEB_DIST_DIR`. Installation copies it into `<codexui-install-prefix>/share/codexui/web`; native-only builds must explicitly configure `-DCODEXUI_INSTALL_WEB=OFF`. The existing `codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the generated `/assets/` files while `/codex` remains the WebSocket upgrade route. Its default static root comes from AISuite's configured install data directory. If CodexUI is installed elsewhere, set `codex --bridge-web-root /path/to/installed/share/codexui/web` to the actual artifact directory; the installation prefixes need not match. A page delivered over HTTPS automatically derives the corresponding same-origin `wss://.../codex` URL.
 
-The configured bridge URL is retained in browser local storage. Controller/observer roles are not authentication; keep the listener on loopback or behind an external authenticated TLS boundary. Observers may receive broadcasts and read permitted workspace files. Provider-side workspace paths and generated-image paths are displayed as remote metadata; the application does not imply access to the browser machine's filesystem. Failed WebSocket openings release their transport through the SDK detach callback; an explicit retry waits for that release before constructing its replacement.
+The configured bridge URL is retained in browser local storage. Manager links carry a `bridge` query parameter specifying a same-origin WS/WSS endpoint; it takes precedence over the saved URL for that navigation, including custom WebSocket paths. Controller/observer roles are not authentication; keep the listener on loopback or behind an external authenticated TLS boundary. Observers may receive broadcasts and read permitted workspace files. Provider-side workspace paths and generated-image paths are displayed as remote metadata; the application does not imply access to the browser machine's filesystem. Failed WebSocket openings release their transport through the SDK detach callback; an explicit retry waits for that release before constructing its replacement.
 
 ## Remote access over WSS
 

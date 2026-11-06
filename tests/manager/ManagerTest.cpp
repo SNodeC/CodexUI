@@ -37,6 +37,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
+#include <QUrlQuery>
 #include <QtTest>
 #include <algorithm>
 #include <iostream>
@@ -315,9 +316,10 @@ private slots:
         const auto path = tools.dir.filePath("profiles.json");
         QString error;
         QVERIFY(ProfileStore(path).save({p}, &error));
-        ManagerWindow window(path);
+        ManagerController manager(path);
+        ManagerWindow window(manager);
         window.show();
-        auto* runtime = window.findChild<ProfileRuntime*>();
+        auto* runtime = manager.runtime(p.id);
         QVERIFY(runtime);
         QTRY_VERIFY(!runtime->busy());
         QAction* deletion = nullptr;
@@ -537,9 +539,10 @@ private slots:
         QString error;
         const auto path = tools.dir.filePath("profiles.json");
         QVERIFY(ProfileStore(path).save({p}, &error));
-        ManagerWindow window(path);
+        ManagerController manager(path);
+        ManagerWindow window(manager);
         window.show();
-        auto* runtime = window.findChild<ProfileRuntime*>();
+        auto* runtime = manager.runtime(p.id);
         QVERIFY(runtime);
         runtime->check();
         QTRY_COMPARE(runtime->accountState(),
@@ -723,6 +726,106 @@ private slots:
         QTest::mouseClick(*account, Qt::LeftButton);
         runtime->stop();
         QTRY_VERIFY(!runtime->busy());
+    }
+    void sharedManagerAuthority() {
+        FixtureTools tools;
+        const auto path = tools.dir.filePath("profiles.json");
+        ManagerController manager(path);
+        ManagerWindow window(manager);
+        window.show();
+        auto p = Profile::create("Shared profile");
+        p.codexHome = tools.dir.filePath("home");
+        p.probeExecutable = tools.dir.filePath("probe");
+        QVERIFY(manager.replace({p}, 0).isEmpty());
+        auto* runtime = manager.runtime(p.id);
+        QVERIFY(runtime);
+        QTRY_VERIFY(!runtime->busy() && !runtime->hasOwnedProcesses());
+        const auto same = manager.request("state", {{"id", p.id}});
+        QCOMPARE(same.value("profiles").toArray().first().toObject().value("name").toString(), p.name);
+        const auto buttons = window.findChildren<QPushButton*>();
+        const auto details = std::find_if(buttons.cbegin(), buttons.cend(), [](QPushButton* button) {
+            return button->text() == "Details →";
+        });
+        QVERIFY(details != buttons.cend());
+        QTest::mouseClick(*details, Qt::LeftButton);
+        auto renamed = p;
+        renamed.name = "Changed from browser";
+        QVERIFY(manager.request("save", {{"configuration", renamed.toJson()}, {"revision", 1}}).isEmpty());
+        const auto labels = window.findChildren<QLabel*>();
+        QVERIFY(std::any_of(labels.cbegin(), labels.cend(), [&](QLabel* label) {
+            return label->text() == renamed.name;
+        }));
+        const auto* title = window.findChild<QLabel*>("detailTitle");
+        QVERIFY(title && title->isVisible());
+        QCOMPARE(title->text(), renamed.name);
+        QVERIFY(!manager.replace({p}, 1).isEmpty());
+        QCOMPARE(manager.profiles().first().name, renamed.name);
+        runtime = manager.runtime(p.id);
+        QTRY_VERIFY(!runtime->busy());
+        runtime->start(false);
+        QTRY_VERIFY(runtime->ready());
+        QVERIFY(!manager.request("remove", {{"id", p.id}, {"revision", manager.revision()}}).value("error").toString().isEmpty());
+        QCOMPARE(manager.runtime(p.id), runtime);
+        runtime->stop();
+        QTRY_VERIFY(!runtime->busy());
+        QVERIFY(manager.remove(p.id, manager.revision()).isEmpty());
+        QVERIFY(manager.profiles().isEmpty());
+    }
+    void browserListenerAndLinks() {
+        QTemporaryDir dir;
+        auto p = Profile::create("Browser profile");
+        p.codexHome = dir.filePath("home");
+        QVERIFY(p.browserUrl().isEmpty());
+        p.browser.transport = "websocket-ipv4";
+        p.browser.port = 4812;
+        QCOMPARE(QUrlQuery(QUrl(p.browserUrl())).queryItemValue("bridge"), QString("ws://127.0.0.1:4812/codex"));
+        QVERIFY(p.errors().isEmpty());
+        const auto plan = LaunchPlan::forProfile(p);
+        const auto command = plan.backends.last().command.arguments;
+        QVERIFY(command.contains("codex-bridge-websocket-ipv4"));
+        QVERIFY(command.contains("4812"));
+        QVERIFY(command.contains(p.frontend.socketPath));
+        QCOMPARE(plan.backends.size(), 1);
+        QCOMPARE(Profile::fromJson(p.toJson()).toJson(), p.toJson());
+        p.browserAddress = "https://profiles.example.test/work/";
+        QCOMPARE(QUrlQuery(QUrl(p.browserUrl())).queryItemValue("bridge"), QString("wss://profiles.example.test/work/codex"));
+        QVERIFY(p.errors().isEmpty());
+        auto other = p;
+        other.id = Profile::create().id;
+        other.codexHome = dir.filePath("other");
+        other.frontend.socketPath = dir.filePath("other.sock");
+        QVERIFY(!p.errors({other}).isEmpty());
+        other.browser.port++;
+        QVERIFY(p.errors({other}).isEmpty());
+        p.browserAddress = "https://user:secret@example.test/";
+        QVERIFY(!p.errors().isEmpty());
+        p.browserAddress.clear();
+        p.browser.transport = "unix";
+        QVERIFY(!p.errors().isEmpty());
+        p.browser.transport = "websocket-ipv6";
+        p.browser.host = "::1";
+        QCOMPARE(QUrlQuery(QUrl(p.browserUrl())).queryItemValue("bridge"), QString("ws://[::1]:4812/codex"));
+    }
+    void sharedDeletionChecks() {
+        FixtureTools tools;
+        auto p = Profile::create("Disposable shared profile");
+        p.codexHome = tools.dir.filePath("home");
+        p.probeExecutable = tools.dir.filePath("probe");
+        ManagerController manager(tools.dir.filePath("profiles.json"));
+        QVERIFY(manager.replace({p}, 0).isEmpty());
+        auto* runtime = manager.runtime(p.id);
+        QTRY_VERIFY(!runtime->busy());
+        runtime->start(false);
+        QTRY_VERIFY(runtime->ready());
+        QVERIFY(!manager.deleteData(p.id, "incorrect", true, manager.revision()).isEmpty());
+        QVERIFY(!manager.deleteData(p.id, p.name, false, manager.revision()).isEmpty());
+        QVERIFY(!manager.deleteData(p.id, p.name, true, manager.revision() - 1).isEmpty());
+        QSignalSpy finished(&manager, &ManagerController::deletionFinished);
+        QVERIFY(manager.deleteData(p.id, p.name, true, manager.revision()).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 15000);
+        QVERIFY(finished.first().at(1).toBool());
+        QVERIFY(manager.profiles().isEmpty());
+        QVERIFY(!QFileInfo::exists(p.codexHome));
     }
     void profileStorageAndConflicts() {
         QTemporaryDir dir;
@@ -967,6 +1070,33 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!runtime.busy(), 10000);
         QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("bridge"))));
         QVERIFY(!QFileInfo::exists(tools.dir.filePath(p.unit("ui"))));
+    }
+    void installedBrowserListenerConfigurations() {
+        QTemporaryDir dir;
+        const auto bridge = QStandardPaths::findExecutable("codex-bridge");
+        QVERIFY(!bridge.isEmpty());
+        const auto certificate = dir.filePath("certificate.pem");
+        writeFile(certificate, "configuration-only fixture\n");
+        for (const auto& transport : browserTransports().mid(1)) {
+            auto profile = Profile::create();
+            profile.bridgeExecutable = bridge;
+            profile.browser.transport = transport;
+            profile.browser.port = 4812;
+            profile.browser.certificate = profile.browser.privateKey = certificate;
+            profile.browser.webSocketPath = profile.frontend.webSocketPath = "/selected-profile";
+            if (transport.endsWith("ipv6")) {
+                profile.browser.host = profile.browser.bindHost = "::1";
+            }
+            const auto component = LaunchPlan::forProfile(profile).backends.last();
+            const auto check = component.configurationCheck();
+            QProcess process;
+            process.setProcessChannelMode(QProcess::MergedChannels);
+            process.start(check.program, check.arguments);
+            QVERIFY(process.waitForFinished(10000));
+            const auto output = QString::fromUtf8(process.readAllStandardOutput());
+            QVERIFY2(component.acceptsConfiguration(process.exitCode(), output), qPrintable(output));
+            QVERIFY(output.contains("codex-bridge-" + transport));
+        }
     }
     void installedCommandConfigurations() {
         QTemporaryDir dir;
@@ -1274,9 +1404,10 @@ private slots:
         const auto path = tools.dir.filePath("profiles.json");
         QVERIFY(ProfileStore(path).save({p}, &error));
         {
-            ManagerWindow window(path);
+            ManagerController manager(path);
+            ManagerWindow window(manager);
             window.show();
-            const auto runtimes = window.findChildren<ProfileRuntime*>();
+            const auto runtimes = manager.findChildren<ProfileRuntime*>();
             QCOMPARE(runtimes.size(), 1);
             runtimes.first()->start(false);
             QApplication::processEvents();
@@ -1319,7 +1450,14 @@ private slots:
             p->probeExecutable = QStandardPaths::findExecutable("codex-bridge-client");
             p->uiExecutable = CODEXMANAGER_UI_EXECUTABLE;
         }
-        ProfileRuntime one(a), two(b);
+        const auto registry = dir.filePath("profiles.json");
+        QString error;
+        QVERIFY2(ProfileStore(registry).save({a, b}, &error), qPrintable(error));
+        ManagerController manager(registry);
+        ManagerWindow window(manager);
+        window.show();
+        auto& one = *manager.runtime(a.id);
+        auto& two = *manager.runtime(b.id);
         connect(&one, &ProfileRuntime::logAdded, this, [](const QString& line) {
             qInfo().noquote() << "stdio:" << line;
         });
@@ -1333,14 +1471,24 @@ private slots:
             qInfo().noquote() << "unix state:" << two.status();
         });
         const auto cleanup = qScopeGuard([&] {
-            one.stop();
-            two.stop();
+            for (auto* runtime : manager.runtimes()) {
+                runtime->stop();
+            }
             QElapsedTimer timer;
             timer.start();
-            while ((one.busy() || two.busy()) && timer.elapsed() < 25000) {
+            const auto busy = [&] {
+                const auto runtimes = manager.runtimes();
+                return std::any_of(runtimes.cbegin(), runtimes.cend(), [](auto* runtime) {
+                    return runtime->busy();
+                });
+            };
+            while (busy() && timer.elapsed() < 25000) {
                 QTest::qWait(20);
             }
-            if (!one.hasOwnedProcesses() && !two.hasOwnedProcesses()) {
+            const auto runtimes = manager.runtimes();
+            if (std::none_of(runtimes.cbegin(), runtimes.cend(), [](auto* runtime) {
+                    return runtime->hasOwnedProcesses();
+                })) {
                 for (const auto& p : {a, b}) {
                     for (const auto& socket : {p.frontend.socketPath, p.provider.socketPath, p.runtimeSocket()}) {
                         QFile::remove(socket);
@@ -1349,16 +1497,29 @@ private slots:
                 }
             }
         });
-        one.start();
-        two.start();
+        QList<QPushButton*> launchButtons;
+        for (auto* button : window.findChildren<QPushButton*>()) {
+            if (button->text() == "Start && open") {
+                launchButtons.push_back(button);
+            }
+        }
+        QCOMPARE(launchButtons.size(), 2);
+        for (auto* button : launchButtons) {
+            QVERIFY(button->isVisible());
+            QVERIFY(button->isEnabled());
+            QTest::mouseClick(button, Qt::LeftButton);
+        }
         QTRY_VERIFY2_WITH_TIMEOUT(
             one.ready() && two.ready(), qPrintable(one.status() + '\n' + one.logs() + '\n' + two.status() + '\n' + two.logs()), 12000);
         QTRY_VERIFY_WITH_TIMEOUT(!one.busy() && !two.busy(), 20000);
         QTRY_COMPARE_WITH_TIMEOUT(one.accountState(), ProfileRuntime::AccountState::SignedOut, 10000);
         QTRY_COMPARE_WITH_TIMEOUT(two.accountState(), ProfileRuntime::AccountState::SignedOut, 10000);
         // Explicit browsing remains available without authenticating or sending inference.
-        one.openUi();
-        two.openUi();
+        for (auto* button : launchButtons) {
+            QCOMPARE(button->text(), QString("Open CodexUI"));
+            QVERIFY(button->isEnabled());
+            QTest::mouseClick(button, Qt::LeftButton);
+        }
         QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(a.runtimeSocket()) && QFileInfo::exists(b.runtimeSocket()), 20000);
         QLocalSocket first, second;
         first.connectToServer(a.runtimeSocket());
@@ -1367,21 +1528,17 @@ private slots:
         QVERIFY(second.waitForConnected(1000));
         first.disconnectFromServer();
         second.disconnectFromServer();
-        one.openUi();
+        QVERIFY(manager.request("native", {{"id", a.id}}).value("error").toString().isEmpty());
         QTRY_VERIFY_WITH_TIMEOUT(!one.busy(), 10000);
-        std::optional<DeletionPlan> deletion;
-        one.inspectDeletion({a, b}, [&](DeletionPlan plan) {
-            deletion = std::move(plan);
-        });
-        QTRY_VERIFY_WITH_TIMEOUT(deletion.has_value(), 10000);
-        QVERIFY2(deletion->error.isEmpty(), qPrintable(deletion->error));
-        QSignalSpy deleted(&one, &ProfileRuntime::deletionFinished);
-        one.deleteData(*deletion);
+        QSignalSpy deleted(&manager, &ManagerController::deletionFinished);
+        const auto deletion =
+            manager.request("delete", {{"id", a.id}, {"name", a.name}, {"exclusive", true}, {"revision", manager.revision()}});
+        QVERIFY2(deletion.value("error").toString().isEmpty(), qPrintable(deletion.value("error").toString()));
         QTRY_COMPARE_WITH_TIMEOUT(deleted.size(), 1, 20000);
-        QVERIFY2(deleted.first().first().toBool(), qPrintable(deleted.first().last().toString()));
+        QVERIFY2(deleted.first().at(1).toBool(), qPrintable(deleted.first().last().toString()));
         QVERIFY(!QFileInfo::exists(a.codexHome));
         QVERIFY(!QFileInfo::exists(a.settingsDirectory()));
-        QVERIFY(!one.hasOwnedProcesses());
+        QVERIFY(manager.runtime(a.id) == nullptr);
         QVERIFY(two.ready());
         two.stop();
         QTRY_VERIFY_WITH_TIMEOUT(!two.busy(), 20000);
@@ -1395,7 +1552,8 @@ private slots:
         QString error;
         const auto file = tools.dir.filePath("profiles.json");
         QVERIFY(ProfileStore(file).save({p}, &error));
-        ManagerWindow window(file);
+        ManagerController manager(file);
+        ManagerWindow window(manager);
         window.show();
         QTest::qWait(30);
         QVERIFY(window.isVisible());
@@ -1436,7 +1594,8 @@ private slots:
         QString error;
         const auto file = tools.dir.filePath("profiles.json");
         QVERIFY(ProfileStore(file).save(profiles, &error));
-        ManagerWindow window(file);
+        ManagerController manager(file);
+        ManagerWindow window(manager);
         window.resize(width, 830);
         window.show();
         QTest::qWait(50);

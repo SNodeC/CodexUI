@@ -13,6 +13,8 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QUuid>
 #include <algorithm>
 
@@ -143,6 +145,12 @@ namespace codexui::manager {
                 "rfcomm",
                 "rfcomm-tls"};
     }
+    QStringList providerTransports() {
+        return {"stdio", "unix", "websocket-ipv4", "websocket-ipv6"};
+    }
+    QStringList browserTransports() {
+        return {"disabled", "websocket-ipv4", "websocket-ipv6", "wss-ipv4", "wss-ipv6"};
+    }
     QString transportLabel(const QString& t) {
         static const QMap<QString, QString> labels{{"stdio", "Stdio · bridge-owned child"},
                                                    {"unix", "Unix-domain socket"},
@@ -207,6 +215,8 @@ namespace codexui::manager {
                 {"appServer", hostJson(appServer)},
                 {"frontend", endpointJson(frontend)},
                 {"provider", endpointJson(provider)},
+                {"browser", endpointJson(browser)},
+                {"browserAddress", browserAddress},
                 {"shareInstructions", shareInstructions}};
     }
     Profile Profile::fromJson(const QJsonObject& j) {
@@ -224,8 +234,33 @@ namespace codexui::manager {
         p.appServer = readHost(j.value("appServer").toObject());
         p.frontend = readEndpoint(j.value("frontend").toObject());
         p.provider = readEndpoint(j.value("provider").toObject());
+        if (j.contains("browser")) {
+            p.browser = readEndpoint(j.value("browser").toObject());
+        }
+        p.browserAddress = j.value("browserAddress").toString();
         p.shareInstructions = j.value("shareInstructions").toBool();
         return p;
+    }
+    QString Profile::browserUrl() const {
+        const auto& endpoint = browser.transport == "disabled" ? frontend : browser;
+        QString result;
+        if (endpoint.transport.startsWith("websocket") || endpoint.transport.startsWith("wss")) {
+            QUrl url;
+            url.setScheme(endpoint.transport.startsWith("wss") ? "https" : "http");
+            url.setHost(endpoint.host);
+            url.setPort(endpoint.port);
+            url.setPath("/");
+            if (!browserAddress.isEmpty()) {
+                url = QUrl(browserAddress);
+            }
+            auto connection = url.resolved(QUrl("." + endpoint.webSocketPath));
+            connection.setScheme(url.scheme() == "https" ? "wss" : "ws");
+            QUrlQuery query;
+            query.addQueryItem("bridge", connection.toString());
+            url.setQuery(query);
+            result = url.toString();
+        }
+        return result;
     }
     QStringList Profile::errors(const QVector<Profile>& others) const {
         QStringList errors;
@@ -241,7 +276,7 @@ namespace codexui::manager {
         if (!frontendTransports().contains(frontend.transport)) {
             errors << "Unsupported frontend transport.";
         }
-        if (!QStringList{"stdio", "unix", "websocket-ipv4", "websocket-ipv6"}.contains(provider.transport)) {
+        if (!providerTransports().contains(provider.transport)) {
             errors << "Unsupported app-server transport.";
         }
         for (const auto* host : {&bridge, &appServer}) {
@@ -287,7 +322,7 @@ namespace codexui::manager {
         if (provider.transport.contains("websocket") && provider.webSocketPath != "/") {
             errors << "The current app-server supports the WebSocket path / only.";
         }
-        for (const auto* e : {&frontend, &provider}) {
+        for (const auto* e : {&frontend, &provider, &browser}) {
             if (e->transport == "unix" && (!QDir::isAbsolutePath(e->socketPath) || e->socketPath.toUtf8().size() > 100)) {
                 errors << "Unix socket paths must be absolute and at most 100 bytes.";
             }
@@ -301,12 +336,31 @@ namespace codexui::manager {
                 errors << "RFCOMM channels must be from 1 to 30.";
             }
         }
-        if (frontend.transport.contains("tls") || frontend.transport.startsWith("wss")) {
-            if (bridge.ownership != Ownership::External && (frontend.certificate.isEmpty() || frontend.privateKey.isEmpty())) {
-                errors << "A managed TLS bridge requires a certificate and private-key path on its host.";
+        for (const auto* e : {&frontend, &browser}) {
+            if (e->transport.contains("tls") || e->transport.startsWith("wss")) {
+                if (bridge.ownership != Ownership::External && (e->certificate.isEmpty() || e->privateKey.isEmpty())) {
+                    errors << "A managed TLS bridge requires a certificate and private-key path on its host.";
+                }
+                if (e == &frontend && e->caCertificate.isEmpty()) {
+                    errors << "Configure the local CA certificate used to verify the bridge.";
+                }
             }
-            if (frontend.caCertificate.isEmpty()) {
-                errors << "Configure the local CA certificate used to verify the bridge.";
+        }
+        if (browser.transport != "disabled") {
+            if (!browserTransports().contains(browser.transport) || browser.transport == frontend.transport ||
+                browser.webSocketPath != frontend.webSocketPath) {
+                errors << "Browser access needs a separate WebSocket listener with the same WebSocket path as the frontend.";
+            }
+            if (listenersConflict(bridge, browser, bridge, frontend) ||
+                (provider.transport != "stdio" && listenersConflict(bridge, browser, appServer, provider))) {
+                errors << "Browser listener conflicts with another component.";
+            }
+        }
+        if (!browserAddress.isEmpty()) {
+            const QUrl url(browserAddress);
+            if (!url.isValid() || (url.scheme() != "http" && url.scheme() != "https") || url.host().isEmpty() ||
+                !url.userInfo().isEmpty() || url.hasQuery() || url.hasFragment() || browserUrl().isEmpty()) {
+                errors << "Browser address must be an HTTP(S) URL without credentials, query or fragment, backed by a WebSocket listener.";
             }
         }
         if (uiExecutable.isEmpty() || bridgeExecutable.isEmpty() || appServerExecutable.isEmpty() || probeExecutable.isEmpty()) {
@@ -319,18 +373,16 @@ namespace codexui::manager {
                 if (serverHost.key() == otherHost.key() && effectivePath(serverHost, codexHome) == effectivePath(otherHost, p.codexHome)) {
                     errors << "Another profile already uses this host and CODEX_HOME.";
                 }
-                if (provider.transport != "stdio" && listenersConflict(appServer, provider, p.bridge, p.frontend)) {
-                    errors << "App-server listener conflicts with another bridge listener.";
-                }
-                if (p.provider.transport != "stdio" && listenersConflict(bridge, frontend, p.appServer, p.provider)) {
-                    errors << "Bridge listener conflicts with another app-server listener.";
-                }
-                if (listenersConflict(bridge, frontend, p.bridge, p.frontend)) {
-                    errors << "Another profile already uses this bridge listener.";
-                }
-                if (provider.transport != "stdio" && p.provider.transport != "stdio" &&
-                    listenersConflict(appServer, provider, p.appServer, p.provider)) {
-                    errors << "Another profile already uses this app-server listener.";
+                const QVector<QPair<const Host*, const Endpoint*>> ours{{&bridge, &frontend}, {&bridge, &browser}, {&appServer, &provider}};
+                const QVector<QPair<const Host*, const Endpoint*>> theirs{
+                    {&p.bridge, &p.frontend}, {&p.bridge, &p.browser}, {&p.appServer, &p.provider}};
+                for (const auto& a : ours) {
+                    for (const auto& b : theirs) {
+                        if (a.second->transport != "disabled" && b.second->transport != "disabled" &&
+                            listenersConflict(*a.first, *a.second, *b.first, *b.second)) {
+                            errors << "Another profile already uses this component listener.";
+                        }
+                    }
                 }
             }
         }

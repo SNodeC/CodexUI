@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+ <head>
+  <meta charset="utf-8"/>
+  <meta content="width=device-width, initial-scale=1" name="viewport"/>
+  <title>
+   CodexManager &middot; Profiles
+  </title>
+  <link href="colors.css" rel="stylesheet"/>
+  <link href="style.css" rel="stylesheet"/>
+  <script src="app.js" type="module">
+  </script>
+ </head>
+ <body>
+  <header>
+   <strong>
+    ◈ CodexManager
+   </strong>
+   <span id="connection" role="status">
+    Connecting&hellip;
+   </span>
+   <button id="import">
+    Import&hellip;
+   </button>
+   <button class="primary" id="new">
+    ＋ New profile
+   </button>
+  </header>
+  <main>
+   <p class="eyebrow">
+    YOUR ENVIRONMENTS
+   </p>
+   <h1>
+    Your work, in parallel.
+   </h1>
+   <p class="intro">
+    One place for your local and remote Codex profiles. Choose where you want to work.
+   </p>
+   <div class="toolbar">
+    <label>
+     Find a profile
+     <input id="search" placeholder="Name, description or location" type="search"/>
+    </label>
+    <span id="summary">
+    </span>
+   </div>
+   <p id="error" role="alert">
+   </p>
+   <section aria-label="Profiles" id="profiles">
+   </section>
+  </main>
+  <dialog id="details">
+   <button aria-label="Close profile details" class="close" data-close="details">
+    &times;
+   </button>
+   <h2 id="detail-name">
+   </h2>
+   <p id="detail-status" role="status">
+   </p>
+   <p role="alert">
+   </p>
+   <nav aria-label="Profile actions" id="actions">
+   </nav>
+   <pre id="components"></pre>
+   <details open="">
+    <summary>
+     Account / Sign in
+    </summary>
+    <p id="account">
+    </p>
+    <p id="auth-message" role="status">
+    </p>
+    <p id="login-code">
+    </p>
+    <a id="login-url" rel="noopener noreferrer" target="_blank">
+     Open sign-in page
+    </a>
+    <label>
+     Sign-in method
+     <select id="method">
+      <option value="chatgptDeviceCode">
+       ChatGPT &middot; device code (local or remote)
+      </option>
+      <option value="chatgpt">
+       ChatGPT &middot; callback on app-server host
+      </option>
+      <option value="apiKey">
+       OpenAI API key
+      </option>
+     </select>
+    </label>
+    <p>
+     Browser login callbacks must reach the app-server host. Use device-code login from another machine.
+    </p>
+    <label hidden="" id="key-label">
+     API key
+     <input autocomplete="off" id="key" type="password"/>
+    </label>
+    <div class="toolbar">
+     <button id="signin">
+      Sign in
+     </button>
+     <button id="cancel">
+      Cancel sign-in
+     </button>
+     <button id="signout">
+      Sign out&hellip;
+     </button>
+    </div>
+   </details>
+   <details>
+    <summary>
+     Configuration
+    </summary>
+    <pre id="configuration"></pre>
+   </details>
+   <details>
+    <summary>
+     Setup &amp; startup
+    </summary>
+    <pre id="instructions"></pre>
+   </details>
+   <details open="">
+    <summary>
+     Logs
+    </summary>
+    <div class="toolbar">
+     <label>
+      Filter
+      <input id="log-filter" type="search"/>
+     </label>
+     <label>
+      <input id="pause" type="checkbox"/>
+      Pause updates
+     </label>
+     <button id="export-logs">
+      Export logs
+     </button>
+    </div>
+    <pre id="logs"></pre>
+   </details>
+  </dialog>
+  <dialog id="editor">
+   <button aria-label="Close profile editor" class="close" data-close="editor">
+    &times;
+   </button>
+   <h2>
+    Configure profile
+   </h2>
+   <p>
+    Paths belong to the named component host. Registration does not copy credentials or change an existing Codex home.
+   </p>
+   <form id="profile-form">
+    <div id="fields">
+    </div>
+    <p id="edit-error" role="alert">
+    </p>
+    <button class="primary" type="submit">
+     Save profile
+    </button>
+   </form>
+  </dialog>
+  <dialog id="deletion">
+   <button aria-label="Close deletion preview" class="close" data-close="deletion">
+    &times;
+   </button>
+   <h2>
+    Delete profile and its data
+   </h2>
+   <pre id="delete-preview"></pre>
+   <details>
+    <summary>
+     Manual instructions
+    </summary>
+    <pre id="delete-instructions"></pre>
+   </details>
+   <form id="delete-form">
+    <label>
+     <input id="exclusive" required="" type="checkbox"/>
+     This home is used exclusively by this profile
+    </label>
+    <label for="delete-name" id="delete-caption">
+    </label>
+    <input autocomplete="off" id="delete-name" required=""/>
+    <p>
+     Cleanup continues if you close this page. A failed cleanup retains the registration; some files may already have been deleted.
+    </p>
+    <button class="danger" type="submit">
+     Delete permanently
+    </button>
+    <p id="delete-error" role="alert">
+    </p>
+   </form>
+  </dialog>
+  <input accept="application/json,.json" hidden="" id="import-file" type="file"/>
+ </body>
+</html>

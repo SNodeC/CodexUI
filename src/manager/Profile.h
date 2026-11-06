@@ -48,18 +48,27 @@ namespace codexui::manager {
         Host appServer;
         Endpoint frontend;
         Endpoint provider;
+        Endpoint browser = [] {
+            Endpoint endpoint;
+            endpoint.transport = QStringLiteral("disabled");
+            return endpoint;
+        }();
+        QString browserAddress;
         bool shareInstructions = false;
 
         [[nodiscard]] static Profile create(QString name = {});
         [[nodiscard]] QJsonObject toJson() const;
         [[nodiscard]] static Profile fromJson(const QJsonObject& object);
         [[nodiscard]] QStringList errors(const QVector<Profile>& others = {}) const;
+        [[nodiscard]] QString browserUrl() const;
         [[nodiscard]] QString runtimeSocket() const;
         [[nodiscard]] QString settingsDirectory() const;
         [[nodiscard]] QString unit(const QString& component) const;
     };
 
     [[nodiscard]] QStringList frontendTransports();
+    [[nodiscard]] QStringList providerTransports();
+    [[nodiscard]] QStringList browserTransports();
     [[nodiscard]] QString transportLabel(const QString& transport);
     [[nodiscard]] QString ownershipLabel(Ownership ownership);
     [[nodiscard]] QString accentColor(const QString& accent);

@@ -89,3 +89,43 @@ Full cleanup requires Python 3.11 or newer with safe directory-relative deletion
 SSH profiles use the same guarded cleanup on their configured host. With no SSH target, the **Manual instructions** tab provides the exact commands to run on the actual app-server host and this machine; every command independently previews and confirms its target. Remove the registration after those commands succeed. The manager does not guess that an externally hosted home is local.
 
 Deletion removes credentials stored inside the home, not OpenAI authorization grants or credentials in an external OS keyring. Use **Account / Sign in… → Sign out** first if that is also wanted. Source checkouts, external data reached through symlinks, socket locations, and system journals are outside the deletion scope. A failed partial deletion leaves an ownership marker for retry; local startup refuses a home marked as partially deleted.
+
+## Browser access from the Qt manager
+
+CodexManager remains one Qt application. Its main thread owns the profile registry and runtime objects; one SNode.C event-loop thread serves the manager web interface using Express. Both interfaces use the same configuration, validation and process ownership. Closing the Qt window leaves web access available; quitting the application closes web access and leaves backend services running as before. This is not a headless deployment.
+
+Both manager web listeners are disabled by default. To enable local access, create a regular file owned by your user, readable only by that user, containing a password on its first line. Keep this file separate from exported profile definitions. Then run:
+
+```sh
+codex-manager --manager-web-password-file /absolute/path/manager-password \
+  manager-web --disabled=false local --host 127.0.0.1 --port 4510
+```
+
+Open `http://127.0.0.1:4510/` and authenticate as `manager` using that password. `--manager-web-user` changes the username. Installation provides the static manager assets under `<prefix>/share/codexui/manager-web`; development builds can select the source assets with `--manager-web-root /absolute/path/CodexUI/src/manager/web`. Listener settings use SNode.C configuration and help, including IPv4 bind addresses, ports and TLS. The Qt application must remain in the foreground; daemonization is rejected.
+
+For direct access from another machine, configure the `manager-web-tls` listener with a trusted server certificate and restrict network access to authorized users:
+
+```sh
+codex-manager --manager-web-password-file /absolute/path/manager-password \
+  manager-web-tls --disabled=false \
+    tls --cert /absolute/path/server-chain.pem --cert-key /absolute/path/server.key \
+    local --host PRIVATE_INTERFACE_ADDRESS --port 4511
+```
+
+Alternatively, put the loopback HTTP listener behind an authenticated TLS boundary that preserves the public Host header, `/api` routes and the SSE event stream. HTTP Basic credentials must not cross an untrusted plaintext connection. The manager page, API, events and assets share the same authentication boundary. State-changing API calls require a same-origin request with the `X-CodexManager-Request: 1` header. API keys entered for profile sign-in are sent to that profile's app-server and are never saved in the manager registry.
+
+The browser interface offers profile creation/configuration, import/export, backend startup/shutdown, account operations, logs, registration removal and guarded data deletion. A native-app action explicitly opens CodexUI on the manager's desktop. Edits carry the registry revision, so a stale form cannot overwrite another interface's changes. Accepted operations outlive a browser connection; after a connection error, inspect the current state before retrying a mutation.
+
+### Open a particular profile in CodexWUI
+
+Each profile card provides **Start & open CodexWUI** or **Open CodexWUI**. Backend startup does not launch native CodexUI. The manager opens the profile's bridge page after protocol readiness, and that page connects directly to its own bridge. The manager is not a conversation proxy.
+
+For an existing WebSocket/WSS frontend, leave **Additional browser listener** disabled. For a Unix, raw stream or Bluetooth native connection, configure an additional WebSocket/WSS listener on the same bridge with a distinct endpoint. Both listeners share the profile's existing app-server and exact `CODEX_HOME`; keep their WebSocket paths identical. All configured component listeners participate in collision checks.
+
+The browser connect hostname must be reachable from the browser's machine. A listener bind address such as `0.0.0.0`, an SSH alias or server-local `localhost` does not provide that reachability. **Browser address** optionally supplies the externally reachable HTTP(S) page address, including a reverse-proxy directory prefix ending in `/`. The bridge endpoint is derived beneath that directory. Protect the bridge's page and WebSocket endpoint separately; manager authentication does not authorize another port automatically.
+
+Manager links include an explicit same-origin `bridge` query parameter. CodexWUI built from this revision uses it ahead of a previously saved endpoint, including for custom WebSocket paths. Rebuild and deploy the CodexWUI artifact alongside this feature; an older artifact does not implement that navigation contract.
+
+### Verification
+
+The shared-controller tests exercise Qt/browser-visible inventory changes, stale revisions, runtime ownership, browser listener launch arguments, URL generation and guarded deletion. When Node and Chrome are available, `codexmanager-web` launches the actual Qt manager and SNode.C listener with disposable profiles and simulated service/bridge helpers. It exercises authenticated HTTP/HTTPS, origin rejection, browser form submission, SSE updates, direct profile navigation, account controls, deletion, concurrent requests and process shutdown. Its HTTPS test uses a disposable self-signed certificate; it does not qualify a deployed certificate chain or remote host. Run these tests through Xvfb with the offscreen Qt platform, as required for native qualification.

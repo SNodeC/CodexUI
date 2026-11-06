@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #pragma once
-#include "manager/ProfileRuntime.h"
+#include "manager/ManagerController.h"
 
 #include <QMainWindow>
 
@@ -17,8 +17,7 @@ class QToolButton;
 namespace codexui::manager {
     class ManagerWindow final : public QMainWindow {
     public:
-        explicit ManagerWindow(QString storePath, QWidget* parent = nullptr);
-        ~ManagerWindow() override;
+        explicit ManagerWindow(ManagerController& manager, QWidget* parent = nullptr);
 
     protected:
         void closeEvent(QCloseEvent* event) override;
@@ -29,21 +28,18 @@ namespace codexui::manager {
         void reflow();
         void createOrEdit(const QString& id = {});
         void remove(const QString& id);
-        void forgetRegistration(const QString& id);
+        void forgetRegistration(const QString& id, int revision);
         void showDeletion(const QString& id);
         void showProfile(const QString& id);
         void showAuthentication(const QString& id);
         void updateProfile(const QString& id);
         void updateLogs();
-        bool persist(const QVector<Profile>& profiles);
         void importProfiles();
         void exportProfile(const QString& id);
         void quitManager();
         [[nodiscard]] ProfileRuntime* runtime(const QString& id) const;
 
-        ProfileStore store_;
-        QVector<Profile> profiles_;
-        QMap<QString, ProfileRuntime*> runtimes_;
+        ManagerController& manager_;
         QMap<QString, QWidget*> cards_;
         QStackedWidget* pages_;
         QWidget* overview_;
@@ -63,6 +59,5 @@ namespace codexui::manager {
         QToolButton* logPause_;
         QString selected_;
         QSystemTrayIcon* tray_;
-        bool storeValid_ = true;
     };
 } // namespace codexui::manager

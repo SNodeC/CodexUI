@@ -152,3 +152,7 @@ Before accepting a change:
   and must materially reduce production Qt code.
 
 The copied CMake formatting modules adapt discovery to `src/`, `tests/`, root and browser CMake files, excluding build, checkout, third-party and generated directories. Formatting stays explicit through `format`, `format-check-cxx` and `format-check-cmake`; ordinary compilation never rewrites sources. `src/codex/main.cpp` and `tests/codex/ShellIntegrationTest.cpp` retain include-order formatting exclusions because SNode.C declares `emit()` before Qt defines the `emit` macro.
+
+## Manager web interface
+
+The Qt-thread `ManagerController` owns the manager inventory, persistence and `ProfileRuntime` instances. `ManagerWindow` is a projection. The SNode.C thread owns Express requests/responses, listeners and SSE subscribers; only owning request/reply values cross the eventfd-backed queues. Web status notifications invalidate browser views rather than becoming another profile-state authority. Keep native and browser actions on the existing runtime/launch/deletion implementations. The manager does not proxy conversation traffic. New manager browser links and CodexWUI's same-origin `bridge` query handling form one navigation contract.
