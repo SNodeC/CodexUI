@@ -815,7 +815,11 @@ namespace codexui::manager {
                 deletion_ = std::move(plan);
                 stop();
             } else {
-                emit deletionFinished(false, "Deletion preview is no longer valid. Inspect and confirm the profile again.");
+                const auto error = plan.error.isEmpty()
+                                       ? QStringLiteral("Deletion preview is no longer valid. Inspect and confirm the profile again.")
+                                       : plan.error;
+                setStatus(error);
+                emit deletionFinished(false, error);
             }
         } else {
             emit deletionFinished(false, "Finish the current profile operation before deleting it.");

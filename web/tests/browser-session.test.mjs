@@ -18,6 +18,12 @@ test("browser session defaults to the bridge's canonical WebSocket endpoint", ()
         assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example:8443/codex");
         globalThis.window.localStorage.getItem = () => "wss://configured.example/bridge";
         assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://configured.example/bridge");
+        globalThis.window.location.search = "?bridge=" + encodeURIComponent("wss://codex.example:8443/profile-endpoint");
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example:8443/profile-endpoint");
+        assert.equal(BrowserFrontendSession.navigationBridgeUrl(), "wss://codex.example:8443/profile-endpoint");
+        globalThis.window.location.search = "?bridge=" + encodeURIComponent("wss://another.example/profile-endpoint");
+        assert.equal(BrowserFrontendSession.navigationBridgeUrl(), undefined);
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://configured.example/bridge");
     } finally {
         delete globalThis.window;
     }

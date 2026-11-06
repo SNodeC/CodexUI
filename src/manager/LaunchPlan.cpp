@@ -168,6 +168,11 @@ namespace codexui::manager {
         const auto instance = frontendInstance("codex-bridge", p.frontend.transport);
         bridge.arguments << instance << "--disabled=false";
         endpointArguments(bridge.arguments, p.frontend, instance, true);
+        if (p.browser.transport != "disabled") {
+            const auto browserInstance = frontendInstance("codex-bridge", p.browser.transport);
+            bridge.arguments << browserInstance << "--disabled=false";
+            endpointArguments(bridge.arguments, p.browser, browserInstance, true);
+        }
         plan.backends.push_back({"Bridge", p.bridge, p.unit("bridge"), bridge});
         // One launch authority per effective home, even across different manager stores.
         auto& owner = p.provider.transport == "stdio" ? plan.backends.last() : plan.backends.first();

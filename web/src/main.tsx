@@ -7,4 +7,5 @@ import "./styles.css";
 const root = document.getElementById("root");
 if (!root) throw new Error("CodexUI root element is missing");
 const session = new BrowserFrontendSession();
+if (BrowserFrontendSession.navigationBridgeUrl()) { session.connect(); }
 createRoot(root).render(<StrictMode><App session={session} /></StrictMode>);

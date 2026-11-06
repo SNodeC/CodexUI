@@ -181,7 +181,7 @@ namespace codexui::manager {
             auto* f = new QFormLayout(group);
             box->addWidget(group);
             auto* transport = new QComboBox(group);
-            const auto keys = provider ? QStringList{"stdio", "unix", "websocket-ipv4", "websocket-ipv6"} : frontendTransports();
+            const auto keys = provider ? providerTransports() : frontendTransports();
             for (const auto& key : keys) {
                 transport->addItem(transportLabel(key), key);
             }
@@ -258,6 +258,24 @@ namespace codexui::manager {
         auto* bridgePage = page(tabs, "Bridge", &content);
         auto* bridgeHost = hostForm(content, profile_.bridge, "Bridge process", profile_.bridgeExecutable, bridgePaths);
         auto* frontendTransport = endpointForm(content, profile_.frontend, false);
+        auto* browserTransport = endpointForm(content, profile_.browser, false);
+        qobject_cast<QGroupBox*>(browserTransport->parentWidget())->setTitle("Additional browser listener");
+        browserTransport->clear();
+        for (const auto& key : browserTransports()) {
+            browserTransport->addItem(transportLabel(key), key);
+        }
+        browserTransport->setCurrentIndex(browserTransport->findData(profile_.browser.transport));
+        auto* browserForm = new QFormLayout;
+        content->addLayout(browserForm);
+        line(browserForm,
+             "Browser address (optional)",
+             profile_.browserAddress,
+             readers_,
+             "Public HTTP(S) address if different from the listener");
+        content->addWidget(UiStyle::makeLabel("The second listener provides browser access while preserving the native connection. Leave "
+                                              "disabled to reuse an existing WebSocket frontend. Both use the same WebSocket path.",
+                                              "meta",
+                                              bridgePage));
         content->addStretch();
         auto* serverPage = page(tabs, "App-server", &content);
         auto* provider = endpointForm(content, profile_.provider, true);

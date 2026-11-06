@@ -18,6 +18,7 @@
 #include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -121,6 +122,10 @@ namespace codexui::manager {
                 footer->addWidget(open_, 1);
                 footer->addWidget(button("Details →", this, std::move(detail)));
                 layout->addLayout(footer);
+                browser_ = button("Open CodexWUI", this, [runtime] {
+                    QDesktopServices::openUrl(QUrl(runtime->profile().browserUrl()));
+                });
+                layout->addWidget(browser_);
                 update();
             }
             void update() {
@@ -131,6 +136,9 @@ namespace codexui::manager {
                                : runtime_->busy() ? "Working…"
                                                   : "Start && open");
                 open_->setEnabled(!runtime_->busy());
+                browser_->setEnabled(runtime_->ready() && !runtime_->profile().browserUrl().isEmpty());
+                browser_->setToolTip(runtime_->profile().browserUrl().isEmpty() ? "Configure a browser WebSocket listener in this profile."
+                                                                                : runtime_->profile().browserUrl());
             }
 
         private:
@@ -138,11 +146,12 @@ namespace codexui::manager {
             QLabel* state_;
             QLabel* account_;
             QPushButton* open_;
+            QPushButton* browser_;
         };
     } // namespace
-    ManagerWindow::ManagerWindow(QString path, QWidget* parent)
+    ManagerWindow::ManagerWindow(ManagerController& manager, QWidget* parent)
         : QMainWindow(parent)
-        , store_(std::move(path)) {
+        , manager_(manager) {
         setWindowTitle("CodexManager · Profiles");
         resize(1240, 830);
         setMinimumSize(740, 520);
@@ -187,7 +196,7 @@ namespace codexui::manager {
         menuButton->setPopupMode(QToolButton::InstantPopup);
         auto* menu = new QMenu(menuButton);
         menu->addAction("Open profile storage", this, [this] {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(store_.filePath()).absolutePath()));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(manager_.storePath()).absolutePath()));
         });
         menu->addSeparator();
         menu->addAction("Quit manager…", this, &ManagerWindow::quitManager);
@@ -380,69 +389,30 @@ namespace codexui::manager {
         if (QSystemTrayIcon::isSystemTrayAvailable()) {
             tray_->show();
         }
-        QString error;
-        profiles_ = store_.load(&error);
-        if (!error.isEmpty()) {
-            storeValid_ = false;
-            QTimer::singleShot(0, this, [this, error] {
-                QMessageBox::critical(this, "Profile store could not be loaded", error + "\nThe store will not be overwritten.");
+        connect(&manager_, &ManagerController::profilesChanged, this, &ManagerWindow::rebuild);
+        connect(&manager_, &ManagerController::changed, this, [this](const QString& id) {
+            updateProfile(id);
+            if (selected_ == id) {
+                updateLogs();
+            }
+        });
+        if (!manager_.error().isEmpty()) {
+            QTimer::singleShot(0, this, [this] {
+                QMessageBox::critical(this, "Profile store could not be loaded", manager_.error() + "\nThe store will not be overwritten.");
             });
         }
         rebuild();
     }
-    ManagerWindow::~ManagerWindow() {
-        // Runtime helpers outlive their services, but must not outlive this presentation.
-        for (auto* r : runtimes_) {
-            r->disconnect(this);
-            delete r;
-        }
-        runtimes_.clear();
-    }
     ProfileRuntime* ManagerWindow::runtime(const QString& id) const {
-        return runtimes_.value(id, nullptr);
-    }
-    bool ManagerWindow::persist(const QVector<Profile>& profiles) {
-        bool saved = false;
-        if (!storeValid_) {
-            QMessageBox::warning(this, "Store unavailable", "Resolve the profile-store loading error before saving.");
-        } else {
-            QString error;
-            saved = store_.save(profiles, &error);
-            if (saved) {
-                profiles_ = profiles;
-                rebuild();
-            } else {
-                QMessageBox::warning(this, "Cannot save profiles", error);
-            }
-        }
-        return saved;
+        return manager_.runtime(id);
     }
     void ManagerWindow::rebuild() {
         for (auto* card : cards_) {
             delete card;
         }
         cards_.clear();
-        QStringList retained;
-        for (const auto& p : profiles_) {
-            retained << p.id;
+        for (const auto& p : manager_.profiles()) {
             auto* r = runtime(p.id);
-            if (r && r->profile().toJson() != p.toJson()) {
-                delete runtimes_.take(p.id);
-                r = nullptr;
-            }
-            if (!r) {
-                r = new ProfileRuntime(p, this);
-                runtimes_.insert(p.id, r);
-                QTimer::singleShot(0, r, &ProfileRuntime::refresh);
-                connect(r, &ProfileRuntime::changed, this, [this, id = p.id] {
-                    updateProfile(id);
-                });
-                connect(r, &ProfileRuntime::logAdded, this, [this, id = p.id](const QString&) {
-                    if (selected_ == id) {
-                        updateLogs();
-                    }
-                });
-            }
             auto* card = new ProfileCard(
                 r,
                 gridWidget_,
@@ -468,13 +438,15 @@ namespace codexui::manager {
                 });
             cards_.insert(p.id, card);
         }
-        for (const auto& id : runtimes_.keys()) {
-            if (!retained.contains(id)) {
-                delete runtimes_.take(id);
-            }
+        if (!runtime(selected_)) {
+            pages_->setCurrentIndex(0);
         }
         reflow();
-        updateProfile(selected_);
+        if (pages_->currentIndex() == 1) {
+            showProfile(selected_);
+        } else {
+            updateProfile(selected_);
+        }
     }
     void ManagerWindow::reflow() {
         while (auto* item = grid_->takeAt(0)) {
@@ -482,7 +454,7 @@ namespace codexui::manager {
         }
         int shown = 0;
         const int columns = std::max(1, std::min(3, (width() - 80) / 330));
-        for (const auto& p : profiles_) {
+        for (const auto& p : manager_.profiles()) {
             auto* card = cards_.value(p.id);
             const bool visible = (p.name + ' ' + p.description).contains(search_->text(), Qt::CaseInsensitive);
             card->setVisible(visible);
@@ -491,7 +463,7 @@ namespace codexui::manager {
                 ++shown;
             }
         }
-        if (profiles_.isEmpty()) {
+        if (manager_.profiles().isEmpty()) {
             auto* empty = gridWidget_->findChild<QLabel*>("emptyProfiles");
             if (!empty) {
                 empty = UiStyle::makeLabel("A fresh place to begin\nCreate a profile for your daily work, an experiment, or a remote Codex "
@@ -506,20 +478,20 @@ namespace codexui::manager {
             empty->hide();
         }
         int ready = 0;
-        for (auto* r : runtimes_) {
+        for (auto* r : manager_.runtimes()) {
             ready += r->ready();
         }
-        summary_->setText(QString::number(profiles_.size()) + " profiles  ·  " + QString::number(ready) + " connected");
+        summary_->setText(QString::number(manager_.profiles().size()) + " profiles  ·  " + QString::number(ready) + " connected");
     }
     void ManagerWindow::updateProfile(const QString& id) {
         if (auto* card = static_cast<ProfileCard*>(cards_.value(id))) {
             card->update();
         }
         int ready = 0;
-        for (auto* r : runtimes_) {
+        for (auto* r : manager_.runtimes()) {
             ready += r->ready();
         }
-        summary_->setText(QString::number(profiles_.size()) + " profiles  ·  " + QString::number(ready) + " connected");
+        summary_->setText(QString::number(manager_.profiles().size()) + " profiles  ·  " + QString::number(ready) + " connected");
         auto* r = runtime(id);
         if (id == selected_ && r) {
             detailState_->setText(r->status() + " · " + r->accountStatus());
@@ -718,27 +690,22 @@ namespace codexui::manager {
                                      "Profile is in use",
                                      "Stop owned components and verify their status before changing this profile's launch configuration.");
         } else {
-            ProfileEditor editor(r ? r->profile() : Profile::create(), profiles_, this);
+            const int revision = manager_.revision();
+            ProfileEditor editor(r ? r->profile() : Profile::create(), manager_.profiles(), this);
             if (editor.exec() == QDialog::Accepted) {
-                auto next = profiles_;
                 const auto p = editor.profile();
-                bool replaced = false;
-                for (auto& item : next) {
-                    if (item.id == p.id) {
-                        item = p;
-                        replaced = true;
-                    }
-                }
-                if (!replaced) {
-                    next.push_back(p);
-                }
-                if (persist(next)) {
+                const auto error =
+                    manager_.request("save", {{"configuration", p.toJson()}, {"revision", revision}}).value("error").toString();
+                if (error.isEmpty()) {
                     showProfile(p.id);
+                } else {
+                    QMessageBox::warning(this, "Cannot save profiles", error);
                 }
             }
         }
     }
     void ManagerWindow::remove(const QString& id) {
+        const int revision = manager_.revision();
         auto* r = runtime(id);
         if (r) {
             if (r->busy() || r->hasOwnedProcesses()) {
@@ -748,21 +715,17 @@ namespace codexui::manager {
                                              "Remove registration?",
                                              "Remove this profile from CodexManager? Its CODEX_HOME, conversations, authentication and "
                                              "external services will not be deleted.") == QMessageBox::Yes) {
-                forgetRegistration(id);
+                forgetRegistration(id, revision);
             }
         }
     }
-    void ManagerWindow::forgetRegistration(const QString& id) {
-        auto next = profiles_;
-        next.erase(std::remove_if(next.begin(),
-                                  next.end(),
-                                  [&](const Profile& p) {
-                                      return p.id == id;
-                                  }),
-                   next.end());
-        if (persist(next)) {
+    void ManagerWindow::forgetRegistration(const QString& id, int revision) {
+        const auto error = manager_.remove(id, revision);
+        if (error.isEmpty()) {
             selected_.clear();
             pages_->setCurrentIndex(0);
+        } else {
+            QMessageBox::warning(this, "Cannot remove profile", error);
         }
     }
     void ManagerWindow::showDeletion(const QString& id) {
@@ -776,7 +739,7 @@ namespace codexui::manager {
             auto* tabs = new QTabWidget(&dialog);
             auto* preview = textView(tabs, "Deletion preview");
             auto* manual = textView(tabs, "Manual instructions");
-            auto plan = DeletionPlan::forProfile(r->profile(), profiles_);
+            auto plan = DeletionPlan::forProfile(r->profile(), manager_.profiles());
             preview->setPlainText(plan.description());
             manual->setPlainText(plan.manualInstructions());
             layout->addWidget(tabs, 1);
@@ -799,6 +762,8 @@ namespace codexui::manager {
             erase->setObjectName("deletePermanently");
             erase->setEnabled(false);
             layout->addWidget(buttons);
+            const int revision = manager_.revision();
+            connect(r, &QObject::destroyed, &dialog, &QDialog::reject);
             bool inspected = false;
             bool deleting = false;
             const auto update = [&] {
@@ -809,7 +774,7 @@ namespace codexui::manager {
             connect(exclusive, &QCheckBox::toggled, &dialog, update);
             connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
             QPointer<QDialog> guard(&dialog);
-            r->inspectDeletion(profiles_, [&, guard](DeletionPlan checked) {
+            r->inspectDeletion(manager_.profiles(), [&, guard](DeletionPlan checked) {
                 if (guard) {
                     plan = std::move(checked);
                     inspected = true;
@@ -823,53 +788,48 @@ namespace codexui::manager {
                 name->setEnabled(false);
                 exclusive->setEnabled(false);
                 status->setText("Stopping components and deleting data… You can close this dialog; cleanup continues in the manager.");
-                r->deleteData(plan);
+                const auto error = manager_.deleteData(id, name->text(), exclusive->isChecked(), revision);
+                if (!error.isEmpty()) {
+                    status->setText(error);
+                }
             });
             // Queued delivery lets the runtime finish its operation before registry removal destroys it.
             const auto completion = connect(
-                r,
-                &ProfileRuntime::deletionFinished,
+                &manager_,
+                &ManagerController::deletionFinished,
                 this,
-                [this, id, guard](bool success, const QString& error) {
-                    if (guard) {
-                        guard->accept();
-                    }
-                    if (success) {
-                        forgetRegistration(id);
-                    } else {
-                        QMessageBox::warning(this, "Profile cleanup incomplete", error);
+                [this, id, guard](const QString& finishedId, bool success, const QString& error) {
+                    if (id == finishedId) {
+                        if (guard) {
+                            guard->accept();
+                        }
+                        if (!success) {
+                            QMessageBox::warning(this, "Profile cleanup incomplete", error);
+                        }
                     }
                 },
-                static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::SingleShotConnection));
+                Qt::QueuedConnection);
             dialog.exec();
-            if (!deleting) {
-                disconnect(completion);
-            }
+            disconnect(completion);
         } else if (r) {
             QMessageBox::information(this, "Profile is busy", "Finish the current operation before deleting this profile.");
         }
     }
     void ManagerWindow::importProfiles() {
+        const int revision = manager_.revision();
         const auto path = QFileDialog::getOpenFileName(this, "Import profile definitions", {}, "Profiles (*.json)");
         if (!path.isEmpty()) {
             QString error;
             const auto imported = ProfileStore(path).load(&error);
-            auto next = profiles_;
-            for (auto it = imported.cbegin(); error.isEmpty() && it != imported.cend(); ++it) {
-                if (std::any_of(next.cbegin(),
-                                next.cend(),
-                                [&](const Profile& x) {
-                                    return x.id == it->id;
-                                }) ||
-                    !it->errors(next).isEmpty()) {
-                    error = "A profile ID, home, or endpoint conflicts with an existing registration. No profiles were imported.";
-                } else {
-                    next.push_back(*it);
-                }
-            }
             if (error.isEmpty()) {
-                persist(next);
-            } else {
+                QJsonArray profiles;
+                for (const auto& profile : imported) {
+                    profiles.append(profile.toJson());
+                }
+                error =
+                    manager_.request("import", {{"version", 1}, {"profiles", profiles}, {"revision", revision}}).value("error").toString();
+            }
+            if (!error.isEmpty()) {
                 QMessageBox::warning(this, "Import failed", error);
             }
         }
@@ -891,7 +851,7 @@ namespace codexui::manager {
                                   "Quit CodexManager?",
                                   "Quit the manager and leave profile services and CodexUI windows running? Use Stop profile first if you "
                                   "want to shut them down.") == QMessageBox::Yes) {
-            qApp->quit();
+            qApp->exit(0);
         }
     }
     void ManagerWindow::closeEvent(QCloseEvent* event) {
