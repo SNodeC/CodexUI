@@ -45,3 +45,20 @@ if(CODEXMANAGER_NODE AND CODEXMANAGER_CHROME)
                    "QT_QPA_PLATFORM=offscreen;CHROME_BIN=${CODEXMANAGER_CHROME}"
     )
 endif()
+
+add_executable(codexmanager-settings-test ManagerSettingsTest.cpp)
+add_dependencies(codexmanager-settings-test codex-manager)
+target_link_libraries(
+    codexmanager-settings-test PRIVATE codexmanager-ui codexmanager-web
+                                       Qt6::Test codexui-build-options
+)
+target_compile_definitions(
+    codexmanager-settings-test
+    PRIVATE CODEXMANAGER_EXECUTABLE="$<TARGET_FILE:codex-manager>"
+            CODEXMANAGER_TEST_ASSETS="${PROJECT_SOURCE_DIR}/src/manager/web"
+)
+add_test(NAME codexmanager-settings COMMAND codexmanager-settings-test)
+set_tests_properties(
+    codexmanager-settings PROPERTIES TIMEOUT 60 ENVIRONMENT
+                                     "QT_QPA_PLATFORM=offscreen"
+)

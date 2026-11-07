@@ -53,6 +53,10 @@ int main(int argc, char* argv[]) {
                            reply.contains("error") && !reply.value("error").toString().isEmpty() ? 409 : 200,
                            QJsonDocument(reply).toJson(QJsonDocument::Compact).toStdString()});
             }
+            std::string settings;
+            while (web.configuration(settings)) {
+                emit window.webSettingsReceived(QJsonDocument::fromJson(QByteArray::fromStdString(settings)).object());
+            }
             if (web.stopped()) {
                 app.exit(web.wait());
             }
@@ -62,6 +66,12 @@ int main(int argc, char* argv[]) {
         });
         QObject::connect(&manager, &codexui::manager::ManagerController::profilesChanged, &app, [&] {
             web.changed();
+        });
+        QObject::connect(&window, &codexui::manager::ManagerWindow::webSettingsRequested, &app, [&](QJsonObject request) {
+            if (!web.configure(QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString())) {
+                request.insert("error", "Settings queue is full; no change was accepted.");
+                emit window.webSettingsReceived(request);
+            }
         });
         window.show();
         if (!options.screenshot.empty()) {

@@ -94,6 +94,10 @@ Deletion removes credentials stored inside the home, not OpenAI authorization gr
 
 CodexManager remains one Qt application. Its main thread owns the profile registry and runtime objects; one SNode.C event-loop thread serves the manager web interface using Express. Both interfaces use the same configuration, validation and process ownership. Closing the Qt window leaves web access available; quitting the application closes web access and leaves backend services running as before. This is not a headless deployment.
 
+Open **Manager menu → Web interface settings…** to enable HTTP or HTTPS, choose their bind addresses and ports, set the authentication username and password-file path, and select HTTPS certificate/private-key paths. The configuration-file field shows the destination used by Save. The dialog reads and writes SNode.C options; it does not store listener settings in Qt preferences. Building this feature requires SNode.C's per-option `promoteDefault()` and public `utils::Config::writeConfig()` APIs.
+
+Save persists changes for the next manager startup; it does not reopen listeners or replace the current authentication middleware. **Currently running** shows actual listener status and browser URLs, with buttons to open active interfaces. Restart CodexManager after saving to activate changes. Explicit command-line arguments still take precedence after restart. With multiple configuration files, saving targets the first file in SNode.C's effective configuration-file list; the dialog displays that path before saving. A disabled configuration source such as `/dev/null` is not a persistence destination.
+
 Both manager web listeners are disabled by default. To enable local access, create a regular file owned by your user, readable only by that user, containing a password on its first line. Keep this file separate from exported profile definitions. Then run:
 
 ```sh
