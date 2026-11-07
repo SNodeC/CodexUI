@@ -69,6 +69,7 @@ test("empty browser header offers disabled navigation alongside existing present
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("offline fixture"); });
     const markup = renderToStaticMarkup(createElement(App, {session}));
     assert.match(markup, /class="thread-heading-context"[\s\S]*class="turn-navigation"[\s\S]*class="thread-workspace-copy"[\s\S]*class="thread-workspace"/u);
+    assert.match(markup, /aria-label="Turn opening;[\s\S]*class="turn-outline[\s\S]*aria-label="Next turn opening"[\s\S]*aria-label="First turn;[\s\S]*class="conversation-latest"/u);
     const presentation = markup.match(/<div class="conversation-view-controls"[^>]*>([\s\S]*?)<\/div>/u)?.[1];
     assert.ok(presentation);
     assert.doesNotMatch(presentation, /class="turn-navigation"/u);

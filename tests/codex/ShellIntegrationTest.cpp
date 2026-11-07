@@ -6458,7 +6458,7 @@ void dialogControlsHaveSemanticLabels() {
         QStringLiteral("Proposed workspace"),
         QAccessible::EditableText);
   auto* source = workspaceDialog.findChild<QComboBox*>("selectionSource");
-  require(source && source->currentIndex() == 1 && !source->model()->flags(source->model()->index(0, 0)).testFlag(Qt::ItemIsEnabled),
+  require(!source && !workspaceDialog.localFiles() && workspaceDialog.selectedDirectory() == QDir::tempPath(),
           "workspace browsing is explicitly app-server-owned; local workspace selection remains unavailable");
   for (auto purpose : {NewThreadDialog::Purpose::Create, NewThreadDialog::Purpose::Fork}) {
     NewThreadDialog dialog(NewThreadDraft{QDir::tempPath(), {}, {}, {}, false}, purpose);

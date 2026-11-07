@@ -63,14 +63,13 @@ h1, h2, h3, p { margin: 0; }
 .conversation-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 10px; margin: 14px 10px 0; padding: 0 14px 8px; border-bottom: 1px solid var(--divider); }
 .conversation-lockup { grid-column: 1 / -1; grid-row: 2; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px; border-top: 1px solid var(--divider); padding-top: 8px; }
 .thread-heading-context { grid-column: 1 / -1; display: flex; align-items: center; min-width: 0; gap: 8px; }
-.thread-heading-context h1 { flex: 1 1 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .thread-workspace { grid-column: 1; min-width: 0; max-width: 300px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; border: 0; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; }
 .thread-workspace-copy { flex: none; width: 24px; height: 24px; padding: 3px; border: 0; background: transparent; color: var(--text-secondary); }
 .thread-workspace-copy svg { width: 16px; height: 16px; }
-.conversation-heading h1 { grid-column: 1; min-width: 0; margin: 0; font-size: 16px; font-weight: 600; }
+.conversation-heading h1 { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin: 0; font-size: 16px; font-weight: 600; }
 .conversation-heading p { grid-column: 1 / -1; min-width: 0; margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
 .conversation-heading .conversation-activity { display: inline; color: var(--text-primary); white-space: normal; text-align: right; }
-.conversation-state { white-space: nowrap; font-weight: 400; text-align: right; }.conversation-state.active { color: var(--activity-active-text); }.conversation-state.success { color: var(--status-success-text); }.conversation-state.warning { color: var(--status-warning-text); }.conversation-state.danger { color: var(--status-danger-text); }
+.conversation-state { flex: none; white-space: nowrap; font-weight: 400; text-align: right; }.conversation-state.active { color: var(--activity-active-text); }.conversation-state.success { color: var(--status-success-text); }.conversation-state.warning { color: var(--status-warning-text); }.conversation-state.danger { color: var(--status-danger-text); }
 .conversation-heading-actions { display: contents; }
 .conversation-heading-actions.responsive { grid-column: 2; grid-row: 1; display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 8px; }
 .responsive-pane-controls { display: flex; align-items: center; gap: 5px; }
@@ -84,7 +83,8 @@ h1, h2, h3, p { margin: 0; }
 :is(.conversation-view-controls, .turn-navigation) button:hover::after, :is(.conversation-view-controls, .turn-navigation) button:focus-visible::after { opacity: 1; }
 :is(.conversation-view-controls, .turn-navigation) button:hover { background: var(--control-hover-surface); border-color: var(--control-hover-border); }
 :is(.conversation-view-controls, .turn-navigation) button.active { background: var(--presentation-selected-surface); border-color: var(--presentation-selected-border); color: var(--text-strong); }
-.turn-navigation { display: flex; flex: none; align-items: center; }
+.turn-navigation { display: flex; flex: none; align-items: center; margin-left: auto; }
+.turn-navigation > button[aria-label^="First turn;"] { margin-left: 8px; }
 .turn-outline > button { width: 52px; }
 .turn-outline .menu-popover { width: min(380px, calc(100vw - 24px)); max-height: 60dvh; overscroll-behavior: contain; }
 .turn-outline .menu-popover button { display: block; width: 100%; height: auto; min-height: 32px; padding: 7px 9px; border: 0; border-radius: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }

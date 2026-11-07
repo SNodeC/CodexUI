@@ -80,7 +80,7 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, Workspace: \/workspace, Status: completed, Recent turn: [^,]+, Created: [^,]+, Last activity: /u);
     assert.match(markup, /<span class="thread-title">Accessible thread<\/span><\/button>/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
-    assert.match(markup, /class="conversation-state success">completed<\/span>/u);
+    assert.match(markup, /<h1>Accessible thread<\/h1>\s*<span class="conversation-state success">completed<\/span>\s*<div class="turn-navigation"/u);
     session.dispose();
 });
 

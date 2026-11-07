@@ -28,6 +28,7 @@
 #include <QShowEvent>
 #include <QStackedWidget>
 #include <QStyleOptionButton>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTextBlock>
 #include <QTimer>
@@ -1461,7 +1462,7 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   setMaximumWidth(520);
 
   auto *outer = new QVBoxLayout(this);
-  outer->setContentsMargins(18, 14, 20, 0);
+  outer->setContentsMargins(18, 14, 18, 0);
   outer->setSpacing(0);
   auto *heading = new QHBoxLayout;
   heading->addStrut(24);
@@ -1486,6 +1487,7 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
 
   inspectorTabs = new QTabWidget;
   inspectorTabs->setDocumentMode(true);
+  inspectorTabs->tabBar()->setExpanding(true);
   inspectorTabs->setElideMode(Qt::ElideNone);
   inspectorTabs->setUsesScrollButtons(true);
   planRows = new RowViewport(this, RowViewport::Page::Plan,

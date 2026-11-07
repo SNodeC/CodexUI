@@ -152,9 +152,9 @@ namespace codexui {
     }
 
     ExpandingPromptEditor::~ExpandingPromptEditor() {
-        // Clearing Qt formats can emit textChanged while the parent destroys siblings.
+        // Suppress format-change callbacks during teardown while preserving QObject destruction cleanup.
         spellingEnabled = false;
-        disconnect();
+        blockSignals(true);
     }
 
     void ExpandingPromptEditor::checkWord(SpellingRange word) {
