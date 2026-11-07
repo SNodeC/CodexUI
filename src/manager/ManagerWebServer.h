@@ -35,6 +35,8 @@ namespace codexui::manager {
         bool take(Request& request);
         void reply(Reply reply);
         void changed();
+        bool configure(std::string request);
+        bool configuration(std::string& result);
         [[nodiscard]] bool stopped() const;
 
     private:
@@ -42,6 +44,7 @@ namespace codexui::manager {
         ManagerOptions options_;
         nodegraph::SpscQueue<Request, Capacity> requests_;
         nodegraph::SpscQueue<Reply, Capacity> replies_;
+        nodegraph::SpscQueue<std::string, Capacity> settingsRequests_, settingsResults_;
         nodegraph::EventFd toQt_, toWeb_;
         std::atomic_bool stopping_{false}, changed_{false};
         std::atomic_int result_{-1};

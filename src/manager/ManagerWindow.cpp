@@ -14,6 +14,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
@@ -29,12 +30,14 @@
 #include <QSaveFile>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QSystemTrayIcon>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QUrl>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <algorithm>
 
@@ -195,6 +198,7 @@ namespace codexui::manager {
         menuButton->setAccessibleName("Manager menu");
         menuButton->setPopupMode(QToolButton::InstantPopup);
         auto* menu = new QMenu(menuButton);
+        menu->addAction("Web interface settings…", this, &ManagerWindow::showWebSettings);
         menu->addAction("Open profile storage", this, [this] {
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(manager_.storePath()).absolutePath()));
         });
@@ -402,6 +406,110 @@ namespace codexui::manager {
             });
         }
         rebuild();
+    }
+    void ManagerWindow::showWebSettings() {
+        auto* existing = findChild<QDialog*>("managerWebSettings");
+        if (existing) {
+            existing->raise();
+        } else {
+            QDialog dialog(this);
+            dialog.setObjectName("managerWebSettings");
+            dialog.setWindowTitle("Web interface settings");
+            dialog.resize(620, 640);
+            const auto token = QUuid::createUuid().toString();
+            auto* layout = new QVBoxLayout(&dialog);
+            auto* scroll = new QScrollArea(&dialog);
+            scroll->setWidgetResizable(true);
+            scroll->setWidget(new QWidget(scroll));
+            auto* form = new QFormLayout(scroll->widget());
+            layout->addWidget(scroll);
+            auto* path = new QLineEdit(&dialog);
+            path->setReadOnly(true);
+            path->setAccessibleName("Configuration file");
+            layout->addWidget(path);
+            auto* running = UiStyle::makeLabel({}, "body", &dialog);
+            running->setObjectName("webSettingsRunning");
+            running->setTextFormat(Qt::PlainText);
+            layout->addWidget(running);
+            auto* links = new QHBoxLayout;
+            layout->addLayout(links);
+            auto* status = UiStyle::makeLabel("Loading settings…", "meta", &dialog);
+            status->setObjectName("webSettingsStatus");
+            status->setTextFormat(Qt::PlainText);
+            status->setWordWrap(true);
+            layout->addWidget(status);
+            layout->addWidget(UiStyle::makeLabel("Changes require a manager restart. Command-line options still take precedence. "
+                                                 "Use HTTPS for access from other machines.",
+                                                 "meta",
+                                                 &dialog));
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Close, &dialog);
+            auto* save = buttons->button(QDialogButtonBox::Save);
+            save->setEnabled(false);
+            layout->addWidget(buttons);
+            QVector<QWidget*> inputs;
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            connect(this, &ManagerWindow::webSettingsReceived, &dialog, [&](const QJsonObject& result) {
+                if (result.value("token").toString() == token) {
+                    scroll->widget()->setEnabled(true);
+                    if (inputs.isEmpty() && result.contains("fields")) {
+                        for (const auto& entry : result.value("fields").toArray()) {
+                            const auto field = entry.toObject();
+                            const auto label = field.value("label").toString();
+                            const auto value = field.value("value").toString();
+                            QWidget* input = nullptr;
+                            if (field.value("option").toString() == "--disabled") {
+                                auto* check = new QCheckBox(scroll->widget());
+                                check->setChecked(value != "true");
+                                input = check;
+                            } else if (field.value("option").toString() == "--port") {
+                                auto* port = new QSpinBox(scroll->widget());
+                                port->setRange(0, 65535);
+                                port->setValue(value.toInt());
+                                input = port;
+                            } else {
+                                input = new QLineEdit(value, scroll->widget());
+                            }
+                            input->setAccessibleName(label);
+                            input->setObjectName(label);
+                            form->addRow(label, input);
+                            inputs.push_back(input);
+                        }
+                        path->setText(result.value("path").toString());
+                        QStringList states;
+                        const auto listeners = result.value("running").toObject();
+                        for (auto it = listeners.begin(); it != listeners.end(); ++it) {
+                            const auto url = it.value().toObject().value("url").toString();
+                            const auto label = it.key() == "manager-web" ? QString("HTTP") : QString("HTTPS");
+                            states << label + ": " + (url.isEmpty() ? it.value().toObject().value("status").toString() : url);
+                            if (!url.isEmpty()) {
+                                links->addWidget(button("Open " + label + " web UI", &dialog, [url] {
+                                    QDesktopServices::openUrl(QUrl(url));
+                                }));
+                            }
+                        }
+                        running->setText("Currently running\n" + states.join('\n'));
+                    }
+                    status->setText(result.contains("error")         ? result.value("error").toString()
+                                    : result.value("saved").toBool() ? "Saved. Restart CodexManager to apply these settings."
+                                                                     : "Edit the settings, then Save.");
+                    save->setEnabled(!inputs.isEmpty());
+                }
+            });
+            connect(save, &QPushButton::clicked, &dialog, [&] {
+                QJsonArray values;
+                for (auto* input : inputs) {
+                    values.append(qobject_cast<QCheckBox*>(input)  ? (qobject_cast<QCheckBox*>(input)->isChecked() ? "false" : "true")
+                                  : qobject_cast<QSpinBox*>(input) ? QString::number(qobject_cast<QSpinBox*>(input)->value())
+                                                                   : qobject_cast<QLineEdit*>(input)->text());
+                }
+                save->setEnabled(false);
+                scroll->widget()->setEnabled(false);
+                status->setText("Saving…");
+                emit webSettingsRequested({{"token", token}, {"values", values}});
+            });
+            emit webSettingsRequested({{"token", token}});
+            dialog.exec();
+        }
     }
     ProfileRuntime* ManagerWindow::runtime(const QString& id) const {
         return manager_.runtime(id);

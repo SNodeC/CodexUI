@@ -16,14 +16,20 @@ class QToolButton;
 
 namespace codexui::manager {
     class ManagerWindow final : public QMainWindow {
+        Q_OBJECT
     public:
         explicit ManagerWindow(ManagerController& manager, QWidget* parent = nullptr);
+
+    signals:
+        void webSettingsRequested(const QJsonObject& request);
+        void webSettingsReceived(const QJsonObject& result);
 
     protected:
         void closeEvent(QCloseEvent* event) override;
         void resizeEvent(QResizeEvent* event) override;
 
     private:
+        void showWebSettings();
         void rebuild();
         void reflow();
         void createOrEdit(const QString& id = {});
