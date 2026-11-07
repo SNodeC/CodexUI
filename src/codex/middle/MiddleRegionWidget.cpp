@@ -187,9 +187,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       button->setFixedSize(presentation::CardHeaderMetrics::ControlWidth, presentation::CardHeaderMetrics::LineHeight);
       return button;
   };
-  auto* firstTurn = headerButton(QStringLiteral("conversationFirstTurn"));
-  firstTurn->setText(QStringLiteral("↥"));
-  firstTurn->setToolTip(QStringLiteral("First turn; load earlier history if needed"));
   auto* previousTurn = headerButton(QStringLiteral("conversationPreviousTurn"));
   previousTurn->setText(QStringLiteral("↑"));
   previousTurn->setToolTip(QStringLiteral("Turn opening; previous turn when already there"));
@@ -200,6 +197,9 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   auto* nextTurn = headerButton(QStringLiteral("conversationNextTurn"));
   nextTurn->setText(QStringLiteral("↓"));
   nextTurn->setToolTip(QStringLiteral("Next turn opening"));
+  auto* firstTurn = headerButton(QStringLiteral("conversationFirstTurn"));
+  firstTurn->setText(QStringLiteral("↥"));
+  firstTurn->setToolTip(QStringLiteral("First turn; load earlier history if needed"));
   auto* latest = headerButton(QStringLiteral("conversationLatest"));
   latest->setText(QStringLiteral("↧"));
   latest->setToolTip(QStringLiteral("Latest output; resume following"));
@@ -375,8 +375,11 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
                                    QSizePolicy::Preferred);
   conversationTokens->setAlignment(Qt::AlignRight | Qt::AlignTop);
   threadHeading->addWidget(conversationTitle, 2);
-  for (auto* button : {firstTurn, previousTurn, turns, nextTurn, latest}) {
+  threadHeading->addWidget(conversationState);
+  threadHeading->addStretch();
+  for (auto* button : {previousTurn, turns, nextTurn, firstTurn, latest}) {
       button->setAccessibleName(button->toolTip());
+      threadHeading->addSpacing(button == firstTurn ? 4 : 0);
       threadHeading->addWidget(button);
   }
   auto* metadata = new QHBoxLayout;
@@ -388,6 +391,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   metadata->addWidget(conversationWorkspace, 1, Qt::AlignTop);
   workspaceCopy = new presentation::CopyButton(QStringLiteral("Copy thread workspace"));
   workspaceCopy->setObjectName(QStringLiteral("copyThreadWorkspace"));
+  threadHeading->addSpacing(4);
   threadHeading->addWidget(workspaceCopy);
   connect(conversationWorkspace, &QPushButton::clicked, this, [this] {
       if (workspaceAction) {
@@ -397,7 +401,6 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   connect(workspaceCopy, &QToolButton::clicked, this, [this] {
       workspaceCopy->copyText(workspacePath, false);
   });
-  threadHeading->addWidget(conversationState);
   contentLayout->addLayout(threadHeading);
   metadata->addWidget(conversationTokens, 2);
   contentLayout->addLayout(metadata);
@@ -531,9 +534,12 @@ QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
 }
 
 bool MiddleRegionWidget::eventFilter(QObject *watched, QEvent *event) {
-  if (watched == conversationTitle && event->type() == QEvent::Resize)
-    conversationTitle->setText(conversationTitle->fontMetrics().elidedText(
-        conversationTitle->toolTip(), Qt::ElideRight, conversationTitle->width()));
+    if (watched == conversationTitle &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::FontChange || event->type() == QEvent::ToolTipChange)) {
+        conversationTitle->setMaximumWidth(conversationTitle->fontMetrics().size(Qt::TextSingleLine, conversationTitle->toolTip()).width());
+        conversationTitle->setText(
+            conversationTitle->fontMetrics().elidedText(conversationTitle->toolTip(), Qt::ElideRight, conversationTitle->width()));
+    }
   if (watched == conversationWorkspace && event->type() == QEvent::Resize) {
       conversationWorkspace->setText(conversationWorkspace->fontMetrics().elidedText(
           workspacePath.isEmpty() ? QStringLiteral("Workspace not reported") : workspacePath,
@@ -563,7 +569,6 @@ void MiddleRegionWidget::setThreadHeading(QString title, const ui::TokenUsageTex
     summary += QStringLiteral(" | ") + trailingMetadata;
   conversationTokens->setUsage(summary,
                                QString::fromStdString(usage.details));
-  conversationTitle->setText(conversationTitle->fontMetrics().elidedText(title, Qt::ElideRight, conversationTitle->width()));
   conversationTitle->setToolTip(title);
   conversationState->setText(state);
   conversationState->setProperty("tone", stateTone);

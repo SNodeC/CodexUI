@@ -1250,8 +1250,8 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 </div>
             </div>
             <div className="conversation-lockup"><div className="thread-heading-context"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
+                {thread && <span className={`conversation-state ${statusTone(thread.status)}`}>{displayStatus(thread.status)}</span>}
                 <div className="turn-navigation" aria-label="Turn navigation">
-                    <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
                     <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
                     <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
                         const openings = loadedOpenings();
@@ -1262,6 +1262,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                                 {card.kind === "userMessage" ? (card.payload as UserMessageData).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
                     }}</Menu>
                     <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
+                    <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
                     <button className="conversation-latest" disabled={navigation.following || !navigationEnabled} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
                         pendingGeometry.current = {presentationKey, following: true, anchor: undefined, focus: true};
                         viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, true);
@@ -1269,7 +1270,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                     }}>↧</button>
                 </div>
                 <button className="thread-workspace-copy" aria-label="Copy thread workspace" disabled={!thread?.cwd} onClick={() => { if (thread?.cwd) { void writeCardClipboard({text: thread.cwd, markdown: false}); } }}><CopyIcon checked={false} /></button>
-                {thread && <span className={`conversation-state ${statusTone(thread.status)}`}>{displayStatus(thread.status)}</span>}</div>
+                </div>
                 <button className="thread-workspace" disabled={!thread || session.workspaceChangeUnavailable(projectionId, presentationKey) !== ""} title={`${thread?.cwd || "Workspace not reported"}\n${session.workspaceChangeUnavailable(projectionId, presentationKey) || "Change workspace…"}`} aria-label={`Thread workspace: ${thread?.cwd || "Workspace not reported"}`} onClick={() => onRequestWorkspace({threadId: projectionId, presentationKey})}>{thread?.cwd || "Workspace not reported"}</button>
                 {!thread && <p className="conversation-meta">{projectionId === DraftThreadId ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>}
                 <div className="conversation-facts"><TokenUsage content={usage} />

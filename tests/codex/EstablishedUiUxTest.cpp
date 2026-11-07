@@ -2377,6 +2377,23 @@ bool turnNavigationUsesTheExistingHeader() {
         result &= expect(region.conversation().mode() == ConversationView::Mode::Paused && latest->isVisible() && latest->isEnabled(),
                          "the actual Previous control pauses following and enables Latest");
         result &= expect(presentation->geometry() == header, "Latest retains its slot and never shifts presentation controls");
+        const auto bounds = [&region](QWidget* widget) {
+            return QRect(widget->mapTo(&region, QPoint()), widget->size());
+        };
+        result &= expect(bounds(state).left() > bounds(title).right() && bounds(state).left() - bounds(title).right() <= 8,
+                         "status sits immediately beside a short thread title");
+        const QFont originalTitleFont = title->font();
+        title->setStyleSheet(QStringLiteral("font-size:%1pt;").arg(originalTitleFont.pointSizeF() + 3));
+        region.setThreadHeading(QStringLiteral("Renamed thread"), {}, {}, QStringLiteral("waiting"));
+        QCoreApplication::processEvents();
+        result &=
+            expect(title->text() == QStringLiteral("Renamed thread") && state->text() == QStringLiteral("waiting") &&
+                       title->font().pointSizeF() > originalTitleFont.pointSizeF() && bounds(state).left() - bounds(title).right() <= 8,
+                   "renames and font changes keep the full short title and its status together");
+        title->setStyleSheet({});
+        QCoreApplication::processEvents();
+        result &= expect(title->text() == QStringLiteral("Renamed thread"),
+                         "restoring the font keeps the complete title despite fractional glyph advances");
         const int minimumWidth = region.minimumSizeHint().width();
         const QString longTitle = QStringLiteral("A long thread title ").repeated(12);
         const QString longPath = QStringLiteral("/remote/project/") + QStringLiteral("long-directory/").repeated(30);
@@ -2385,25 +2402,25 @@ bool turnNavigationUsesTheExistingHeader() {
         region.setThreadWorkspace(longPath, {}, [&workspaceOpened] {
             workspaceOpened = true;
         });
-        const auto bounds = [&region](QWidget* widget) {
-            return QRect(widget->mapTo(&region, QPoint()), widget->size());
-        };
         for (int width : {1100, 820, 460, 340}) {
             region.resize(width, 700);
             QCoreApplication::processEvents();
-            int right = bounds(title).right();
-            for (auto* button : {first, previous, outline, next, latest, copy}) {
+            int right = bounds(state).right();
+            for (auto* button : {previous, outline, next, first, latest, copy}) {
                 result &= expect(std::abs(bounds(button).center().y() - bounds(title).center().y()) <= 1 &&
                                      !button->accessibleName().isEmpty() && bounds(button).left() > right,
-                                 "navigation and workspace Copy follow the title in one accessible row");
+                                 "turn controls, thread endpoints and rightmost Copy follow title/status in one accessible row");
                 right = bounds(button).right();
             }
             result &= expect(region.minimumSizeHint().width() == minimumWidth && region.width() == std::max(width, minimumWidth) &&
-                                 bounds(state).left() > right && std::abs(bounds(state).center().y() - bounds(title).center().y()) <= 1 &&
-                                 bounds(workspace).left() == bounds(title).left() && bounds(workspace).top() > bounds(title).bottom() &&
-                                 bounds(presentation).bottom() < bounds(first).top() && title->toolTip() == longTitle &&
-                                 workspace->toolTip().startsWith(longPath) && workspace->isEnabled(),
-                             "long title and path fit without moving status below navigation or workspace away from the left edge");
+                                 bounds(state).left() > bounds(title).right() && bounds(state).right() < bounds(previous).left() &&
+                                 bounds(first).left() - bounds(next).right() > bounds(next).left() - bounds(outline).right() &&
+                                 bounds(first).left() - bounds(next).right() == bounds(copy).left() - bounds(latest).right() &&
+                                 std::abs(bounds(state).center().y() - bounds(title).center().y()) <= 1 && title->width() > 0 &&
+                                 !title->text().isEmpty() && bounds(workspace).left() == bounds(title).left() &&
+                                 bounds(workspace).top() > bounds(title).bottom() && bounds(presentation).bottom() < bounds(first).top() &&
+                                 title->toolTip() == longTitle && workspace->toolTip().startsWith(longPath) && workspace->isEnabled(),
+                             "long title and path fit with status beside the title and a gap between turn and thread navigation");
             if (!qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR").isEmpty()) {
                 region.grab().save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") +
                                    QStringLiteral("/native-thread-header-%1.png").arg(width));
