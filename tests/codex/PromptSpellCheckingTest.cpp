@@ -560,6 +560,25 @@ namespace {
                          "real composer submits exactly the corrected draft");
         return passed;
     }
+    bool teardownPreservesDestructionNotification() {
+        int destroyed = 0;
+        int changesDuringTeardown = 0;
+        {
+            Editor editor;
+            editor.setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+            editor.setPlainText(QStringLiteral("mispelled word "));
+            settle();
+            QObject::connect(&editor, &QObject::destroyed, [&destroyed] {
+                ++destroyed;
+            });
+            QObject::connect(&editor, &QPlainTextEdit::textChanged, [&changesDuringTeardown] {
+                ++changesDuringTeardown;
+            });
+        }
+        const bool passed = expect(destroyed == 1 && changesDuringTeardown == 0,
+                                   "editor teardown suppresses content callbacks and preserves destruction cleanup notifications");
+        return passed;
+    }
 } // namespace
 
 int main(int argc, char** argv) {
@@ -586,8 +605,9 @@ int main(int argc, char** argv) {
         dictionary.write(extension == QStringLiteral("aff") ? "SET UTF-8\nREP 1\nREP qzzxamp qzzx&ampp\n" : "1\nqzzx&ampp\n");
     }
     QApplication application(argc, argv);
+    missingBackend = unavailable && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--unavailable");
+    passed &= teardownPreservesDestructionNotification();
     if (unavailable) {
-        missingBackend = QString::fromLocal8Bit(argv[1]) == QStringLiteral("--unavailable");
         Editor editor;
         QMenu* menu = menuAt(editor, 0);
         passed &=
