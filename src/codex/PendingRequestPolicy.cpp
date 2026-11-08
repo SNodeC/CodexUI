@@ -149,17 +149,16 @@ bool knownKeys(const nlohmann::json &object,
 
 bool nonEmptyString(const nlohmann::json &object, const char *key) {
   const auto found = object.is_object() ? object.find(key) : object.end();
-  return found != object.end() && found->is_string() && !found->empty() &&
-         found->get_ref<const std::string &>().size() <= 4096;
+  return found != object.end() && found->is_string() && !found->get_ref<const std::string&>().empty() &&
+         found->get_ref<const std::string&>().size() <= 4096;
 }
 
 bool boundedStringArray(const nlohmann::json &value, bool allowEmpty = false) {
-  return value.is_array() && value.size() <= 64 &&
-         (allowEmpty || !value.empty()) &&
-         std::ranges::all_of(value, [](const nlohmann::json &entry) {
-           return entry.is_string() && !entry.empty() &&
-                  entry.get_ref<const std::string &>().size() <= 4096;
-         });
+    return value.is_array() && value.size() <= 64 && (allowEmpty || !value.empty()) &&
+           std::ranges::all_of(value, [](const nlohmann::json& entry) {
+               return entry.is_string() && !entry.get_ref<const std::string&>().empty() &&
+                      entry.get_ref<const std::string&>().size() <= 4096;
+           });
 }
 
 nlohmann::json boundedDisclosureValue(const nlohmann::json &value,
@@ -521,15 +520,11 @@ bool validAnswers(const nlohmann::json &request,
         question.value("options", nlohmann::json::array());
     const bool allowsOther =
         options.empty() || question.value("isOther", false);
-    return std::ranges::all_of(*values, [&](const nlohmann::json &value) {
-      if (!value.is_string() || value.empty() ||
-          value.get_ref<const std::string &>().size() > 4096)
-        return false;
-      if (allowsOther)
-        return true;
-      return std::ranges::any_of(options, [&](const nlohmann::json &option) {
-        return option.at("label") == value;
-      });
+    return std::ranges::all_of(*values, [&](const nlohmann::json& value) {
+        return value.is_string() && !value.get_ref<const std::string&>().empty() && value.get_ref<const std::string&>().size() <= 4096 &&
+               (allowsOther || std::ranges::any_of(options, [&](const nlohmann::json& option) {
+                    return option.at("label") == value;
+                }));
     });
   });
 }
@@ -1046,6 +1041,48 @@ PendingRequestPolicy::disclosure(const PendingRequestDescriptor &request) {
   return std::move(context.disclosure);
 }
 
+nlohmann::json PendingRequestPolicy::asyncQuestionRequest(const nlohmann::json& questions) {
+    nlohmann::json request = {{"questions", nlohmann::json::array()}};
+    bool valid = questions.is_array() && !questions.empty() && questions.size() <= 64;
+    for (std::size_t index = 0; valid && index < questions.size(); ++index) {
+        const auto& question = questions[index];
+        valid = nonEmptyString(question, "title");
+        nlohmann::json options = nlohmann::json::array();
+        if (valid && question.contains("options") && !question["options"].is_null()) {
+            valid = boundedStringArray(question["options"], true);
+            if (valid) {
+                for (const auto& option : question["options"]) {
+                    options.push_back({{"label", option}});
+                }
+            }
+        }
+        if (valid) {
+            request["questions"].push_back(
+                {{"id", std::to_string(index)}, {"question", question["title"]}, {"isOther", true}, {"options", std::move(options)}});
+        }
+    }
+    return valid && validQuestionRequest(request) ? request : nlohmann::json(nullptr);
+}
+
+std::optional<std::string> PendingRequestPolicy::asyncQuestionAnswer(const nlohmann::json& request,
+                                                                     const PendingRequestSubmission& submission) {
+    std::optional<std::string> result;
+    if (submission.choice == "submit" && validQuestionRequest(request) && validAnswers(request, submission.input) &&
+        std::ranges::all_of(submission.input, [](const auto& answer) {
+            return answer["answers"].size() == 1;
+        })) {
+        std::string text;
+        for (const auto& question : request["questions"]) {
+            text += (text.empty() ? "" : "\n\n") + question["question"].get<std::string>();
+            for (const auto& answer : submission.input[question["id"].get<std::string>()]["answers"]) {
+                text += "\n" + answer.get<std::string>();
+            }
+        }
+        result = std::move(text);
+    }
+    return result;
+}
+
 std::vector<PendingRequestAction>
 PendingRequestPolicy::actions(const PendingRequestDescriptor &request) {
   if (request.kind == PendingRequestKind::CommandApproval)
@@ -1054,10 +1091,13 @@ PendingRequestPolicy::actions(const PendingRequestDescriptor &request) {
     return safeActions(request.kind, request.raw,
                        std::vector<PendingRequestAction>(
                            approvalActions().begin(), approvalActions().end()));
-  if (request.kind == PendingRequestKind::UserInput)
-    return safeActions(request.kind, request.raw,
-                       {action("submit", "Submit", Tone::Approve, true),
-                        action("decline", "Decline", Tone::Danger)});
+  if (request.kind == PendingRequestKind::UserInput) {
+      std::vector<PendingRequestAction> actions{action("submit", "Submit", Tone::Approve, true)};
+      if (request.method != "agentMessage") {
+          actions.push_back(action("decline", "Decline", Tone::Danger));
+      }
+      return safeActions(request.kind, request.raw, std::move(actions));
+  }
   if (request.kind == PendingRequestKind::McpElicitation) {
     const std::string approvalKind = mcpApprovalKind(request.raw);
     const bool messageOnly = mcpMessageOnly(request.raw);

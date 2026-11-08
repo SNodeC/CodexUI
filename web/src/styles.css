@@ -127,6 +127,8 @@ h1, h2, h3, p { margin: 0; }
 .conversation-card.reasoning { border-left: 3px solid var(--reasoning-accent); }
 .conversation-card.agentMessage.update { background: var(--update-message-surface); border-color: var(--update-message-border); }
 .conversation-card.agentMessage.final { background: var(--final-answer-surface); border-color: var(--final-answer-border); }
+.conversation-card.agentMessage.question { background: var(--question-message-surface); border-color: var(--question-message-border); }
+.conversation-card.agentMessage.question > header .card-heading > span { color: var(--question-message-text); }
 .conversation-card.agentMessage.final > header span { color: var(--final-answer-text); }.conversation-card.agentMessage.final > header .card-phase.final { color: var(--final-answer-phase-text); }
 .conversation-card.fileChanges { border-left: 3px solid var(--file-changes-accent); }
 @keyframes awaiting { to { background-position: -200% 0; } }

@@ -580,12 +580,13 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     break;
   }
   case CardKind::AgentMessage:
-    result.payload = AgentMessageData{
-        withTruncationNotice(graphMessageText(state),
-                             graphOmittedTextBytes(state, "text"),
-                             "Codex response", true),
-        scalarTextFromValue(valueMember(state, "phase"))};
-    break;
+      result.payload =
+          AgentMessageData{withTruncationNotice(graphMessageText(state), graphOmittedTextBytes(state, "text"), "Codex response", true),
+                           scalarTextFromValue(valueMember(state, "phase")),
+                           scalarTextFromValue(valueMember(state, "delivery")) == "async" && valueMember(state, "questions")
+                               ? PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*valueMember(state, "questions")))
+                               : nlohmann::json(nullptr)};
+      break;
   case CardKind::CommandExecution: {
     std::string outputField = "aggregatedOutput";
     std::string output =

@@ -306,6 +306,33 @@ function validAnswers(raw: unknown, answers: unknown): boolean {
     });
 }
 
+export function asyncQuestionRequest(questions: unknown): Record<string, unknown> | null {
+    const request: {questions: Record<string, unknown>[]} = {questions: []};
+    let valid = Array.isArray(questions) && questions.length > 0 && questions.length <= 64;
+    if (Array.isArray(questions)) {
+        for (let index = 0; valid && index < questions.length; ++index) {
+            const question: unknown = questions[index];
+            valid = nonEmptyString(question, "title");
+            if (valid && isObject(question)) {
+                valid = question.options === undefined || question.options === null || boundedStringArray(question.options, true);
+                request.questions.push({id: String(index), question: question.title, isOther: true,
+                    options: Array.isArray(question.options) ? question.options.map(label => ({label})) : []});
+            }
+        }
+    }
+    return valid && validQuestionRequest(request) ? request : null;
+}
+
+export function asyncQuestionAnswer(request: unknown, submission: PendingRequestSubmission): string | undefined {
+    let result: string | undefined;
+    if (submission.choice === "submit" && validQuestionRequest(request) && validAnswers(request, submission.input)
+        && Object.values(submission.input as Record<string, {answers: string[]}>).every(answer => answer.answers.length === 1)) {
+        const answers = submission.input as Record<string, {answers: string[]}>;
+        result = request.questions.map(question => [question.question, ...answers[String(question.id)]!.answers].join("\n")).join("\n\n");
+    }
+    return result;
+}
+
 function mcpApprovalKind(raw: unknown): string {
     const metadata = isObject(raw) && isObject(raw._meta) ? raw._meta : undefined;
     return typeof metadata?.codex_approval_kind === "string" ? metadata.codex_approval_kind : "";

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {qualifyCatchup} from "./qualify-catchup.mjs";
+import {qualifyAsyncQuestions} from "./qualify-async-questions.mjs";
 import {spawn} from "node:child_process";
 import {constants as fsConstants} from "node:fs";
 import {access, mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
@@ -1260,6 +1261,7 @@ try {
             stream: {...streamResult, ...streamPerformance},
             detachedStream: detachedResult,
             nodes: afterStream.Nodes, jsHeapBytes: afterStream.JSHeapUsedSize}}, null, 2));
+    console.log(JSON.stringify({asyncQuestions: await qualifyAsyncQuestions(devTools)}));
     assert.deepEqual(performanceFailures, [], "Browser performance qualification failed");
 } catch (error) {
     if (chromeErrors) process.stderr.write(chromeErrors);

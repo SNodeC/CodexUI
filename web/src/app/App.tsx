@@ -19,6 +19,7 @@ import type {
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
 import type {AttachmentDraft} from "../conversation/PromptCoordinator.js";
+import type {PendingRequestSubmission} from "./PendingRequestResponses.js";
 import {DraftThreadId} from "./BrowserFrontendSession.js";
 import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
 import type {WorkspaceGroup, AgentPresentation} from "../presentation/PresentationModel.js";
@@ -831,7 +832,7 @@ function ScrollableCode({text, className, label, state}: {text: string; classNam
 
 type ClipboardOutcome = "copied" | "unsupported" | "failed";
 
-export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false, times = [], onTiming, onRestore, commandScroll, outputScroll, onTurnMenu}: {onTurnMenu?: (position: {x: number; y: number}, opener: HTMLButtonElement) => void; times?: ProtocolTime[]; onTiming?: () => void; onRestore?: () => void; commandScroll?: {scrollTop: number; following: boolean}; outputScroll?: {scrollTop: number; following: boolean}; card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
+export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false, times = [], onTiming, onRestore, commandScroll, outputScroll, onTurnMenu, onAnswer}: {onAnswer?: () => void; onTurnMenu?: (position: {x: number; y: number}, opener: HTMLButtonElement) => void; times?: ProtocolTime[]; onTiming?: () => void; onRestore?: () => void; commandScroll?: {scrollTop: number; following: boolean}; outputScroll?: {scrollTop: number; following: boolean}; card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
     const fallbackScroll = useRef({command: {scrollTop: 0, following: false}, output: {scrollTop: 0, following: true}});
     const [copyFeedback, setCopyFeedback] = useState<{text: string; failed: boolean}>();
     const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -858,8 +859,8 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
         body = <><SafeMarkdown text={userMessageMarkdownText(data.prompt)} /><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}{data.requiresExplicitRecovery && onRestore && <button onClick={onRestore}>Restore to composer</button>}</>;
     } else if (card.kind === "agentMessage") {
-        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
-        body = <SafeMarkdown text={data.text} />;
+        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.questionRequest ? "question" : data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = cardVariant === "question" ? "Question" : data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
+        body = <><SafeMarkdown text={data.text} />{data.questionRequest && <button type="button" disabled={!onAnswer} onClick={onAnswer}>Answer…</button>}</>;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
         body = data.summary ? <SafeMarkdown text={data.summary} /> : active ? <div className="activity-line"><i />Working…</div> : null;
@@ -1006,6 +1007,7 @@ function TurnRemovalSurface({session, target, onClose, onConfirm}: {
 function Conversation({session, paneControls, onInspect, usage, onRequestWorkspace}: {session: BrowserFrontendSession; onRequestWorkspace: (target: ThreadPresentationTarget) => void; usage: TokenUsageText; paneControls?: ReactNode; onInspect: (view: "requests" | "timing", target?: TimingTarget) => void}) {
     const snapshot = session.getSnapshot();
     const [turnRemoval, setTurnRemoval] = useState<TurnRemovalTarget>();
+    const [answering, setAnswering] = useState<{card: VisibleCardData; presentationKey: string}>();
     const thread = session.model.thread(snapshot.selectedThreadId);
     const projectionId = snapshot.selectedThreadId;
     const presentationKey = session.threadVisualKey(projectionId);
@@ -1152,9 +1154,9 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         const next = {...current, ...change}; persistConversationPresentation(next); return next;
     });
     const cardVisible = (card: VisibleCardData) => {
-        if (card.kind === "reasoning") return presentation.showReasoning;
-        if (card.kind !== "agentMessage") return true;
-        return ["final_answer", "partial_answer"].includes((card.payload as AgentMessageData).phase) || presentation.showCodexUpdates;
+        const message = card.kind === "agentMessage" ? card.payload as AgentMessageData : undefined;
+        return card.kind === "reasoning" ? presentation.showReasoning : !message || Boolean(message.questionRequest)
+            || ["final_answer", "partial_answer"].includes(message.phase) || presentation.showCodexUpdates;
     };
     const cardCollapsed = (card: VisibleCardData, key: string) => {
         const initiallyCollapsed = (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)
@@ -1232,6 +1234,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
         return <Card key={`${presentationKey}:${key}`} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} times={card.key.kind === "item" ? targetTimes(session.model, {threadId: card.threadId, turnId: card.turnId, itemId: card.itemId}) : []}
+            {...(session.canSubmit(presentationKey) ? {onAnswer: () => setAnswering({card, presentationKey})} : {})}
             onTurnMenu={(position, opener) => {
                 const turn = session.model.thread(card.threadId)?.turns.get(card.turnId);
                 if (turn) { setTurnRemoval({threadId: card.threadId, turnId: card.turnId, presentationKey, turn, position, stage: "menu", cardKey: key, opener}); }
@@ -1241,6 +1244,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             {...(card.kind === "commandExecution" ? {commandScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:command`, false), outputScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:output`, true)} : {})} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
+        {answering && <AsyncQuestionDialog session={session} card={answering.card} presentationKey={answering.presentationKey} onClose={() => setAnswering(undefined)} />}
         {turnRemoval && <TurnRemovalSurface session={session} target={turnRemoval} onClose={() => setTurnRemoval(undefined)} onConfirm={() => setTurnRemoval({...turnRemoval, stage: "confirm"})} />}
         <div className="conversation-heading"><span className="eyebrow">CONVERSATION</span>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
@@ -1544,17 +1548,39 @@ function TokenUsage({content}: {content: TokenUsageText}) {
 
 function Info({label, value}: {label: string; value: string}) { return <div className="info-row"><span>{label}</span><strong>{value || "—"}</strong></div>; }
 
-function RequestCard({request, session}: {request: PendingRequestPresentation; session: BrowserFrontendSession}) {
+export function AsyncQuestionDialog({session, card, presentationKey, onClose}: {session: BrowserFrontendSession; card: VisibleCardData; presentationKey: string; onClose: () => void}) {
+    const dialog = useRef<HTMLDialogElement>(null);
+    const [error, setError] = useState("");
+    useEffect(() => {
+        const opener = document.activeElement as HTMLElement | null;
+        dialog.current?.showModal();
+        return () => { if (opener?.isConnected) { opener.focus(); } };
+    }, []);
+    const request: PendingRequestPresentation = {id: card.itemId, presentationKey, kind: "user-input", threadId: card.threadId,
+        generation: session.model.connection().generation, raw: (card.payload as AgentMessageData).questionRequest};
+    return <dialog ref={dialog} className="new-thread-dialog" aria-label="Codex needs input" onCancel={onClose}>
+        <h2>Codex needs input</h2><RequestCard request={request} session={session} onSubmit={async submission => {
+            const admitted = await session.answerQuestion(card, presentationKey, submission);
+            if (admitted) { onClose(); }
+            else { setError("The answer was not sent. Check connection, controller access and the original question, then try again."); }
+            return admitted;
+        }} />{error && <p role="alert">{error}</p>}<footer><button type="button" onClick={onClose}>Cancel</button></footer>
+    </dialog>;
+}
+
+function RequestCard({request, session, onSubmit}: {request: PendingRequestPresentation; session: BrowserFrontendSession; onSubmit?: (submission: PendingRequestSubmission) => Promise<boolean>}) {
     const raw = request.raw && typeof request.raw === "object" ? request.raw as Record<string, unknown> : {};
-    const decisions = pendingDecisionOptions(request);
+    const decisions = pendingDecisionOptions(request).filter(decision => !onSubmit || decision.value === "submit");
     const questions = decisions.some(decision => decision.value === "submit") && Array.isArray(raw.questions)
         ? raw.questions as Record<string, unknown>[] : [];
-    const [answers, setAnswers] = useState<Record<string, string[]>>({});
+    const [answers, setAnswers] = useState<Record<string, string[]>>(() => onSubmit
+        ? Object.fromEntries(questions.map(question => [String(question.id), Array.isArray(question.options) && question.options.length ? [String(question.options[0].label)] : []])) : {});
     const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({});
     const [structured, setStructured] = useState("{}");
     const details = pendingRequestDetails(request);
-    const resolving = session.isPendingResolving(request);
-    const actionable = session.canResolvePending(request);
+    const [submitting, setSubmitting] = useState(false);
+    const resolving = submitting || session.isPendingResolving(request);
+    const actionable = onSubmit ? session.canSubmit() : session.canResolvePending(request);
     const userInputValid = questions.length > 0 && questions.every(question => {
         const id = typeof question.id === "string" ? question.id : "";
         return id !== "" && ((answers[id]?.length ?? 0) > 0 || (otherAnswers[id]?.trim() ?? "") !== "");
@@ -1581,8 +1607,8 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
         [id]: checked ? [...(current[id] ?? []), value] : (current[id] ?? []).filter(answer => answer !== value),
     }));
     return <div className="request-card" aria-busy={resolving || undefined}>
-        <strong>{humanize(request.kind)}</strong>
-        {details.entries.length > 0 && <dl className="request-details">{details.entries.map((detail, index) => <div key={`${detail.path}-${index}`}>
+        {!onSubmit && <strong>{humanize(request.kind)}</strong>}
+        {!onSubmit && details.entries.length > 0 && <dl className="request-details">{details.entries.map((detail, index) => <div key={`${detail.path}-${index}`}>
             <dt>{detail.path.split(" / ").map(humanize).join(" / ")}</dt><dd>{detail.value}</dd></div>)}
             {details.truncated && <div><dt>Additional detail</dt><dd>Too large to display safely</dd></div>}</dl>}
         {request.kind === "user-input" && questions.map((question, questionIndex) => {
@@ -1592,11 +1618,14 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
             return <fieldset className="request-question" key={id || questionIndex}><legend>{String((question.header ?? question.question ?? id) || `Question ${questionIndex + 1}`)}</legend>
                 {question.header !== undefined && question.question !== undefined && <span>{String(question.question)}</span>}
                 {options.map((choice, optionIndex) => { const label = String(choice.label ?? ""); return label === "" ? null : <label key={`${label}-${optionIndex}`}>
-                    <input type="checkbox" checked={(answers[id] ?? []).includes(label)} onChange={event => toggleAnswer(id, label, event.target.checked)} />
+                    <input type={onSubmit ? "radio" : "checkbox"} name={onSubmit ? `question-${id}` : undefined} checked={(answers[id] ?? []).includes(label)} onChange={event => {
+                        if (onSubmit) { setAnswers(current => ({...current, [id]: [label]})); setOtherAnswers(current => ({...current, [id]: ""})); }
+                        else { toggleAnswer(id, label, event.target.checked); }
+                    }} />
                     <span>{label}{typeof choice.description === "string" && choice.description !== "" && <small>{choice.description}</small>}</span></label>; })}
-                {showOther && <input type={question.isSecret ? "password" : "text"} value={otherAnswers[id] ?? ""}
+                {showOther && <input aria-label={`${question.question ?? id}: Other answer`} type={question.isSecret ? "password" : "text"} value={otherAnswers[id] ?? ""}
                     placeholder={options.length > 0 ? "Other answer" : "Type your answer"}
-                    onChange={event => setOtherAnswers(current => ({...current, [id]: event.target.value}))} />}
+                    onChange={event => { setOtherAnswers(current => ({...current, [id]: event.target.value})); if (onSubmit) { setAnswers(current => ({...current, [id]: []})); } }} />}
             </fieldset>;
         })}
         {request.kind === "mcp-elicitation" && decisions.some(decision => decision.value === "accept" && decision.requiresInput) && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
@@ -1606,7 +1635,12 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
                 && (request.kind !== "mcp-elicitation" || structuredValid));
             return <button type="button" key={decision.value} className={`request-button ${decision.tone === "neutral" ? "" : decision.tone}`}
                 disabled={!actionable || !inputValid}
-                onClick={() => session.resolvePending(request, submission(decision.value))}>{decision.label}</button>;
+                onClick={async () => {
+                    if (onSubmit) {
+                        setSubmitting(true);
+                        try { await onSubmit(submission(decision.value)); } finally { setSubmitting(false); }
+                    } else { session.resolvePending(request, submission(decision.value)); }
+                }}>{decision.label}</button>;
         })}</div>
     </div>;
 }

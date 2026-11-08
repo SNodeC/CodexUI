@@ -4,12 +4,12 @@
 #define CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 
 #include "codex/ProtocolTiming.h"
-
 #include "codex/UiStatus.h"
 #include "codex/nodegraph/NodeGraph.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -70,6 +70,7 @@ struct UserMessageData {
 struct AgentMessageData {
   std::string text;
   std::string phase;
+  nlohmann::json questionRequest = nullptr;
 
   bool operator==(const AgentMessageData &) const = default;
 };

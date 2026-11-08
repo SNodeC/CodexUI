@@ -1,0 +1,203 @@
+{
+  "cases": [
+    {
+      "id": "choice",
+      "questions": [
+        {
+          "title": "Approve the follow-up PR?",
+          "options": [
+            "Approve",
+            "Hold"
+          ]
+        }
+      ],
+      "answer": {
+        "0": {
+          "answers": [
+            "Hold"
+          ]
+        }
+      },
+      "text": "Approve the follow-up PR?\nHold"
+    },
+    {
+      "id": "multiple-unicode",
+      "questions": [
+        {
+          "title": "Environment?",
+          "options": [
+            "Staging",
+            "Production"
+          ]
+        },
+        {
+          "title": "Why?"
+        }
+      ],
+      "answer": {
+        "0": {
+          "answers": [
+            "Staging"
+          ]
+        },
+        "1": {
+          "answers": [
+            "Überprüfung"
+          ]
+        }
+      },
+      "text": "Environment?\nStaging\n\nWhy?\nÜberprüfung"
+    },
+    {
+      "id": "null-options",
+      "questions": [
+        {
+          "title": "Describe the change",
+          "options": null
+        }
+      ],
+      "answer": {
+        "0": {
+          "answers": [
+            "Keep it small"
+          ]
+        }
+      },
+      "text": "Describe the change\nKeep it small"
+    },
+    {
+      "id": "no-questions",
+      "questions": []
+    },
+    {
+      "id": "wrong-shape",
+      "questions": "question"
+    },
+    {
+      "id": "missing-title",
+      "questions": [
+        {
+          "options": [
+            "Yes"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "invalid-title",
+      "questions": [
+        {
+          "title": 5
+        }
+      ]
+    },
+    {
+      "id": "empty-title",
+      "questions": [
+        {
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": "invalid-options",
+      "questions": [
+        {
+          "title": "Question",
+          "options": "Yes"
+        }
+      ]
+    },
+    {
+      "id": "empty-option",
+      "questions": [
+        {
+          "title": "Question",
+          "options": [
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "id": "invalid-option",
+      "questions": [
+        {
+          "title": "Question",
+          "options": [
+            {
+              "label": "Yes"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "visibilityCases": [
+    {
+      "id": "question-commentary",
+      "item": {"phase": "commentary", "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "question-partial",
+      "item": {"phase": "partial_answer", "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "question-final",
+      "item": {"phase": "final_answer", "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "question-null",
+      "item": {"phase": null, "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "question-missing",
+      "item": {"delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "ordinary-commentary",
+      "item": {"phase": "commentary"},
+      "visibleWhenUpdatesHidden": false
+    },
+    {
+      "id": "ordinary-partial",
+      "item": {"phase": "partial_answer"},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "ordinary-final",
+      "item": {"phase": "final_answer"},
+      "visibleWhenUpdatesHidden": true
+    },
+    {
+      "id": "ordinary-null",
+      "item": {"phase": null},
+      "visibleWhenUpdatesHidden": false
+    },
+    {
+      "id": "ordinary-missing",
+      "item": {},
+      "visibleWhenUpdatesHidden": false
+    },
+    {
+      "id": "empty-questions",
+      "item": {"phase": "commentary", "delivery": "async", "questions": []},
+      "visibleWhenUpdatesHidden": false
+    },
+    {
+      "id": "invalid-question",
+      "item": {"phase": "commentary", "delivery": "async", "questions": [{"title": ""}]},
+      "visibleWhenUpdatesHidden": false
+    },
+    {
+      "id": "missing-async-delivery",
+      "item": {"phase": "commentary", "questions": [{"title": "Choose a label"}]},
+      "visibleWhenUpdatesHidden": false
+    }
+  ]
+}

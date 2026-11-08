@@ -96,6 +96,10 @@ class PendingRequestPolicy final {
 public:
   PendingRequestPolicy() = delete;
 
+  [[nodiscard]] static nlohmann::json asyncQuestionRequest(const nlohmann::json& questions);
+  [[nodiscard]] static std::optional<std::string> asyncQuestionAnswer(const nlohmann::json& request,
+                                                                      const PendingRequestSubmission& submission);
+
   [[nodiscard]] static PendingRequestKind
   kindForMethod(std::string_view method) noexcept;
   [[nodiscard]] static std::string_view
