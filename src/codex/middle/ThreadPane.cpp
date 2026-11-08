@@ -97,7 +97,7 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
              : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
-QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool indirectActive) {
+QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool indirectActive, bool uninspectedResult) {
     const std::string_view tone = statusTone(status);
     const char* role = UiStyle::threadInactive;
     if (draft || pending != 0) {
@@ -106,6 +106,8 @@ QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool
         role = UiStyle::statusIndirect;
     } else if (tone == "active") {
         role = UiStyle::statusActive;
+    } else if (uninspectedResult) {
+        role = UiStyle::statusUninspected;
     } else if (tone == "success") {
         role = UiStyle::statusSuccess;
     } else if (tone == "warning") {
@@ -141,6 +143,7 @@ public:
   std::string workspaceChangeUnavailable;
   UiStatus status;
   bool indirectActive = false;
+  bool uninspectedResult = false;
   std::optional<std::int64_t> createdAt;
   ProtocolTimes timing;
   std::optional<std::int64_t> recencyAt;
@@ -667,6 +670,9 @@ QString itemDescription(const ThreadTreeItem& item) {
     if (item.indirectActive) {
         details.push_back(QStringLiteral("Indirect activity: running descendant"));
     }
+    if (item.uninspectedResult) {
+        details.push_back(QStringLiteral("Finished result not yet inspected in this thread or a descendant"));
+    }
     return details.join(QLatin1Char('\n'));
 }
 
@@ -823,7 +829,7 @@ public:
     const QPointF dotCenter(contentLeft + StatusCenterOffset,
                             QRectF(contentRow).center().y());
     painter->setPen(Qt::NoPen);
-    painter->setBrush(statusColor(item->status, item->pending, item->draft, item->indirectActive));
+    painter->setBrush(statusColor(item->status, item->pending, item->draft, item->indirectActive, item->uninspectedResult));
     if (item->kind != ui::ThreadRowKind::Page) {
         painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
     }
@@ -2057,6 +2063,7 @@ bool ThreadPane::applyItemPresentation(
   assign(item->workspaceChangeUnavailable, row.workspaceChangeUnavailable);
   assign(item->status, row.status);
   assign(item->indirectActive, row.indirectActive);
+  assign(item->uninspectedResult, row.uninspectedResult);
   assign(item->createdAt, row.createdAt);
   assign(item->timing, row.timing);
   assign(item->recencyAt, row.recencyAt);

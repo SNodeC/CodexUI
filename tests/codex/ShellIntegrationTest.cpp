@@ -4381,6 +4381,111 @@ void groupedStatusNotificationsRefreshAncestors(Configuration& configuration) {
     }
 }
 
+void inspectionAcknowledgementsTrackTheBoundConversation(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    auto& graph = FrontendSessionTestPeer::graph(session);
+    WorkerLogic worker(graph, channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    applyThread(worker, "inspection-a");
+    applyThread(worker, "inspection-b");
+    auto* tree = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    require(spinUntil([&] {
+                return threadItem(tree, "inspection-a") && threadItem(tree, "inspection-b");
+            }),
+            "inspection threads reach the actual shell");
+    const auto acknowledge = [&] {
+        for (const auto& message : takeQtMessages(channels)) {
+            if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::InspectThread) {
+                static_cast<void>(worker.inspectThread(action->target));
+            }
+        }
+        spin();
+    };
+    require(selectThread(tree, "inspection-a"), "the UI binds the first inspected conversation");
+    acknowledge();
+    const auto complete = [&](const std::string& thread, const std::string& turn) {
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "turn/completed",
+                                        {},
+                                        {{"threadId", thread}, {"turn", Value::Object{{"id", turn}, {"status", "completed"}}}}}));
+    };
+    complete("inspection-b", "background");
+    require(spinUntil([&] {
+                return threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected");
+            }),
+            "background completion routes its inspection marker through the real shell");
+    require(selectThread(tree, "inspection-b"), "the UI selects the result awaiting inspection");
+    acknowledge();
+    require(spinUntil([&] {
+                return !threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected");
+            }),
+            "the binding acknowledgement clears the visible result marker");
+    complete("inspection-b", "foreground");
+    spin();
+    require(!threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected"),
+            "completion in the bound conversation stays inspected");
+    require(selectThread(tree, "inspection-a"), "the UI leaves the inspected result");
+    acknowledge();
+    complete("inspection-b", "foreground");
+    spin();
+    require(!threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected"),
+            "duplicate completion after navigation cannot recreate attention");
+}
+
+void saturatedInspectionKeepsOnlyTheLatestBinding(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    auto& graph = FrontendSessionTestPeer::graph(session);
+    WorkerLogic worker(graph, channels);
+    applyThread(worker, "inspection-queue-a");
+    applyThread(worker, "inspection-queue-b");
+    NodeRef first, last;
+    {
+        auto read = graph.tryRead();
+        first = read->find({NodeKind::Thread, "inspection-queue-a"});
+        last = read->find({NodeKind::Thread, "inspection-queue-b"});
+    }
+    for (std::size_t index = 0; index < ThreadChannels::QtToWorkerCapacity - 1; ++index) {
+        NodeAction fill{first, NodeActionKind::Hydrate};
+        require(deliveryGuaranteed(channels.sendNodeAction(fill)), "inspection fixture fills the ordinary mailbox capacity");
+    }
+    session.acknowledgeInspection(first);
+    session.acknowledgeInspection(last);
+    session.acknowledgeInspection({});
+    session.acknowledgeInspection(last);
+    static_cast<void>(takeQtMessages(channels));
+    FrontendSessionTestPeer::drainWorkerMessages(session);
+    const auto messages = takeQtMessages(channels);
+    require(messages.size() == 1, "mailbox saturation coalesces inspection into one latest acknowledgement");
+    const auto* action = messages.size() == 1 ? std::get_if<NodeAction>(&messages.front()) : nullptr;
+    require(action && action->kind == NodeActionKind::InspectThread && action->target == last,
+            "the latest exact bound identity survives saturation");
+    if (action) {
+        static_cast<void>(worker.inspectThread(action->target));
+    }
+    {
+        auto read = graph.tryRead();
+        const auto runtime = read->find({NodeKind::Runtime, "runtime"});
+        require(runtime && read->related(runtime, RelationKind::UiInspectionTarget) == std::vector<NodeRef>{last},
+                "only the actual latest binding is marked inspected");
+    }
+    session.acknowledgeInspection({});
+    const auto cleared = takeQtMessages(channels);
+    const auto* clear = cleared.size() == 1 ? std::get_if<NodeAction>(&cleared.front()) : nullptr;
+    require(clear && clear->kind == NodeActionKind::InspectThread && !clear->target, "a new draft can clear the inspected conversation");
+    if (clear) {
+        static_cast<void>(worker.inspectThread(clear->target));
+        auto read = graph.tryRead();
+        const auto runtime = read->find({NodeKind::Runtime, "runtime"});
+        require(runtime && read->related(runtime, RelationKind::UiInspectionTarget).empty(),
+                "a draft leaves no conversation marked inspected");
+    }
+}
+
 void optimisticDraftUsesOneTypedCreateAction(Configuration& configuration, bool grouped = false, bool multipleRoots = false) {
     FrontendSession session(configuration);
     ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
@@ -6852,6 +6957,8 @@ int main(int argc, char **argv) {
   forkActionsExposeLineageAndAdvancedOptions(*configuration);
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
   groupedStatusNotificationsRefreshAncestors(*configuration);
+  inspectionAcknowledgementsTrackTheBoundConversation(*configuration);
+  saturatedInspectionKeepsOnlyTheLatestBinding(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration, true);
   optimisticDraftUsesOneTypedCreateAction(*configuration, true, true);

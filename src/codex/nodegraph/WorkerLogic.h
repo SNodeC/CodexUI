@@ -109,6 +109,7 @@ public:
   [[nodiscard]] std::vector<NodeRef> activeAgentChildren(const NodeRef &thread);
   [[nodiscard]] ChannelSendStatus showNotice(std::string message);
   [[nodiscard]] ChannelSendStatus selectThread(const NodeRef &thread);
+  [[nodiscard]] ChannelSendStatus inspectThread(const NodeRef& thread);
 
   [[nodiscard]] ChannelSendStatus
   resolveInteraction(const NodeRef &interaction);

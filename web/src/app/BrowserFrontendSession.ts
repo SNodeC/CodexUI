@@ -193,7 +193,7 @@ export class BrowserFrontendSession {
             const historyReplaced = frame.kind === "result" && frame.ok === true
                 && (frame.action === "thread.revert" || (frame.action === "thread.turns.list"
                     && this.model.thread(stringMember(scope, "threadId"))?.raw.historyStale === true));
-            const application = this.model.applyEvent(frame);
+            const application = this.model.applyEvent(frame, this.selectedThreadId);
             if (application === "rejected") return;
             const threadId = stringMember(scope, "threadId");
             const hydrationResult = stringMember(frame, "kind") === "result"
@@ -359,6 +359,7 @@ export class BrowserFrontendSession {
             this.newThreadDraft = undefined;
         }
         this.selectedThreadId = threadId;
+        this.model.inspectThread(threadId);
         if (threadId !== "") {
             this.ensureThreadHydrated(threadId, refreshSettings);
         }

@@ -48,6 +48,7 @@ export interface TurnPresentation {
     status: PresentationStatus;
     itemOrder: string[];
     itemsComplete?: boolean;
+    completionReported?: boolean;
     items: Map<string, ItemPresentation>;
     plan: JsonObject;
 }
@@ -73,6 +74,7 @@ export interface ThreadPresentation {
     projectId: string; sectionId: string;
     membershipSequence: Map<string, number>;
     activeTurnId?: string;
+    uninspectedResult?: boolean;
     title: string;
     preview: string;
     cwd: string;
@@ -385,10 +387,10 @@ export class PresentationModel {
     private lastSequence = 0;
     private settingsAcknowledgement = 0;
 
-    applyEvent(event: unknown): PresentationApplyResult {
+    applyEvent(event: unknown, inspectedThreadId = ""): PresentationApplyResult {
         try {
             const previousGeneration = this.connectionState.generation;
-            const result = this.applyValidatedEvent(event);
+            const result = this.applyValidatedEvent(event, inspectedThreadId);
             if (previousGeneration !== 0 && this.connectionState.generation > previousGeneration)
                 return "provider-reset";
             if (result === false) return "settings-unchanged";
@@ -405,8 +407,8 @@ export class PresentationModel {
     threadIndicatorTones(): Map<string, string> {
         const tones = new Map<string, string>(), parents = new Map<string, string[]>(), pending: string[] = [];
         for (const thread of this.threads.values()) {
-            tones.set(thread.id, statusTone(thread.status));
-            if (isActiveStatus(thread.status)) { pending.push(thread.id); }
+            tones.set(thread.id, isActiveStatus(thread.status) ? "active" : thread.uninspectedResult ? "uninspected" : statusTone(thread.status));
+            if (isActiveStatus(thread.status) || thread.uninspectedResult) { pending.push(thread.id); }
             for (const child of thread.childThreadOrder) {
                 parents.set(child, [...(parents.get(child) ?? []), thread.id]);
             }
@@ -414,8 +416,9 @@ export class PresentationModel {
         while (pending.length > 0) {
             const child = pending.pop()!;
             for (const parent of parents.get(child) ?? []) {
-                if (tones.get(parent) !== "active" && tones.get(parent) !== "indirect") {
-                    tones.set(parent, "indirect");
+                const tone = ["active", "indirect"].includes(tones.get(child) ?? "") ? "indirect" : "uninspected";
+                if (tones.get(parent) !== "active" && tones.get(parent) !== "indirect" && tones.get(parent) !== tone) {
+                    tones.set(parent, tone);
                     pending.push(parent);
                 }
             }
@@ -423,6 +426,12 @@ export class PresentationModel {
         return tones;
     }
 
+    inspectThread(threadId: string): void {
+        const thread = this.threads.get(threadId);
+        if (thread) {
+            thread.uninspectedResult = false;
+        }
+    }
     thread(threadId: string): ThreadPresentation | undefined { return this.threads.get(threadId); }
     setThreadTitleLocally(threadId: string, title: string): void {
         const thread = this.threads.get(threadId);
@@ -479,7 +488,7 @@ export class PresentationModel {
         return this.pendingRequests;
     }
 
-    private applyValidatedEvent(candidate: unknown): boolean | "requests-reset" | "provider-reset" | "rejected" | undefined {
+    private applyValidatedEvent(candidate: unknown, inspectedThreadId: string): boolean | "requests-reset" | "provider-reset" | "rejected" | undefined {
         if (!isPresentationFrame(candidate)) return "rejected";
         const event = candidate as PresentationFrame;
         const generation = unsignedValue(event.generation);
@@ -702,6 +711,10 @@ export class PresentationModel {
                 turn.status = "running";
             const updated = this.upsertTurn(thread, turn, false);
             thread.membershipSequence.set("status", sequence);
+            if (lifecycle === "completed" && updated.id !== "" && !updated.completionReported) {
+                updated.completionReported = true;
+                thread.uninspectedResult ||= thread.id !== inspectedThreadId;
+            }
             if (lifecycle === "started") { updated.itemsComplete = true; }
             if (isActiveStatus(updated.status)) thread.activeTurnId = updated.id;
             else if (thread.activeTurnId === updated.id) delete thread.activeTurnId;
@@ -912,10 +925,13 @@ export class PresentationModel {
         if (Object.hasOwn(raw, "projectId")) result.projectId = stringMember(raw, "projectId");
         if (Object.hasOwn(raw, "section")) result.sectionId = stringMember(raw.section, "id");
         const previousThreadStatus = result.status;
-        const terminalTurnStatuses = new Map<string, PresentationStatus>();
+        const terminalTurnStatuses = new Map<string, {status: PresentationStatus; completionReported: boolean}>();
         if (replaceTurns) {
-            for (const [turnId, turn] of result.turns)
-                if (isTerminalTurnStatus(turn.status)) terminalTurnStatuses.set(turnId, turn.status);
+            for (const [turnId, turn] of result.turns) {
+                if (isTerminalTurnStatus(turn.status)) {
+                    terminalTurnStatuses.set(turnId, {status: turn.status, completionReported: turn.completionReported === true});
+                }
+            }
         }
         const {turns: _turns, ...metadata} = raw;
         const threadFields = clone(metadata);
@@ -981,7 +997,12 @@ export class PresentationModel {
                 }
                 for (const [turnId, terminalStatus] of terminalTurnStatuses) {
                     const turn = result.turns.get(turnId);
-                    if (turn && isActiveStatus(turn.status)) turn.status = terminalStatus;
+                    if (turn) {
+                        turn.completionReported = terminalStatus.completionReported;
+                        if (isActiveStatus(turn.status)) {
+                            turn.status = terminalStatus.status;
+                        }
+                    }
                 }
             }
             this.refreshActiveTurn(result);

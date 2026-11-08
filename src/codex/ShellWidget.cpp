@@ -156,26 +156,26 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
       }))
     return {true, true, {}};
   const auto *read = &access;
-  constexpr std::array<std::string_view, 19> Fields{
-      "projectId",
-      "section",
-      "sectionEnteredAt",
-      "name",
-      "localNameOverlay",
-      "title",
-      "preview",
-      "cwd",
-      "workspace",
-      "status",
-      "createdAt",
-      "updatedAt",
-      "recencyAt",
-      "lastActivityAt",
-      "localActivityAt",
-      "localPromptActivityAt",
-      "confirmedLocalPromptActivityAt",
-      "hydrationState",
-      "archived"};
+  constexpr std::array<std::string_view, 20> Fields{"projectId",
+                                                    "section",
+                                                    "sectionEnteredAt",
+                                                    "name",
+                                                    "localNameOverlay",
+                                                    "title",
+                                                    "preview",
+                                                    "cwd",
+                                                    "workspace",
+                                                    "status",
+                                                    "createdAt",
+                                                    "updatedAt",
+                                                    "recencyAt",
+                                                    "lastActivityAt",
+                                                    "localActivityAt",
+                                                    "localPromptActivityAt",
+                                                    "confirmedLocalPromptActivityAt",
+                                                    "hydrationState",
+                                                    "uninspectedResult",
+                                                    "archived"};
   ThreadPaneRoute route;
   route.graphRevision = change.revision;
   for (const nodegraph::NodeRef &node : change.affected) {
@@ -224,10 +224,9 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
           fieldChanged(*read, node, "confirmedLocalPromptActivityAt",
                        change.revision)));
     if (read->structureChangedRevision(node) == change.revision ||
-        (grouping != ui::ThreadGrouping::Ungrouped &&
-         read->statusChangedRevision(node) == change.revision) ||
-        sortChanged || fieldChanged(*read, node, "archived", change.revision)) {
-      return {true, true, {}};
+        (grouping != ui::ThreadGrouping::Ungrouped && read->statusChangedRevision(node) == change.revision) || sortChanged ||
+        fieldChanged(*read, node, "uninspectedResult", change.revision) || fieldChanged(*read, node, "archived", change.revision)) {
+        return {true, true, {}};
     }
     route.affected = true;
     if (std::ranges::find(route.rows, node) == route.rows.end())
@@ -1106,6 +1105,9 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
         selectedThread->id().canonical, selectedThread->incarnation());
   pendingConversationAuthorityReplacement = false;
   pendingStructuralConversationDelta.reset();
+  if (boundGraphThread != selectedThread) {
+      session.acknowledgeInspection(selectedThread);
+  }
   boundGraphThread = std::move(selectedThread);
   middleRegion->inspector().clearTimingTarget();
   routedThreadRevision = 0;

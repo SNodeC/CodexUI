@@ -1445,6 +1445,7 @@ projectThreadRow(nodegraph::NodeGraph::ReadAccess &read,
   row.cwd = scalarTextFromValue(valueMember(*state, "cwd"));
   row.workspaceChangeUnavailable = nodegraph::threadWorkspaceChangeUnavailable(read, thread);
   row.status = statusFromState(*state);
+  row.uninspectedResult = boolFromValue(valueMember(*state, "uninspectedResult"));
   row.createdAt = timestamp("createdAt");
   row.updatedAt = timestamp("updatedAt");
   row.recencyAt = timestamp("recencyAt");
@@ -1837,8 +1838,10 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
             !localChildren.insert(child.get()).second)
           continue;
         ThreadListRow projected = self(self, child);
-        if (!projected.id.empty())
-          row.children.push_back(std::move(projected));
+        if (!projected.id.empty()) {
+            row.uninspectedResult |= projected.uninspectedResult;
+            row.children.push_back(std::move(projected));
+        }
       }
     }
     row.indirectActive = !isActiveStatus(row.status) && std::ranges::any_of(row.children, [](const auto& child) {
@@ -2150,6 +2153,9 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
             if (row.kind == ThreadRowKind::Project || row.kind == ThreadRowKind::Section) {
                 row.status = descendants;
                 row.indirectActive = isActiveStatus(descendants);
+                row.uninspectedResult = std::ranges::any_of(row.children, [](const auto& child) {
+                    return child.uninspectedResult;
+                });
             }
             // Fold descendants without changing an individual thread's own status.
             for (const auto& status : {row.status, descendants}) {

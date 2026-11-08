@@ -273,6 +273,9 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
             `Created: ${thread?.createdAt === undefined ? "Unknown" : threadTimestampText(thread.createdAt)}`,
             `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : threadTimestampText(thread.lastActivityAt)}`,
             ...(parentId ? [`Parent: ${session.model.thread(parentId)?.title || parentId}`] : [])];
+        if (indicatorTones.get(id) === "uninspected") {
+            hoverDetails.push("Finished result not yet inspected in this thread or a descendant");
+        }
         const accessibleDetails = hoverDetails.join(", ");
         const contextOpen = Boolean(contextMenu && "threadId" in contextMenu && contextMenu.threadId === id && contextMenu.presentationKey === presentationKey);
         return <div key={presentationKey} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
@@ -312,8 +315,9 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         const members = session.model.threadIds().filter(id => membership(id, `${kind}Id`) === group.id
             && (!nested || membership(id, "projectId") === projectId));
         const tone = members.some(id => ["active", "indirect"].includes(indicatorTones.get(id) ?? "")) ? "indirect"
+            : members.some(id => indicatorTones.get(id) === "uninspected") ? "uninspected"
             : members.some(id => statusTone(session.model.thread(id)!.status) !== "") ? "success" : "muted";
-        const statusDescription = tone === "indirect" ? "Indirect activity: running descendant" : tone === "success" ? "Threads: loaded" : "Threads: not loaded";
+        const statusDescription = tone === "uninspected" ? "Finished result not yet inspected in a descendant" : tone === "indirect" ? "Indirect activity: running descendant" : tone === "success" ? "Threads: loaded" : "Threads: not loaded";
         return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-label={`${groupLabel(kind, group)}, ${statusDescription}`} aria-expanded={expanded}>
             <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><StatusDot tone={tone} /><span>{kind === "section" && !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
                 <button className="thread-menu-trigger group-menu-trigger" aria-label={`Actions for ${groupLabel(kind, group)}`} aria-haspopup="menu"
