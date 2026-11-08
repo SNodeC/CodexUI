@@ -7,7 +7,7 @@ import {
 } from "@snodec/codex-frontend";
 import type {WebSocketFactory} from "@snodec/codex-frontend";
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
-import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
+import {isObject, jsonEqual, member, stringMember} from "../presentation/PresentationProtocol.js";
 import {PresentationModel} from "../presentation/PresentationModel.js";
 import type {PendingRequestPresentation, WorkspaceGroup} from "../presentation/PresentationModel.js";
 import {ProtocolNormalizer} from "../presentation/ProtocolNormalizer.js";
@@ -15,10 +15,10 @@ import {PromptCoordinator, indexAuthoritativeItems, localCardVisible, promptWith
 import type {AttachmentDraft, PromptDispatch, PromptRecoveryContext} from "../conversation/PromptCoordinator.js";
 import {DefaultAuthoritativeItemLimit, projectConversation} from "../conversation/ConversationProjection.js";
 import {PendingAnimationDelayMilliseconds, stableKey} from "../conversation/MiddleTypes.js";
-import type {ConversationSnapshot} from "../conversation/MiddleTypes.js";
+import type {AgentMessageData, VisibleCardData, ConversationSnapshot} from "../conversation/MiddleTypes.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 import {ConversationViewportState} from "./ConversationViewportState.js";
-import {pendingResponse} from "./PendingRequestResponses.js";
+import {asyncQuestionAnswer, asyncQuestionRequest, pendingResponse} from "./PendingRequestResponses.js";
 import type {PendingRequestSubmission} from "./PendingRequestResponses.js";
 import type {SettingDraft} from "./TurnSettingsOptions.js";
 
@@ -478,6 +478,22 @@ export class BrowserFrontendSession {
         conversation.hasMore ||= thread?.historyHasMore === true;
         conversation.activeTurnId = this.model.activeTurnId(this.selectedThreadId);
         return conversation;
+    }
+
+    async answerQuestion(card: VisibleCardData, presentationKey: string, submission: PendingRequestSubmission): Promise<boolean> {
+        const item = this.model.thread(card.threadId)?.turns.get(card.turnId)?.items.get(card.itemId)?.raw;
+        const request = (card.payload as AgentMessageData).questionRequest;
+        const answer = asyncQuestionAnswer(request, submission);
+        const current = card.kind === "agentMessage" && item?.delivery === "async" && item.type === "agentMessage"
+            && jsonEqual(asyncQuestionRequest(item.questions), request);
+        let admitted = false;
+        if (current && answer && card.threadId === this.selectedThreadId && this.canSubmit(presentationKey)) {
+            admitted = await this.submitPrompt(answer, [], {}, {}, presentationKey);
+        }
+        if (!admitted) {
+            this.setNotice("The answer was not sent. Check connection, controller access and the original question, then try again.");
+        }
+        return admitted;
     }
 
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {},

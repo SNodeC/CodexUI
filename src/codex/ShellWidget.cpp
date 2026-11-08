@@ -864,6 +864,35 @@ void ShellWidget::Impl::connectUi() {
   };
   threadActions.timing = showTiming;
   middleRegion->conversation().setTimingAction(showTiming);
+  middleRegion->conversation().setAnswerAction([this](nodegraph::NodeRef item) {
+      PendingRequestDescriptor request;
+      request.kind = PendingRequestKind::UserInput;
+      request.method = "agentMessage";
+      const auto source = [&] {
+          nlohmann::json questions = nullptr;
+          auto read = session.nodeGraph().tryRead();
+          if (read && read->live(item) && read->parent(read->parent(item)) == boundGraphThread) {
+              const auto state = read->state(item);
+              if (exactStringFromValue(valueMember(*state, "type")) == "agentMessage" &&
+                  exactStringFromValue(valueMember(*state, "delivery")) == "async" && valueMember(*state, "questions")) {
+                  questions = PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*valueMember(*state, "questions")));
+              }
+          }
+          return questions;
+      };
+      request.raw = source();
+      const auto thread = boundGraphThread;
+      if (!request.raw.is_null()) {
+          request.availability = PendingRequestAvailability::Actionable;
+          static_cast<void>(PendingRequestDialog::present(request, owner, nullptr, {}, [&](const PendingRequestSubmission& submission) {
+              const auto answer = PendingRequestPolicy::asyncQuestionAnswer(request.raw, submission);
+              const bool current = thread == boundGraphThread && source() == request.raw;
+              const bool admitted = current && renderedChrome && renderedChrome->canControl && answer && submitPrompt(text(*answer), {});
+              return admitted;
+          }));
+          acknowledgeDetachedTargets();
+      }
+  });
   middleRegion->conversation().setTurnMenuAction([this](nodegraph::NodeRef item, QPoint position) {
       showTurnMenu(std::move(item), position);
   });

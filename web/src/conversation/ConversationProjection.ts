@@ -1,3 +1,4 @@
+import {asyncQuestionRequest} from "../app/PendingRequestResponses.js";
 import type {ItemPresentation, ThreadPresentation, TurnPresentation} from "../presentation/PresentationModel.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
@@ -163,7 +164,8 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
         status = UnknownStatus;
         kind = "agentMessage";
         payload = {text: withTruncationNotice(messageText(item), omittedTextBytes(presentation, "text"), "Codex response", true),
-            phase: stringMember(item, "phase")} satisfies AgentMessageData;
+            phase: stringMember(item, "phase"), ...(stringMember(item, "delivery") === "async"
+                ? {questionRequest: asyncQuestionRequest(member(item, "questions"))} : {})} satisfies AgentMessageData;
     } else if (type === "commandExecution") {
         kind = "commandExecution";
         const outputField = stringMember(item, "aggregatedOutput") !== "" ? "aggregatedOutput" : "output";

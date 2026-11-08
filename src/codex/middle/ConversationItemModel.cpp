@@ -1307,13 +1307,10 @@ void ConversationItemModel::refreshSectionStructure(
 
 bool ConversationItemModel::isPresented(
     const VisibleCardData &card) const noexcept {
-  if (card.kind == CardKind::Reasoning)
-    return visibility_.showReasoning;
-  if (card.kind != CardKind::AgentMessage)
-    return true;
-  const auto *message = std::get_if<AgentMessageData>(&card.payload);
-  return !message || message->phase == "final_answer" ||
-         message->phase == "partial_answer" || visibility_.showCodexUpdates;
+    const auto* message = card.kind == CardKind::AgentMessage ? std::get_if<AgentMessageData>(&card.payload) : nullptr;
+    return card.kind == CardKind::Reasoning ? visibility_.showReasoning
+                                            : !message || !message->questionRequest.is_null() || message->phase == "final_answer" ||
+                                                  message->phase == "partial_answer" || visibility_.showCodexUpdates;
 }
 
 void ConversationItemModel::rebuildIndexes() {

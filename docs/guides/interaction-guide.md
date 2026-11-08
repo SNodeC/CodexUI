@@ -387,6 +387,8 @@ Message specializations (`steering`, `update`, and `final answer`) use normal
 font weight and sit at the right of the header immediately before Copy. The
 title remains at the left; no separator glyph is rendered.
 
+Async question messages expose **Answer…**, which opens the shared question form with one suggested choice selected and an editable **Other answer** field. Submit sends the selected answers with their question text to the original thread: it steers an active turn or starts a new turn when idle. Agent work can continue while the form is open. Cancel sends nothing, and existing composer text stays intact. A changed question, changed thread, lost controller access or rejected submission keeps the form open with its authored answers. Historical question messages remain available for deliberate replies; the UI does not infer that unrelated later messages answered them.
+
 Pending-request dialogs validate required answers and structured MCP content
 before accepting the modal. Invalid input keeps the dialog and all entered
 content open for correction.

@@ -15,10 +15,12 @@ namespace codexui::codex {
 
 class PendingRequestDialog final {
 public:
-  [[nodiscard]] static std::optional<PendingRequestSubmission>
-  present(const PendingRequestDescriptor &request, QWidget *parent,
-          const PendingRequestSubmission *initialSubmission = nullptr,
-          const std::function<void(QPushButton *)> &observeSubmit = {});
+    [[nodiscard]] static std::optional<PendingRequestSubmission>
+    present(const PendingRequestDescriptor& request,
+            QWidget* parent,
+            const PendingRequestSubmission* initialSubmission = nullptr,
+            const std::function<void(QPushButton*)>& observeSubmit = {},
+            const std::function<bool(const PendingRequestSubmission&)>& onSubmit = {});
 };
 
 } // namespace codexui::codex

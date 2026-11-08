@@ -421,6 +421,8 @@ QString applicationStyleSheet() {
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: %{finalAnswerText}; }
         QFrame[messageRole="agent"][messagePhase="update"] { background: %{updateMessageSurface}; border: 1px solid %{updateMessageBorder}; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"] { color: %{updateMessageText}; }
+        QFrame[messageRole="agent"][messagePhase="question"] { background: %{questionMessageSurface}; border: 1px solid %{questionMessageBorder}; border-radius: 8px; }
+        QFrame[messageRole="agent"][messagePhase="question"] QLabel[kind="title"], QFrame[messageRole="agent"][messagePhase="question"] QLabel#agentMessagePhase { color: %{questionMessageText}; }
         QFrame[kind="summary"] { background: %{raised}; border: 1px solid %{divider}; border-radius: 7px; }
         QFrame[kind="standardDivider"] { background: %{divider}; border: none; }
         QFrame[kind="attentionBadge"] { background: %{attentionSurface}; border: 1px solid %{attentionBorder}; border-radius: 7px; }
@@ -749,6 +751,7 @@ QString applicationStyleSheet() {
   X(userMessageBorder) X(userMessageText) X(steeringMessageSurface) X(steeringMessageBorder) \
   X(steeringMessageText) X(finalAnswerSurface) X(finalAnswerBorder) X(finalAnswerText) \
   X(updateMessageSurface) X(updateMessageBorder) X(updateMessageText) X(attentionSurface) \
+  X(questionMessageSurface) X(questionMessageBorder) X(questionMessageText) \
   X(attentionBorder) X(dangerNoticeSurface) X(dangerNoticeBorder) X(textSelectionSurface) \
   X(listSelectedSurface) X(fileSelectedSurface) X(tabSelectedSurface) X(menuCheckedSurface) \
   X(menuCheckedText) X(menuCheckedHoverSurface)

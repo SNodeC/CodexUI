@@ -596,12 +596,12 @@ std::optional<QString> selectionSource(const VisibleCardData &card, bool nested,
         } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
           if (role == SelectionRole::Title)
             return QStringLiteral("Codex");
-          if (role == SelectionRole::Phase)
-            return payload.phase == "final_answer"
-                       ? QStringLiteral("final answer")
-                   : payload.phase == "partial_answer"
-                       ? QStringLiteral("partial answer")
-                       : QStringLiteral("update");
+          if (role == SelectionRole::Phase) {
+              return !payload.questionRequest.is_null()  ? QStringLiteral("Question")
+                     : payload.phase == "final_answer"   ? QStringLiteral("final answer")
+                     : payload.phase == "partial_answer" ? QStringLiteral("partial answer")
+                                                         : QStringLiteral("update");
+          }
           if (role == SelectionRole::MarkdownBody)
             return text(payload.text);
         } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
@@ -1769,8 +1769,7 @@ public:
         policy &= ~static_cast<int>(Qt::TabFocus);
       control->setFocusPolicy(static_cast<Qt::FocusPolicy>(policy));
     };
-    QWidget *controls[] = {copy,    timing, disclosure,  markdownBody, detail,
-                           command, output, fileChanges, recovery};
+    QWidget* controls[] = {copy, timing, disclosure, markdownBody, detail, command, output, fileChanges, recovery, answer};
     for (QWidget *control : controls)
       updateControl(control);
     if (images) {
@@ -1927,32 +1926,41 @@ public:
   }
 
   void updateComposition(const AgentMessageData &message) {
-    const QString messagePhase = message.phase == "final_answer"
-                                     ? QStringLiteral("final")
-                                     : QStringLiteral("update");
-    if (this->messagePhase != messagePhase) {
-      this->messagePhase = messagePhase;
-      owner->setProperty("messagePhase", messagePhase);
-      repolishIfPolished();
-    }
-    showPhase(message.phase == "final_answer"
-                  ? QStringLiteral("final answer")
-              : message.phase == "partial_answer"
-                  ? QStringLiteral("partial answer")
-                  : QStringLiteral("update"),
-              QStringLiteral("agentMessagePhase"));
-    presentation::setLabelTone(*phase,
-                               message.phase == "final_answer" ? "success" : "active");
-    layout->setContentsMargins(12 - UiStyle::markdownSelectionGutter,
-                               message.phase == "final_answer" ? 10 : 8, 12,
-                               message.phase == "final_answer" ? 10 : 8);
-    if (collapsed) {
-      markdownBody->setVisible(!message.text.empty());
-      markBodyProjectionDeferred();
-      return;
-    }
-    setVisibleMarkdown(markdownBody, text(message.text));
-    markBodyProjectionReady();
+      if (!answer && !message.questionRequest.is_null()) {
+          answer = new QPushButton(QStringLiteral("Answer…"), content);
+          answer->setObjectName(QStringLiteral("answerAsyncQuestion"));
+          contentLayout->addWidget(answer, contentLayout->rowCount(), 0, 1, 2);
+          QObject::connect(answer, &QPushButton::clicked, owner, [this] {
+              emit this->owner->answerRequested(current.target);
+          });
+          refreshViewportTabFocus();
+      }
+      if (answer) {
+          setExplicitVisibility(answer, !message.questionRequest.is_null());
+      }
+      const QString messagePhase = !message.questionRequest.is_null() ? QStringLiteral("question")
+                                   : message.phase == "final_answer"  ? QStringLiteral("final")
+                                                                      : QStringLiteral("update");
+      if (this->messagePhase != messagePhase) {
+          this->messagePhase = messagePhase;
+          owner->setProperty("messagePhase", messagePhase);
+          repolishIfPolished();
+      }
+      showPhase(selectionSource(current, nestedConversationCard, SelectionRole::Phase).value_or(QString{}),
+                QStringLiteral("agentMessagePhase"));
+      presentation::setLabelTone(*phase,
+                                 messagePhase == QStringLiteral("question") ? ""
+                                 : message.phase == "final_answer"          ? "success"
+                                                                            : "active");
+      layout->setContentsMargins(
+          12 - UiStyle::markdownSelectionGutter, message.phase == "final_answer" ? 10 : 8, 12, message.phase == "final_answer" ? 10 : 8);
+      if (collapsed) {
+          markdownBody->setVisible(!message.text.empty());
+          markBodyProjectionDeferred();
+      } else {
+          setVisibleMarkdown(markdownBody, text(message.text));
+          markBodyProjectionReady();
+      }
   }
 
   void createComposition(const CommandExecutionData &execution) {
@@ -2300,6 +2308,7 @@ public:
   QTimer *animationTimer = nullptr;
   QTimer *pendingDelayTimer = nullptr;
   QPushButton *recovery = nullptr;
+  QPushButton* answer = nullptr;
   bool pendingFeedbackVisible = false;
   bool viewportVisible = true;
   bool nestedConversationCard = false;

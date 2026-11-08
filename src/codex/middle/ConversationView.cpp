@@ -2808,6 +2808,11 @@ ConversationCard *ConversationView::createCard(const VisibleCardData &data,
           turnMenuAction_(std::move(target), position);
       }
   });
+  connect(card, &ConversationCard::answerRequested, this, [this](nodegraph::NodeRef target) {
+      if (answerAction_) {
+          answerAction_(std::move(target));
+      }
+  });
   card->setNestedPresentation(nested);
   connect(card, &ConversationCard::foldRequested, this,
           [this, key, card](bool collapsed) {

@@ -188,6 +188,7 @@ public:
 signals:
   void foldRequested(bool collapsed);
   void timingRequested(nodegraph::NodeRef target);
+  void answerRequested(nodegraph::NodeRef target);
   void intrinsicGeometryChanged();
   void recoveryRequested();
   void turnMenuRequested(nodegraph::NodeRef target, QPoint position);

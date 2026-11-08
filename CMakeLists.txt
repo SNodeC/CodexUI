@@ -886,6 +886,30 @@ if(BUILD_TESTING)
     )
 
     qt_add_executable(
+        codexui-async-questions-test tests/codex/AsyncQuestionsTest.cpp
+    )
+    configure_codexui_target(codexui-async-questions-test)
+    target_compile_definitions(
+        codexui-async-questions-test
+        PRIVATE
+            CODEXUI_ASYNC_QUESTIONS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/async-questions.json"
+    )
+    foreach(question_dpr IN ITEMS 1 1.25 1.5 2)
+        string(REPLACE "." "_" question_dpr_name "${question_dpr}")
+        add_test(NAME codexui-async-questions-dpr-${question_dpr_name}
+                 COMMAND codexui-async-questions-test
+        )
+        set_tests_properties(
+            codexui-async-questions-dpr-${question_dpr_name}
+            PROPERTIES
+                TIMEOUT
+                20
+                ENVIRONMENT
+                "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${question_dpr};QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough"
+        )
+    endforeach()
+
+    qt_add_executable(
         codexui-shell-integration-test
         tests/codex/ShellIntegrationTest.cpp
     )
