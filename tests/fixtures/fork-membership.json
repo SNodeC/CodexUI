@@ -1,0 +1,13 @@
+[
+  {"name":"quick", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":false},
+  {"name":"options", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true},
+  {"name":"ephemeral-options", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true, "ephemeral":true},
+  {"name":"standalone-section", "projectId":"", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":false},
+  {"name":"unsectioned-project", "projectId":"source-project", "sectionId":"", "forkProjectId":"source-project", "forkSectionId":"unwanted-section", "options":true},
+  {"name":"ungrouped", "projectId":"", "sectionId":"", "forkProjectId":"workspace-project", "forkSectionId":"unwanted-section", "options":true},
+  {"name":"already-inherited", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"source-project", "forkSectionId":"source-section", "options":false},
+  {"name":"section-first", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true, "reverse":true},
+  {"name":"source-moved", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":false, "moveSource":true},
+  {"name":"project-rejection", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":false, "reject":"project"},
+  {"name":"section-rejection", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true, "reject":"section"}
+]
