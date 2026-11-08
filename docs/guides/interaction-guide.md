@@ -159,10 +159,7 @@ follows the bottom or is manually paused.
   authoritative thread ID, then sends `thread/name/set`. Blank, stale, or
   mismatched provider payloads never expose the ID as the title. The overlay
   retires only when the matching name acknowledgement arrives.
-- The thread menu exposes `Quick fork` and `Fork with options…`. Quick fork
-  inherits the source context. Fork with options opens the same workspace,
-  name, base-instructions, developer-instructions, and temporary-thread fields
-  as New thread; the generated name is editable.
+- The thread menu exposes `Quick fork` and `Fork with options…`. Quick fork inherits the source context. Fork with options opens the same workspace, name, base-instructions, developer-instructions, and temporary-thread fields as New thread; the generated name is editable. Both modes inherit the source project and section captured when the fork is submitted, including an unassigned project or section. Changing the workspace does not change that membership. Membership assignments are persisted through the app-server; a failed assignment is reported while the created fork remains usable.
 - Automatic fork names preserve lineage and choose the first unused direct
   child number. Repeated forks of `Original` become `Original (fork 1)`,
   `Original (fork 2)`, and so on. Forking `Original (fork 1)` produces

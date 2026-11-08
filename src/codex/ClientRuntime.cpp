@@ -2950,62 +2950,69 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
         if (!outcome.stale && !outcome.ok)
           showNotice(outcome.error);
       };
-      if (action.kind == Rename)
-        dispatchRequest<codex::generated::client_requests::ThreadSetName>(
-            sdk, std::move(parameters), workerLogic, target, completed);
-      else if (action.kind == Fork)
-        dispatchRequestHandled<codex::generated::client_requests::ThreadFork>(
-            sdk, std::move(parameters), workerLogic, target,
-            [](const nodegraph::ProtocolRequestId &) {},
-            [&, requestedForkName, ephemeralFork](
-                RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
-              if (!outcome.ok) {
-                static_cast<void>(
-                    workerLogic.applyDetailed(std::move(decoded)));
-                showNotice(outcome.error);
-                return;
+      const auto threadGroups = [&graph](const nodegraph::NodeRef& thread) {
+          std::array<std::string, 2> ids;
+          auto write = graph.write();
+          for (std::size_t index = 0; index < ids.size(); ++index) {
+              const auto groups = write.related(
+                  thread, index == 0 ? nodegraph::RelationKind::ProjectMembership : nodegraph::RelationKind::SectionMembership);
+              if (!groups.empty()) {
+                  ids[index] = groups.front()->id().canonical;
               }
-              std::string forkId = std::move(outcome.threadId);
-              if (forkId.empty()) {
-                static_cast<void>(
-                    workerLogic.applyDetailed(std::move(decoded)));
-                showNotice("Thread fork returned no thread identifier");
-                return;
-              }
-              static_cast<void>(workerLogic.completeFork(
-                  std::move(decoded), forkId, requestedForkName));
-              nodegraph::NodeRef fork =
-                  currentNode({nodegraph::NodeKind::Thread, forkId});
-              if (!fork)
-                return;
-              if (!ephemeralFork && !requestedForkName.empty()) {
-                dispatchRequest<
-                    codex::generated::client_requests::ThreadSetName>(
-                    sdk,
-                    nlohmann::json{{"threadId", forkId},
-                                   {"name", requestedForkName}},
-                    workerLogic, fork,
-                    [&showNotice](RequestOutcome renameOutcome) {
-                      if (!renameOutcome.stale && !renameOutcome.ok)
-                        showNotice(renameOutcome.error);
-                    });
-              }
-              // A metadata-only fork is already live and must not gate its
-              // first prompt on retained history. Hydrate that history through
-              // the same bounded page path in parallel.
-              static_cast<void>(workerLogic.selectThread(fork));
-              loadHistory(nodegraph::NodeAction{
-                  fork, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
-            });
-      else if (action.kind == Archive)
-        dispatchRequest<codex::generated::client_requests::ThreadArchive>(
-            sdk, std::move(parameters), workerLogic, target, completed);
-      else if (action.kind == Unarchive)
-        dispatchRequest<codex::generated::client_requests::ThreadUnarchive>(
-            sdk, std::move(parameters), workerLogic, target, completed);
-      else
-        dispatchRequest<codex::generated::client_requests::ThreadDelete>(
-            sdk, std::move(parameters), workerLogic, target, completed);
+          }
+          static_cast<void>(write.finish());
+          return ids;
+      };
+      if (action.kind == Rename) {
+          dispatchRequest<codex::generated::client_requests::ThreadSetName>(sdk, std::move(parameters), workerLogic, target, completed);
+      } else if (action.kind == Fork) {
+          dispatchRequestHandled<codex::generated::client_requests::ThreadFork>(
+              sdk,
+              std::move(parameters),
+              workerLogic,
+              target,
+              [](const nodegraph::ProtocolRequestId&) {
+              },
+              [&, requestedForkName, ephemeralFork, threadGroups, groups = threadGroups(target), completed](
+                  RequestOutcome outcome, nodegraph::DecodedMessage decoded) {
+                  const std::string forkId = std::move(outcome.threadId);
+                  if (!outcome.ok || forkId.empty()) {
+                      static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+                      showNotice(outcome.ok ? "Thread fork returned no thread identifier" : outcome.error);
+                  } else {
+                      static_cast<void>(workerLogic.completeFork(std::move(decoded), forkId, requestedForkName));
+                      if (const auto fork = currentNode({nodegraph::NodeKind::Thread, forkId})) {
+                          const auto inherited = threadGroups(fork);
+                          if (groups[0] != inherited[0]) {
+                              dispatchRequest<codex::generated::client_requests::ThreadMetadataUpdate>(
+                                  sdk, {{"threadId", forkId}, {"projectId", groups[0]}}, workerLogic, fork, completed);
+                          }
+                          if (groups[1] != inherited[1]) {
+                              dispatchRequest<codex::generated::client_requests::ThreadSectionMove>(
+                                  sdk,
+                                  {{"threadId", forkId},
+                                   {"sectionId", groups[1].empty() ? nlohmann::json(nullptr) : nlohmann::json(groups[1])}},
+                                  workerLogic,
+                                  fork,
+                                  completed);
+                          }
+                          if (!ephemeralFork && !requestedForkName.empty()) {
+                              dispatchRequest<codex::generated::client_requests::ThreadSetName>(
+                                  sdk, {{"threadId", forkId}, {"name", requestedForkName}}, workerLogic, fork, completed);
+                          }
+                          // History and the first prompt stay independent of membership assignments.
+                          static_cast<void>(workerLogic.selectThread(fork));
+                          loadHistory(nodegraph::NodeAction{fork, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
+                      }
+                  }
+              });
+      } else if (action.kind == Archive) {
+          dispatchRequest<codex::generated::client_requests::ThreadArchive>(sdk, std::move(parameters), workerLogic, target, completed);
+      } else if (action.kind == Unarchive) {
+          dispatchRequest<codex::generated::client_requests::ThreadUnarchive>(sdk, std::move(parameters), workerLogic, target, completed);
+      } else {
+          dispatchRequest<codex::generated::client_requests::ThreadDelete>(sdk, std::move(parameters), workerLogic, target, completed);
+      }
       return;
     }
     case SubmitPrompt: {

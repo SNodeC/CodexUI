@@ -6,6 +6,7 @@
 #include "codex/nodegraph/Messages.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/ThreadChannels.h"
+#include "codex/ui/NodeGraphUiAdapter.h"
 
 #include <array>
 #include <atomic>
@@ -1681,6 +1682,168 @@ void staleHistoryFailureIsSemanticallyInert(UnixBridge &bridge,
          "state");
   expect(!findNode(runtime.graph(), {NodeKind::Thread, std::string(ThreadId)}),
          "the stale history result cannot recreate its retired thread");
+}
+
+void forksPersistSourceMembership(UnixBridge& bridge, RunningRuntime& runtime) {
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/fork-membership.json");
+    const auto fixtures = nlohmann::json::parse(input);
+    const auto section = [](const std::string& id) {
+        return id.empty() ? nlohmann::json(nullptr) : nlohmann::json{{"id", id}, {"name", id}};
+    };
+    for (const auto& fixture : fixtures) {
+        const std::string name = fixture.at("name");
+        const std::string sourceId = "membership-source-" + name;
+        const std::string forkId = "membership-fork-" + name;
+        const std::string projectId = fixture.at("projectId"), sectionId = fixture.at("sectionId");
+        const std::string originalProject = fixture.at("forkProjectId"), originalSection = fixture.at("forkSectionId");
+        const std::string rejected = fixture.value("reject", "");
+        const nlohmann::json source{{"id", sourceId},
+                                    {"name", "Find Slides"},
+                                    {"cwd", "/source-workspace"},
+                                    {"projectId", projectId},
+                                    {"section", section(sectionId)},
+                                    {"status", "idle"},
+                                    {"forkedFromId", nullptr},
+                                    {"parentThreadId", nullptr}};
+        expect(bridge.appServerNotification("thread/started", {{"thread", source}}), name + ": source metadata delivered");
+        const auto sourceNode = findNode(runtime.graph(), {NodeKind::Thread, sourceId});
+        expect(static_cast<bool>(sourceNode), name + ": source exists");
+        NodeAction action{sourceNode, NodeActionKind::Fork};
+        const bool ephemeral = fixture.value("ephemeral", false);
+        if (!ephemeral) {
+            action.payload.emplace("requestedName", Value("Find Slides (fork 1)"));
+        }
+        if (fixture.at("options").get<bool>()) {
+            action.payload.emplace("cwd", Value("/fork-workspace"));
+            action.payload.emplace("baseInstructions", Value("Fork base"));
+            action.payload.emplace("developerInstructions", Value("Fork developer"));
+            action.payload.emplace("ephemeral", Value(ephemeral));
+        }
+        expect(sendAction(runtime.channels(), std::move(action)), name + ": fork admitted");
+        const auto request = bridge.receiveAppServer();
+        expect(request && request->value("method", "") == "thread/fork", name + ": one fork request");
+        if (request) {
+            expect(request->at("params").value("cwd", "") == (fixture.at("options").get<bool>() ? "/fork-workspace" : ""),
+                   name + ": workspace option is independent of grouping");
+            if (fixture.value("moveSource", false)) {
+                auto moved = source;
+                moved["projectId"] = "moved-project";
+                moved["section"] = section("moved-section");
+                expect(bridge.appServerNotification("thread/started", {{"thread", moved}}), name + ": source moved in flight");
+            }
+            nlohmann::json forked{{"id", forkId},
+                                  {"name", "Provider title"},
+                                  {"cwd", "/fork-workspace"},
+                                  {"projectId", originalProject},
+                                  {"section", section(originalSection)},
+                                  {"forkedFromId", sourceId},
+                                  {"parentThreadId", nullptr},
+                                  {"status", "idle"},
+                                  {"turns", nlohmann::json::array()}};
+            expect(bridge.reply(*request, {{"thread", forked}}), name + ": fork result delivered");
+            std::vector<nlohmann::json> assignments;
+            std::unordered_map<std::string, int> methods;
+            std::optional<nlohmann::json> history;
+            const int expectedCount = 1 + !ephemeral + (projectId != originalProject) + (sectionId != originalSection);
+            for (int index = 0; index < expectedCount; ++index) {
+                const auto pending = bridge.receiveAppServer();
+                expect(static_cast<bool>(pending), name + ": completion request delivered");
+                if (pending) {
+                    const auto method = pending->value("method", "");
+                    ++methods[method];
+                    expect(pending->at("params").value("threadId", "") == forkId, name + ": completion targets the fork");
+                    if (method == "thread/metadata/update" || method == "thread/section/move") {
+                        assignments.push_back(*pending);
+                    } else if (method == "thread/turns/list") {
+                        history = *pending;
+                    } else {
+                        expect(method == "thread/name/set", name + ": no unexpected completion operation");
+                        expect(bridge.reply(*pending, nlohmann::json::object()), name + ": rename acknowledged");
+                    }
+                }
+            }
+            expect(methods["thread/metadata/update"] == (projectId != originalProject), name + ": project assignment only on mismatch");
+            expect(methods["thread/section/move"] == (sectionId != originalSection), name + ": section assignment only on mismatch");
+            expect(methods["thread/name/set"] == !ephemeral, name + ": ephemeral fork avoids rename");
+            const auto forkNode = findNode(runtime.graph(), {NodeKind::Thread, forkId});
+            ui::NodeGraphUiAdapter adapter(runtime.graph());
+            const auto before = adapter.threadRow(forkNode);
+            expect(before && before->projectId == originalProject && before->sectionId == originalSection,
+                   name + ": unacknowledged membership is not projected optimistically");
+            NodeAction prompt{forkNode, NodeActionKind::SubmitPrompt};
+            prompt.promptText = "Answer while assignments and history are pending";
+            expect(sendAction(runtime.channels(), std::move(prompt)), name + ": first prompt admitted");
+            const auto turn = bridge.receiveAppServer();
+            expect(turn && turn->value("method", "") == "turn/start", name + ": first prompt is independent of membership and history");
+            if (turn) {
+                expect(bridge.reply(*turn,
+                                    {{"turn", {{"id", "membership-turn"}, {"status", "completed"}, {"items", nlohmann::json::array()}}}}),
+                       name + ": prompt acknowledged");
+            }
+            if (fixture.value("reverse", false)) {
+                std::ranges::reverse(assignments);
+            }
+            for (const auto& assignment : assignments) {
+                const bool project = assignment.at("method") == "thread/metadata/update";
+                const std::string kind = project ? "project" : "section";
+                expect(assignment.at("params").at(project ? "projectId" : "sectionId") == (project             ? nlohmann::json(projectId)
+                                                                                           : sectionId.empty() ? nlohmann::json(nullptr)
+                                                                                                               : nlohmann::json(sectionId)),
+                       name + ": assignment retains source membership at submission");
+                if (rejected == kind) {
+                    expect(bridge.replyError(assignment, -32000, "fixture " + kind + " assignment failed"), name + ": assignment rejected");
+                } else if (project) {
+                    forked["projectId"] = projectId;
+                    // A project result can contain section metadata captured before its concurrent move.
+                    auto projectResult = forked;
+                    projectResult["section"] = section(originalSection);
+                    expect(bridge.reply(assignment, {{"thread", projectResult}}), name + ": project acknowledged");
+                } else {
+                    forked["section"] = section(sectionId);
+                    expect(bridge.reply(assignment, nlohmann::json::object()), name + ": empty section acknowledgement accepted");
+                }
+            }
+            if (history) {
+                expect(bridge.reply(*history, {{"data", nlohmann::json::array()}, {"nextCursor", nullptr}}),
+                       name + ": history completes independently");
+            }
+            expect(waitUntil([&] {
+                       const auto row = adapter.threadRow(forkNode);
+                       return row && row->projectId == (rejected == "project" ? originalProject : projectId) &&
+                              row->sectionId == (rejected == "section" ? originalSection : sectionId);
+                   }),
+                   name + ": authoritative projection reflects acknowledged memberships only");
+            if (!rejected.empty()) {
+                expect(waitUntil([&] {
+                           auto read = runtime.graph().tryRead();
+                           const auto notice = read ? read->find({NodeKind::Notice, "local-worker-notice"}) : NodeRef{};
+                           return notice && exactStringFromValue(valueMember(*read->state(notice), "message")) ==
+                                                "fixture " + rejected + " assignment failed";
+                       }),
+                       name + ": assignment failure remains visible");
+            }
+            if (rejected.empty() && !fixture.value("moveSource", false)) {
+                const auto snapshot = adapter.threads(forkNode);
+                bool nested = false;
+                const auto inspect = [&](const auto& self, const auto& rows) -> void {
+                    for (const auto& row : rows) {
+                        if (row.id == sourceId) {
+                            nested = std::ranges::any_of(row.children, [&](const auto& child) {
+                                return child.id == forkId;
+                            });
+                        }
+                        self(self, row.children);
+                    }
+                };
+                if (snapshot) {
+                    inspect(inspect, snapshot->roots);
+                }
+                expect(nested, name + ": fork is nested beneath its source in the project tree");
+            }
+            expect(!bridge.receiveAppServer(80ms), name + ": no duplicate request or automatic mutation retry");
+        }
+        runtime.drainNotifications();
+    }
 }
 
 void firstPromptAfterForkStartsANewTurn(UnixBridge &bridge,
@@ -3558,6 +3721,7 @@ int main(int argc, char **argv) {
     codexui::codex::ordinaryThreadPromptStillStartsAndCompletes(bridge,
                                                                 runtime);
     codexui::codex::firstPromptAfterForkStartsANewTurn(bridge, runtime);
+    codexui::codex::forksPersistSourceMembership(bridge, runtime);
     codexui::codex::runtimeRefreshActionsHaveExactRequestCardinality(bridge,
                                                                      runtime);
     codexui::codex::failedWakeUsesBoundedWorkerRecovery(bridge, runtime);

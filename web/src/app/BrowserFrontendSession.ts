@@ -656,31 +656,48 @@ export class BrowserFrontendSession {
         };
     }
     forkThread(threadId: string, draft?: NewThreadDraft, presentationKey?: string): void {
-        if (!this.matchesThreadPresentation(threadId, presentationKey)) return;
-        const suggested = this.forkDraft(threadId);
-        const requestedName = draft?.ephemeral ? "" : (draft?.name.trim() || suggested.name);
-        const parameters: JsonObject = {threadId, excludeTurns: true};
-        if (draft) {
-            if (draft.workspace.trim() !== "") parameters.cwd = draft.workspace.trim();
-            if (draft.baseInstructions.trim() !== "") parameters.baseInstructions = draft.baseInstructions.trim();
-            if (draft.developerInstructions.trim() !== "")
-                parameters.developerInstructions = draft.developerInstructions.trim();
-            parameters.ephemeral = draft.ephemeral;
-        }
-        this.performUserOperation("thread.fork", "thread.fork", parameters, "Fork thread", presentationKey)?.then(response => {
-            const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
-            const id = stringMember(thread, "id");
-            if (response.ok && id !== "") {
-                if (requestedName !== "") this.model.setThreadTitleLocally(id, requestedName);
-                const runtime = this.threadRuntime(id);
-                runtime.phase = "ready";
-                if (requestedName !== "") this.renameThread(id, requestedName);
-                // The fork response already supplies current execution settings.
-                this.selectThread(id, undefined, false);
-                this.loadForkHistory(id, runtime);
+        if (this.matchesThreadPresentation(threadId, presentationKey)) {
+            const {projectId = "", sectionId = ""} = this.model.thread(threadId) ?? {};
+            const requestedName = draft?.ephemeral ? "" : (draft?.name.trim() || this.forkDraft(threadId).name);
+            const parameters: JsonObject = {threadId, excludeTurns: true};
+            if (draft) {
+                if (draft.workspace.trim() !== "") {
+                    parameters.cwd = draft.workspace.trim();
+                }
+                if (draft.baseInstructions.trim() !== "") {
+                    parameters.baseInstructions = draft.baseInstructions.trim();
+                }
+                if (draft.developerInstructions.trim() !== "") {
+                    parameters.developerInstructions = draft.developerInstructions.trim();
+                }
+                parameters.ephemeral = draft.ephemeral;
             }
-            else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");
-        });
+            this.performUserOperation("thread.fork", "thread.fork", parameters, "Fork thread", presentationKey)?.then(response => {
+                const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
+                const id = stringMember(thread, "id");
+                if (response.ok && id !== "") {
+                    if (requestedName !== "") {
+                        this.model.setThreadTitleLocally(id, requestedName);
+                    }
+                    const runtime = this.threadRuntime(id);
+                    runtime.phase = "ready";
+                    if (requestedName !== "") {
+                        this.renameThread(id, requestedName);
+                    }
+                    // The fork response already supplies current execution settings.
+                    this.selectThread(id, undefined, false);
+                    this.loadForkHistory(id, runtime);
+                    const forked = this.model.thread(id);
+                    const project = forked?.projectId !== projectId ? this.assignThreadGroup(id, "project", projectId) : undefined;
+                    if (forked?.sectionId !== sectionId) {
+                        void this.assignThreadGroup(id, "section", sectionId, undefined, project);
+                    }
+                }
+                else if (response.ok) {
+                    this.setNotice("Fork thread failed: no thread was returned.");
+                }
+            });
+        }
     }
     archiveThread(threadId: string, archived: boolean, presentationKey?: string): void {
         void this.performUserOperation("thread.archive", archived ? "thread.unarchive" : "thread.archive",
@@ -1284,17 +1301,29 @@ export class BrowserFrontendSession {
             this.schedulePublish();
         }
     }
-    async assignThreadGroup(threadId: string, kind: "project" | "section", id: string, beforeThreadId?: string): Promise<boolean> {
+    async assignThreadGroup(threadId: string, kind: "project" | "section", id: string, beforeThreadId?: string,
+        prerequisite?: Promise<boolean>): Promise<boolean> {
+        const presentationKey = this.threadVisualKey(threadId);
         const action = kind === "project" ? "thread.metadata" : "thread.section";
         const response = await this.performUserOperation(action, action, {threadId, [`${kind}Id`]: id || (kind === "project" ? "" : null),
             ...(beforeThreadId ? {beforeThreadId} : {})}, `Assign ${kind}`);
-        if (!response?.ok || response.stale) return false;
-        if (kind === "section") {
-            const refresh = await this.requestPromise("thread.read", {threadId, includeTurns: false});
-            if (refresh.stale) return false;
-            if (!refresh.ok) this.setNotice(`Section changed, but metadata refresh failed: ${this.errorMessage(refresh)}`);
+        let assigned = response?.ok === true && !response.stale;
+        if (assigned && kind === "section") {
+            // Mutations run independently; their metadata refresh needs both acknowledgements.
+            await prerequisite;
+            assigned = this.matchesThreadPresentation(threadId, presentationKey);
+            if (assigned) {
+                const refresh = await this.requestPromise("thread.read", {threadId, includeTurns: false});
+                assigned = !refresh.stale;
+                if (assigned && !refresh.ok) {
+                    this.setNotice(`Section changed, but metadata refresh failed: ${this.errorMessage(refresh)}`);
+                }
+            }
         }
-        this.refreshBrowser(); return true;
+        if (assigned) {
+            this.refreshBrowser();
+        }
+        return assigned;
     }
     private performUserOperation(keyAction: Action, action: Action, parameters: JsonObject,
         failureContext: string, presentationKey?: string): Promise<OperationResponse> | undefined {
