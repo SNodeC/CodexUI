@@ -57,7 +57,7 @@ namespace {
     int fixture(const QStringList& arguments) {
         const auto mode = arguments.value(2);
         int result = 0;
-        if (arguments.contains("--show-config")) {
+        if (arguments.contains("-S")) {
             std::cout << "snodec.config.comment-meta\n";
             result = 2;
         } else if (arguments.contains("--help")) {

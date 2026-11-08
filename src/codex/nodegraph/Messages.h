@@ -68,6 +68,7 @@ enum class NodeActionKind : std::uint8_t {
     ResolveInteraction,
     PromptMaterialized,
     UiDetached,
+    InspectThread,
 };
 
 // Only newly authored data crosses from Qt. Existing protocol-derived state is

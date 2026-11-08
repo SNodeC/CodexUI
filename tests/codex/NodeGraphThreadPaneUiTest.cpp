@@ -8,6 +8,7 @@
 #include "codex/ThreadBrowser.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
 
@@ -2855,12 +2856,105 @@ bool rowDotUsesColor(QTreeWidget *tree, QTreeWidgetItem *item,
                      const QColor &expected) {
   if (!tree || !item)
     return false;
-  const QRect rect = tree->visualItemRect(item);
+  QRect rect = tree->visualItemRect(item);
+  if (item->childCount() > 0) {
+      const QRect child = tree->visualItemRect(item->child(0));
+      if (child.isValid() && rect.contains(child.center())) {
+          rect.setTop(rect.top() + UiStyle::projectCardEdgePadding);
+          rect.setBottom(child.top() - 1);
+      }
+  }
   return rect.isValid() &&
          colorDistance(
              logicalPixel(tree->viewport()->grab().toImage(),
                           QPoint(rect.left() + 14, rect.center().y())),
              expected) <= 6;
+}
+
+bool uninspectedResultsFollowCompletionAndSelection() {
+    using namespace nodegraph;
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/thread-inspection.json");
+    const auto fixture = nlohmann::json::parse(input);
+    NodeGraph graph;
+    ThreadChannels channels;
+    WorkerLogic logic(graph, channels);
+    ui::NodeGraphUiAdapter adapter(graph);
+    middle::ThreadPane pane;
+    pane.resize(480, 780);
+    {
+        auto write = graph.write();
+        for (const auto& [key, kind] : std::array{std::pair{"project", NodeKind::Project}, std::pair{"section", NodeKind::ThreadSection}}) {
+            NodeState state;
+            state.fields = *valueFromJson(fixture.at(key)).asObject();
+            static_cast<void>(write.upsert({kind, fixture.at(key).at("id").get<std::string>()}, std::move(state)));
+        }
+        for (const auto method : {"project/list", "threadSection/list"}) {
+            NodeState state;
+            state.fields = {{"loaded", true}};
+            static_cast<void>(write.upsert({NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}, std::move(state)));
+        }
+        static_cast<void>(write.finish());
+    }
+    for (const auto& thread : fixture.at("threads")) {
+        static_cast<void>(logic.apply({DecodedMessageKind::ServerNotification, "thread/started", {}, {{"thread", valueFromJson(thread)}}}));
+    }
+    NodeRef selected;
+    int requestSerial = 0;
+    bool passed = true;
+    pane.show();
+    for (const auto& step : fixture.at("steps")) {
+        if (step.contains("select")) {
+            {
+                auto read = graph.tryRead();
+                selected = read->find({NodeKind::Thread, step.at("select").get<std::string>()});
+            }
+            static_cast<void>(logic.inspectThread(selected));
+        } else if (step.contains("method")) {
+            static_cast<void>(logic.apply({DecodedMessageKind::ServerNotification,
+                                           step.at("method").get<std::string>(),
+                                           {},
+                                           *valueFromJson(step.at("params")).asObject()}));
+        } else if (step.contains("history")) {
+            const ProtocolRequestId id("inspection-history-" + std::to_string(++requestSerial));
+            const auto admitted = logic.applyDetailed({DecodedMessageKind::ClientRequest,
+                                                       "thread/read",
+                                                       id,
+                                                       {{"threadId", valueFromJson(step.at("history").at("id"))}, {"includeTurns", true}}});
+            static_cast<void>(logic.applyDetailed(
+                {DecodedMessageKind::ClientResult, "thread/read", id, {{"thread", valueFromJson(step.at("history"))}}, admitted.primary}));
+        } else {
+            pane.refresh(*adapter.threads(selected, nullptr, &pane.browserOptions()));
+            auto* tree = threadTree(pane);
+            tree->expandAll();
+            QApplication::processEvents();
+            for (const auto& [id, value] : step.at("expected").items()) {
+                const auto tone = value.get<std::string>();
+                const QColor expected(tone == "active"        ? UiStyle::statusActive
+                                      : tone == "indirect"    ? UiStyle::statusIndirect
+                                      : tone == "uninspected" ? "#ec4899"
+                                                              : UiStyle::statusSuccess);
+                auto* item = threadItem(tree, id);
+                const bool correct = item && rowDotUsesColor(tree, item, expected);
+                if (!correct) {
+                    std::cerr << "Inspection fixture: " << step.at("label") << " row " << id << " expected " << tone << '\n';
+                }
+                passed &= require(correct, "native indicator violates the shared inspection contract");
+                if (tone == "uninspected") {
+                    passed &= require(item && item->toolTip(0).contains("not yet inspected"),
+                                      "uninspected results have a readable accessible description");
+                }
+            }
+            auto* project = threadItem(tree, "ready-project");
+            project->setExpanded(false);
+            QApplication::processEvents();
+            const auto tone = step.at("expected").at("ready-project").get<std::string>();
+            const QColor expected(tone == "indirect"      ? UiStyle::statusIndirect
+                                  : tone == "uninspected" ? "#ec4899"
+                                                          : UiStyle::statusSuccess);
+            passed &= require(rowDotUsesColor(tree, project, expected), "collapsed projects preserve descendant result attention");
+        }
+    }
+    return passed;
 }
 
 bool threadIndicatorsDistinguishDirectAndIndirectActivity() {
@@ -3835,6 +3929,7 @@ int main(int argc, char **argv) {
   passed &= codexui::codex::threadDisclosureIsReadyOnFirstPresentation();
   passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
   passed &= codexui::codex::threadIndicatorsDistinguishDirectAndIndirectActivity();
+  passed &= codexui::codex::uninspectedResultsFollowCompletionAndSelection();
   passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
   passed &=
       codexui::codex::optimisticDiscardRetiresAuthorityBeforeSelectionReentry();

@@ -3333,6 +3333,29 @@ void workspaceChangesUseAcknowledgedThreadContext(UnixBridge& bridge, RunningRun
     runtime.drainNotifications();
 }
 
+void inspectionIsLocalToTheActualConversation(UnixBridge& bridge, RunningRuntime& runtime) {
+    const NodeRef thread = findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
+    expect(static_cast<bool>(thread), "inspection targets the retained thread");
+    expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::InspectThread}),
+           "inspection enters the existing worker mailbox");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               const auto owner = read ? read->find({NodeKind::Runtime, "runtime"}) : NodeRef{};
+               return owner && read->related(owner, RelationKind::UiInspectionTarget) == std::vector<NodeRef>{thread};
+           }),
+           "runtime dispatch records the actual inspected conversation");
+    expect(!bridge.receiveAppServer(100ms), "inspection sends no app-server request");
+    expect(sendAction(runtime.channels(), NodeAction{{}, NodeActionKind::InspectThread}),
+           "new draft clears inspection through the same mailbox");
+    expect(waitUntil([&] {
+               auto read = runtime.graph().tryRead();
+               const auto owner = read ? read->find({NodeKind::Runtime, "runtime"}) : NodeRef{};
+               return owner && read->related(owner, RelationKind::UiInspectionTarget).empty();
+           }),
+           "runtime dispatch clears the inspected conversation for a draft");
+    runtime.drainNotifications();
+}
+
 void cachedSettingsRefreshDoesNotReloadHistory(UnixBridge& bridge, RunningRuntime& runtime) {
     const NodeRef thread = findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
     expect(static_cast<bool>(thread), "settings refresh targets the retained thread");
@@ -3519,6 +3542,7 @@ int main(int argc, char **argv) {
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);
     codexui::codex::removingTurnsUsesOneAuthoritativeWireOperation(bridge, runtime);
+    codexui::codex::inspectionIsLocalToTheActualConversation(bridge, runtime);
     codexui::codex::cachedSettingsRefreshDoesNotReloadHistory(bridge, runtime);
     codexui::codex::workspaceChangesUseAcknowledgedThreadContext(bridge, runtime);
     codexui::codex::filesystemRequestsRetainResultsUntilCollected(bridge, runtime);

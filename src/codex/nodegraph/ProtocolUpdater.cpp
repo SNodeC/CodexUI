@@ -3070,6 +3070,14 @@ void ProtocolUpdater::applyGraphUpdate(
       write.setStatus(turn, NodeStatus::Completed);
       write.setField(turn, "status", Value("completed"));
     }
+    if (thread && turn && method == "turn/completed" && !boolFromValue(valueMember(write.state(turn)->fields, "completionReported"))) {
+        write.setField(turn, "completionReported", Value(true));
+        const auto runtime = write.find({NodeKind::Runtime, "runtime"});
+        const auto selected = runtime ? write.related(runtime, RelationKind::UiInspectionTarget) : std::vector<NodeRef>{};
+        if (std::ranges::find(selected, thread) == selected.end()) {
+            write.setField(thread, "uninspectedResult", Value(true));
+        }
+    }
     updateActiveTurn(write, thread, turn);
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Turn);

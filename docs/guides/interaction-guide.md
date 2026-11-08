@@ -140,6 +140,7 @@ follows the bottom or is manually paused.
   controls share the compact centered-chevron treatment. Hover details expose
   the effective `Recent turn`, provider `Created`, and synthetic `Last
   activity` times; missing provider values are reported as Unknown.
+- Status circles use vivid blue for a thread that is running, vivid purple for a running descendant, vivid pink (`#ec4899`) for a finished result not yet inspected in the thread or a descendant, green for loaded, and gray for not loaded. Running states take precedence over pink. Opening a thread clears only its own pending inspection; other unseen descendant results keep ancestors, sections, and projects pink. Completion in the open conversation is already inspected. Historical results do not create attention, and duplicate completion notifications do not recreate it after inspection. Inspection state lasts for the current client session.
 - A left click selects a thread and changes the displayed conversation. A
   right click opens actions for the pointed-to card without changing the
   selected thread or displayed conversation. That card retains its hover

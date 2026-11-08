@@ -294,6 +294,9 @@ std::string_view nodeActionDiagnosticSubject(nodegraph::NodeActionKind kind) {
         case PromptMaterialized:
             subject = "local/prompt/materialized";
             break;
+        case InspectThread:
+            subject = "local/thread/inspected";
+            break;
         case UiDetached:
             subject = "local/ui/detached";
             break;
@@ -2729,85 +2732,89 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
   const auto dispatchNodeAction = [&](nodegraph::NodeAction action) {
     using enum nodegraph::NodeActionKind;
     switch (action.kind) {
-    case Hydrate:
-      hydrateThread(action.target);
-      return;
-    case Reload:
-      hydrateThread(action.target, true);
-      return;
-    case LoadHistory:
-      loadHistory(std::move(action));
-      return;
-    case RevertTurn: {
-        std::string reason = "Thread state is busy; try again.";
-        nodegraph::NodeRef thread;
-        std::string before;
-        bool needsResume = false;
-        if (auto read = graph.tryRead()) {
-            reason = nodegraph::threadRevertUnavailable(*read, action.target);
-            if (reason.empty()) {
-                thread = read->parent(action.target);
-                before = nodegraph::protocolCanonicalId(*read->state(action.target), action.target);
-                needsResume = read->state(thread)->status == nodegraph::NodeStatus::NotLoaded;
-            }
-        }
-        if (!reason.empty()) {
-            rejectNodeAction(action, reason);
-        } else {
-            const auto revert = [&, action, thread, before] {
-                std::string unavailable = "Thread state is busy; try again.";
-                if (auto read = graph.tryRead()) {
-                    unavailable = nodegraph::threadRevertUnavailable(*read, action.target);
+        case InspectThread:
+            static_cast<void>(workerLogic.inspectThread(action.target));
+            return;
+        case Hydrate:
+            hydrateThread(action.target);
+            return;
+        case Reload:
+            hydrateThread(action.target, true);
+            return;
+        case LoadHistory:
+            loadHistory(std::move(action));
+            return;
+        case RevertTurn: {
+            std::string reason = "Thread state is busy; try again.";
+            nodegraph::NodeRef thread;
+            std::string before;
+            bool needsResume = false;
+            if (auto read = graph.tryRead()) {
+                reason = nodegraph::threadRevertUnavailable(*read, action.target);
+                if (reason.empty()) {
+                    thread = read->parent(action.target);
+                    before = nodegraph::protocolCanonicalId(*read->state(action.target), action.target);
+                    needsResume = read->state(thread)->status == nodegraph::NodeStatus::NotLoaded;
                 }
-                if (!unavailable.empty()) {
-                    rejectNodeAction(action, unavailable);
-                } else {
-                    std::erase_if(itemPageQueue, [&thread](const ItemPage& page) {
-                        return page.thread == thread;
-                    });
-                    dispatchRequest<codex::generated::client_requests::ThreadRevert>(
+            }
+            if (!reason.empty()) {
+                rejectNodeAction(action, reason);
+            } else {
+                const auto revert = [&, action, thread, before] {
+                    std::string unavailable = "Thread state is busy; try again.";
+                    if (auto read = graph.tryRead()) {
+                        unavailable = nodegraph::threadRevertUnavailable(*read, action.target);
+                    }
+                    if (!unavailable.empty()) {
+                        rejectNodeAction(action, unavailable);
+                    } else {
+                        std::erase_if(itemPageQueue, [&thread](const ItemPage& page) {
+                            return page.thread == thread;
+                        });
+                        dispatchRequest<codex::generated::client_requests::ThreadRevert>(
+                            sdk,
+                            {{"threadId", thread->id().canonical}, {"beforeTurnId", before}},
+                            workerLogic,
+                            thread,
+                            [&, thread](RequestOutcome outcome) {
+                                if (!outcome.stale) {
+                                    if (outcome.ok) {
+                                        const auto state = currentNodeState(thread);
+                                        const std::string cursor =
+                                            state ? exactStringFromValue(valueMember(*state, "historyNextCursor")) : std::string{};
+                                        if (!cursor.empty()) {
+                                            loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
+                                        }
+                                    } else {
+                                        refreshRevertedHistory(thread->id().canonical);
+                                        showNotice("History removal failed. Reload the thread if the connection was lost: " +
+                                                   outcome.error);
+                                    }
+                                }
+                            });
+                    }
+                };
+                if (needsResume) {
+                    dispatchRequest<codex::generated::client_requests::ThreadResume>(
                         sdk,
-                        {{"threadId", thread->id().canonical}, {"beforeTurnId", before}},
+                        {{"threadId", thread->id().canonical}, {"excludeTurns", true}},
                         workerLogic,
                         thread,
-                        [&, thread](RequestOutcome outcome) {
+                        [&, revert](RequestOutcome outcome) {
                             if (!outcome.stale) {
                                 if (outcome.ok) {
-                                    const auto state = currentNodeState(thread);
-                                    const std::string cursor =
-                                        state ? exactStringFromValue(valueMember(*state, "historyNextCursor")) : std::string{};
-                                    if (!cursor.empty()) {
-                                        loadHistory({thread, nodegraph::NodeActionKind::LoadHistory, {}, {}, {}, {}});
-                                    }
+                                    revert();
                                 } else {
-                                    refreshRevertedHistory(thread->id().canonical);
-                                    showNotice("History removal failed. Reload the thread if the connection was lost: " + outcome.error);
+                                    showNotice(outcome.error);
                                 }
                             }
                         });
+                } else {
+                    revert();
                 }
-            };
-            if (needsResume) {
-                dispatchRequest<codex::generated::client_requests::ThreadResume>(
-                    sdk,
-                    {{"threadId", thread->id().canonical}, {"excludeTurns", true}},
-                    workerLogic,
-                    thread,
-                    [&, revert](RequestOutcome outcome) {
-                        if (!outcome.stale) {
-                            if (outcome.ok) {
-                                revert();
-                            } else {
-                                showNotice(outcome.error);
-                            }
-                        }
-                    });
-            } else {
-                revert();
             }
+            return;
         }
-        return;
-    }
     case ChangeWorkspace: {
         std::string reason = "Thread state is busy; try again.";
         bool needsResume = false;

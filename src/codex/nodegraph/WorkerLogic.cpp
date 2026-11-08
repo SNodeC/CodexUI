@@ -596,6 +596,22 @@ void WorkerLogic::selectThread(NodeGraph::WriteAccess& write, const NodeRef& thr
     }
 }
 
+ChannelSendStatus WorkerLogic::inspectThread(const NodeRef& thread) {
+    GraphChange change;
+    {
+        auto write = graph_.write();
+        if (!thread || (thread->id().kind == NodeKind::Thread && write.find(thread->id()) == thread)) {
+            const auto runtime = write.upsert({NodeKind::Runtime, "runtime"});
+            write.replaceRelated(runtime, RelationKind::UiInspectionTarget, std::span<const NodeRef>(&thread, thread ? 1 : 0));
+            if (thread) {
+                write.eraseField(thread, "uninspectedResult");
+            }
+        }
+        change = write.finish();
+    }
+    return publish(std::move(change));
+}
+
 ChannelSendStatus WorkerLogic::resolveInteraction(const NodeRef &interaction) {
   return publish(updater_.resolveInteraction(interaction));
 }

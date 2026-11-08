@@ -66,6 +66,8 @@ public:
   [[nodiscard]] nodegraph::ChannelSendStatus
   sendRuntimeAction(nodegraph::RuntimeAction &action);
 
+  void acknowledgeInspection(const nodegraph::NodeRef& thread);
+
   // Presentation owners call this only after every Qt reference to the
   // retired identities has been detached. The worker keeps the retired graph
   // nodes readable until this explicit lifetime acknowledgement arrives.

@@ -88,7 +88,7 @@ namespace codexui::manager {
         if (name == "App-server") {
             check.arguments = {"app-server", "--help"};
         } else {
-            check.arguments.prepend("--show-config");
+            check.arguments.prepend("-S");
         }
         if (name == "CodexUI") {
             check.environment.insert("QT_QPA_PLATFORM", "offscreen");
