@@ -73,7 +73,7 @@ export async function qualifyAsyncQuestions(devTools) {
         await waitFor(()=>!dialog());await frame();
         const sent=submits().at(-1)?.payload;
         const chosen=sent?.method==='turn/steer'&&sent.params.expectedTurnId==='question-turn'
-            &&sent.params.threadId===metadata.id&&sent.params.input[0].text==='Approve the follow-up?\\nHold';
+            &&sent.params.threadId===metadata.id&&JSON.parse(sent.params.input[0].text.slice(34,-35))[0].answer==='Hold';
         const draftRetained=prompt.value==='Preserve my draft';
         answer().focus();answer().click();await waitFor(()=>dialog()?.open);
         const other=dialog().querySelector('input[placeholder="Other answer"]');
@@ -83,11 +83,44 @@ export async function qualifyAsyncQuestions(devTools) {
         const beforeStale=submits().length;
         [...dialog().querySelectorAll('button')].find(button=>button.textContent==='Submit').click();await frame();
         const staleRetained=dialog()?.open&&other.value==='My own answer'&&submits().length===beforeStale&&!!dialog().querySelector('[role="alert"]');
-        cancel();await frame();socket.send=original;
+        cancel();await frame();
         notify('item/completed',{threadId:metadata.id,turnId:'question-turn',item:{...item,phase:'final_answer',questions:[]}});await frame();
         const finalRestored=card.querySelector('.card-phase')?.textContent==='final answer'&&!answer()
             &&matches(getComputedStyle(card).backgroundColor,'--final-answer-surface');
-        return {...visibilityChecks,questionStyle,finalRestored,modal,defaultChoice,cancelled,focusReturned,exclusive,chosen,draftRetained,freeTextClearsChoice,staleRetained};
+        socket.receive({kind:'appserver',payload:{id:sent.id,result:{turnId:'question-turn'}}});await frame();
+        const entry=${JSON.stringify(fixture.cases.find(entry=>entry.id==='two-independent-choices'))};
+        const two={id:'two-question',type:'agentMessage',delivery:'async',phase:'commentary',
+            text:entry.questions.map(q=>q.title+'\\n'+q.options.map(option=>'- '+option).join('\\n')).join('\\n\\n'),questions:entry.questions};
+        notify('item/completed',{threadId:metadata.id,turnId:'question-turn',item:two});await frame();
+        scroll.scrollTop=scroll.scrollHeight;await frame();
+        const twoCard=()=>[...document.querySelectorAll('.conversation-card.agentMessage')].find(card=>card.textContent.includes('Merge the changes?'));
+        const twoAnswer=()=>[...twoCard().querySelectorAll('button')].find(button=>button.textContent==='Answer…'||button.textContent==='Answer again…');
+        twoAnswer().click();await waitFor(()=>dialog()?.open);
+        const fields=[...dialog().querySelectorAll('fieldset')];
+        fields.forEach((field,index)=>[...field.querySelectorAll('input[type="radio"]')]
+            .find(input=>input.closest('label').textContent.trim()===entry.answer[String(index)].answers[0]).click());await frame();
+        const independentChoices=fields.every((field,index)=>[...field.querySelectorAll('input[type="radio"]')]
+            .filter(input=>input.checked).map(input=>input.closest('label').textContent.trim()).join()===entry.answer[String(index)].answers[0]);
+        [...dialog().querySelectorAll('button')].find(button=>button.textContent==='Submit').click();await waitFor(()=>!dialog());await frame();
+        const reply=submits().at(-1).payload;
+        const submitted=JSON.parse(reply.params.input[0].text.slice(34,-35));
+        const twoQuestionsPreserved=submitted.length===2&&submitted.every((answer,index)=>answer.question===entry.questions[index].title
+            &&answer.answer===entry.answer[String(index)].answers[0]&&JSON.parse(answer.questionItemId)[1]===two.id);
+        const sendingHeader=twoCard().querySelector('.card-phase').textContent==='Question · Sending…';
+        socket.receive({kind:'appserver',payload:{id:reply.id,result:{turnId:'question-turn'}}});await frame();
+        const acknowledgedHeader=twoCard().querySelector('.card-phase').textContent==='Question · ✓ Answer sent';
+        const boldAnswers=[...twoCard().querySelectorAll('strong')].map(element=>element.textContent).join('|')==='Hold|Production';
+        const answerAgain=twoAnswer().textContent==='Answer again…';
+        const oldStyle=twoCard().getAttribute('style');
+        const narrowStatus=[300,440,900].every(width=>{
+            twoCard().style.width=width+'px';twoCard().style.boxSizing='border-box';
+            const phase=twoCard().querySelector('.card-phase'),bounds=phase.getBoundingClientRect();
+            const range=document.createRange();range.selectNodeContents(phase);
+            return [...range.getClientRects()].every(rect=>rect.left>=bounds.left-.5&&rect.right<=bounds.right+.5&&rect.bottom<=bounds.bottom+.5);
+        });
+        if(oldStyle===null){twoCard().removeAttribute('style');}else{twoCard().setAttribute('style',oldStyle);}
+        socket.send=original;
+        return {...visibilityChecks,questionStyle,finalRestored,modal,defaultChoice,cancelled,focusReturned,exclusive,chosen,draftRetained,freeTextClearsChoice,staleRetained,independentChoices,twoQuestionsPreserved,sendingHeader,acknowledgedHeader,boldAnswers,answerAgain,narrowStatus};
     })()`);
     console.log(JSON.stringify({asyncQuestionChecks: result}));
     for (const [name, passed] of Object.entries(result)) {

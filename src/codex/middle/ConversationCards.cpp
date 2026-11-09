@@ -597,7 +597,8 @@ std::optional<QString> selectionSource(const VisibleCardData &card, bool nested,
           if (role == SelectionRole::Title)
             return QStringLiteral("Codex");
           if (role == SelectionRole::Phase) {
-              return !payload.questionRequest.is_null()  ? QStringLiteral("Question")
+              return !payload.questionRequest.is_null()
+                         ? text(payload.questionStatus.empty() ? "Question" : "Question · " + payload.questionStatus)
                      : payload.phase == "final_answer"   ? QStringLiteral("final answer")
                      : payload.phase == "partial_answer" ? QStringLiteral("partial answer")
                                                          : QStringLiteral("update");
@@ -1937,6 +1938,12 @@ public:
       }
       if (answer) {
           setExplicitVisibility(answer, !message.questionRequest.is_null());
+          answer->setText(std::ranges::any_of(message.answers,
+                                              [](const auto& value) {
+                                                  return !value.empty();
+                                              })
+                              ? QStringLiteral("Answer again…")
+                              : QStringLiteral("Answer…"));
       }
       const QString messagePhase = !message.questionRequest.is_null() ? QStringLiteral("question")
                                    : message.phase == "final_answer"  ? QStringLiteral("final")
@@ -1948,6 +1955,7 @@ public:
       }
       showPhase(selectionSource(current, nestedConversationCard, SelectionRole::Phase).value_or(QString{}),
                 QStringLiteral("agentMessagePhase"));
+      phase->setWordWrap(!message.questionRequest.is_null());
       presentation::setLabelTone(*phase,
                                  messagePhase == QStringLiteral("question") ? ""
                                  : message.phase == "final_answer"          ? "success"

@@ -312,9 +312,9 @@ export function asyncQuestionRequest(questions: unknown): Record<string, unknown
     if (Array.isArray(questions)) {
         for (let index = 0; valid && index < questions.length; ++index) {
             const question: unknown = questions[index];
-            valid = nonEmptyString(question, "title");
+            valid = isObject(question);
             if (valid && isObject(question)) {
-                valid = question.options === undefined || question.options === null || boundedStringArray(question.options, true);
+                valid = question.options === undefined || question.options === null || (Array.isArray(question.options) && question.options.length <= 64);
                 request.questions.push({id: String(index), question: question.title, isOther: true,
                     options: Array.isArray(question.options) ? question.options.map(label => ({label})) : []});
             }
@@ -323,14 +323,41 @@ export function asyncQuestionRequest(questions: unknown): Record<string, unknown
     return valid && validQuestionRequest(request) ? request : null;
 }
 
-export function asyncQuestionAnswer(request: unknown, submission: PendingRequestSubmission): string | undefined {
+export function asyncQuestionAnswer(request: unknown, submission: PendingRequestSubmission, itemId: string): string | undefined {
     let result: string | undefined;
-    if (submission.choice === "submit" && validQuestionRequest(request) && validAnswers(request, submission.input)
+    if (submission.choice === "submit" && itemId !== "" && validQuestionRequest(request) && validAnswers(request, submission.input)
         && Object.values(submission.input as Record<string, {answers: string[]}>).every(answer => answer.answers.length === 1)) {
         const answers = submission.input as Record<string, {answers: string[]}>;
-        result = request.questions.map(question => [question.question, ...answers[String(question.id)]!.answers].join("\n")).join("\n\n");
+        result = questionReplyText(request.questions.map((question, index) => ({questionItemId: questionReplyKey(itemId, index),
+            question: String(question.question), answer: answers[String(question.id)]!.answers[0]!})));
     }
     return result;
+}
+
+export interface QuestionReply {questionItemId: string; question: string; answer: string}
+export function questionReplyKey(itemId: string, index: number): string {
+    return JSON.stringify(["request_user_input_async", itemId, index]);
+}
+export function questionReplies(source: string): QuestionReply[] {
+    const open = "<send_user_message_question_reply>", close = "</send_user_message_question_reply>";
+    let result: QuestionReply[] = [];
+    source = source.replace(/^[ \t\r\n]+|[ \t\r\n]+$/gu, "");
+    if (source.startsWith(open) && source.endsWith(close)) {
+        try {
+            const parsed: unknown = JSON.parse(source.slice(open.length, -close.length));
+            const entries: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+            if (entries.length > 0 && entries.length <= 64 && entries.every(entry => isObject(entry)
+                && typeof entry.questionItemId === "string" && typeof entry.question === "string" && typeof entry.answer === "string")) {
+                result = entries as QuestionReply[];
+            }
+        } catch { /* An invalid envelope remains ordinary message text. */ }
+    }
+    return result;
+}
+export function questionReplyText(replies: readonly QuestionReply[], markdown = false): string {
+    return markdown ? replies.map(reply => reply.question + (reply.answer === "" ? "" : "\n\n"
+        + reply.answer.replace(/([\\`*_\[\]<>&])/gu, "\\$1").split(/\r?\n/u).map(line => line ? `**${line}**` : "").join("\n"))).join("\n\n")
+        : "<send_user_message_question_reply>\n" + JSON.stringify(replies) + "\n</send_user_message_question_reply>";
 }
 
 function mcpApprovalKind(raw: unknown): string {

@@ -133,6 +133,7 @@ add_library(
 )
 target_compile_features(codexui-pending-request-policy PUBLIC cxx_std_20)
 target_include_directories(codexui-pending-request-policy PUBLIC src)
+target_link_libraries(codexui-pending-request-policy PUBLIC codexui-nodegraph)
 
 add_library(
     codexui-turn-settings-policy STATIC

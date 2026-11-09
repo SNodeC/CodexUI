@@ -2,6 +2,8 @@
 
 #include "codex/PendingRequestPolicy.h"
 
+#include "codex/nodegraph/PromptText.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1046,39 +1048,37 @@ nlohmann::json PendingRequestPolicy::asyncQuestionRequest(const nlohmann::json& 
     bool valid = questions.is_array() && !questions.empty() && questions.size() <= 64;
     for (std::size_t index = 0; valid && index < questions.size(); ++index) {
         const auto& question = questions[index];
-        valid = nonEmptyString(question, "title");
-        nlohmann::json options = nlohmann::json::array();
-        if (valid && question.contains("options") && !question["options"].is_null()) {
-            valid = boundedStringArray(question["options"], true);
-            if (valid) {
-                for (const auto& option : question["options"]) {
-                    options.push_back({{"label", option}});
-                }
-            }
-        }
+        valid = question.is_object() && (!question.contains("options") || question["options"].is_null() ||
+                                         (question["options"].is_array() && question["options"].size() <= 64));
         if (valid) {
-            request["questions"].push_back(
-                {{"id", std::to_string(index)}, {"question", question["title"]}, {"isOther", true}, {"options", std::move(options)}});
+            auto& normalized =
+                request["questions"].emplace_back(nlohmann::json{{"id", std::to_string(index)},
+                                                                 {"question", question.value("title", nlohmann::json(nullptr))},
+                                                                 {"isOther", true},
+                                                                 {"options", nlohmann::json::array()}});
+            for (const auto& option : question.value("options", nlohmann::json::array())) {
+                normalized["options"].push_back({{"label", option}});
+            }
         }
     }
     return valid && validQuestionRequest(request) ? request : nlohmann::json(nullptr);
 }
 
 std::optional<std::string> PendingRequestPolicy::asyncQuestionAnswer(const nlohmann::json& request,
-                                                                     const PendingRequestSubmission& submission) {
+                                                                     const PendingRequestSubmission& submission,
+                                                                     std::string_view itemId) {
     std::optional<std::string> result;
-    if (submission.choice == "submit" && validQuestionRequest(request) && validAnswers(request, submission.input) &&
+    if (submission.choice == "submit" && !itemId.empty() && validQuestionRequest(request) && validAnswers(request, submission.input) &&
         std::ranges::all_of(submission.input, [](const auto& answer) {
             return answer["answers"].size() == 1;
         })) {
-        std::string text;
+        nlohmann::ordered_json replies = nlohmann::ordered_json::array();
         for (const auto& question : request["questions"]) {
-            text += (text.empty() ? "" : "\n\n") + question["question"].get<std::string>();
-            for (const auto& answer : submission.input[question["id"].get<std::string>()]["answers"]) {
-                text += "\n" + answer.get<std::string>();
-            }
+            replies.push_back({{"questionItemId", nodegraph::questionReplyKey(itemId, replies.size())},
+                               {"question", question["question"]},
+                               {"answer", submission.input[question["id"].get<std::string>()]["answers"][0]}});
         }
-        result = std::move(text);
+        result = "<send_user_message_question_reply>\n" + replies.dump() + "\n</send_user_message_question_reply>";
     }
     return result;
 }

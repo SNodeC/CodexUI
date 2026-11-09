@@ -20,6 +20,7 @@ import type {
 } from "../index.js";
 import type {AttachmentDraft} from "../conversation/PromptCoordinator.js";
 import type {PendingRequestSubmission} from "./PendingRequestResponses.js";
+import {questionReplies, questionReplyText} from "./PendingRequestResponses.js";
 import {DraftThreadId} from "./BrowserFrontendSession.js";
 import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
 import type {WorkspaceGroup, AgentPresentation} from "../presentation/PresentationModel.js";
@@ -696,6 +697,9 @@ const SafeMarkdown = memo(function SafeMarkdown({text}: {text: string}) {
 });
 
 export function userMessageMarkdownText(text: string): string {
+    const replies = questionReplies(text);
+    if (replies.length) { text = questionReplyText(replies, true); }
+
     const lines = text.split("\n").map(line => line.endsWith("\r") ? line.slice(0, -1) : line);
     let fenceMarker = "", fenceLength = 0;
     return lines.map((line, index) => {
@@ -759,13 +763,12 @@ function fileChangeMetadata(changes: FileChangesData): string {
 }
 
 export function cardCopyContent(card: VisibleCardData): CardCopyContent {
-    if (card.kind === "userMessage") {
-        const data = card.payload as UserMessageData;
-        return data.text ? {text: data.text, markdown: true} : {text: data.imagePaths.join("\n"), markdown: false};
-    }
-    if (card.kind === "localPrompt") {
-        const data = card.payload as LocalPromptData;
-        return data.prompt ? {text: data.prompt, markdown: true} : {text: data.imagePaths.join("\n"), markdown: false};
+    if (card.kind === "userMessage" || card.kind === "localPrompt") {
+        const data = card.payload as UserMessageData & LocalPromptData;
+        const source = card.kind === "userMessage" ? data.text : data.prompt;
+        const replies = questionReplies(source);
+        return source ? {text: replies.length ? questionReplyText(replies, true) : source, markdown: true}
+            : {text: data.imagePaths.join("\n"), markdown: false};
     }
     if (card.kind === "agentMessage") return {text: (card.payload as AgentMessageData).text, markdown: true};
     if (card.kind === "reasoning") return {text: (card.payload as ReasoningData).summary, markdown: true};
@@ -859,8 +862,8 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
         body = <><SafeMarkdown text={userMessageMarkdownText(data.prompt)} /><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}{data.requiresExplicitRecovery && onRestore && <button onClick={onRestore}>Restore to composer</button>}</>;
     } else if (card.kind === "agentMessage") {
-        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.questionRequest ? "question" : data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = cardVariant === "question" ? "Question" : data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
-        body = <><SafeMarkdown text={data.text} />{data.questionRequest && <button type="button" disabled={!onAnswer} onClick={onAnswer}>Answer…</button>}</>;
+        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.questionRequest ? "question" : data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = cardVariant === "question" ? "Question" + (data.questionStatus ? ` · ${data.questionStatus}` : "") : data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
+        body = <><SafeMarkdown text={data.text} />{data.questionRequest && <button type="button" disabled={!onAnswer} onClick={onAnswer}>{data.answers?.some(Boolean) ? "Answer again…" : "Answer…"}</button>}</>;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
         body = data.summary ? <SafeMarkdown text={data.summary} /> : active ? <div className="activity-line"><i />Working…</div> : null;
@@ -1266,8 +1269,8 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                         return <><div className="turn-outline-count">{openings.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
                             {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier turns…" : "Load earlier turns"}</button>}
                             {openings.map(card => <button key={stableKey(card.key)} aria-current={card.turnId === currentOpening?.turnId ? "true" : undefined}
-                                autoFocus={card.turnId === currentOpening?.turnId} onClick={() => navigateTo(card)} title={card.kind === "userMessage" ? (card.payload as UserMessageData).text : "Turn without an opening prompt"}>
-                                {card.kind === "userMessage" ? (card.payload as UserMessageData).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
+                                autoFocus={card.turnId === currentOpening?.turnId} onClick={() => navigateTo(card)} title={card.kind === "userMessage" ? cardCopyContent(card).text : "Turn without an opening prompt"}>
+                                {card.kind === "userMessage" ? cardCopyContent(card).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
                     }}</Menu>
                     <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
                     <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>

@@ -199,6 +199,7 @@ private:
   // Derived from relations_ so removal can find exact incoming edges without
   // searching unrelated nodes. Only WriteAccess mutates both sides.
   std::vector<std::pair<Node *, RelationKind>> incomingRelations_;
+  std::pair<Node*, std::set<std::string>> questionReferences_;
   std::unordered_map<std::string, std::uint64_t> fieldChangedRevisions_;
   std::uint64_t statusChangedRevision_ = 0;
   // Changes only when this node's parent, ordered children, or an outgoing
@@ -349,8 +350,9 @@ public:
                                                RelationKind kind) const;
     [[nodiscard]] const InspectorThreadIndex *
     inspectorIndex(const NodeRef &thread) const;
+    [[nodiscard]] std::vector<NodeRef> questionReplies(const NodeRef& question) const;
 
-  private:
+private:
     friend class NodeGraph;
     ReadAccess(const NodeGraph &graph,
                std::shared_lock<std::shared_mutex> lock) noexcept;
@@ -466,6 +468,7 @@ public:
         std::span<const NodeRef> next);
     void noteInspectorRelationChange(Node *source, RelationKind kind);
     void refreshInspectorIndexes();
+    void refreshQuestionReferences();
     void refreshInspectorAgentContribution(InspectorAgentSelector &selector,
                                            std::size_t contributor) const;
     void refreshInspectorAgentDependencies(InspectorThreadIndex &index,
@@ -517,6 +520,7 @@ private:
   std::array<std::atomic<std::uint64_t>, NodeKindCount>
       publishedStructureRevisions_{};
   std::map<Node *, InspectorThreadIndex> inspectorIndexes_;
+  std::map<std::pair<Node*, std::string>, std::set<NodeRef>> questionReferences_;
 };
 
 } // namespace codexui::nodegraph

@@ -1,4 +1,4 @@
-import {asyncQuestionRequest} from "../app/PendingRequestResponses.js";
+import {asyncQuestionRequest, questionReplies, questionReplyKey, questionReplyText} from "../app/PendingRequestResponses.js";
 import type {ItemPresentation, ThreadPresentation, TurnPresentation} from "../presentation/PresentationModel.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
@@ -288,6 +288,29 @@ export function projectConversation(
             key: {kind: "prompt", submissionId: submission.id}, kind: "localPrompt", threadId: authoritativeItems.threadId,
             turnId, itemId: "", payload, status: UnknownStatus,
         }});
+    }
+    const replies = new Map(authoritativeItems.questionReplies);
+    const sending = new Map<string, string>();
+    for (const submission of localSubmissions) {
+        for (const reply of questionReplies(submission.prompt)) {
+            const position = submission.admissionAnchor ? authoritativePosition(authoritativeItems, submission.admissionAnchor) ?? -1 : -1;
+            if (submission.state === "accepted" && position >= (replies.get(reply.questionItemId)?.position ?? -1)) { replies.set(reply.questionItemId, {...reply, position}); }
+            else if ((submission.state === "queued" || submission.state === "inFlight") && localCardVisible(submission)) { sending.set(reply.questionItemId, reply.question); }
+        }
+    }
+    for (const {card} of nodes) {
+        const data = card.payload as AgentMessageData;
+        if (card.kind === "agentMessage" && Array.isArray(data.questionRequest?.questions)) {
+            const questions = data.questionRequest.questions as {question: string}[];
+            const pending = questions.some((question, index) => sending.get(questionReplyKey(card.itemId, index)) === question.question);
+            data.answers = questions.map((question, index) => {
+                const reply = replies.get(questionReplyKey(card.itemId, index));
+                return reply?.question === question.question ? reply.answer : "";
+            });
+            const count = data.answers.filter(Boolean).length;
+            data.questionStatus = pending ? "Sending…" : count === questions.length ? "✓ Answer sent" : count ? `${count}/${questions.length} answers sent` : "";
+            if (count) { data.text = questionReplyText(questions.map((question, index) => ({questionItemId: "", question: question.question, answer: data.answers![index]!})), true); }
+        }
     }
     nodes.sort((left, right) => left.position - right.position || left.tieBreaker - right.tieBreaker);
     const sectionIndexes = new Map<string, number>();

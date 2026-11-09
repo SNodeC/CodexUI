@@ -6,6 +6,7 @@
 #include "codex/PendingRequestPolicy.h"
 #include "codex/ThreadBrowser.h"
 #include "codex/UiStatus.h"
+#include "codex/nodegraph/PromptText.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/WorkerLogic.h"
 
@@ -278,26 +279,6 @@ std::string withTruncationNotice(std::string value, std::uint64_t omitted,
                   : '[' + notice + "]\n" + value;
 }
 
-std::string graphMessageText(const nodegraph::NodeState &state) {
-  std::string result;
-  if (const auto *content = valueMember(state, "content");
-      content && content->asArray()) {
-    for (const nodegraph::Value &entry : *content->asArray()) {
-      const auto *object = entry.asObject();
-      const std::string text =
-          object ? scalarTextFromValue(valueMember(*object, "text"))
-                 : std::string{};
-      if (text.empty())
-        continue;
-      if (!result.empty())
-        result.push_back('\n');
-      result += text;
-    }
-  }
-  return result.empty() ? scalarTextFromValue(valueMember(state, "text"))
-                        : result;
-}
-
 std::vector<std::string> graphImagePaths(const nodegraph::NodeState &state) {
   std::vector<std::string> result;
   const auto *content = valueMember(state, "content");
@@ -541,8 +522,9 @@ CardKind graphCardKind(const nodegraph::NodeState &state) {
     return CardKind::FileChanges;
   if (type == "imageGeneration" || type == "imageView")
     return CardKind::ImageGeneration;
-  if (type == "plan" && !graphMessageText(state).empty())
-    return CardKind::Plan;
+  if (type == "plan" && !nodegraph::messageText(state).empty()) {
+      return CardKind::Plan;
+  }
   return CardKind::GenericActivity;
 }
 
@@ -575,17 +557,16 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     result.status = {};
   switch (result.kind) {
   case CardKind::UserMessage: {
-    result.payload =
-        UserMessageData{graphMessageText(state), graphImagePaths(state)};
-    break;
+      result.payload = UserMessageData{nodegraph::messageText(state), graphImagePaths(state)};
+      break;
   }
   case CardKind::AgentMessage:
-      result.payload =
-          AgentMessageData{withTruncationNotice(graphMessageText(state), graphOmittedTextBytes(state, "text"), "Codex response", true),
-                           scalarTextFromValue(valueMember(state, "phase")),
-                           scalarTextFromValue(valueMember(state, "delivery")) == "async" && valueMember(state, "questions")
-                               ? PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*valueMember(state, "questions")))
-                               : nlohmann::json(nullptr)};
+      result.payload = AgentMessageData{
+          withTruncationNotice(nodegraph::messageText(state), graphOmittedTextBytes(state, "text"), "Codex response", true),
+          scalarTextFromValue(valueMember(state, "phase")),
+          scalarTextFromValue(valueMember(state, "delivery")) == "async" && valueMember(state, "questions")
+              ? PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*valueMember(state, "questions")))
+              : nlohmann::json(nullptr)};
       break;
   case CardKind::CommandExecution: {
     std::string outputField = "aggregatedOutput";
@@ -683,13 +664,9 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     break;
   }
   case CardKind::Plan:
-    result.payload =
-        PlanData{{},
-                 {},
-                 withTruncationNotice(graphMessageText(state),
-                                      graphOmittedTextBytes(state, "text"),
-                                      "plan text", true)};
-    break;
+      result.payload =
+          PlanData{{}, {}, withTruncationNotice(nodegraph::messageText(state), graphOmittedTextBytes(state, "text"), "plan text", true)};
+      break;
   case CardKind::GenericActivity:
     result.payload = GenericActivityData{type, graphDisplayDetail(state)};
     break;
@@ -837,6 +814,44 @@ VisibleCardData conversationCardData(nodegraph::NodeGraph::ReadAccess &read,
       conversationCardKey(read, item, threadId, turnId);
   VisibleCardData result = graphCardData(item, std::move(threadId),
                                          std::move(turnId), state, threadCwd);
+  if (auto* message = std::get_if<AgentMessageData>(&result.payload); message && !message->questionRequest.is_null()) {
+      const auto& questions = message->questionRequest["questions"];
+      message->answers.resize(questions.size());
+      std::map<std::string, std::size_t> keys;
+      for (std::size_t i = 0; i < questions.size(); ++i) {
+          keys.emplace(nodegraph::questionReplyKey(result.itemId, i), i);
+      }
+      bool sending = false;
+      for (const auto& source : read.questionReplies(item)) {
+          const auto state = read.state(source);
+          const auto dispatch = isHiddenMaterializedPrompt(read, source) ? "" : scalarTextFromValue(valueMember(*state, "dispatchState"));
+          const bool accepted = scalarTextFromValue(valueMember(*state, "type")) == "userMessage" || dispatch == "awaitingMaterialization";
+          for (const auto& reply : nodegraph::questionReplies(nodegraph::messageText(*state))) {
+              const auto found = keys.find(reply.questionItemId);
+              if (found != keys.end() && reply.question == questions[found->second]["question"].get<std::string>() &&
+                  !reply.answer.empty()) {
+                  if (accepted) {
+                      message->answers[found->second] = reply.answer;
+                  }
+                  sending |= dispatch == "queued" || dispatch == "dispatching" || dispatch == "inFlight";
+              }
+          }
+      }
+      const std::size_t count = std::ranges::count_if(message->answers, [](const auto& answer) {
+          return !answer.empty();
+      });
+      message->questionStatus = sending                     ? "Sending…"
+                                : count == questions.size() ? "✓ Answer sent"
+                                : count ? std::to_string(count) + "/" + std::to_string(questions.size()) + " answers sent"
+                                        : "";
+      if (count) {
+          std::vector<nodegraph::QuestionReply> replies;
+          for (std::size_t i = 0; i < questions.size(); ++i) {
+              replies.push_back({{}, questions[i]["question"], message->answers[i]});
+          }
+          message->text = nodegraph::questionReplyMarkdown(replies);
+      }
+  }
   if (key)
     result.key = *key;
   const auto turn = read.parent(item);
