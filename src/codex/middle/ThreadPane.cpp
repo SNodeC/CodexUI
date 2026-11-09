@@ -1795,8 +1795,6 @@ void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
   }
   QPlainTextEdit *roots = nullptr;
   QPlainTextEdit *description = nullptr;
-  QLineEdit *icon = nullptr;
-  QLineEdit *color = nullptr;
   if (project) {
     roots = new UiStyle::DialogTextEdit;
     roots->setObjectName(QStringLiteral("projectRoots"));
@@ -1845,22 +1843,6 @@ void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
       form->addRow(QStringLiteral("Metadata"), details);
     }
   } else {
-    const auto appearance =
-        fields.contains("appearance") && fields["appearance"].is_object()
-            ? fields["appearance"]
-            : nlohmann::json::object();
-    const auto component = [&](const char *key) {
-      const auto found = appearance.find(key);
-      return found != appearance.end() && found->is_string()
-                 ? text(found->get<std::string>())
-                 : QString{};
-    };
-    icon = new QLineEdit(component("icon"));
-    color = new QLineEdit(component("color"));
-    icon->setReadOnly(readOnly);
-    color->setReadOnly(readOnly);
-    form->addRow(QStringLiteral("Icon"), icon);
-    form->addRow(QStringLiteral("Colour"), color);
     layout->addWidget(UiStyle::makeLabel(
         QStringLiteral(
             "Sections are shared across projects. Changes apply everywhere."),
@@ -1903,16 +1885,8 @@ void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
         parameters["projectId"] = id;
         parameters["description"] = value;
       }
-    } else {
-      if (!id.empty())
+    } else if (!id.empty()) {
         parameters["sectionId"] = id;
-      parameters["appearance"] = {
-          {"icon", icon->text().isEmpty()
-                       ? nlohmann::json(nullptr)
-                       : nlohmann::json(icon->text().toStdString())},
-          {"color", color->text().isEmpty()
-                        ? nlohmann::json(nullptr)
-                        : nlohmann::json(color->text().toStdString())}};
     }
     using enum nodegraph::RuntimeActionKind;
     actions.manage(project ? (id.empty() ? CreateProject : UpdateProject)

@@ -1937,20 +1937,6 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
       return found == groups.end() ? (id.empty() ? fallback : id)
                                    : found->label;
     };
-    const auto sectionAppearance = [&](ThreadListRow &row) {
-      const auto found =
-          std::ranges::find(result.sections, row.sectionId, &ThreadGroup::id);
-      if (found == result.sections.end())
-        return;
-      row.details = "Shared section across projects\n" + found->fields.dump(2);
-      const auto appearance = found->fields.find("appearance");
-      if (appearance == found->fields.end() || !appearance->is_object())
-        return;
-      const auto icon = appearance->find("icon");
-      if (icon != appearance->end() && icon->is_string() &&
-          !icon->get_ref<const std::string &>().empty())
-        row.title = icon->get<std::string>() + " " + row.title;
-    };
     nlohmann::json filter = nlohmann::json::object();
     if (browser->archived != 2)
       filter["archived"] = browser->archived == 1;
@@ -2087,9 +2073,10 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
               row.details += '\n';
             row.details += root.value("path", std::string{});
           }
+          if (!project) {
+              row.details = "Shared section across projects";
+          }
         }
-        if (!project)
-          sectionAppearance(row);
       }
       return row;
     };
@@ -2125,9 +2112,10 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread,
                   groupName(result.sections, sectionId, "Unsectioned");
               const auto found = std::ranges::find(result.sections, sectionId,
                                                    &ThreadGroup::id);
-              if (found != result.sections.end())
-                section.target = found->target;
-              sectionAppearance(section);
+              if (found != result.sections.end()) {
+                  section.target = found->target;
+                  section.details = "Shared section across projects";
+              }
               auto parameters = group.query.at("parameters");
               parameters["sectionId"] = sectionId;
               if (browser->manualSections) {
