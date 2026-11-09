@@ -18,7 +18,9 @@
           ]
         }
       },
-      "text": "Approve the follow-up PR?\nHold"
+      "text": "Approve the follow-up PR?\nHold",
+      "wire": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}]\n</send_user_message_question_reply>",
+      "markdown": "Approve the follow-up PR?\n\n**Hold**"
     },
     {
       "id": "multiple-unicode",
@@ -46,7 +48,43 @@
           ]
         }
       },
-      "text": "Environment?\nStaging\n\nWhy?\nÜberprüfung"
+      "text": "Environment?\nStaging\n\nWhy?\nÜberprüfung",
+      "wire": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Environment?\",\"answer\":\"Staging\"},{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",1]\",\"question\":\"Why?\",\"answer\":\"Überprüfung\"}]\n</send_user_message_question_reply>",
+      "markdown": "Environment?\n\n**Staging**\n\nWhy?\n\n**Überprüfung**"
+    },
+    {
+      "id": "two-independent-choices",
+      "questions": [
+        {
+          "title": "Merge the changes?",
+          "options": [
+            "Approve",
+            "Hold"
+          ]
+        },
+        {
+          "title": "Which environment?",
+          "options": [
+            "Staging",
+            "Production"
+          ]
+        }
+      ],
+      "answer": {
+        "0": {
+          "answers": [
+            "Hold"
+          ]
+        },
+        "1": {
+          "answers": [
+            "Production"
+          ]
+        }
+      },
+      "text": "Merge the changes?\nHold\n\nWhich environment?\nProduction",
+      "wire": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Merge the changes?\",\"answer\":\"Hold\"},{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",1]\",\"question\":\"Which environment?\",\"answer\":\"Production\"}]\n</send_user_message_question_reply>",
+      "markdown": "Merge the changes?\n\n**Hold**\n\nWhich environment?\n\n**Production**"
     },
     {
       "id": "null-options",
@@ -63,7 +101,9 @@
           ]
         }
       },
-      "text": "Describe the change\nKeep it small"
+      "text": "Describe the change\nKeep it small",
+      "wire": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Describe the change\",\"answer\":\"Keep it small\"}]\n</send_user_message_question_reply>",
+      "markdown": "Describe the change\n\n**Keep it small**"
     },
     {
       "id": "no-questions",
@@ -136,47 +176,114 @@
   "visibilityCases": [
     {
       "id": "question-commentary",
-      "item": {"phase": "commentary", "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "item": {
+        "phase": "commentary",
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a label",
+            "options": [
+              "Blue",
+              "Green"
+            ]
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "question-partial",
-      "item": {"phase": "partial_answer", "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "item": {
+        "phase": "partial_answer",
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a label",
+            "options": [
+              "Blue",
+              "Green"
+            ]
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "question-final",
-      "item": {"phase": "final_answer", "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "item": {
+        "phase": "final_answer",
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a label",
+            "options": [
+              "Blue",
+              "Green"
+            ]
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "question-null",
-      "item": {"phase": null, "delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "item": {
+        "phase": null,
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a label",
+            "options": [
+              "Blue",
+              "Green"
+            ]
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "question-missing",
-      "item": {"delivery": "async", "questions": [{"title": "Choose a label", "options": ["Blue", "Green"]}]},
+      "item": {
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a label",
+            "options": [
+              "Blue",
+              "Green"
+            ]
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "ordinary-commentary",
-      "item": {"phase": "commentary"},
+      "item": {
+        "phase": "commentary"
+      },
       "visibleWhenUpdatesHidden": false
     },
     {
       "id": "ordinary-partial",
-      "item": {"phase": "partial_answer"},
+      "item": {
+        "phase": "partial_answer"
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "ordinary-final",
-      "item": {"phase": "final_answer"},
+      "item": {
+        "phase": "final_answer"
+      },
       "visibleWhenUpdatesHidden": true
     },
     {
       "id": "ordinary-null",
-      "item": {"phase": null},
+      "item": {
+        "phase": null
+      },
       "visibleWhenUpdatesHidden": false
     },
     {
@@ -186,18 +293,135 @@
     },
     {
       "id": "empty-questions",
-      "item": {"phase": "commentary", "delivery": "async", "questions": []},
+      "item": {
+        "phase": "commentary",
+        "delivery": "async",
+        "questions": []
+      },
       "visibleWhenUpdatesHidden": false
     },
     {
       "id": "invalid-question",
-      "item": {"phase": "commentary", "delivery": "async", "questions": [{"title": ""}]},
+      "item": {
+        "phase": "commentary",
+        "delivery": "async",
+        "questions": [
+          {
+            "title": ""
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": false
     },
     {
       "id": "missing-async-delivery",
-      "item": {"phase": "commentary", "questions": [{"title": "Choose a label"}]},
+      "item": {
+        "phase": "commentary",
+        "questions": [
+          {
+            "title": "Choose a label"
+          }
+        ]
+      },
       "visibleWhenUpdatesHidden": false
+    }
+  ],
+  "replyCases": [
+    {
+      "id": "object-form",
+      "source": "<send_user_message_question_reply>\n{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}\n</send_user_message_question_reply>",
+      "replies": [
+        {
+          "questionItemId": "[\"request_user_input_async\",\"question\",0]",
+          "question": "Approve the follow-up PR?",
+          "answer": "Hold"
+        }
+      ],
+      "markdown": "Approve the follow-up PR?\n\n**Hold**"
+    },
+    {
+      "id": "outer-whitespace",
+      "source": " \n<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}]\n</send_user_message_question_reply>\n\t",
+      "replies": [
+        {
+          "questionItemId": "[\"request_user_input_async\",\"question\",0]",
+          "question": "Approve the follow-up PR?",
+          "answer": "Hold"
+        }
+      ],
+      "markdown": "Approve the follow-up PR?\n\n**Hold**"
+    },
+    {
+      "id": "plain-legacy",
+      "source": "Approve the follow-up PR?\nHold",
+      "replies": [],
+      "markdown": "Approve the follow-up PR?\nHold"
+    },
+    {
+      "id": "invalid-json",
+      "source": "<send_user_message_question_reply>no json</send_user_message_question_reply>",
+      "replies": [],
+      "markdown": "<send_user_message_question_reply>no json</send_user_message_question_reply>"
+    },
+    {
+      "id": "empty-array",
+      "source": "<send_user_message_question_reply>\n[]\n</send_user_message_question_reply>",
+      "replies": [],
+      "markdown": "<send_user_message_question_reply>\n[]\n</send_user_message_question_reply>"
+    },
+    {
+      "id": "invalid-answer",
+      "source": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":7}]\n</send_user_message_question_reply>",
+      "replies": [],
+      "markdown": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":7}]\n</send_user_message_question_reply>"
+    },
+    {
+      "id": "mixed-array",
+      "source": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"},{}]\n</send_user_message_question_reply>",
+      "replies": [],
+      "markdown": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"},{}]\n</send_user_message_question_reply>"
+    },
+    {
+      "id": "escaped-answer",
+      "source": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Describe the change\",\"answer\":\"*x*_[a]<b>&lt;`\\\\\"}]\n</send_user_message_question_reply>",
+      "replies": [
+        {
+          "questionItemId": "[\"request_user_input_async\",\"question\",0]",
+          "question": "Describe the change",
+          "answer": "*x*_[a]<b>&lt;`\\"
+        }
+      ],
+      "markdown": "Describe the change\n\n**\\*x\\*\\_\\[a\\]\\<b\\>\\&lt;\\`\\\\**"
+    },
+    {
+      "id": "multiline-answer",
+      "source": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Describe the change\",\"answer\":\"First\\n\\nSecond\\n\"}]\n</send_user_message_question_reply>",
+      "replies": [
+        {
+          "questionItemId": "[\"request_user_input_async\",\"question\",0]",
+          "question": "Describe the change",
+          "answer": "First\n\nSecond\n"
+        }
+      ],
+      "markdown": "Describe the change\n\n**First**\n\n**Second**\n"
+    },
+    {
+      "id": "crlf-answer",
+      "source": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Describe the change\",\"answer\":\"First\\r\\nSecond\"}]\n</send_user_message_question_reply>",
+      "replies": [
+        {
+          "questionItemId": "[\"request_user_input_async\",\"question\",0]",
+          "question": "Describe the change",
+          "answer": "First\r\nSecond"
+        }
+      ],
+      "markdown": "Describe the change\n\n**First**\n**Second**"
+    },
+    {
+      "id": "non-json-padding",
+      "source": " <send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}]\n</send_user_message_question_reply> ",
+      "replies": [],
+      "markdown": " <send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}]\n</send_user_message_question_reply> "
     }
   ]
 }

@@ -859,8 +859,8 @@ std::vector<ConversationView::TurnDestination> ConversationView::turnDestination
                 if (opening && rowPresented(*opening)) {
                     const auto* card = model_->card(*opening);
                     const auto* prompt = std::get_if<UserMessageData>(&card->payload);
-                    const QString label =
-                        prompt ? QString::fromStdString(prompt->text).simplified() : QStringLiteral("Turn without an opening prompt");
+                    const QString label = prompt ? presentation::userMessageMarkdown(QString::fromStdString(prompt->text)).simplified()
+                                                 : QStringLiteral("Turn without an opening prompt");
                     result.push_back({model_->row(*opening)->stableKey, label.isEmpty() ? QStringLiteral("Attachment prompt") : label});
                 }
             }

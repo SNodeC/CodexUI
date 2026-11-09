@@ -3,22 +3,23 @@
 #include "codex/middle/ConversationPresentation.h"
 
 #include "codex/UiStatus.h"
+#include "codex/nodegraph/PromptText.h"
 #include "codex/ui/UiStyle.h"
 
-#include <QApplication>
 #include <QAccessible>
 #include <QAccessibleWidget>
+#include <QApplication>
 #include <QClipboard>
-#include <QEvent>
 #include <QDesktopServices>
+#include <QEvent>
 #include <QFileInfo>
-#include <QRegularExpression>
 #include <QFocusEvent>
 #include <QFrame>
 #include <QLabel>
 #include <QMimeData>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRegularExpression>
 #include <QStringList>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -29,7 +30,6 @@
 #include <QTimer>
 #include <QToolTip>
 #include <QVariantAnimation>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -589,85 +589,80 @@ void announce(QWidget &widget, const QString &message) {
 }
 
 QString userMessageMarkdown(QStringView source, bool nativeLineBreaks) {
-  QString rendered;
-  rendered.reserve(source.size() + source.count(QLatin1Char('\n')) * 3);
+    const auto replies = nodegraph::questionReplies(source.toString().toStdString());
+    const auto readable = replies.empty() ? source.toString() : QString::fromStdString(nodegraph::questionReplyMarkdown(replies));
+    source = readable;
+    QString rendered;
+    rendered.reserve(source.size() + source.count(QLatin1Char('\n')) * 3);
 
-  // Qt imports Markdown hard breaks as paragraphs. In ordinary prompt prose,
-  // use its in-paragraph separator instead; blank lines remain paragraph breaks.
-  const bool nativeProse = nativeLineBreaks && simpleMarkdownParagraphs(source);
+    // Qt imports Markdown hard breaks as paragraphs. In ordinary prompt prose,
+    // use its in-paragraph separator instead; blank lines remain paragraph breaks.
+    const bool nativeProse = nativeLineBreaks && simpleMarkdownParagraphs(source);
 
-  bool fenced = false;
-  QChar fenceMarker;
-  qsizetype fenceLength = 0;
-  qsizetype lineStart = 0;
-  while (lineStart <= source.size()) {
-    qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
-    const bool hasNewline = lineEnd >= 0;
-    if (!hasNewline)
-      lineEnd = source.size();
-    QStringView line = source.sliced(lineStart, lineEnd - lineStart);
-    if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
-      line.chop(1);
+    bool fenced = false;
+    QChar fenceMarker;
+    qsizetype fenceLength = 0;
+    qsizetype lineStart = 0;
+    while (lineStart <= source.size()) {
+        qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
+        const bool hasNewline = lineEnd >= 0;
+        if (!hasNewline)
+            lineEnd = source.size();
+        QStringView line = source.sliced(lineStart, lineEnd - lineStart);
+        if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
+            line.chop(1);
 
-    qsizetype indentation = 0;
-    while (indentation < line.size() && indentation < 4 &&
-           line.at(indentation) == QLatin1Char(' '))
-      ++indentation;
-    const bool indentedCode =
-        indentation >= 4 || line.startsWith(QLatin1Char('\t'));
-    const QChar marker =
-        indentation < line.size() ? line.at(indentation) : QChar{};
-    qsizetype markerLength = 0;
-    if (indentation <= 3 &&
-        (marker == QLatin1Char('`') || marker == QLatin1Char('~'))) {
-      while (indentation + markerLength < line.size() &&
-             line.at(indentation + markerLength) == marker)
-        ++markerLength;
+        qsizetype indentation = 0;
+        while (indentation < line.size() && indentation < 4 && line.at(indentation) == QLatin1Char(' '))
+            ++indentation;
+        const bool indentedCode = indentation >= 4 || line.startsWith(QLatin1Char('\t'));
+        const QChar marker = indentation < line.size() ? line.at(indentation) : QChar{};
+        qsizetype markerLength = 0;
+        if (indentation <= 3 && (marker == QLatin1Char('`') || marker == QLatin1Char('~'))) {
+            while (indentation + markerLength < line.size() && line.at(indentation + markerLength) == marker)
+                ++markerLength;
+        }
+        const bool opensFence = !fenced && markerLength >= 3;
+        const bool closesFence =
+            fenced && marker == fenceMarker && markerLength >= fenceLength && line.sliced(indentation + markerLength).trimmed().isEmpty();
+        const bool fenceLine = opensFence || closesFence;
+        const bool insideFence = fenced || opensFence;
+
+        rendered += line;
+        if (hasNewline) {
+            qsizetype nextEnd = source.indexOf(QLatin1Char('\n'), lineEnd + 1);
+            if (nextEnd < 0)
+                nextEnd = source.size();
+            QStringView next = source.sliced(lineEnd + 1, nextEnd - lineEnd - 1);
+            if (!next.isEmpty() && next.back() == QLatin1Char('\r'))
+                next.chop(1);
+            const bool currentBlank = line.trimmed().isEmpty();
+            const bool nextBlank = next.trimmed().isEmpty();
+            const bool alreadyHardBreak = line.endsWith(QLatin1Char('\\')) || line.endsWith(QLatin1StringView("  "));
+            if (nativeProse && !currentBlank && !nextBlank) {
+                if (alreadyHardBreak)
+                    rendered.chop(line.endsWith(QLatin1Char('\\')) ? 1 : 2);
+                rendered += QChar::LineSeparator;
+            } else {
+                if (!alreadyHardBreak && !insideFence && !fenceLine && !indentedCode && !currentBlank && !nextBlank)
+                    rendered += QLatin1StringView("  ");
+                rendered += QLatin1Char('\n');
+            }
+        }
+
+        if (opensFence) {
+            fenced = true;
+            fenceMarker = marker;
+            fenceLength = markerLength;
+        } else if (closesFence) {
+            fenced = false;
+            fenceMarker = QChar{};
+            fenceLength = 0;
+        }
+        if (!hasNewline)
+            break;
+        lineStart = lineEnd + 1;
     }
-    const bool opensFence = !fenced && markerLength >= 3;
-    const bool closesFence =
-        fenced && marker == fenceMarker && markerLength >= fenceLength &&
-        line.sliced(indentation + markerLength).trimmed().isEmpty();
-    const bool fenceLine = opensFence || closesFence;
-    const bool insideFence = fenced || opensFence;
-
-    rendered += line;
-    if (hasNewline) {
-      qsizetype nextEnd = source.indexOf(QLatin1Char('\n'), lineEnd + 1);
-      if (nextEnd < 0)
-        nextEnd = source.size();
-      QStringView next = source.sliced(lineEnd + 1, nextEnd - lineEnd - 1);
-      if (!next.isEmpty() && next.back() == QLatin1Char('\r'))
-        next.chop(1);
-      const bool currentBlank = line.trimmed().isEmpty();
-      const bool nextBlank = next.trimmed().isEmpty();
-      const bool alreadyHardBreak = line.endsWith(QLatin1Char('\\')) ||
-                                    line.endsWith(QLatin1StringView("  "));
-      if (nativeProse && !currentBlank && !nextBlank) {
-        if (alreadyHardBreak)
-          rendered.chop(line.endsWith(QLatin1Char('\\')) ? 1 : 2);
-        rendered += QChar::LineSeparator;
-      } else {
-        if (!alreadyHardBreak && !insideFence && !fenceLine && !indentedCode &&
-            !currentBlank && !nextBlank)
-          rendered += QLatin1StringView("  ");
-        rendered += QLatin1Char('\n');
-      }
-    }
-
-    if (opensFence) {
-      fenced = true;
-      fenceMarker = marker;
-      fenceLength = markerLength;
-    } else if (closesFence) {
-      fenced = false;
-      fenceMarker = QChar{};
-      fenceLength = 0;
-    }
-    if (!hasNewline)
-      break;
-    lineStart = lineEnd + 1;
-  }
   return rendered;
 }
 

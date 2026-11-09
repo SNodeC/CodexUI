@@ -868,6 +868,7 @@ void ShellWidget::Impl::connectUi() {
       PendingRequestDescriptor request;
       request.kind = PendingRequestKind::UserInput;
       request.method = "agentMessage";
+      std::string sourceId;
       const auto source = [&] {
           nlohmann::json questions = nullptr;
           auto read = session.nodeGraph().tryRead();
@@ -876,6 +877,7 @@ void ShellWidget::Impl::connectUi() {
               if (exactStringFromValue(valueMember(*state, "type")) == "agentMessage" &&
                   exactStringFromValue(valueMember(*state, "delivery")) == "async" && valueMember(*state, "questions")) {
                   questions = PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*valueMember(*state, "questions")));
+                  sourceId = nodegraph::protocolCanonicalId(*state, item);
               }
           }
           return questions;
@@ -885,7 +887,7 @@ void ShellWidget::Impl::connectUi() {
       if (!request.raw.is_null()) {
           request.availability = PendingRequestAvailability::Actionable;
           static_cast<void>(PendingRequestDialog::present(request, owner, nullptr, {}, [&](const PendingRequestSubmission& submission) {
-              const auto answer = PendingRequestPolicy::asyncQuestionAnswer(request.raw, submission);
+              const auto answer = PendingRequestPolicy::asyncQuestionAnswer(request.raw, submission, sourceId);
               const bool current = thread == boundGraphThread && source() == request.raw;
               const bool admitted = current && renderedChrome && renderedChrome->canControl && answer && submitPrompt(text(*answer), {});
               return admitted;

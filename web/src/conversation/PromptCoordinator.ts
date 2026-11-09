@@ -1,3 +1,5 @@
+import {questionReplies} from "../app/PendingRequestResponses.js";
+import type {QuestionReply} from "../app/PendingRequestResponses.js";
 import type {ThreadPresentation, ItemPresentation} from "../presentation/PresentationModel.js";
 import {isObject, stringMember} from "../presentation/PresentationProtocol.js";
 import type {AuthoritativeItemKey, LocalPromptKey, PromptState} from "./MiddleTypes.js";
@@ -26,7 +28,7 @@ export interface UserMessageByText {turnId: string; text: string; position: numb
 export interface AuthoritativeItemIndex {
     threadId: string; ordered: AuthoritativeItem[]; positions: Map<string, number>;
     userMessagesByClientId: Map<string, number>; userMessagesByText: UserMessageByText[];
-    turnRoots: Map<string, number>;
+    turnRoots: Map<string, number>; questionReplies: Map<string, QuestionReply & {position: number}>;
 }
 
 export function authoritativeKey(key: AuthoritativeItemKey): string {
@@ -52,7 +54,7 @@ export function indexAuthoritativeItems(threadId: string, thread?: ThreadPresent
         get positions() {
             return positions ??= new Map(result.ordered.map((item, position) => [authoritativeKey(item.key), position]));
         },
-        turnRoots: new Map(),
+        turnRoots: new Map(), questionReplies: new Map(),
     };
     if (!thread) return result;
     for (const turnId of thread.turnOrder) {
@@ -69,7 +71,9 @@ export function indexAuthoritativeItems(threadId: string, thread?: ThreadPresent
                 const clientId = stringMember(presentation.raw, "clientId");
                 if (clientId !== "" && !result.userMessagesByClientId.has(clientId))
                     result.userMessagesByClientId.set(clientId, position);
-                const text = userMessageText(presentation.raw).trim();
+                const source = userMessageText(presentation.raw);
+                const text = source.trim();
+                for (const reply of questionReplies(source)) { result.questionReplies.set(reply.questionItemId, {...reply, position}); }
                 result.userMessagesByText.push({turnId: "", text, position}, {turnId, text, position});
             }
         }

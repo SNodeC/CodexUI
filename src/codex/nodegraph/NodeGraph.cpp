@@ -2,6 +2,8 @@
 
 #include "codex/nodegraph/NodeGraph.h"
 
+#include "codex/nodegraph/PromptText.h"
+
 #include <algorithm>
 #include <exception>
 #include <functional>
@@ -1863,15 +1865,104 @@ void NodeGraph::WriteAccess::refreshInspectorIndexes() {
       graph_->inspectorIndexes_.erase(node.get());
 }
 
+std::vector<NodeRef> NodeGraph::ReadAccess::questionReplies(const NodeRef& question) const {
+    requireMember(question);
+    std::set<NodeRef> sources;
+    for (const auto& key : question->questionReferences_.second) {
+        const auto found = graph_->questionReferences_.find({question->questionReferences_.first, key});
+        if (found != graph_->questionReferences_.end()) {
+            sources.insert(found->second.begin(), found->second.end());
+        }
+    }
+    sources.erase(question);
+    std::vector<NodeRef> result(sources.begin(), sources.end());
+    std::ranges::sort(result, [](const auto& left, const auto& right) {
+        const auto *a = left->parent_, *b = right->parent_;
+        return a == b ? left->parentIndex_ < right->parentIndex_ : a->parentIndex_ < b->parentIndex_;
+    });
+    return result;
+}
+
+void NodeGraph::WriteAccess::refreshQuestionReferences() {
+    auto changed = affected_;
+    changed.insert(changed.end(), removed_.begin(), removed_.end());
+    std::set<std::pair<Node*, std::string>> affectedKeys;
+    for (std::size_t index = 0; index < changed.size(); ++index) {
+        const auto node = changed[index];
+        if (node->id_.kind == NodeKind::Turn && node->questionReferences_.first != node->parent_) {
+            node->questionReferences_.first = node->parent_;
+            for (auto* child : node->children_) {
+                changed.push_back(child->shared_from_this());
+            }
+        }
+        if (node->id_.kind == NodeKind::Item) {
+            auto& [previousThread, previousKeys] = node->questionReferences_;
+            for (const auto& key : previousKeys) {
+                const auto identity = std::make_pair(previousThread, key);
+                auto& sources = graph_->questionReferences_.at(identity);
+                sources.erase(node);
+                if (sources.empty()) {
+                    graph_->questionReferences_.erase(identity);
+                }
+                affectedKeys.insert(identity);
+            }
+            previousKeys.clear();
+            auto* turn = node->parent_;
+            previousThread = turn && turn->id_.kind == NodeKind::Turn && turn->parent_ && turn->parent_->id_.kind == NodeKind::Thread &&
+                                     find(node->id_) == node
+                                 ? turn->parent_
+                                 : nullptr;
+            if (previousThread) {
+                const auto& state = *node->state_;
+                const auto type = scalarTextFromValue(valueMember(state, "type"));
+                const auto* questions = valueMember(state, "questions");
+                if (type == "agentMessage" && scalarTextFromValue(valueMember(state, "delivery")) == "async" && questions &&
+                    questions->asArray()) {
+                    auto id = scalarTextFromValue(valueMember(state, "protocolId"));
+                    if (id.empty()) {
+                        id = node->id_.canonical;
+                    }
+                    for (std::size_t i = 0; i < std::min<std::size_t>(64, questions->asArray()->size()); ++i) {
+                        previousKeys.insert(questionReplyKey(id, i));
+                    }
+                } else if (type == "userMessage" || type == "localPrompt") {
+                    for (const auto& reply : nodegraph::questionReplies(messageText(state))) {
+                        previousKeys.insert(reply.questionItemId);
+                    }
+                }
+                for (const auto& key : previousKeys) {
+                    graph_->questionReferences_[{previousThread, key}].insert(node);
+                    affectedKeys.emplace(previousThread, key);
+                }
+            }
+        }
+    }
+    for (const auto& key : affectedKeys) {
+        const auto found = graph_->questionReferences_.find(key);
+        if (found != graph_->questionReferences_.end()) {
+            for (const auto& source : found->second) {
+                if (scalarTextFromValue(valueMember(*source->state_, "type")) == "agentMessage") {
+                    prepareChanges(std::array{source}, {});
+                }
+            }
+        }
+    }
+    return;
+}
+
 GraphChange NodeGraph::WriteAccess::finish() noexcept {
-  if (finished_)
-    return GraphChange{graph_ ? graph_->revision_ : 0, {}, {}};
-  if (dirty_)
-    refreshInspectorIndexes();
-  GraphChange change = publish();
-  if (lock_.owns_lock())
-    lock_.unlock();
-  return change;
+    GraphChange change{graph_ ? graph_->revision_ : 0, {}, {}};
+    if (!finished_) {
+        if (dirty_) {
+            refreshInspectorIndexes();
+            refreshQuestionReferences();
+        }
+        change = publish();
+    }
+    if (lock_.owns_lock()) {
+        lock_.unlock();
+    }
+    return change;
 }
 
 void NodeGraph::WriteAccess::requireLive(const NodeRef &node) const {

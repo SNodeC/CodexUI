@@ -71,6 +71,8 @@ struct AgentMessageData {
   std::string text;
   std::string phase;
   nlohmann::json questionRequest = nullptr;
+  std::vector<std::string> answers = {};
+  std::string questionStatus = {};
 
   bool operator==(const AgentMessageData &) const = default;
 };

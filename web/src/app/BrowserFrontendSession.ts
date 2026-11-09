@@ -483,7 +483,7 @@ export class BrowserFrontendSession {
     async answerQuestion(card: VisibleCardData, presentationKey: string, submission: PendingRequestSubmission): Promise<boolean> {
         const item = this.model.thread(card.threadId)?.turns.get(card.turnId)?.items.get(card.itemId)?.raw;
         const request = (card.payload as AgentMessageData).questionRequest;
-        const answer = asyncQuestionAnswer(request, submission);
+        const answer = asyncQuestionAnswer(request, submission, card.itemId);
         const current = card.kind === "agentMessage" && item?.delivery === "async" && item.type === "agentMessage"
             && jsonEqual(asyncQuestionRequest(item.questions), request);
         let admitted = false;

@@ -7,15 +7,22 @@
 
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace codexui::nodegraph {
 
-// Produces the one text value used by both the local pending card and the
-// app-server input. Binary image/audio attachments remain separate input
-// items; ordinary files are safe local-file Markdown links.
-[[nodiscard]] std::string
-composePromptMarkdown(std::string prompt,
-                      std::span<const Attachment> attachments);
+    struct QuestionReply {
+        std::string questionItemId, question, answer;
+    };
+    [[nodiscard]] std::string questionReplyKey(std::string_view item, std::size_t index);
+    [[nodiscard]] std::vector<QuestionReply> questionReplies(std::string_view source);
+    [[nodiscard]] std::string questionReplyMarkdown(std::span<const QuestionReply> replies);
+    [[nodiscard]] std::string messageText(const NodeState& state);
+
+    // Produces the one text value used by both the local pending card and the
+    // app-server input. Binary image/audio attachments remain separate input
+    // items; ordinary files are safe local-file Markdown links.
+    [[nodiscard]] std::string composePromptMarkdown(std::string prompt, std::span<const Attachment> attachments);
 
 } // namespace codexui::nodegraph
 
