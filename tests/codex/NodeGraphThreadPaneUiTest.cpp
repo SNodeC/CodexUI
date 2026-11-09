@@ -26,6 +26,7 @@
 #include <QEventLoop>
 #include <QImage>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMetaObject>
@@ -203,8 +204,7 @@ bool groupLabelsIdentifyDestinationsWithoutRoutineIds() {
     project("windows-first-id", "Windows", {"C:\\work\\book"});
     project("windows-second-id", "Windows", {"D:\\work\\book"});
     project("literal-name-id", "Book — work/book", {});
-    entity(NodeKind::ThreadSection, "section-one-1111111",
-           {{"name", "Review"}});
+    entity(NodeKind::ThreadSection, "section-one-1111111", {{"name", "Review"}, {"appearance", {{"icon", "star"}, {"color", "purple"}}}});
     entity(NodeKind::ThreadSection, "section-two-2111111",
            {{"name", "Review"}});
     entity(NodeKind::ThreadSection, "unique-section-id", {{"name", "Ready"}});
@@ -369,6 +369,12 @@ bool groupLabelsIdentifyDestinationsWithoutRoutineIds() {
         inspected = identifier && identifier->text() == id &&
                     identifier->isReadOnly() && authoredName &&
                     authoredName->text() == name;
+        if (std::string_view(id) == "section-one-1111111") {
+            inspected &= dialog->findChildren<QLineEdit*>().size() == 2 && authoredName->isReadOnly();
+            if (const QString path = qEnvironmentVariable("CODEXUI_SECTION_DETAILS_SCREENSHOT"); !path.isEmpty()) {
+                passed &= require(dialog->grab().save(path), "section details screenshot saved");
+            }
+        }
         dialog->reject();
       });
       action->trigger();
@@ -575,8 +581,8 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
         {{"name", "AISuite — very long project name with Unicode 日本語"},
          {"position", 1},
          {"metadata", nlohmann::json::object()}});
-    section = entity(NodeKind::ThreadSection, "shared-section",
-                     {{"name", "In progress"}});
+    section = entity(
+        NodeKind::ThreadSection, "shared-section", {{"name", "In progress"}, {"appearance", {{"icon", "star"}, {"color", "purple"}}}});
     root = entity(
         NodeKind::Thread, "group-parent",
         {{"name", "Parent"}, {"cwd", "/workspace/ui"}, {"recencyAt", 10}});
@@ -592,9 +598,9 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     write.relate(sibling, RelationKind::ProjectMembership, firstProject);
     for (const auto &thread : {root, child, sibling})
       write.relate(thread, RelationKind::SectionMembership, section);
-    const auto standaloneSection =
-        entity(NodeKind::ThreadSection, "standalone-section",
-               {{"name", "Personal research"}});
+    const auto standaloneSection = entity(NodeKind::ThreadSection,
+                                          "standalone-section",
+                                          {{"name", "Personal research"}, {"appearance", {{"icon", "folder"}, {"color", "blue"}}}});
     const auto standaloneMember =
         entity(NodeKind::Thread, "standalone-member",
                {{"name", "Research outside projects"}});
@@ -660,6 +666,11 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     return false;
   const auto *standalone = threadItem(tree, "standalone-section");
   const auto *ungrouped = threadItem(tree, "ungrouped-thread");
+  for (const auto* id : {"shared-section", "standalone-section"}) {
+      const auto tooltip = threadItem(tree, id)->data(0, Qt::ToolTipRole).toString();
+      passed &= require(!tooltip.contains("star") && !tooltip.contains("folder") && !tooltip.contains("appearance"),
+                        "nested and standalone section headings and tooltips ignore appearance metadata");
+  }
   tree->scrollToItem(threadItem(tree, "ungrouped-thread"));
   QApplication::processEvents();
   const auto currentBeforeContext = tree->currentIndex();
@@ -711,6 +722,15 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
                   threadItem(tree, "group-child") == childItem,
               "a grouped semantic no-op preserves pixels and row identity");
   {
+      auto write = graph.write();
+      write.setField(section, "appearance", *valueFromJson({{"icon", "changed-marker"}, {"color", "orange"}}).asObject());
+      static_cast<void>(write.finish());
+  }
+  snapshot = adapter.threads(child, nullptr, &pane.browserOptions());
+  pane.refresh(*snapshot);
+  QApplication::processEvents();
+  passed &= require(pane.grab().toImage() == before, "another client's section appearance change leaves native presentation unchanged");
+  {
     auto write = graph.write();
     write.replaceRelated(child, RelationKind::ProjectMembership,
                          std::array{firstProject});
@@ -754,6 +774,8 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
       require(changes > 0 && childItem->parent() == rootItem &&
                   rootItem->parent() == threadItem(tree, "shared-section"),
               "Sections view preserves same-group family nesting");
+  passed &= require(!rootItem->parent()->data(0, Qt::ToolTipRole).toString().contains("changed-marker"),
+                    "Sections view ignores appearance metadata after regrouping");
 
   auto *search = pane.findChild<QLineEdit *>("threadTitleSearch");
   search->setText("Sibling");
@@ -823,49 +845,62 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
 
   // Exercise the actual edit dialog and emit authored data, not a handcrafted
   // projection of what the dialog ought to send.
-  auto *projectItem = threadItem(tree, "project-a");
-  const QPoint point = tree->visualItemRect(projectItem).topLeft() + QPoint(40, UiStyle::projectCardEdgePadding + 12);
-  QMetaObject::invokeMethod(tree, "customContextMenuRequested",
-                            Qt::DirectConnection, Q_ARG(QPoint, point));
-  QApplication::processEvents();
-  QPointer<QMenu> context;
-  for (auto *candidate : tree->findChildren<QMenu *>())
-    if (candidate->isVisible())
-      context = candidate;
-  if (context) {
-    QAction *edit = nullptr;
-    for (auto *action : context->actions())
-      if (action->text() == "Edit…")
-        edit = action;
-    QTimer::singleShot(0, [&] {
-      auto *dialog = pane.findChild<QDialog *>("threadGroupDialog");
-      if (!dialog)
-        return;
-      auto *description =
-          dialog->findChild<QPlainTextEdit *>("projectDescription");
-      if (description)
-        description->setPlainText("Edited description 日本語");
-      if (const QString path =
-              qEnvironmentVariable("CODEXUI_GROUP_DIALOG_SCREENSHOT");
-          !path.isEmpty())
-        passed &= require(dialog->grab().save(path),
-                          "project edit dialog screenshot saved");
-      auto *buttons = dialog->findChild<QDialogButtonBox *>();
-      if (buttons)
-        buttons->button(QDialogButtonBox::Save)->click();
-    });
-    if (edit)
-      edit->trigger();
-    if (context)
-      context->close();
+  for (const bool project : {true, false}) {
+      const auto beforeEdit = mutations.size();
+      auto* groupItem = threadItem(tree, project ? "project-a" : "standalone-section");
+      tree->scrollToItem(groupItem);
+      QApplication::processEvents();
+      const QPoint point = tree->visualItemRect(groupItem).topLeft() + QPoint(40, UiStyle::projectCardEdgePadding + 12);
+      QMetaObject::invokeMethod(tree, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, point));
+      QApplication::processEvents();
+      QPointer<QMenu> context;
+      for (auto* candidate : tree->findChildren<QMenu*>()) {
+          if (candidate->isVisible()) {
+              context = candidate;
+          }
+      }
+      if (context) {
+          QAction* edit = nullptr;
+          for (auto* action : context->actions()) {
+              if (action->text() == "Edit…") {
+                  edit = action;
+              }
+          }
+          QTimer::singleShot(0, [&] {
+              auto* dialog = pane.findChild<QDialog*>("threadGroupDialog");
+              passed &= require(dialog != nullptr, "group edit opens the real dialog");
+              if (dialog) {
+                  auto* description = dialog->findChild<QPlainTextEdit*>("projectDescription");
+                  if (description) {
+                      description->setPlainText("Edited description 日本語");
+                  }
+                  if (!project) {
+                      passed &= require(dialog->findChildren<QLineEdit*>().size() == 1, "section editing exposes only the name field");
+                      dialog->findChild<QLineEdit*>("groupName")->setText("Renamed section");
+                  }
+                  if (const QString path = qEnvironmentVariable("CODEXUI_GROUP_DIALOG_SCREENSHOT"); !path.isEmpty()) {
+                      passed &= require(dialog->grab().save(project ? path : path + ".section.png"), "group edit dialog screenshot saved");
+                  }
+                  auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                  if (buttons) {
+                      buttons->button(QDialogButtonBox::Save)->click();
+                  }
+              }
+          });
+          if (edit) {
+              edit->trigger();
+          }
+          if (context) {
+              context->close();
+          }
+      }
+      passed &= require(
+          mutations.size() == beforeEdit + 1 &&
+              mutations.back().first == (project ? RuntimeActionKind::UpdateProject : RuntimeActionKind::UpdateSection) &&
+              (project ? mutations.back().second.value("description", "") == "Edited description 日本語"
+                       : mutations.back().second == nlohmann::json{{"sectionId", "standalone-section"}, {"name", "Renamed section"}}),
+          "group edits submit authored fields without foreign project metadata or section appearance");
   }
-  passed &=
-      require(!mutations.empty() &&
-                  mutations.back().first == RuntimeActionKind::UpdateProject &&
-                  mutations.back().second.value("description", "") ==
-                      "Edited description 日本語",
-              "the real project dialog submits only the authored description, "
-              "not foreign metadata");
   for (const bool project : {true, false}) {
     const QString label = project ? "New project…" : "New section…";
     const std::string id = project ? "new-empty-project" : "new-empty-section";
@@ -875,6 +910,12 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
       if (!dialog)
         return;
       auto *name = dialog->findChild<QLineEdit *>("groupName");
+      if (!project) {
+          passed &= require(dialog->findChildren<QLineEdit*>().size() == 1, "new section dialog exposes only the name field");
+          if (const QString prefix = qEnvironmentVariable("CODEXUI_GROUP_CREATE_SCREENSHOT"); !prefix.isEmpty()) {
+              passed &= require(dialog->grab().save(prefix + "-empty-section.png"), "empty section dialog screenshot saved");
+          }
+      }
       auto *save = dialog->findChild<QDialogButtonBox *>()->button(
           QDialogButtonBox::Save);
       save->click();
@@ -928,6 +969,12 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
           for (const auto width : {dialog->minimumSizeHint().width(), 520}) {
               dialog->resize(width, dialog->height());
               QApplication::processEvents();
+              for (auto* label : dialog->findChildren<QLabel*>()) {
+                  if (!project && label->wordWrap() && !label->text().isEmpty()) {
+                      passed &= require(label->height() >= label->heightForWidth(label->width()),
+                                        "section dialog text remains fully visible at narrow widths and enlarged fonts");
+                  }
+              }
               passed &= require(dialog->grab().save(prefix + (project ? "-project-" : "-section-") + QString::number(width) + ".png"),
                                 "group creation dialog screenshot saved");
           }
@@ -950,6 +997,9 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     if (mutations.size() == beforeCreate)
       continue;
     const auto &parameters = mutations.back().second;
+    if (!project) {
+        passed &= require(parameters == nlohmann::json{{"name", id}}, "section creation submits only its name");
+    }
     if (project)
         passed &=
             require(parameters.at("roots").size() == 4 && parameters.at("metadata").at(ProjectDescriptionKey) == "Description 日本語" &&
@@ -3883,6 +3933,12 @@ bool threadPerformanceProfile(std::size_t count, qreal expectedDpr,
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+  if (const int points = qEnvironmentVariableIntValue("CODEXUI_GROUP_FONT"); points > 0) {
+      auto font = application.font();
+      font.setPointSize(points);
+      application.setFont(font);
+      application.setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  }
   QTemporaryDir settings;
   QSettings::setDefaultFormat(QSettings::IniFormat);
   QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
