@@ -1,6 +1,6 @@
 import {protocolTimes, targetTimes, timingSummary, timingDetails, tokenUsage} from "../presentation/PresentationTelemetry.js";
 import type {ProtocolTime, TimingTarget, TokenUsageText} from "../presentation/PresentationTelemetry.js";
-import {memo, useId, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
+import {memo, useId, useEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -26,8 +26,9 @@ import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "
 import type {WorkspaceGroup, AgentPresentation} from "../presentation/PresentationModel.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
+import {ScrollWindow, windowTreeEntries, useBrowserLayoutEffect} from "./ScrollWindow.js";
+import type {TreeEntry} from "./ScrollWindow.js";
 
-const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 export const ThreadLoadingSpinnerDelayMilliseconds = 500;
 
 export type ResponsiveMode = "desktop" | "tablet" | "mobile";
@@ -92,27 +93,31 @@ function navigateContextMenu(event: ReactKeyboardEvent<HTMLDivElement>): void {
 function navigateThreadTree(event: ReactKeyboardEvent<HTMLDivElement>): void {
     const keys = ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End"];
     if (keys.includes(event.key)) {
-        const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".thread-row, .group-disclosure")];
+        const rows = [...event.currentTarget.querySelectorAll<HTMLElement>(".scroll-window, .group-disclosure")].flatMap((element): TreeEntry[] => {
+            const window = windowTreeEntries.get(element);
+            return window ? window() : [{level: Number(element.closest('[role="treeitem"]')?.getAttribute("aria-level") ?? 1),
+                expanded: element.getAttribute("aria-expanded") === "true", element: () => element,
+                focus: () => element.focus(), toggle: () => element.click()}];
+        });
         const current = (event.target as HTMLElement).closest('[role="treeitem"]');
-        const index = rows.findIndex(row => row.closest('[role="treeitem"]') === current);
+        const index = rows.findIndex(row => row.element()?.closest('[role="treeitem"]') === current);
         if (index >= 0) {
             event.preventDefault();
-            const level = (row: HTMLElement) => Number(row.closest('[role="treeitem"]')?.getAttribute("aria-level") ?? 1);
             const row = rows[index]!;
             let target = index;
-            const expanded = current?.getAttribute("aria-expanded");
+            const expanded = row.expanded;
             if (event.key === "Home") { target = 0; }
             else if (event.key === "End") { target = rows.length - 1; }
             else if (event.key === "ArrowDown") { target = Math.min(index + 1, rows.length - 1); }
             else if (event.key === "ArrowUp") { target = Math.max(index - 1, 0); }
             else if (event.key === "ArrowRight") {
-                if (expanded === "false") { (row.matches(".group-disclosure") ? row : row.previousElementSibling as HTMLButtonElement)?.click(); }
-                else if (rows[index + 1] && level(rows[index + 1]!) > level(row)) { target = index + 1; }
-            } else if (expanded === "true") {
-                (row.matches(".group-disclosure") ? row : row.previousElementSibling as HTMLButtonElement)?.click();
+                if (expanded === false) { row.toggle(); }
+                else if (rows[index + 1] && rows[index + 1]!.level > row.level) { target = index + 1; }
+            } else if (expanded === true) {
+                row.toggle();
             } else {
                 let parent = index - 1;
-                while (parent >= 0 && level(rows[parent]!) >= level(row)) { --parent; }
+                while (parent >= 0 && rows[parent]!.level >= row.level) { --parent; }
                 if (parent >= 0) { target = parent; }
             }
             rows[target]?.focus();
@@ -333,7 +338,10 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         </div>;
     };
     const renderRows = (ids: string[], depth: number) => {
-        visibleRows.length = 0; appendVisibleRows(ids, depth); return visibleRows.map(renderThread);
+        visibleRows.length = 0; appendVisibleRows(ids, depth);
+        return <ScrollWindow items={[...visibleRows]} itemKey={row => row.presentationKey} renderItem={renderThread}
+            tree={row => ({level: row.depth + 1, expanded: session.model.thread(row.id)?.childThreadOrder.length ? row.expanded : undefined,
+                toggle: () => toggle(row.id, row.presentationKey, row.expanded)})} />;
     };
     const pageControls = (pages: ReturnType<BrowserFrontendSession["threadPages"]>) => pages.map((page, index) =>
         (page.pending || page.error || page.nextCursor) && <button key={index} className="load-more" disabled={page.pending}
@@ -1573,8 +1581,8 @@ function Inspector({session, inspection, onInspect, drawer = false, paneRef, onC
                 {latestPlan.legacyText && <SafeMarkdown text={latestPlan.legacyText} />}
                 {latestPlan.steps.map((step, index) => <div key={index}><StatusDot tone={statusTone(step.status)} /><span>{step.text}</span><small>{displayStatus(step.status)}</small></div>)}
             </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
-            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => <InspectorAgentCard key={`${selectedPresentationKey}:${id}`} id={id} agent={selected.agents.get(id)!} expanded={!session.viewportState.cardCollapsed(selectedThreadId, selectedPresentationKey, `inspector:${id}`, true)}
-                onToggle={() => { const key = `inspector:${id}`; session.viewportState.setCardCollapsed(selectedThreadId, selectedPresentationKey, key, !session.viewportState.cardCollapsed(selectedThreadId, selectedPresentationKey, key, true)); forceAgentFold(value => value + 1); }} />))}
+            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : <ScrollWindow key={selectedPresentationKey} items={selected.agentOrder} itemKey={id => id} renderItem={id => <InspectorAgentCard key={`${selectedPresentationKey}:${id}`} id={id} agent={selected.agents.get(id)!} expanded={!session.viewportState.cardCollapsed(selectedThreadId, selectedPresentationKey, `inspector:${id}`, true)}
+                onToggle={() => { const key = `inspector:${id}`; session.viewportState.setCardCollapsed(selectedThreadId, selectedPresentationKey, key, !session.viewportState.cardCollapsed(selectedThreadId, selectedPresentationKey, key, true)); forceAgentFold(value => value + 1); }} />} />)}
             {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.presentationKey} request={request} session={session} />))}
             {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={displayStatus(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(plainState?.changedFileCount ?? 0)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
             {tab === "protocol" && <div className="protocol-list">{[...session.getSnapshot().protocolFrames].reverse().map(frame => <details key={String(member(frame, "sequence"))}><summary>{humanize(String((frame as Record<string, unknown>).type ?? (frame as Record<string, unknown>).action ?? "Frame"))}</summary><pre>{JSON.stringify(frame, null, 2)}</pre></details>)}</div>}

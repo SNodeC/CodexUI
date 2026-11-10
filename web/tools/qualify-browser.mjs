@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {qualifyContextMenus} from "./qualify-context-menus.mjs";
+import {qualifyListWindowing} from "./qualify-list-windowing.mjs";
 import {qualifyUiInventory} from "./qualify-ui-inventory.mjs";
 import {qualifyCatchup} from "./qualify-catchup.mjs";
 import {qualifyAsyncQuestions} from "./qualify-async-questions.mjs";
@@ -956,10 +957,11 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
-    if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY || process.env.CODEXUI_BROWSER_UI_INVENTORY_ONLY) {
+    if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY || process.env.CODEXUI_BROWSER_UI_INVENTORY_ONLY || process.env.CODEXUI_BROWSER_LARGE_LISTS_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         console.log(JSON.stringify({contextMenus: await qualifyContextMenus(devTools), browser: browserVersion.product}));
+        if (process.env.CODEXUI_BROWSER_LARGE_LISTS_ONLY) { console.log(JSON.stringify({listWindowing: await qualifyListWindowing(devTools)})); }
         if (process.env.CODEXUI_BROWSER_UI_INVENTORY_ONLY) { console.log(JSON.stringify({uiInventory: await qualifyUiInventory(devTools)})); }
         if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
             await mkdir(process.env.CODEXUI_BROWSER_SCREENSHOTS, {recursive: true});
