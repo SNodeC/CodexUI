@@ -168,21 +168,22 @@ QString thumbnailCacheKey(const ImageFileIdentity &identity,
 
 class ImageThumbnail final : public QLabel {
 public:
-  ImageThumbnail(QString path, std::function<void()> geometryChanged,
-                 QWidget *parent)
-      : QLabel(parent), path_(std::move(path)),
-        identity_(imageFileIdentity(path_)),
-        geometryChanged_(std::move(geometryChanged)) {
-    setObjectName(QStringLiteral("messageImageThumbnail"));
-    setProperty("kind", "imageThumbnail");
-    setCursor(Qt::PointingHandCursor);
-    setToolTip(QDir::toNativeSeparators(path_));
-    setAccessibleDescription(QDir::toNativeSeparators(path_));
-    setAlignment(Qt::AlignCenter);
-    setMinimumSize(72, 48);
-    setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
-    loadPixmap();
-  }
+    ImageThumbnail(QString path, std::function<void()> geometryChanged, std::function<void(QString)> openFailed, QWidget* parent)
+        : QLabel(parent)
+        , path_(std::move(path))
+        , identity_(imageFileIdentity(path_))
+        , geometryChanged_(std::move(geometryChanged))
+        , openFailed_(std::move(openFailed)) {
+        setObjectName(QStringLiteral("messageImageThumbnail"));
+        setProperty("kind", "imageThumbnail");
+        setCursor(Qt::PointingHandCursor);
+        setToolTip(QDir::toNativeSeparators(path_));
+        setAccessibleDescription(QDir::toNativeSeparators(path_));
+        setAlignment(Qt::AlignCenter);
+        setMinimumSize(72, 48);
+        setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
+        loadPixmap();
+    }
 
   [[nodiscard]] bool represents(const QString &path) const {
     return path_ == path && identity_ == imageFileIdentity(path);
@@ -310,41 +311,44 @@ private:
   }
 
   bool activate() {
-    if (pixmap().isNull())
-      return false;
-    openLocalFile(path_);
-    return true;
+      const bool available = !pixmap().isNull();
+      if (available && !openLocalFile(path_)) {
+          openFailed_(QStringLiteral("Could not open %1").arg(QDir::toNativeSeparators(path_)));
+      }
+      return available;
   }
 
   QString path_;
   ImageFileIdentity identity_;
   std::function<void()> geometryChanged_;
+  std::function<void(QString)> openFailed_;
   QString pendingCacheKey_;
   bool leftPressArmed_ = false;
 };
 
 class ImageRibbon final : public QScrollArea {
 public:
-  explicit ImageRibbon(std::function<void()> geometryChanged,
-                       QWidget *parent = nullptr)
-      : QScrollArea(parent), geometryChanged_(std::move(geometryChanged)) {
-    setObjectName(QStringLiteral("messageImages"));
-    setFrameShape(QFrame::StyledPanel);
-    setWidgetResizable(false);
-    setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
-    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    explicit ImageRibbon(std::function<void()> geometryChanged, std::function<void(QString)> openFailed, QWidget* parent = nullptr)
+        : QScrollArea(parent)
+        , geometryChanged_(std::move(geometryChanged))
+        , openFailed_(std::move(openFailed)) {
+        setObjectName(QStringLiteral("messageImages"));
+        setFrameShape(QFrame::StyledPanel);
+        setWidgetResizable(false);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
 
-    strip_ = new QWidget;
-    strip_->setObjectName(QStringLiteral("messageImageStrip"));
-    layout_ = new QHBoxLayout(strip_);
-    layout_->setContentsMargins(4, 4, 4, 4);
-    layout_->setSpacing(8);
-    layout_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    setWidget(strip_);
-    hide();
-  }
+        strip_ = new QWidget;
+        strip_->setObjectName(QStringLiteral("messageImageStrip"));
+        layout_ = new QHBoxLayout(strip_);
+        layout_->setContentsMargins(4, 4, 4, 4);
+        layout_->setSpacing(8);
+        layout_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        setWidget(strip_);
+        hide();
+    }
 
   void setPaths(const QStringList &paths) {
     bool changed = false;
@@ -360,9 +364,13 @@ public:
         delete item;
       }
       layout_->insertWidget(static_cast<int>(index),
-                            new ImageThumbnail(paths.at(index),
-                                               [this] { imageSizeChanged(); },
-                                               strip_),
+                            new ImageThumbnail(
+                                paths.at(index),
+                                [this] {
+                                    imageSizeChanged();
+                                },
+                                openFailed_,
+                                strip_),
                             0,
                             Qt::AlignVCenter);
       changed = true;
@@ -430,6 +438,7 @@ private:
   QWidget *strip_ = nullptr;
   QHBoxLayout *layout_ = nullptr;
   std::function<void()> geometryChanged_;
+  std::function<void(QString)> openFailed_;
   QSize naturalSize_;
 };
 
@@ -1862,9 +1871,15 @@ public:
   }
 
   void createImageContainer() {
-    images = new ImageRibbon(
-        [this] { emit owner->intrinsicGeometryChanged(); }, content);
-    contentLayout->addWidget(images, contentLayout->rowCount(), 1);
+      images = new ImageRibbon(
+          [this] {
+              emit owner->intrinsicGeometryChanged();
+          },
+          [this](QString message) {
+              emit owner->noticeRequested(std::move(message), true);
+          },
+          content);
+      contentLayout->addWidget(images, contentLayout->rowCount(), 1);
   }
 
   void markBodyProjectionDeferred() {

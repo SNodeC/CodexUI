@@ -3,13 +3,16 @@ const $ = (id) => document.getElementById(id);
 let state = {profiles: [], detail: {}, revision: 0};
 let selected = location.hash.slice(1), opening = '', editing, deletion;
 let loading = false, dirty = false, connected = false;
+let actionError = '';
 const cards = new Map();
 function report(error) {
     const dialogs = [...document.querySelectorAll('dialog[open]')];
     const target = dialogs.at(-1)?.querySelector('[role=alert]') || $('error');
+    if (target === $('error')) { actionError = error.message; }
     target.textContent = error.message;
 }
-async function perform(task) {
+async function perform(task, userAction = true) {
+    if (userAction) { actionError = ''; }
     try { await task(); } catch (error) { report(error); }
 }
 async function api(action, body = {}) {
@@ -112,7 +115,7 @@ function render() {
         open.title = p.browserUrl || 'Configure a browser WebSocket listener in this profile.';
     }
     $('summary').textContent = `${state.profiles.length} profiles · ${state.profiles.filter((p) => p.ready).length} ready`;
-    $('error').textContent = state.error || (state.profiles.length ? '' : 'Create a profile to get started.');
+    $('error').textContent = actionError || state.error || (state.profiles.length ? '' : 'Create a profile to get started.');
     const profile = current();
     if (profile && state.detail.configuration) {
         $('detail-name').textContent = profile.name;
@@ -286,7 +289,7 @@ $('pause').onchange = renderLogs;
 $('search').oninput = render;
 for (const close of document.querySelectorAll('[data-close]')) { close.onclick = () => $(close.dataset.close).close(); }
 const events = new EventSource('api/events');
-events.onmessage = () => perform(reload);
-events.onopen = () => { connected = true; $('connection').textContent = 'Connected to manager'; perform(reload); };
+events.onmessage = () => perform(reload, false);
+events.onopen = () => { connected = true; $('connection').textContent = 'Connected to manager'; perform(reload, false); };
 events.onerror = () => { connected = false; $('connection').textContent = 'Connection lost · reconnecting…'; render(); };
 perform(async () => { await reload(); if (selected && current()) { await showDetails(selected); } });

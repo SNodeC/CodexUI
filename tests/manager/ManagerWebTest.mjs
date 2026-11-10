@@ -140,8 +140,26 @@ try {
         await page.send('Page.enable');
         await page.send('Network.enable');
         await page.send('Fetch.enable', {handleAuthRequests: true});
+        await page.send('Page.addScriptToEvaluateOnNewDocument', {source: `
+            const NativeEventSource = EventSource;
+            globalThis.EventSource = class extends NativeEventSource {
+                constructor(...args) { super(...args); globalThis.managerFixtureEvents = this; }
+            };`});
         await page.send('Page.navigate', {url: origin});
         await until(() => page.evaluate(`document.querySelector('#connection')?.textContent === 'Connected to manager'`));
+        await page.evaluate(`globalThis.inventoryOriginalFetch = fetch; globalThis.inventoryStateReads = 0;
+            globalThis.fetch = async (...args) => {
+                if (args[0] === 'api/new') { return new Response(JSON.stringify({error:'Inventory creation rejected'}), {status:409,headers:{'Content-Type':'application/json'}}); }
+                if (String(args[0]).startsWith('api/state')) { ++globalThis.inventoryStateReads; }
+                return inventoryOriginalFetch(...args);
+            };`);
+        await page.click('#new');
+        await until(() => page.evaluate(`document.querySelector('#error').textContent === 'Inventory creation rejected'`));
+        await page.evaluate(`managerFixtureEvents.dispatchEvent(new MessageEvent('message', {data:'{}'}))`);
+        await until(() => page.evaluate(`inventoryStateReads > 0`));
+        await pause(100);
+        assert.equal(await page.evaluate(`document.querySelector('#error').textContent`), 'Inventory creation rejected', 'background invalidation preserves the user action failure');
+        await page.evaluate(`globalThis.fetch = inventoryOriginalFetch`);
         await page.click('#new');
         await until(() => page.evaluate(`document.querySelector('#editor').open && document.querySelectorAll('#fields input').length > 10`));
         await page.fill('[name="Identity.name"]', 'Browser-created profile');

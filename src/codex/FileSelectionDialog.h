@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #ifndef CODEXUI_CODEX_FILESELECTIONDIALOG_H
 #define CODEXUI_CODEX_FILESELECTIONDIALOG_H
-#include <QDialog>
+#include "codex/ui/UiStyle.h"
+
 #include <QStringList>
 #include <QThreadPool>
 #include <functional>
@@ -13,7 +14,7 @@ class QPushButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 namespace codexui::codex {
-    class FileSelectionDialog final : public QDialog {
+    class FileSelectionDialog final : public UiStyle::ScrollFormDialog {
     public:
         using Filesystem = std::function<void(QObject*, std::string, nlohmann::json, std::function<void(nlohmann::json, std::string)>)>;
         using Access = std::function<Filesystem()>;

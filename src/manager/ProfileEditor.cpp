@@ -89,7 +89,7 @@ namespace codexui::manager {
         , others_(std::move(others)) {
         setWindowTitle("Configure profile");
         resize(780, 700);
-        setMinimumSize(560, 440);
+
         auto* layout = new QVBoxLayout(this);
         auto* heading = UiStyle::makeLabel("Make room for another way of working", "panelHeader", this);
         layout->addWidget(heading);

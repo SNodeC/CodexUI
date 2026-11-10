@@ -318,7 +318,11 @@ private slots:
         QVERIFY(ProfileStore(path).save({p}, &error));
         ManagerController manager(path);
         ManagerWindow window(manager);
+        window.resize(640, 480);
         window.show();
+        QApplication::processEvents();
+        QVERIFY2(window.width() <= 640 && window.height() <= 480,
+                 qPrintable(QString("constrained manager is %1x%2").arg(window.width()).arg(window.height())));
         auto* runtime = manager.runtime(p.id);
         QVERIFY(runtime);
         QTRY_VERIFY(!runtime->busy());
@@ -1150,7 +1154,10 @@ private slots:
         auto p = Profile::create("Before");
         p.codexHome = tools.dir.filePath("home");
         ProfileEditor editor(p, {});
+        editor.resize(640, 480);
         editor.show();
+        QApplication::processEvents();
+        QVERIFY(editor.width() <= 640 && editor.height() <= 480);
         const auto combos = editor.findChildren<QComboBox*>();
         auto frontend = std::find_if(combos.cbegin(), combos.cend(), [](QComboBox* combo) {
             return combo->findData("rfcomm-tls") >= 0;

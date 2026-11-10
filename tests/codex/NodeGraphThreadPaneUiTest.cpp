@@ -701,6 +701,25 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     return false;
   const auto *standalone = threadItem(tree, "standalone-section");
   const auto *ungrouped = threadItem(tree, "ungrouped-thread");
+  if (standalone && standalone->childCount()) {
+      const bool expanded = standalone->isExpanded();
+      tree->expandItem(standalone);
+      QApplication::processEvents();
+      const auto sectionMember = tree->visualItemRect(standalone->child(0));
+      const auto bodies = tree->findChildren<QTreeView*>(QStringLiteral("projectThreadBody"));
+      const auto projectRow =
+          bodies.isEmpty() ? QRect{} : bodies.front()->visualRect(bodies.front()->model()->index(0, 0, bodies.front()->rootIndex()));
+      passed &= require(projectRow.isValid() && sectionMember.height() == projectRow.height() &&
+                            sectionMember.height() >= tree->fontMetrics().height(),
+                        "standalone and project members share actual compact geometry without clipping their font");
+      passed &= require(tree->visualItemRect(standalone).height() == sectionMember.height() + UiStyle::projectCardEdgePadding,
+                        "expanded section headers reserve only the card's top padding before their first member");
+      const auto* last = standalone->child(standalone->childCount() - 1);
+      passed &= require(tree->visualItemRect(last).height() == sectionMember.height() + UiStyle::projectCardEdgePadding,
+                        "the terminal section row owns the enclosing card's bottom padding");
+      tree->setExpanded(tree->indexFromItem(standalone), expanded);
+  }
+
   for (const auto* id : {"shared-section", "standalone-section"}) {
       const auto tooltip = threadItem(tree, id)->data(0, Qt::ToolTipRole).toString();
       passed &= require(!tooltip.contains("star") && !tooltip.contains("folder") && !tooltip.contains("appearance"),

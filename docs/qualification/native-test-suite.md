@@ -427,7 +427,7 @@ The behavior inventory in sections 1–21 still applies in full.
 | Page/loading/retry/end rows | Visually distinct from real threads and groups; clear action or explanation; no blank clickable row. |
 | Thread/group context menus | Correct target, complete actions, membership destinations and ordering choices; long names do not make controls unreachable. |
 | Project form | Name, Roots and Description labels/editors aligned; one root per line; explanatory non-instruction text visible; metadata/timestamp details readable in read-only mode. |
-| Section form | Name, Icon and Colour fields aligned; shared-across-projects explanation visible; no implication that sections are owned exclusively by a project. |
+| Section form | Name field aligned; details also expose the read-only ID. Shared-across-projects explanation visible; appearance metadata remains untouched and is not offered as a heading customization. |
 | Create/edit/delete dialogs | Clear title, validation, confirmation and action/cancel buttons; read-only details visually non-editable; deletion text distinguishes groups from retained threads. |
 
 ### 22.4 Conversation chrome and shared card anatomy

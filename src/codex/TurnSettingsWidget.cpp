@@ -19,6 +19,7 @@
 #include <array>
 #include <initializer_list>
 #include <utility>
+#include <vector>
 
 namespace codexui::codex {
 namespace {
@@ -34,10 +35,9 @@ public:
   bool hasHeightForWidth() const override { return true; }
   QSize minimumSize() const override {
     const auto margins = contentsMargins();
-    return {2 * cellWidth() + horizontalSpacing() + margins.left() +
-                margins.right(),
-            heightForWidth(4 * (cellWidth() + horizontalSpacing()) +
-                           margins.left() + margins.right())};
+    const int minimumColumns = count() > 4 ? 2 : 1;
+    return {minimumColumns * cellWidth() + (minimumColumns - 1) * horizontalSpacing() + margins.left() + margins.right(),
+            heightForWidth(4 * (cellWidth() + horizontalSpacing()) + margins.left() + margins.right())};
   }
   int heightForWidth(int width) const override {
     int height = 0;
@@ -51,20 +51,20 @@ public:
     return height + contentsMargins().top() + contentsMargins().bottom();
   }
   void setGeometry(const QRect &rect) override {
-    if (count() == 8) {
-      int row, col, rowSpan, colSpan;
-      getItemPosition(7, &row, &col, &rowSpan, &colSpan);
-      const int cols = columns(rect.width());
-      if (col + 1 != cols) {
-        std::array<QLayoutItem *, 8> items;
-        for (auto &item : items)
-          item = takeAt(0);
-        for (int column = 0; column < 4; ++column)
-          setColumnStretch(column, column < cols ? 1 : 0);
-        for (int i = 0; i < 8; ++i)
-          addItem(items[i], i / cols, i % cols);
+      if (count() == 8 || count() == 4) {
+          int row, col, rowSpan, colSpan;
+          getItemPosition(count() - 1, &row, &col, &rowSpan, &colSpan);
+          const int cols = columns(rect.width());
+          if (col + 1 != cols) {
+              std::vector<QLayoutItem*> items(count());
+              for (auto& item : items)
+                  item = takeAt(0);
+              for (int column = 0; column < static_cast<int>(items.size()) / 2; ++column)
+                  setColumnStretch(column, column < cols ? 1 : 0);
+              for (int i = 0; i < static_cast<int>(items.size()); ++i)
+                  addItem(items[i], i / cols, i % cols);
+          }
       }
-    }
     QGridLayout::setGeometry(rect);
   }
 
@@ -79,7 +79,8 @@ private:
     width -= contentsMargins().left() + contentsMargins().right();
     const int cells = (width + horizontalSpacing()) /
                       (cellWidth() + horizontalSpacing());
-    return cells >= 4 ? 4 : 2;
+    const int maximumColumns = std::max(1, count() / 2);
+    return cells >= maximumColumns ? maximumColumns : (maximumColumns > 2 ? 2 : 1);
   }
 };
 
@@ -226,8 +227,7 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
 
   auto *moreMenu = new QMenu(this);
   auto *moreContents = new QWidget;
-  moreContents->setMinimumWidth(470);
-  auto *moreLayout = new QGridLayout(moreContents);
+  auto* moreLayout = new SettingsGrid(moreContents);
   moreLayout->setContentsMargins(14, 12, 14, 12);
   moreLayout->setHorizontalSpacing(8);
   moreLayout->setVerticalSpacing(8);

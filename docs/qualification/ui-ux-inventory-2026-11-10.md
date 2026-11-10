@@ -1,5 +1,7 @@
 # UI/UX audit inventory — 2026-11-10
 
+Follow-up: [repair status and verification](ui-ux-repairs-2026-11-10.md). This audit describes the checkpoint before those repairs.
+
 ## Scope and verdict
 
 The standalone-section problem is not isolated. This audit identified **11 current UI defects or inconsistencies, one contradictory UI qualification requirement, and five qualification risks**. Findings cover the native application, browser application and profile manager. They are grouped by responsibility rather than counting each affected button as a separate defect.

@@ -157,7 +157,7 @@ namespace codexui::manager {
         , manager_(manager) {
         setWindowTitle("CodexManager · Profiles");
         resize(1240, 830);
-        setMinimumSize(740, 520);
+
         setWindowIcon(QIcon::fromTheme("codex-manager", style()->standardIcon(QStyle::SP_ComputerIcon)));
         setStyleSheet(
             UiStyle::applicationStyleSheet() +
@@ -181,9 +181,12 @@ namespace codexui::manager {
         auto* outer = new QVBoxLayout(central);
         outer->setContentsMargins(32, 24, 32, 24);
         outer->setSpacing(22);
-        auto* bar = new QHBoxLayout;
+        auto* header = new QFormLayout;
+        header->setRowWrapPolicy(QFormLayout::WrapLongRows);
         auto* brand = UiStyle::makeLabel("◈  CodexManager", "panelHeader", central);
-        bar->addWidget(brand);
+        auto* controls = new QWidget(central);
+        auto* bar = new QHBoxLayout(controls);
+        bar->setContentsMargins(0, 0, 0, 0);
         bar->addStretch();
         bar->addWidget(button("Import…", central, [this] {
             importProfiles();
@@ -206,7 +209,8 @@ namespace codexui::manager {
         menu->addAction("Quit manager…", this, &ManagerWindow::quitManager);
         menuButton->setMenu(menu);
         bar->addWidget(menuButton);
-        outer->addLayout(bar);
+        header->addRow(brand, controls);
+        outer->addLayout(header);
         pages_ = new QStackedWidget(central);
         outer->addWidget(pages_, 1);
         overview_ = new QWidget(pages_);
@@ -242,8 +246,11 @@ namespace codexui::manager {
             reflow();
         });
 
-        auto* details = new QWidget(pages_);
-        pages_->addWidget(details);
+        auto* detailArea = new QScrollArea(pages_);
+        detailArea->setWidgetResizable(true);
+        auto* details = new QWidget;
+        detailArea->setWidget(details);
+        pages_->addWidget(detailArea);
         auto* dl = new QVBoxLayout(details);
         dl->setContentsMargins(0, 0, 0, 0);
         dl->setSpacing(16);
