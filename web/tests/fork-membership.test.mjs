@@ -22,6 +22,7 @@ for (const fixture of fixtures) {
             id: "source", name: "Find Slides", cwd: "/source-workspace",
             projectId: fixture.projectId, section: section(fixture.sectionId),
             forkedFromId: null, parentThreadId: null, status: {type: "idle"},
+            turns: ["first", "middle", "last"].map(id => ({id, status: "completed", items: []})),
         };
         const forked = {
             id: "forked", name: "Provider title", cwd: "/fork-workspace",
@@ -39,10 +40,12 @@ for (const fixture of fixtures) {
             session.forkThread("source", fixture.options ? {
                 workspace: "/fork-workspace", name: "Chosen fork",
                 baseInstructions: "Fork base", developerInstructions: "Fork developer", ephemeral: fixture.ephemeral ?? false,
-            } : undefined);
+            } : undefined, session.threadVisualKey("source"), fixture.lastTurnId, session.model.thread("source")?.turns.get(fixture.lastTurnId));
             const fork = requests(socket, "thread/fork").at(-1);
             assert.ok(fork, "the fork is submitted");
             assert.equal(fork.payload.params.threadId, "source");
+            assert.equal(fork.payload.params.lastTurnId, fixture.lastTurnId);
+            assert.deepEqual(session.model.thread("source").turnOrder, ["first", "middle", "last"], "forking preserves the source history");
             assert.equal(fork.payload.params.cwd, fixture.options ? "/fork-workspace" : undefined);
             if (fixture.moveSource) {
                 socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {thread: {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {qualifyContextMenus} from "./qualify-context-menus.mjs";
 import {qualifyCatchup} from "./qualify-catchup.mjs";
 import {qualifyAsyncQuestions} from "./qualify-async-questions.mjs";
 import {spawn} from "node:child_process";
@@ -954,6 +955,16 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
+    if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        console.log(JSON.stringify({contextMenus: await qualifyContextMenus(devTools), browser: browserVersion.product}));
+        if (process.env.CODEXUI_BROWSER_SCREENSHOTS) {
+            await mkdir(process.env.CODEXUI_BROWSER_SCREENSHOTS, {recursive: true});
+            const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+            await writeFile(join(process.env.CODEXUI_BROWSER_SCREENSHOTS, "context-menus.png"), Buffer.from(screenshot.data, "base64"));
+        }
+    } else {
     await setWidth(devTools, 760);
     await waitUntil(devTools, `document.querySelectorAll(".responsive-pane-button").length===2`, "760px drawer controls");
     assertTopBar(await devTools.evaluate(fullTopBarMeasurement), 760);
@@ -1263,6 +1274,7 @@ try {
             nodes: afterStream.Nodes, jsHeapBytes: afterStream.JSHeapUsedSize}}, null, 2));
     console.log(JSON.stringify({asyncQuestions: await qualifyAsyncQuestions(devTools)}));
     assert.deepEqual(performanceFailures, [], "Browser performance qualification failed");
+    }
 } catch (error) {
     if (chromeErrors) process.stderr.write(chromeErrors);
     throw error;

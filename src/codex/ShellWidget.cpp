@@ -575,9 +575,8 @@ struct ShellWidget::Impl final {
   void beginNewThreadDialog(std::string project = {}, std::string section = {});
   [[nodiscard]] std::optional<NewThreadDraft>
   suggestedForkDraft(const nodegraph::NodeRef &thread) const;
-  void forkThread(const nodegraph::NodeRef &thread, NewThreadDraft draft,
-                  bool includeOptions);
-  void beginForkThreadDialog(const nodegraph::NodeRef &thread);
+  void forkThread(const nodegraph::NodeRef& thread, NewThreadDraft draft, bool includeOptions, const nodegraph::NodeRef& turn = {});
+  void beginForkThreadDialog(nodegraph::NodeRef thread, nodegraph::NodeRef turn = {});
   void renameThreadDialog(const nodegraph::NodeRef &thread);
   void changeWorkspaceDialog(const nodegraph::NodeRef& thread);
   void confirmDeleteThread(const nodegraph::NodeRef &thread);
@@ -2540,38 +2539,48 @@ ShellWidget::Impl::suggestedForkDraft(const nodegraph::NodeRef &thread) const {
   return draft;
 }
 
-void ShellWidget::Impl::forkThread(const nodegraph::NodeRef &thread,
-                                   NewThreadDraft draft, bool includeOptions) {
-  if (!thread || thread->id().kind != nodegraph::NodeKind::Thread ||
-      !uiAdapter.threadRow(thread)) {
-    showNotice(QStringLiteral(
-        "The source thread is no longer available; no fork was sent."));
-    return;
-  }
-  nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork,
-                               {}, {}, {}, {}};
-  const QString requestedName = draft.name.trimmed();
-  if (!draft.ephemeral && !requestedName.isEmpty())
-    action.payload.emplace("requestedName", utf8(requestedName));
-  if (includeOptions) {
-    const QString workspace = draft.workspace.trimmed();
-    if (!workspace.isEmpty())
-      action.payload.emplace("cwd", utf8(workspace));
-    const QString baseInstructions = draft.baseInstructions.trimmed();
-    if (!baseInstructions.isEmpty())
-      action.payload.emplace("baseInstructions", utf8(baseInstructions));
-    const QString developerInstructions = draft.developerInstructions.trimmed();
-    if (!developerInstructions.isEmpty())
-      action.payload.emplace("developerInstructions",
-                             utf8(developerInstructions));
-    action.payload.emplace("ephemeral", draft.ephemeral);
-  }
-  static_cast<void>(sendNodeAction(
-      std::move(action),
-      QStringLiteral("Thread fork was not admitted; try again.")));
+void ShellWidget::Impl::forkThread(const nodegraph::NodeRef& thread,
+                                   NewThreadDraft draft,
+                                   bool includeOptions,
+                                   const nodegraph::NodeRef& turn) {
+    if (!thread || thread->id().kind != nodegraph::NodeKind::Thread || !uiAdapter.threadRow(thread)) {
+        showNotice(QStringLiteral("The source thread is no longer available; no fork was sent."));
+    } else {
+        nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork, {}, {}, {}, {}};
+        if (turn) {
+            auto read = session.nodeGraph().tryRead();
+            if (!read || !read->live(turn) || read->parent(turn) != thread) {
+                showNotice(QStringLiteral("The selected turn is no longer available; no fork was sent."));
+            } else {
+                action.payload.emplace("lastTurnId", nodegraph::protocolCanonicalId(*read->state(turn), turn));
+            }
+        }
+        const QString requestedName = draft.name.trimmed();
+        if (!draft.ephemeral && !requestedName.isEmpty()) {
+            action.payload.emplace("requestedName", utf8(requestedName));
+        }
+        if (includeOptions) {
+            const QString workspace = draft.workspace.trimmed();
+            if (!workspace.isEmpty()) {
+                action.payload.emplace("cwd", utf8(workspace));
+            }
+            const QString baseInstructions = draft.baseInstructions.trimmed();
+            if (!baseInstructions.isEmpty()) {
+                action.payload.emplace("baseInstructions", utf8(baseInstructions));
+            }
+            const QString developerInstructions = draft.developerInstructions.trimmed();
+            if (!developerInstructions.isEmpty()) {
+                action.payload.emplace("developerInstructions", utf8(developerInstructions));
+            }
+            action.payload.emplace("ephemeral", draft.ephemeral);
+        }
+        if (!turn || action.payload.contains("lastTurnId")) {
+            static_cast<void>(sendNodeAction(std::move(action), QStringLiteral("Thread fork was not admitted; try again.")));
+        }
+    }
 }
 
-void ShellWidget::Impl::beginForkThreadDialog(const nodegraph::NodeRef& thread) {
+void ShellWidget::Impl::beginForkThreadDialog(nodegraph::NodeRef thread, nodegraph::NodeRef turn) {
     const auto draft = suggestedForkDraft(thread);
     if (!draft) {
         showNotice(QStringLiteral("Thread state is busy; try Fork with options again."));
@@ -2586,7 +2595,7 @@ void ShellWidget::Impl::beginForkThreadDialog(const nodegraph::NodeRef& thread) 
             if (selected.name.trimmed().isEmpty()) {
                 selected.name = draft->name;
             }
-            forkThread(thread, std::move(selected), true);
+            forkThread(thread, std::move(selected), true, turn);
         }
     }
 }
@@ -2651,20 +2660,37 @@ void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {
 }
 
 void ShellWidget::Impl::showTurnMenu(nodegraph::NodeRef item, QPoint position) {
-    nodegraph::NodeRef turn;
+    nodegraph::NodeRef turn, thread;
     std::string reason = "Conversation state is busy; try again.";
     if (auto read = session.nodeGraph().tryRead()) {
         if (item && read->live(item)) {
             turn = read->parent(item);
+            thread = turn ? read->parent(turn) : nodegraph::NodeRef{};
         }
         reason = nodegraph::threadRevertUnavailable(*read, turn);
     }
     QMenu menu(owner);
     menu.setToolTipsVisible(true);
+    auto* quick = menu.addAction(QStringLiteral("Quick fork from here"));
+    auto* options = menu.addAction(QStringLiteral("Fork from here with options…"));
+    for (auto* action : {quick, options}) {
+        action->setEnabled(thread && renderedChrome && renderedChrome->canControl);
+    }
+    menu.addSeparator();
     QAction* remove = menu.addAction(QStringLiteral("Remove this turn and all later turns…"));
     remove->setEnabled(reason.empty());
     remove->setToolTip(text(reason));
-    if (menu.exec(position) == remove && reason.empty()) {
+    const auto* selected = menu.exec(position);
+    if (selected == options) {
+        beginForkThreadDialog(thread, turn);
+    } else if (selected == quick) {
+        const auto draft = suggestedForkDraft(thread);
+        if (draft) {
+            forkThread(thread, *draft, false, turn);
+        } else {
+            showNotice(QStringLiteral("Thread state is busy; try Quick fork again."));
+        }
+    } else if (selected == remove && reason.empty()) {
         QMessageBox confirmation(
             QMessageBox::Warning,
             QStringLiteral("Remove conversation history?"),

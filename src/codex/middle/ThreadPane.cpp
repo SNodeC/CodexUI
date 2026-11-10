@@ -1770,131 +1770,123 @@ void ThreadPane::activateBrowserRow(ThreadTreeItem *item) {
   }
 }
 
-void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
-  const auto &source = project ? projects : sections;
-  const auto found = std::ranges::find(source, id, &ui::ThreadGroup::id);
-  const nlohmann::json fields =
-      found == source.end() ? nlohmann::json::object() : found->fields;
-  QDialog dialog(this);
-  dialog.setObjectName(QStringLiteral("threadGroupDialog"));
-  dialog.setWindowTitle(project ? QStringLiteral("Project")
-                                : QStringLiteral("Section"));
-  dialog.resize(520, project ? 480 : 300);
-  auto *layout = new QVBoxLayout(&dialog);
-  auto *form = new QFormLayout;
-  form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-  auto *name = new QLineEdit(text(fields.value("name", std::string{})));
-  name->setObjectName(QStringLiteral("groupName"));
-  name->setReadOnly(readOnly);
-  form->addRow(QStringLiteral("Name"), name);
-  if (readOnly && !id.empty()) {
-    auto *identifier = new QLineEdit(text(id));
-    identifier->setReadOnly(true);
-    identifier->setObjectName(QStringLiteral("groupId"));
-    form->addRow(QStringLiteral("ID"), identifier);
-  }
-  QPlainTextEdit *roots = nullptr;
-  QPlainTextEdit *description = nullptr;
-  if (project) {
-    roots = new UiStyle::DialogTextEdit;
-    roots->setObjectName(QStringLiteral("projectRoots"));
-    roots->setProperty("kind", "dialogEditor");
-    roots->setReadOnly(readOnly);
-    roots->setMaximumHeight(90);
-    QStringList paths;
-    for (const auto &root : fields.value("roots", nlohmann::json::array()))
-      paths.push_back(text(root.value("path", std::string{})));
-    roots->setPlainText(paths.join('\n'));
-    roots->setPlaceholderText(
-        QStringLiteral("Absolute workspace paths, one per line"));
-    form->addRow(QStringLiteral("Roots"), roots);
-    auto* addRoot = new QPushButton(QStringLiteral("Add root…"));
-    addRoot->setObjectName(QStringLiteral("addProjectRoot"));
-    addRoot->setAccessibleName(QStringLiteral("Add project workspace root"));
-    addRoot->setEnabled(!readOnly && canControl && bool(actions.manage));
-    form->addRow(QString{}, addRoot);
-    connect(addRoot, &QPushButton::clicked, &dialog, [&, roots] {
-        FileSelectionDialog selection({}, &dialog, {}, {}, actions.filesystem ? actions.filesystem() : FileSelectionDialog::Filesystem{});
-        if (selection.exec() == QDialog::Accepted && canControl && actions.manage && !roots->isReadOnly()) {
-            const auto path = selection.selectedDirectory();
-            const auto paths = roots->toPlainText().split('\n', Qt::SkipEmptyParts);
-            if (!paths.contains(path)) {
-                roots->appendPlainText(path);
+void ThreadPane::editGroup(bool project, std::string id, bool readOnly, nodegraph::NodeRef assignThread) {
+    const auto& source = project ? projects : sections;
+    const auto found = std::ranges::find(source, id, &ui::ThreadGroup::id);
+    const nlohmann::json fields = found == source.end() ? nlohmann::json::object() : found->fields;
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("threadGroupDialog"));
+    dialog.setWindowTitle(project ? QStringLiteral("Project") : QStringLiteral("Section"));
+    dialog.resize(520, project ? 480 : 300);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto* name = new QLineEdit(text(fields.value("name", std::string{})));
+    name->setObjectName(QStringLiteral("groupName"));
+    name->setReadOnly(readOnly);
+    form->addRow(QStringLiteral("Name"), name);
+    if (readOnly && !id.empty()) {
+        auto* identifier = new QLineEdit(text(id));
+        identifier->setReadOnly(true);
+        identifier->setObjectName(QStringLiteral("groupId"));
+        form->addRow(QStringLiteral("ID"), identifier);
+    }
+    QPlainTextEdit* roots = nullptr;
+    QPlainTextEdit* description = nullptr;
+    if (project) {
+        roots = new UiStyle::DialogTextEdit;
+        roots->setObjectName(QStringLiteral("projectRoots"));
+        roots->setProperty("kind", "dialogEditor");
+        roots->setReadOnly(readOnly);
+        roots->setMaximumHeight(90);
+        QStringList paths;
+        for (const auto& root : fields.value("roots", nlohmann::json::array()))
+            paths.push_back(text(root.value("path", std::string{})));
+        roots->setPlainText(paths.join('\n'));
+        roots->setPlaceholderText(QStringLiteral("Absolute workspace paths, one per line"));
+        form->addRow(QStringLiteral("Roots"), roots);
+        auto* addRoot = new QPushButton(QStringLiteral("Add root…"));
+        addRoot->setObjectName(QStringLiteral("addProjectRoot"));
+        addRoot->setAccessibleName(QStringLiteral("Add project workspace root"));
+        addRoot->setEnabled(!readOnly && canControl && bool(actions.manage));
+        form->addRow(QString{}, addRoot);
+        connect(addRoot, &QPushButton::clicked, &dialog, [&, roots] {
+            FileSelectionDialog selection(
+                {}, &dialog, {}, {}, actions.filesystem ? actions.filesystem() : FileSelectionDialog::Filesystem{});
+            if (selection.exec() == QDialog::Accepted && canControl && actions.manage && !roots->isReadOnly()) {
+                const auto path = selection.selectedDirectory();
+                const auto paths = roots->toPlainText().split('\n', Qt::SkipEmptyParts);
+                if (!paths.contains(path)) {
+                    roots->appendPlainText(path);
+                }
+            }
+        });
+        description = new UiStyle::DialogTextEdit;
+        description->setObjectName(QStringLiteral("projectDescription"));
+        description->setProperty("kind", "dialogEditor");
+        description->setReadOnly(readOnly);
+        const auto metadata = fields.value("metadata", nlohmann::json::object());
+        description->setPlainText(text(metadata.value(ProjectDescriptionKey, std::string{})));
+        form->addRow(QStringLiteral("Description"), description);
+        layout->addWidget(UiStyle::makeLabel(QStringLiteral("Descriptions organise work; they are not model instructions."), "muted"));
+        if (readOnly) {
+            auto* details = new QPlainTextEdit(text(fields.dump(2)));
+            details->setReadOnly(true);
+            details->setAccessibleName(QStringLiteral("Project metadata and timestamps"));
+            form->addRow(QStringLiteral("Metadata"), details);
+        }
+    } else {
+        layout->addWidget(UiStyle::makeLabel(QStringLiteral("Sections are shared across projects. Changes apply everywhere."), "muted"));
+    }
+    layout->addLayout(form, 1);
+    auto* error = UiStyle::makeLabel({}, "muted");
+    error->setWordWrap(true);
+    layout->addWidget(error);
+    auto* buttons = new QDialogButtonBox(readOnly ? QDialogButtonBox::Close : QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        const auto paths = roots ? roots->toPlainText().split('\n', Qt::SkipEmptyParts) : QStringList{};
+        if (canControl && actions.manage) {
+            if (name->text().trimmed().isEmpty()) {
+                error->setText(QStringLiteral("Enter a name."));
+            } else if (project && std::ranges::any_of(paths, [](const auto& path) {
+                           return !QDir::isAbsolutePath(path.trimmed());
+                       })) {
+                error->setText(QStringLiteral("Workspace roots must be absolute paths."));
+            } else if (assignThread && !std::ranges::any_of(rows, [&assignThread](const auto& entry) {
+                           return entry.second->target == assignThread;
+                       })) {
+                error->setText(QStringLiteral("The target thread is no longer available."));
+            } else {
+                nlohmann::json parameters{{"name", name->text().trimmed().toStdString()}};
+                if (project) {
+                    parameters["roots"] = nlohmann::json::array();
+                    for (const auto& path : paths) {
+                        parameters["roots"].push_back({{"path", path.trimmed().toStdString()}});
+                    }
+                    const auto value = description->toPlainText().toStdString();
+                    if (id.empty()) {
+                        parameters["metadata"] = {{ProjectDescriptionKey, value}};
+                        parameters["idempotencyKey"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+                    } else {
+                        parameters["projectId"] = id;
+                        parameters["description"] = value;
+                    }
+                } else if (!id.empty()) {
+                    parameters["sectionId"] = id;
+                }
+                if (assignThread) {
+                    parameters["threadId"] = assignThread->id().canonical;
+                }
+                using enum nodegraph::RuntimeActionKind;
+                actions.manage(project ? (id.empty() ? CreateProject : UpdateProject) : (id.empty() ? CreateSection : UpdateSection),
+                               std::move(parameters));
+                dialog.accept();
             }
         }
     });
-    description = new UiStyle::DialogTextEdit;
-    description->setObjectName(QStringLiteral("projectDescription"));
-    description->setProperty("kind", "dialogEditor");
-    description->setReadOnly(readOnly);
-    const auto metadata = fields.value("metadata", nlohmann::json::object());
-    description->setPlainText(
-        text(metadata.value(ProjectDescriptionKey, std::string{})));
-    form->addRow(QStringLiteral("Description"), description);
-    layout->addWidget(UiStyle::makeLabel(
-        QStringLiteral(
-            "Descriptions organise work; they are not model instructions."),
-        "muted"));
-    if (readOnly) {
-      auto *details = new QPlainTextEdit(text(fields.dump(2)));
-      details->setReadOnly(true);
-      details->setAccessibleName(
-          QStringLiteral("Project metadata and timestamps"));
-      form->addRow(QStringLiteral("Metadata"), details);
-    }
-  } else {
-    layout->addWidget(UiStyle::makeLabel(
-        QStringLiteral(
-            "Sections are shared across projects. Changes apply everywhere."),
-        "muted"));
-  }
-  layout->addLayout(form, 1);
-  auto *error = UiStyle::makeLabel({}, "muted");
-  error->setWordWrap(true);
-  layout->addWidget(error);
-  auto *buttons = new QDialogButtonBox(readOnly ? QDialogButtonBox::Close
-                                                : QDialogButtonBox::Save |
-                                                      QDialogButtonBox::Cancel);
-  layout->addWidget(buttons);
-  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-  connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-    if (!canControl || !actions.manage)
-      return;
-    if (name->text().trimmed().isEmpty()) {
-      error->setText(QStringLiteral("Enter a name."));
-      return;
-    }
-    nlohmann::json parameters{{"name", name->text().trimmed().toStdString()}};
-    if (project) {
-      parameters["roots"] = nlohmann::json::array();
-      for (const auto &path :
-           roots->toPlainText().split('\n', Qt::SkipEmptyParts)) {
-        if (!QDir::isAbsolutePath(path.trimmed())) {
-          error->setText(
-              QStringLiteral("Workspace roots must be absolute paths."));
-          return;
-        }
-        parameters["roots"].push_back({{"path", path.trimmed().toStdString()}});
-      }
-      const auto value = description->toPlainText().toStdString();
-      if (id.empty()) {
-        parameters["metadata"] = {{ProjectDescriptionKey, value}};
-        parameters["idempotencyKey"] =
-            QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-      } else {
-        parameters["projectId"] = id;
-        parameters["description"] = value;
-      }
-    } else if (!id.empty()) {
-        parameters["sectionId"] = id;
-    }
-    using enum nodegraph::RuntimeActionKind;
-    actions.manage(project ? (id.empty() ? CreateProject : UpdateProject)
-                           : (id.empty() ? CreateSection : UpdateSection),
-                   std::move(parameters));
-    dialog.accept();
-  });
-  dialog.exec();
+    dialog.exec();
 }
 
 void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
@@ -1972,6 +1964,11 @@ void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
     auto *assign = menu->addMenu(isProject ? QStringLiteral("Assign project")
                                            : QStringLiteral("Assign section"));
     assign->setEnabled(canControl && groupingAvailable);
+    assign->addAction(
+        isProject ? QStringLiteral("New project…") : QStringLiteral("New section…"), this, [this, isProject, target = item->target] {
+            editGroup(isProject, {}, false, target);
+        });
+    assign->addSeparator();
     for (const auto &destination : isProject ? projects : sections)
       assign->addAction(
           text(destination.label).replace("&", "&&"), this,

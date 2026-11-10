@@ -59,6 +59,7 @@ h1, h2, h3, p { margin: 0; }
 .thread-context-menu { position: fixed; z-index: 45; display: grid; min-width: 150px; padding: 5px; border: 1px solid var(--thread-menu-border); border-radius: 8px; background: var(--panel); }
 .thread-context-menu button { border: 0; border-radius: 5px; padding: 7px 9px; background: transparent; text-align: left; font-size: 11px; cursor: pointer; }
 .thread-context-menu button:hover, .thread-context-menu button:focus-visible { background: var(--menu-item-hover-surface); }
+.thread-context-menu > hr { margin: 4px 8px; border: 0; border-top: 1px solid var(--divider); }
 .thread-context-menu .danger { color: var(--destructive-text); }
 @media (hover: none) { .thread-menu-trigger { visibility: visible; } }
 .conversation-pane { --composer-overlay-height: 340px; position: relative; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--conversation-surface); }
