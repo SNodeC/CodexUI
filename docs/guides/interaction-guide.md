@@ -146,7 +146,7 @@ follows the bottom or is manually paused.
   selected thread or displayed conversation. That card retains its hover
   treatment until the non-blocking menu closes; dismissing the menu does not
   replay the closing click into another control.
-- The opening card of a turn has a **⋯** menu beside Copy. Choose **Remove this turn and all later turns…**, review the confirmation, and choose **Remove turns** to permanently remove that history. Earlier turns remain; file changes and commands already performed are not undone. This requires an idle, persistent thread with paginated history and controller access, with no pending prompts or conflicting thread operations. The menu belongs to the complete turn, including turns without a user message; steering messages do not repeat it.
+- The opening card of a turn has a **⋯** menu beside Copy. The first actions are **Quick fork from here** and **Fork from here with options…**, followed by a divider and **Remove this turn and all later turns…**. Both fork actions include the selected turn and earlier history, preserve the source, and reuse the thread fork defaults and options dialog. To remove history, choose **Remove this turn and all later turns…**, review the confirmation, and choose **Remove turns** to permanently remove that history. Earlier turns remain; file changes and commands already performed are not undone. This requires an idle, persistent thread with paginated history and controller access, with no pending prompts or conflicting thread operations. The menu belongs to the complete turn, including turns without a user message; steering messages do not repeat it.
 - Sending always targets the visibly selected thread. CodexUI validates the
   visible selection before dispatch and never creates a thread as an implicit
   fallback for missing or inconsistent selection state.
@@ -159,6 +159,7 @@ follows the bottom or is manually paused.
   authoritative thread ID, then sends `thread/name/set`. Blank, stale, or
   mismatched provider payloads never expose the ID as the title. The overlay
   retires only when the matching name acknowledgement arrives.
+- The **Assign project** and **Assign section** menus put **New project…** and **New section…** first, followed by a divider and the existing choices. Creation uses the existing form and assigns the context thread only after the app-server returns the new group ID. Cancelling sends nothing. Creation failure preserves the current membership; assignment failure is reported while the successfully created group remains available. Sections remain shared across projects.
 - The thread menu exposes `Quick fork` and `Fork with options…`. Quick fork inherits the source context. Fork with options opens the same workspace, name, base-instructions, developer-instructions, and temporary-thread fields as New thread; the generated name is editable. Both modes inherit the source project and section captured when the fork is submitted, including an unassigned project or section. Changing the workspace does not change that membership. Membership assignments are persisted through the app-server; a failed assignment is reported while the created fork remains usable.
 - Automatic fork names preserve lineage and choose the first unused direct
   child number. Repeated forks of `Original` become `Original (fork 1)`,

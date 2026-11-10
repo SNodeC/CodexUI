@@ -15,6 +15,7 @@ class QPaintEvent;
 class QPainter;
 class QRect;
 class QScrollArea;
+class QTextEdit;
 class QWidget;
 
 namespace codexui::UiStyle {
@@ -331,8 +332,7 @@ public:
   void revealFormFocus(QWidget *control);
 
 protected:
-  bool event(QEvent *event) override;
-  bool focusNextPrevChild(bool next) override;
+    bool event(QEvent* event) override;
 
 private:
   QScrollArea *scroll_;
@@ -362,9 +362,10 @@ protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-  QString wrappedText(int width) const;
-  QString summary_;
-  QLabel *details_;
+    void showDetails();
+    QString wrappedText(int width) const;
+    QString summary_;
+    QTextEdit* details_;
 };
 
 class ChevronComboBox final : public QComboBox {

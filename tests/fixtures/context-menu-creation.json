@@ -1,0 +1,10 @@
+[
+  {"kind":"project","failure":""},
+  {"kind":"section","failure":""},
+  {"kind":"project","failure":"create"},
+  {"kind":"section","failure":"create"},
+  {"kind":"project","failure":"assign"},
+  {"kind":"section","failure":"assign"},
+  {"kind":"project","failure":"retired-target"},
+  {"kind":"section","failure":"retired-target"}
+]

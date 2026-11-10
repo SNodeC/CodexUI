@@ -252,7 +252,9 @@ test("group creation forms disclose descriptions and section scope honestly", ()
     const project = renderToStaticMarkup(createElement(GroupDialog, {session, kind: "project", readOnly: false, onClose() {}}));
     const section = renderToStaticMarkup(createElement(GroupDialog, {session, kind: "section", readOnly: false, onClose() {}}));
     assert.match(project, /not model instructions/u); assert.match(project, /absolute app-server path/u);
-    assert.match(section, /Sections are shared across projects/u); assert.match(section, /Colour/u);
+    assert.match(section, /Sections are shared across projects/u);
+    assert.match(section, /Name<input/u);
+    assert.doesNotMatch(section, /Icon|Colour/u);
     session.dispose();
 });
 

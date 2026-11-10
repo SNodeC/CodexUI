@@ -3,20 +3,22 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QCursor>
 #include <QFontInfo>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QScreen>
+#include <QScrollArea>
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionToolButton>
-#include <QCursor>
-#include <QScreen>
-#include <QScrollArea>
-#include <QKeyEvent>
+#include <QTextDocument>
+#include <QTextEdit>
 #include <QWidget>
-
+#include <QtMath>
 #include <algorithm>
 #include <utility>
 
@@ -31,21 +33,20 @@ ScrollFormDialog::ScrollFormDialog(QWidget *parent)
     : QDialog(parent), scroll_(new QScrollArea(this)) {
   scroll_->setWidgetResizable(true);
   scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  connect(qApp, &QApplication::focusChanged, this, [this](QWidget*, QWidget* current) {
+      revealFormFocus(current);
+  });
 }
 
 bool ScrollFormDialog::event(QEvent *event) {
   const bool handled = QDialog::event(event);
+  if (event->type() == QEvent::Show) {
+      resize(size().boundedTo(screen()->availableGeometry().size() - QSize(32, 32)));
+  }
   // Qt lays out the dialog before delivering these geometry events.
   if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::Resize)
     revealFormFocus(focusWidget());
   return handled;
-}
-
-bool ScrollFormDialog::focusNextPrevChild(bool next) {
-  if (!QDialog::focusNextPrevChild(next))
-    return false;
-  revealFormFocus(focusWidget());
-  return true;
 }
 
 void ScrollFormDialog::revealFormFocus(QWidget *control) {
@@ -88,18 +89,22 @@ QLabel *makeLabel(QString value, const char *kind, QWidget *parent) {
   return label;
 }
 
-TokenUsageLabel::TokenUsageLabel(QWidget *parent) : QLabel(parent), details_(new QLabel(this, Qt::ToolTip)) {
-  setProperty("kind", "meta");
-  setProperty("tone", "strong");
-  setTextFormat(Qt::PlainText);
-  setFocusPolicy(Qt::StrongFocus);
-  QFont numericFont = font();
-  numericFont.setFeature(QFont::Tag("tnum"), 1);
-  setFont(numericFont);
-  details_->setObjectName(QStringLiteral("tokenUsageDetails"));
-  details_->setTextFormat(Qt::PlainText);
-  details_->setMargin(8);
-  qApp->installEventFilter(this);
+TokenUsageLabel::TokenUsageLabel(QWidget* parent)
+    : QLabel(parent)
+    , details_(new QTextEdit(this)) {
+    setProperty("kind", "meta");
+    setProperty("tone", "strong");
+    setTextFormat(Qt::PlainText);
+    setFocusPolicy(Qt::StrongFocus);
+    QFont numericFont = font();
+    numericFont.setFeature(QFont::Tag("tnum"), 1);
+    setFont(numericFont);
+    details_->setObjectName(QStringLiteral("tokenUsageDetails"));
+    details_->setWindowFlags(Qt::ToolTip);
+    details_->setReadOnly(true);
+    details_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    details_->document()->setDocumentMargin(8);
+    qApp->installEventFilter(this);
 }
 
 TokenUsageLabel::~TokenUsageLabel() { qApp->removeEventFilter(this); }
@@ -110,8 +115,10 @@ void TokenUsageLabel::setUsage(QString summary, QString details) {
   setToolTip(details);
   setAccessibleName(summary_.section(QStringLiteral(" | "), 0, 0));
   setAccessibleDescription(details);
-  details_->setText(details);
-  details_->adjustSize();
+  details_->setPlainText(details);
+  if (details_->isVisible()) {
+      showDetails();
+  }
   setText(wrappedText(contentsRect().width()));
   updateGeometry();
 }
@@ -141,18 +148,30 @@ int TokenUsageLabel::heightForWidth(int width) const {
   return (wrappedText(width).count(QLatin1Char('\n')) + 1) * fontMetrics().lineSpacing();
 }
 
+void TokenUsageLabel::showDetails() {
+    const QRect available = screen()->availableGeometry().adjusted(8, 8, -8, -8);
+    int width = 0;
+    for (const auto& line : details_->toPlainText().split('\n')) {
+        width = std::max(width, details_->fontMetrics().horizontalAdvance(line));
+    }
+    details_->setFixedWidth(std::min(width + 40, available.width()));
+    details_->document()->setTextWidth(details_->viewport()->width());
+    details_->setFixedHeight(std::min(qCeil(details_->document()->size().height()) + 24, available.height()));
+    QPoint position = mapToGlobal(rect().bottomLeft());
+    position.setX(std::clamp(position.x(), available.left(), available.right() - details_->width() + 1));
+    position.setY(std::clamp(position.y(), available.top(), available.bottom() - details_->height() + 1));
+    details_->move(position);
+    details_->show();
+    return;
+}
+
 bool TokenUsageLabel::eventFilter(QObject *watched, QEvent *event) {
   const auto type = event->type();
   if (watched == this) {
     if (type == QEvent::ToolTip || type == QEvent::FocusIn) {
-      const QRect screen = this->screen()->availableGeometry();
-      QPoint position = mapToGlobal(rect().bottomLeft());
-      position.setX(std::clamp(position.x(), screen.left(), std::max(screen.left(), screen.right() - details_->width())));
-      if (position.y() + details_->height() > screen.bottom())
-        position.setY(mapToGlobal(QPoint{}).y() - details_->height());
-      details_->move(position);
-      details_->show();
-      if (type == QEvent::ToolTip) return true;
+        showDetails();
+        if (type == QEvent::ToolTip)
+            return true;
     }
     if (type == QEvent::Hide || type == QEvent::FocusOut)
       details_->hide();
@@ -716,7 +735,7 @@ QString applicationStyleSheet() {
             background: %{divider};
             margin: 4px 8px;
         }
-        QToolTip, QLabel#tokenUsageDetails { background: %{panel}; color: %{primary}; border: 1px solid %{dividerStrong}; border-radius: 6px; padding: 5px; }
+        QToolTip, QTextEdit#tokenUsageDetails { background: %{panel}; color: %{primary}; border: 1px solid %{dividerStrong}; border-radius: 6px; padding: 5px; }
     )QSS");
   // Stringization keeps QSS placeholders named and order-independent.
   // clang-format off

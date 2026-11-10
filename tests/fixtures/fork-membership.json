@@ -9,5 +9,7 @@
   {"name":"section-first", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true, "reverse":true},
   {"name":"source-moved", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":false, "moveSource":true},
   {"name":"project-rejection", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":false, "reject":"project"},
-  {"name":"section-rejection", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true, "reject":"section"}
+  {"name":"section-rejection", "projectId":"source-project", "sectionId":"source-section", "forkProjectId":"workspace-project", "forkSectionId":"", "options":true, "reject":"section"},
+  {"name":"turn-quick","options":false,"projectId":"source-project","sectionId":"source-section","forkProjectId":"","forkSectionId":"","lastTurnId":"middle"},
+  {"name":"turn-options","options":true,"projectId":"source-project","sectionId":"source-section","forkProjectId":"","forkSectionId":"","lastTurnId":"middle"}
 ]

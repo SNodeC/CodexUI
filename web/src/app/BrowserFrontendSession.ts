@@ -655,11 +655,27 @@ export class BrowserFrontendSession {
             ephemeral: source?.raw.ephemeral === true,
         };
     }
-    forkThread(threadId: string, draft?: NewThreadDraft, presentationKey?: string): void {
-        if (this.matchesThreadPresentation(threadId, presentationKey)) {
+    forkUnavailable(threadId: string, presentationKey?: string, lastTurnId?: string, expectedTurn?: object): string {
+        let reason = "";
+        const thread = this.model.thread(threadId);
+        if (!thread || !this.matchesThreadPresentation(threadId, presentationKey)
+            || (lastTurnId !== undefined && (!expectedTurn || thread.turns.get(lastTurnId) !== expectedTurn))) {
+            reason = "The selected thread or turn is no longer available.";
+        } else if (!this.canSubmit()) {
+            reason = "Forking requires a ready provider and controller access.";
+        } else if (this.operationPending("thread.fork", threadId) || this.operationPending("thread.revert", threadId)) {
+            reason = "Wait for the pending thread operation to finish.";
+        }
+        return reason;
+    }
+    forkThread(threadId: string, draft?: NewThreadDraft, presentationKey?: string, lastTurnId?: string, expectedTurn?: object): void {
+        const reason = this.forkUnavailable(threadId, presentationKey, lastTurnId, expectedTurn);
+        if (reason !== "") {
+            this.setNotice(reason);
+        } else {
             const {projectId = "", sectionId = ""} = this.model.thread(threadId) ?? {};
             const requestedName = draft?.ephemeral ? "" : (draft?.name.trim() || this.forkDraft(threadId).name);
-            const parameters: JsonObject = {threadId, excludeTurns: true};
+            const parameters: JsonObject = {threadId, excludeTurns: true, ...(lastTurnId ? {lastTurnId} : {})};
             if (draft) {
                 if (draft.workspace.trim() !== "") {
                     parameters.cwd = draft.workspace.trim();
@@ -1271,35 +1287,52 @@ export class BrowserFrontendSession {
         });
     }
     groupingAvailable(): boolean { return !this.unsupportedCatalogs.size; }
-    async manageGroup(action: Extract<Action, `project.${string}` | `section.${string}`>, parameters: JsonObject, target?: WorkspaceGroup): Promise<boolean> {
-        if (!this.canSubmit()) return false;
+    async manageGroup(action: Extract<Action, `project.${string}` | `section.${string}`>, parameters: JsonObject, target?: WorkspaceGroup, assignTarget?: {threadId: string; presentationKey: string}): Promise<boolean> {
+        let saved = false;
         const key = `${action}:${stringMember(parameters, "projectId") || stringMember(parameters, "sectionId")}`;
-        if (this.pendingUserOperations.has(key)) return false;
         const groups = action.startsWith("project.") ? this.model.projects : this.model.sections;
         const id = stringMember(parameters, "projectId") || stringMember(parameters, "sectionId");
         const expected = target ?? groups.get(id);
         const current = () => !expected || groups.get(id) === expected;
-        if (!current()) return false;
-        const identity = {}; this.pendingUserOperations.set(key, identity); this.publish();
-        const epoch = this.lifecycleEpoch;
-        try {
-            if (action === "project.update") {
-                const fresh = await this.requestPromise("project.read", {projectId: parameters.projectId}, current);
-                if (epoch !== this.lifecycleEpoch || !current() || !this.canSubmit() || !fresh.ok) {
-                    if (!fresh.stale) this.setNotice(`Project update failed: ${this.errorMessage(fresh)}`); return false;
+        if (this.canSubmit() && !this.pendingUserOperations.has(key) && current()
+            && (!assignTarget || this.matchesThreadPresentation(assignTarget.threadId, assignTarget.presentationKey))) {
+            const identity = {}; this.pendingUserOperations.set(key, identity); this.publish();
+            const epoch = this.lifecycleEpoch;
+            try {
+                const fresh = action === "project.update" ? await this.requestPromise("project.read", {projectId: parameters.projectId}, current) : undefined;
+                if (fresh && (epoch !== this.lifecycleEpoch || !current() || !this.canSubmit() || !fresh.ok)) {
+                    if (!fresh.stale) { this.setNotice(`Project update failed: ${this.errorMessage(fresh)}`); }
+                } else {
+                    if (fresh) {
+                        const metadata = member(member(fresh.data, "project", {}), "metadata", {});
+                        const {description, ...update} = parameters;
+                        parameters = {...update, metadata: {...(isObject(metadata) ? metadata : {}), "codexui.description": description}};
+                    }
+                    const response = await this.requestPromise(action, parameters, current);
+                    if (!response.stale && epoch === this.lifecycleEpoch) {
+                        if (!response.ok) {
+                            this.setNotice(this.errorMessage(response));
+                        } else {
+                            saved = true;
+                            if (assignTarget && action.endsWith(".create")) {
+                                const kind = action.startsWith("project.") ? "project" : "section";
+                                const createdId = stringMember(member(response.data, kind, {}), "id");
+                                if (createdId !== "" && this.matchesThreadPresentation(assignTarget.threadId, assignTarget.presentationKey)) {
+                                    void this.assignThreadGroup(assignTarget.threadId, kind, createdId);
+                                } else {
+                                    this.setNotice("Group created, but assignment could not be sent. Use Assign project or Assign section to retry.");
+                                }
+                            }
+                            this.refreshBrowser();
+                        }
+                    }
                 }
-                const metadata = member(member(fresh.data, "project", {}), "metadata", {});
-                const {description, ...update} = parameters;
-                parameters = {...update, metadata: {...(isObject(metadata) ? metadata : {}), "codexui.description": description}};
+            } finally {
+                if (this.pendingUserOperations.get(key) === identity) { this.pendingUserOperations.delete(key); }
+                this.schedulePublish();
             }
-            const response = await this.requestPromise(action, parameters, current);
-            if (response.stale || epoch !== this.lifecycleEpoch) return false;
-            if (!response.ok) { this.setNotice(this.errorMessage(response)); return false; }
-            this.refreshBrowser(); return true;
-        } finally {
-            if (this.pendingUserOperations.get(key) === identity) this.pendingUserOperations.delete(key);
-            this.schedulePublish();
         }
+        return saved;
     }
     async assignThreadGroup(threadId: string, kind: "project" | "section", id: string, beforeThreadId?: string,
         prerequisite?: Promise<boolean>): Promise<boolean> {
@@ -1343,9 +1376,10 @@ export class BrowserFrontendSession {
             if (thread) { thread.raw.historyStale = true; }
         }
         this.publish();
-        const expectedTurn = this.model.thread(threadId)?.turns.get(stringMember(parameters, "beforeTurnId"));
+        const boundary = stringMember(parameters, "lastTurnId") || stringMember(parameters, "beforeTurnId");
+        const expectedTurn = this.model.thread(threadId)?.turns.get(boundary);
         const current = () => this.matchesThreadPresentation(threadId, targetKey)
-            && (keyAction !== "thread.revert" || this.model.thread(threadId)?.turns.get(stringMember(parameters, "beforeTurnId")) === expectedTurn);
+            && ((keyAction !== "thread.revert" && !(keyAction === "thread.fork" && boundary)) || this.model.thread(threadId)?.turns.get(boundary) === expectedTurn);
         const operation = (keyAction === "thread.workspace" || keyAction === "thread.revert") && this.model.thread(threadId)?.status.semantic === "notLoaded"
             ? this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current).then(response => {
                 let result: OperationResponse | Promise<OperationResponse> = response;

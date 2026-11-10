@@ -14,6 +14,7 @@
 #include <QMenu>
 #include <QMimeDatabase>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStyle>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -21,7 +22,7 @@
 namespace codexui::codex {
     FileSelectionDialog::FileSelectionDialog(
         QString initialDirectory, QWidget* parent, QString targetTitle, QStringList choices, Filesystem filesystem, bool files)
-        : QDialog(parent)
+        : ScrollFormDialog(parent)
         , filesystem(std::move(filesystem))
         , serverDirectory(initialDirectory.isEmpty() ? QStringLiteral("/") : initialDirectory)
         , localDirectory(QDir::homePath())
@@ -30,13 +31,16 @@ namespace codexui::codex {
         setWindowTitle(files ? "Attach files" : targetTitle.isEmpty() ? "Select app-server workspace" : "Change workspace…");
         setMinimumWidth(360);
         resize(640, 480);
-        auto* root = new QVBoxLayout(this);
+        auto* layout = new QVBoxLayout(this);
+        auto* content = new QWidget;
+        auto* root = new QVBoxLayout(content);
+        formScrollArea()->setWidget(content);
+        layout->addWidget(formScrollArea(), 1);
         auto* heading = new QLabel(windowTitle());
         heading->setProperty("kind", "heading");
         root->addWidget(heading);
         if (!targetTitle.isEmpty()) {
-            auto* target = new QLabel(targetTitle);
-            target->setTextFormat(Qt::PlainText);
+            auto* target = UiStyle::makeLabel(targetTitle, "body");
             root->addWidget(target);
         }
         if (files) {
@@ -48,13 +52,14 @@ namespace codexui::codex {
             source->setCurrentIndex(1);
             root->addWidget(source);
         }
-        status = new QLabel;
-        status->setWordWrap(true);
+        status = UiStyle::makeLabel({}, "body");
         status->setAccessibleName("Selection location and status");
         root->addWidget(status);
         auto* path = new QComboBox;
         path->setObjectName("workspaceRoots");
         path->setEditable(true);
+        path->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        path->setMinimumContentsLength(12);
         path->addItems(choices);
         location = path->lineEdit();
         location->setObjectName("codexWorkspaceDirectory");
@@ -87,7 +92,7 @@ namespace codexui::codex {
         auto* footer = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         acceptButton = footer->button(QDialogButtonBox::Ok);
         acceptButton->setProperty("kind", "primary");
-        root->addWidget(footer);
+        layout->addWidget(footer);
         connect(footer, &QDialogButtonBox::rejected, this, &QDialog::reject);
         connect(footer, &QDialogButtonBox::accepted, this, [this] {
             if (this->files && !localFiles() && this->filesystem) {

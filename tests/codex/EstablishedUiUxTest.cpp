@@ -50,6 +50,8 @@
 #include <QStyleFactory>
 #include <QTemporaryDir>
 #include <QTextCursor>
+#include <QTextDocument>
+#include <QTextEdit>
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
@@ -821,6 +823,31 @@ bool workspaceAndSocketSelectionContract() {
         }
     };
 
+    for (const int points : {10, 16}) {
+        const QString longPath = "/server/" + QString("long-directory/").repeated(60);
+        FileSelectionDialog constrained(longPath, nullptr, QString("Long target thread ").repeated(30), {longPath});
+        QFont font = constrained.font();
+        font.setPointSize(points);
+        constrained.setFont(font);
+        constrained.resize(640, 320);
+        constrained.show();
+        QCoreApplication::processEvents();
+        result &= expect(constrained.width() <= 640 && constrained.height() <= 320,
+                         "long targets and root choices do not impose a dialog width or height floor");
+        auto* path = constrained.findChild<QLineEdit*>("codexWorkspaceDirectory");
+        path->setFocus();
+        QCoreApplication::processEvents();
+        result &= expect(path->isVisible() && constrained.selectedDirectory() == longPath,
+                         "constrained pickers preserve the complete editable server path");
+        result &= expect(constrained.rect().contains(QRect(path->mapTo(&constrained, QPoint{}), path->size())),
+                         "long choices keep the actual path editor within the dialog viewport");
+        for (auto* button : constrained.findChildren<QPushButton*>()) {
+            if (button->isVisible()) {
+                result &= expect(constrained.rect().contains(QRect(button->mapTo(&constrained, QPoint{}), button->size())),
+                                 "long choices keep navigation and footer actions reachable");
+            }
+        }
+    }
     const QStringList choices{QStringLiteral("/project/first"), QStringLiteral("/project/second")};
     for (const auto& roots : {QStringList{}, choices}) {
         FileSelectionDialog dialog(QStringLiteral("/remote/manual"), nullptr, QStringLiteral("Target thread"), roots);
@@ -1448,6 +1475,17 @@ bool controlsRetainUsableGeometryAndAuthority() {
                              control->height() >= control->minimumSizeHint().height(),
                          "settings respect font-dependent control geometry");
       }
+    }
+    auto* more = settings.findChild<QToolButton*>("codexMoreSettings");
+    auto* profile = settings.findChild<QComboBox*>("codexPermissionProfile");
+    auto* reviewer = settings.findChild<QComboBox*>("codexReviewer");
+    auto* contents = profile->parentWidget()->parentWidget();
+    for (const int width : {640, 360, 640}) {
+        contents->resize(width, contents->layout()->heightForWidth(width));
+        contents->layout()->activate();
+        result &= expect(profile->width() >= profile->minimumSizeHint().width() && reviewer->width() >= reviewer->minimumSizeHint().width(),
+                         "More settings reflow without clipping enlarged controls");
+        result &= expect(more->menu()->actions().size() == 1, "More uses the existing controls through its single widget action");
     }
     ComposerPane composer;
     composer.resize(700, composer.sizeHint().height());
@@ -2256,7 +2294,7 @@ bool tokenDetailsRemainVisible() {
   QCoreApplication::processEvents();
   QHelpEvent help(QEvent::ToolTip, label.rect().center(), label.mapToGlobal(label.rect().center()));
   QApplication::sendEvent(&label, &help);
-  auto *details = label.findChild<QLabel *>(QStringLiteral("tokenUsageDetails"));
+  auto* details = label.findChild<QTextEdit*>(QStringLiteral("tokenUsageDetails"));
   bool result = expect(details && details->isVisible(), "token details open on hover");
   if (!details) return false;
   if (qEnvironmentVariableIsSet("CODEXUI_CAPTURE_HEADER"))
@@ -2285,9 +2323,21 @@ bool tokenDetailsRemainVisible() {
   result &= expect(details->isVisible() && label.accessibleName() == "Tokens 100",
                    "keyboard focus opens details with the unchanged token accessibility name");
   label.setUsage("Tokens 200 | In 160 | Out 40", "Total: 200\nInput: 160\nOutput: 40");
-  result &= expect(details->isVisible() && details->text().contains("Total: 200") &&
-                       label.accessibleName() == "Tokens 200",
+  result &= expect(details->isVisible() && details->toPlainText().contains("Total: 200") && label.accessibleName() == "Tokens 200",
                    "visible details and accessibility update with the latest usage");
+  QFont enlarged = label.font();
+  enlarged.setPointSize(24);
+  details->setFont(enlarged);
+  const QString extreme =
+      QString("Input tokens: 18,446,744,073,709,551,615 cached and 18,446,744,073,709,551,615 uncached\n").repeated(200);
+  label.move(label.screen()->availableGeometry().bottomRight() - QPoint(20, 20));
+  label.setUsage("Tokens maximum", extreme);
+  QApplication::sendEvent(&label, &focus);
+  QCoreApplication::processEvents();
+  result &= expect(label.screen()->availableGeometry().contains(details->geometry()) && details->toPlainText() == extreme,
+                   "enlarged token details remain entirely on screen without losing text");
+  result &= expect(details->verticalScrollBar()->maximum() > 0, "long token details expose native scrolling rather than clipping content");
+  details->verticalScrollBar()->setValue(details->verticalScrollBar()->maximum());
   QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
   QApplication::sendEvent(&label, &escape);
   result &= expect(!details->isVisible(), "Escape dismisses keyboard-opened details");

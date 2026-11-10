@@ -887,6 +887,7 @@ struct RequestOutcome final {
   std::string turnId;
   std::string nextCursor;
   bool stale = false;
+  std::string groupId{};
 };
 
 std::vector<std::string>
@@ -914,15 +915,14 @@ void identifyResultEntities(RequestOutcome &outcome) {
   outcome.turnId = exactStringFromValue(valueMember(outcome.payload, "turnId"));
   outcome.nextCursor =
       exactStringFromValue(valueMember(outcome.payload, "nextCursor"));
-  if (const nodegraph::Value *thread = valueMember(outcome.payload, "thread")) {
-    if (const nodegraph::Value::Object *object = thread->asObject())
-      if (outcome.threadId.empty())
-        outcome.threadId = exactStringFromValue(valueMember(*object, "id"));
-  }
-  if (const nodegraph::Value *turn = valueMember(outcome.payload, "turn")) {
-    if (const nodegraph::Value::Object *object = turn->asObject())
-      if (outcome.turnId.empty())
-        outcome.turnId = exactStringFromValue(valueMember(*object, "id"));
+  for (const auto& [key, id] : std::array{std::pair{"thread", &outcome.threadId},
+                                          std::pair{"turn", &outcome.turnId},
+                                          std::pair{"project", &outcome.groupId},
+                                          std::pair{"section", &outcome.groupId}}) {
+      const auto* value = valueMember(outcome.payload, key);
+      if (id->empty() && value && value->asObject()) {
+          *id = exactStringFromValue(valueMember(*value->asObject(), "id"));
+      }
   }
 }
 
@@ -2893,17 +2893,26 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
         const nodegraph::Value *value = valueMember(threadState->fields, name);
         return value && value->asBool() && *value->asBool();
       };
+      const auto lastTurnId = exactStringFromValue(valueMember(action.payload, "lastTurnId"));
+      bool forkBoundaryAvailable = lastTurnId.empty();
       bool historyRemovalPending = true;
       if (auto read = graph.tryRead()) {
+          if (threadState && !lastTurnId.empty()) {
+              const auto turn =
+                  read->find(nodegraph::scopedTurnNodeId(nodegraph::protocolCanonicalId(*threadState, action.target), lastTurnId));
+              forkBoundaryAvailable =
+                  turn && read->parent(turn) == action.target && !nodegraph::boolFromValue(valueMember(*read->state(turn), "local"));
+          }
           historyRemovalPending =
               std::ranges::any_of(read->related(action.target, nodegraph::RelationKind::PendingOperation), [&read](const auto& operation) {
                   return exactStringFromValue(valueMember(*read->state(operation), "method")) == "thread/revert";
               });
       }
-      if (!threadState || stateFlag("local") || stateFlag("recoveryOnly") || historyRemovalPending) {
+      if (!threadState || stateFlag("local") || stateFlag("recoveryOnly") || historyRemovalPending ||
+          (action.kind == Fork && !forkBoundaryAvailable)) {
           rejectNodeAction(action,
                            historyRemovalPending ? "Wait for history removal to finish before changing this thread."
-                                                 : "The selected thread is no longer available");
+                                                 : "The selected thread or turn is no longer available");
           return;
       }
       const bool archived = stateFlag("archived");
@@ -3256,26 +3265,53 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
     if (!sdk.providerReady() || !sdk.isController()) {
       showNotice(
           "Controller authority changed. No organisation change was sent.");
-      return;
+    } else {
+        const bool project = Operation::method == "project/create";
+        const bool creating = project || Operation::method == "threadSection/create";
+        const auto assignId = creating ? parameters.value("threadId", "") : std::string{};
+        const auto assignTarget = currentNode({nodegraph::NodeKind::Thread, assignId});
+        if (creating) {
+            parameters.erase("threadId");
+        }
+        const auto completed = [&](RequestOutcome outcome) {
+            if (!outcome.stale && !outcome.ok) {
+                showNotice(outcome.error);
+            }
+            if (!outcome.stale && outcome.ok) {
+                // Responses/notifications own membership.
+                // Refresh the already opened queries only; do
+                // not crawl unopened groups after a mutation.
+                std::vector<std::string> keys;
+                for (const auto& [key, page] : browserPages) {
+                    if (!page.unsupported) {
+                        keys.push_back(key);
+                    }
+                }
+                for (const auto& key : keys) {
+                    queueBrowserPage(key, true);
+                }
+            }
+        };
+        dispatchRequest<Operation>(
+            sdk, std::move(parameters), workerLogic, {}, [&, project, assignId, assignTarget, completed](RequestOutcome outcome) {
+                completed(outcome);
+                if (outcome.ok && !outcome.stale && !assignId.empty()) {
+                    const auto& id = outcome.groupId;
+                    if (id.empty() || !assignTarget || currentNode(assignTarget->id()) != assignTarget || !sdk.isController() ||
+                        !sdk.providerReady()) {
+                        showNotice("Group created, but assignment could not be sent. Use Assign project or Assign section to retry.");
+                    } else {
+                        using namespace codex::generated::client_requests;
+                        const nlohmann::json assignment{{"threadId", assignId}, {project ? "projectId" : "sectionId", id}};
+                        if (project) {
+                            dispatchRequest<ThreadMetadataUpdate>(sdk, assignment, workerLogic, assignTarget, completed);
+                        } else {
+                            dispatchRequest<ThreadSectionMove>(sdk, assignment, workerLogic, assignTarget, completed);
+                        }
+                    }
+                }
+            });
     }
-    dispatchRequest<Operation>(sdk, std::move(parameters), workerLogic, {},
-                               [&](RequestOutcome outcome) {
-                                 if (outcome.stale)
-                                   return;
-                                 if (!outcome.ok) {
-                                   showNotice(outcome.error);
-                                   return;
-                                 }
-                                 // Responses/notifications own membership.
-                                 // Refresh the already opened queries only; do
-                                 // not crawl unopened groups after a mutation.
-                                 std::vector<std::string> keys;
-                                 for (const auto &[key, page] : browserPages)
-                                   if (!page.unsupported)
-                                     keys.push_back(key);
-                                 for (const auto &key : keys)
-                                   queueBrowserPage(key, true);
-                               });
   };
   const auto dispatchRuntimeAction = [&](nodegraph::RuntimeAction action) {
     using enum nodegraph::RuntimeActionKind;

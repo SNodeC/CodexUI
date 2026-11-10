@@ -287,31 +287,66 @@ bool groupLabelsIdentifyDestinationsWithoutRoutineIds() {
         continue;
       const auto &groups = project ? snapshot->projects : snapshot->sections;
       auto *submenu = action->menu();
-      passed &= require(submenu && submenu->actions().size() == groups.size(),
-                        "assignment menus retain every destination");
-      if (!submenu || submenu->actions().size() != groups.size())
-        continue;
+      passed &= require(submenu && submenu->actions().size() == groups.size() + 2, "assignment menus retain every destination");
+      if (!submenu || submenu->actions().size() != groups.size() + 2)
+          continue;
+      passed &= require(submenu->actions().at(0)->text() == (project ? "New project…" : "New section…") &&
+                            submenu->actions().at(1)->isSeparator(),
+                        "creation is first, separated from existing destinations");
       for (std::size_t i = 0; i < groups.size(); ++i) {
-        auto *entry = submenu->actions().at(i);
-        const auto &group = groups[i];
-        passed &=
-            require(entry->text() ==
-                        QString::fromStdString(group.label).replace("&", "&&"),
-                    "menu uses the same label as the sidebar and preserves "
-                    "literal ampersands");
-        entry->trigger();
-        passed &= require(
-            !mutations.empty() &&
-                mutations.back().first ==
-                    (project ? RuntimeActionKind::AssignProject
-                             : RuntimeActionKind::AssignSection) &&
-                mutations.back().second.value(
-                    project ? "projectId" : "sectionId", "") == group.id,
-            "disambiguated actions still target the full canonical ID");
+          auto* entry = submenu->actions().at(i + 2);
+          const auto& group = groups[i];
+          passed &= require(entry->text() == QString::fromStdString(group.label).replace("&", "&&"),
+                            "menu uses the same label as the sidebar and preserves "
+                            "literal ampersands");
+          entry->trigger();
+          passed &= require(!mutations.empty() &&
+                                mutations.back().first == (project ? RuntimeActionKind::AssignProject : RuntimeActionKind::AssignSection) &&
+                                mutations.back().second.value(project ? "projectId" : "sectionId", "") == group.id,
+                            "disambiguated actions still target the full canonical ID");
       }
     }
     if (menu)
       menu->close();
+  }
+  for (bool project : {true, false}) {
+      for (bool cancel : {true, false}) {
+          menu = openMenu(threadItem(tree, "label-thread"));
+          QAction* create = nullptr;
+          if (menu) {
+              for (auto* action : menu->actions()) {
+                  if (action->text() == (project ? "Assign project" : "Assign section")) {
+                      create = action->menu()->actions().front();
+                  }
+              }
+          }
+          passed &= require(create != nullptr, "fresh creation action is reachable");
+          const auto count = mutations.size();
+          if (create) {
+              QTimer::singleShot(0, &pane, [&pane, cancel, &passed] {
+                  auto* dialog = pane.findChild<QDialog*>("threadGroupDialog");
+                  passed &= require(dialog != nullptr, "assignment opens the existing creation dialog");
+                  if (dialog) {
+                      if (cancel) {
+                          dialog->reject();
+                      } else {
+                          dialog->findChild<QLineEdit*>("groupName")->setText("Created from assignment");
+                          dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+                      }
+                  }
+              });
+              create->trigger();
+          }
+          passed &= require(mutations.size() == count + (cancel ? 0 : 1), "creation cancellation preserves assignments");
+          if (!cancel && mutations.size() > count) {
+              passed &= require(mutations.back().first == (project ? RuntimeActionKind::CreateProject : RuntimeActionKind::CreateSection) &&
+                                    mutations.back().second.value("threadId", "") == "label-thread",
+                                "creation retains the context thread for assignment after success");
+          }
+          if (menu) {
+              menu->close();
+          }
+      }
   }
   for (const auto *groups : {&snapshot->projects, &snapshot->sections})
     for (const auto &group : *groups) {
@@ -666,6 +701,25 @@ bool groupedThreadsPreserveIdentityAndInteractions() {
     return false;
   const auto *standalone = threadItem(tree, "standalone-section");
   const auto *ungrouped = threadItem(tree, "ungrouped-thread");
+  if (standalone && standalone->childCount()) {
+      const bool expanded = standalone->isExpanded();
+      tree->expandItem(standalone);
+      QApplication::processEvents();
+      const auto sectionMember = tree->visualItemRect(standalone->child(0));
+      const auto bodies = tree->findChildren<QTreeView*>(QStringLiteral("projectThreadBody"));
+      const auto projectRow =
+          bodies.isEmpty() ? QRect{} : bodies.front()->visualRect(bodies.front()->model()->index(0, 0, bodies.front()->rootIndex()));
+      passed &= require(projectRow.isValid() && sectionMember.height() == projectRow.height() &&
+                            sectionMember.height() >= tree->fontMetrics().height(),
+                        "standalone and project members share actual compact geometry without clipping their font");
+      passed &= require(tree->visualItemRect(standalone).height() == sectionMember.height() + UiStyle::projectCardEdgePadding,
+                        "expanded section headers reserve only the card's top padding before their first member");
+      const auto* last = standalone->child(standalone->childCount() - 1);
+      passed &= require(tree->visualItemRect(last).height() == sectionMember.height() + UiStyle::projectCardEdgePadding,
+                        "the terminal section row owns the enclosing card's bottom padding");
+      tree->setExpanded(tree->indexFromItem(standalone), expanded);
+  }
+
   for (const auto* id : {"shared-section", "standalone-section"}) {
       const auto tooltip = threadItem(tree, id)->data(0, Qt::ToolTipRole).toString();
       passed &= require(!tooltip.contains("star") && !tooltip.contains("folder") && !tooltip.contains("appearance"),

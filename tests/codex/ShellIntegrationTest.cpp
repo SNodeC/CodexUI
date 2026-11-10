@@ -6827,6 +6827,52 @@ void turnRemovalConfirmationTargetsTheCapturedTurn(Configuration& configuration)
     markThreadReady(session, worker, "other-menu-thread");
     spin();
     static_cast<void>(takeQtMessages(channels));
+    for (int mode = 0; mode < 3; ++mode) {
+        auto* button = shell.findChild<QToolButton*>(QStringLiteral("turnMenuButton"));
+        QTimer::singleShot(0, &shell, [&, mode] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            require(menu && menu->actions().size() == 4, "turn fork menu opens");
+            if (mode != 0) {
+                QTimer::singleShot(0, &shell, [&, mode] {
+                    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    require(dialog && dialog->windowTitle() == "Fork with options", "turn fork reuses the options dialog");
+                    if (dialog) {
+                        if (mode == 1) {
+                            dialog->reject();
+                        } else {
+                            for (auto* input : dialog->findChildren<QLineEdit*>()) {
+                                if (input->placeholderText() == "App-server directory path") {
+                                    input->setText("/turn-fork-workspace");
+                                }
+                            }
+                            dialog->accept();
+                        }
+                    }
+                });
+            }
+            if (menu) {
+                menu->setActiveAction(menu->actions().at(mode == 0 ? 0 : 1));
+                QKeyEvent activate(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QApplication::sendEvent(menu, &activate);
+            }
+        });
+        if (button) {
+            button->click();
+        }
+        const auto forkMessages = takeQtMessages(channels);
+        int forks = 0;
+        for (const auto& message : forkMessages) {
+            if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::Fork) {
+                ++forks;
+                require(action->target->id().canonical == "turn-menu" &&
+                            exactStringFromValue(valueMember(action->payload, "lastTurnId")) == "selected" &&
+                            action->payload.contains("cwd") == (mode == 2),
+                        "both turn fork modes retain the selected inclusive boundary and their option semantics");
+            }
+        }
+        require(forks == (mode == 1 ? 0 : 1), "cancelling turn fork options dispatches nothing");
+        require(selectThread(list, "turn-menu"), "forking leaves the source selected until its result");
+    }
     for (int scenario = 0; scenario < 5; ++scenario) {
         if (scenario == 1) {
             shell.resize(1050, 700);
@@ -6841,17 +6887,20 @@ void turnRemovalConfirmationTargetsTheCapturedTurn(Configuration& configuration)
         if (button) {
             QTimer::singleShot(0, &shell, [&, scenario] {
                 auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
-                require(menu && menu->actions().size() == 1 && menu->actions().front()->isEnabled(),
-                        "turn menu exposes one eligible removal action");
+                require(menu && menu->actions().size() == 4 && menu->actions().at(0)->text() == "Quick fork from here" &&
+                            menu->actions().at(1)->text() == "Fork from here with options…" && menu->actions().at(2)->isSeparator() &&
+                            menu->actions().back()->text() == "Remove this turn and all later turns…" &&
+                            menu->actions().back()->isEnabled(),
+                        "turn menu exposes both fork modes above a divider and eligible removal");
                 const QString evidence = qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR");
                 if (menu && scenario <= 1 && !evidence.isEmpty()) {
                     const QString suffix = QString::number(scenario) + QStringLiteral("-dpr-") + qEnvironmentVariable("QT_SCALE_FACTOR") +
                                            QStringLiteral(".png");
                     shell.grab().save(evidence + QStringLiteral("/turn-shell-") + suffix);
                     menu->grab().save(evidence + QStringLiteral("/turn-menu-") + suffix);
-                    menu->actions().front()->setEnabled(false);
+                    menu->actions().back()->setEnabled(false);
                     menu->grab().save(evidence + QStringLiteral("/turn-menu-disabled-") + suffix);
-                    menu->actions().front()->setEnabled(true);
+                    menu->actions().back()->setEnabled(true);
                 }
                 QTimer::singleShot(0, &shell, [&, scenario] {
                     auto* confirmation = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
@@ -6884,7 +6933,7 @@ void turnRemovalConfirmationTargetsTheCapturedTurn(Configuration& configuration)
                 });
                 if (menu) {
                     QKeyEvent activate(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-                    menu->setActiveAction(menu->actions().front());
+                    menu->setActiveAction(menu->actions().back());
                     QApplication::sendEvent(menu, &activate);
                 }
             });

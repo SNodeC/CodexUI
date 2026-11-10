@@ -98,8 +98,7 @@ private:
   void updateContextRow(const std::string &presentationKey);
   void showContextMenu(const QPoint &position);
   void showGroupMenu(QMenu *menu, ThreadTreeItem *item);
-  void editGroup(bool project, const std::string &id = {},
-                 bool readOnly = false);
+  void editGroup(bool project, std::string id = {}, bool readOnly = false, nodegraph::NodeRef assignThread = {});
   void changeBrowser();
   void activateBrowserRow(ThreadTreeItem *item);
   [[nodiscard]] QString settingsKey() const;

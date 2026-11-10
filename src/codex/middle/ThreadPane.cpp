@@ -41,6 +41,7 @@
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
 #include <QShowEvent>
@@ -302,11 +303,29 @@ public:
         countRows(project);
         return count * compactRowHeight();
     }
-    [[nodiscard]] QMargins projectCardInsets(const QModelIndex& index) const {
+    [[nodiscard]] const ThreadTreeItem* lastVisibleItem(const ThreadTreeItem* item) const {
+        while (item && item->isExpanded() && item->childCount()) {
+            item = threadItem(item->child(item->childCount() - 1));
+        }
+        return item;
+    }
+    [[nodiscard]] QMargins groupCardInsets(const QModelIndex& index) const {
         const auto* item = threadItem(index);
-        const bool project =
-            item && !item->parent() && item->kind == ui::ThreadRowKind::Project && item->isExpanded() && item->childCount();
-        return {0, project ? UiStyle::projectCardEdgePadding : 0, 0, 0};
+        const auto* outer = item;
+        while (outer && outer->parent()) {
+            outer = threadItem(outer->parent());
+        }
+        QMargins insets;
+        if (outer && outer->isExpanded() && outer->childCount() &&
+            (outer->kind == ui::ThreadRowKind::Project || outer->kind == ui::ThreadRowKind::Section)) {
+            if (item == outer) {
+                insets.setTop(UiStyle::projectCardEdgePadding);
+            }
+            if (outer->kind == ui::ThreadRowKind::Section && item == lastVisibleItem(outer)) {
+                insets.setBottom(UiStyle::projectCardEdgePadding);
+            }
+        }
+        return insets;
     }
     void updateRow(const QModelIndex& index) {
         auto* view = rowView(index);
@@ -576,7 +595,7 @@ QRect ThreadTreeStyle::subElementRect(SubElement element,
     if (const auto *tree = dynamic_cast<const ThreadTreeWidget *>(widget)) {
       const QModelIndex index = tree->QTreeWidget::indexAt(
           QPoint(tree->viewport()->width() / 2, option->rect.center().y()));
-      native = native.marginsRemoved(tree->projectCardInsets(index));
+      native = native.marginsRemoved(tree->groupCardInsets(index));
       const auto* item = tree->threadItem(index);
       if (item && item->kind == ui::ThreadRowKind::Project && item->isExpanded() && item->childCount()) {
           native.setHeight(tree->compactRowHeight());
@@ -700,10 +719,15 @@ public:
           while (outer->parent()) {
               outer = tree_->threadItem(outer->parent());
           }
-          if (outer->kind == ui::ThreadRowKind::Project && outer->isExpanded() && outer->childCount()) {
-              height = tree_->compactRowHeight();
+          if (outer->kind == ui::ThreadRowKind::Project || outer->kind == ui::ThreadRowKind::Section) {
+              const auto insets = tree_->groupCardInsets(index);
+              height = tree_->compactRowHeight() + insets.top() + insets.bottom();
               if (item == outer) {
-                  height += 2 * UiStyle::projectCardEdgePadding + tree_->projectBodyHeight(index);
+                  if (!outer->isExpanded() || !outer->childCount()) {
+                      height += 2 * UiStyle::projectCardEdgePadding;
+                  } else if (outer->kind == ui::ThreadRowKind::Project) {
+                      height += UiStyle::projectCardEdgePadding + tree_->projectBodyHeight(index);
+                  }
               }
           }
       }
@@ -734,7 +758,7 @@ public:
     const bool hovered = effective.state.testFlag(QStyle::State_MouseOver);
     const QColor rowBackground(QString::fromLatin1(
         selected ? UiStyle::threadSelected : hovered ? UiStyle::hover : UiStyle::panel));
-    QRect contentRow = row.marginsRemoved(tree_->projectCardInsets(index));
+    QRect contentRow = row.marginsRemoved(tree_->groupCardInsets(index));
     if (item == outer && outer->kind == ui::ThreadRowKind::Project && outer->isExpanded() && outer->childCount()) {
         contentRow.setHeight(tree_->compactRowHeight());
     }
@@ -753,27 +777,22 @@ public:
     if (!grouped && item->kind == ui::ThreadRowKind::Page)
       painter->fillRect(row, QColor(QString::fromLatin1(UiStyle::sidebar)));
     if (grouped) {
-      const auto *last = outer;
-      while (last->isExpanded() && last->childCount())
-        last = tree_->threadItem(last->child(last->childCount() - 1));
-      QRectF surface = tree_->rowRect(tree_->indexFromItem(outer));
-      if (outer->kind != ui::ThreadRowKind::Project) {
-          surface.setBottom(tree_->rowRect(tree_->indexFromItem(last)).bottom());
-      }
-      surface.adjust(0.5, 3.5, -0.5, -3.5);
-      painter->setClipRect(row, Qt::IntersectClip);
-      painter->setPen(QColor(QString::fromLatin1(
-          activeCard ? UiStyle::activeGroupBorder : UiStyle::groupBorder)));
-      painter->setBrush(QColor(QString::fromLatin1(
-          activeCard ? UiStyle::activeGroupSurface : UiStyle::panel)));
-      painter->drawRoundedRect(surface, 8.0, 8.0);
-      QPainterPath clip;
-      clip.addRoundedRect(surface.adjusted(1, 1, -1, -1), 7, 7);
-      painter->setClipPath(clip, Qt::IntersectClip);
-      if (activeCard && item == outer)
-          painter->fillRect(contentRow.adjusted(2, 0, -2, 0), QColor(QString::fromLatin1(UiStyle::activeGroupHeaderSurface)));
-      else if (selected || hovered)
-        painter->fillRect(contentRow.adjusted(2, 0, -2, 0), rowBackground);
+        QRectF surface = tree_->rowRect(tree_->indexFromItem(outer));
+        if (outer->kind != ui::ThreadRowKind::Project) {
+            surface.setBottom(tree_->rowRect(tree_->indexFromItem(tree_->lastVisibleItem(outer))).bottom());
+        }
+        surface.adjust(0.5, 3.5, -0.5, -3.5);
+        painter->setClipRect(row, Qt::IntersectClip);
+        painter->setPen(QColor(QString::fromLatin1(activeCard ? UiStyle::activeGroupBorder : UiStyle::groupBorder)));
+        painter->setBrush(QColor(QString::fromLatin1(activeCard ? UiStyle::activeGroupSurface : UiStyle::panel)));
+        painter->drawRoundedRect(surface, 8.0, 8.0);
+        QPainterPath clip;
+        clip.addRoundedRect(surface.adjusted(1, 1, -1, -1), 7, 7);
+        painter->setClipPath(clip, Qt::IntersectClip);
+        if (activeCard && item == outer)
+            painter->fillRect(contentRow.adjusted(2, 0, -2, 0), QColor(QString::fromLatin1(UiStyle::activeGroupHeaderSurface)));
+        else if (selected || hovered)
+            painter->fillRect(contentRow.adjusted(2, 0, -2, 0), rowBackground);
     }
 
     const bool feedback = item->draft || item->awaitingPrompt;
@@ -1770,131 +1789,129 @@ void ThreadPane::activateBrowserRow(ThreadTreeItem *item) {
   }
 }
 
-void ThreadPane::editGroup(bool project, const std::string &id, bool readOnly) {
-  const auto &source = project ? projects : sections;
-  const auto found = std::ranges::find(source, id, &ui::ThreadGroup::id);
-  const nlohmann::json fields =
-      found == source.end() ? nlohmann::json::object() : found->fields;
-  QDialog dialog(this);
-  dialog.setObjectName(QStringLiteral("threadGroupDialog"));
-  dialog.setWindowTitle(project ? QStringLiteral("Project")
-                                : QStringLiteral("Section"));
-  dialog.resize(520, project ? 480 : 300);
-  auto *layout = new QVBoxLayout(&dialog);
-  auto *form = new QFormLayout;
-  form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-  auto *name = new QLineEdit(text(fields.value("name", std::string{})));
-  name->setObjectName(QStringLiteral("groupName"));
-  name->setReadOnly(readOnly);
-  form->addRow(QStringLiteral("Name"), name);
-  if (readOnly && !id.empty()) {
-    auto *identifier = new QLineEdit(text(id));
-    identifier->setReadOnly(true);
-    identifier->setObjectName(QStringLiteral("groupId"));
-    form->addRow(QStringLiteral("ID"), identifier);
-  }
-  QPlainTextEdit *roots = nullptr;
-  QPlainTextEdit *description = nullptr;
-  if (project) {
-    roots = new UiStyle::DialogTextEdit;
-    roots->setObjectName(QStringLiteral("projectRoots"));
-    roots->setProperty("kind", "dialogEditor");
-    roots->setReadOnly(readOnly);
-    roots->setMaximumHeight(90);
-    QStringList paths;
-    for (const auto &root : fields.value("roots", nlohmann::json::array()))
-      paths.push_back(text(root.value("path", std::string{})));
-    roots->setPlainText(paths.join('\n'));
-    roots->setPlaceholderText(
-        QStringLiteral("Absolute workspace paths, one per line"));
-    form->addRow(QStringLiteral("Roots"), roots);
-    auto* addRoot = new QPushButton(QStringLiteral("Add root…"));
-    addRoot->setObjectName(QStringLiteral("addProjectRoot"));
-    addRoot->setAccessibleName(QStringLiteral("Add project workspace root"));
-    addRoot->setEnabled(!readOnly && canControl && bool(actions.manage));
-    form->addRow(QString{}, addRoot);
-    connect(addRoot, &QPushButton::clicked, &dialog, [&, roots] {
-        FileSelectionDialog selection({}, &dialog, {}, {}, actions.filesystem ? actions.filesystem() : FileSelectionDialog::Filesystem{});
-        if (selection.exec() == QDialog::Accepted && canControl && actions.manage && !roots->isReadOnly()) {
-            const auto path = selection.selectedDirectory();
-            const auto paths = roots->toPlainText().split('\n', Qt::SkipEmptyParts);
-            if (!paths.contains(path)) {
-                roots->appendPlainText(path);
+void ThreadPane::editGroup(bool project, std::string id, bool readOnly, nodegraph::NodeRef assignThread) {
+    const auto& source = project ? projects : sections;
+    const auto found = std::ranges::find(source, id, &ui::ThreadGroup::id);
+    const nlohmann::json fields = found == source.end() ? nlohmann::json::object() : found->fields;
+    UiStyle::ScrollFormDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("threadGroupDialog"));
+    dialog.setWindowTitle(project ? QStringLiteral("Project") : QStringLiteral("Section"));
+    dialog.resize(520, project ? 480 : 300);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* content = new QWidget;
+    auto* formLayout = new QVBoxLayout(content);
+    dialog.formScrollArea()->setWidget(content);
+    layout->addWidget(dialog.formScrollArea(), 1);
+    auto* form = new QFormLayout;
+    form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto* name = new QLineEdit(text(fields.value("name", std::string{})));
+    name->setObjectName(QStringLiteral("groupName"));
+    name->setReadOnly(readOnly);
+    form->addRow(QStringLiteral("Name"), name);
+    if (readOnly && !id.empty()) {
+        auto* identifier = new QLineEdit(text(id));
+        identifier->setReadOnly(true);
+        identifier->setObjectName(QStringLiteral("groupId"));
+        form->addRow(QStringLiteral("ID"), identifier);
+    }
+    QPlainTextEdit* roots = nullptr;
+    QPlainTextEdit* description = nullptr;
+    if (project) {
+        roots = new UiStyle::DialogTextEdit;
+        roots->setObjectName(QStringLiteral("projectRoots"));
+        roots->setProperty("kind", "dialogEditor");
+        roots->setReadOnly(readOnly);
+        roots->setMaximumHeight(90);
+        QStringList paths;
+        for (const auto& root : fields.value("roots", nlohmann::json::array()))
+            paths.push_back(text(root.value("path", std::string{})));
+        roots->setPlainText(paths.join('\n'));
+        roots->setPlaceholderText(QStringLiteral("Absolute workspace paths, one per line"));
+        form->addRow(QStringLiteral("Roots"), roots);
+        auto* addRoot = new QPushButton(QStringLiteral("Add root…"));
+        addRoot->setObjectName(QStringLiteral("addProjectRoot"));
+        addRoot->setAccessibleName(QStringLiteral("Add project workspace root"));
+        addRoot->setEnabled(!readOnly && canControl && bool(actions.manage));
+        form->addRow(QString{}, addRoot);
+        connect(addRoot, &QPushButton::clicked, &dialog, [&, roots] {
+            FileSelectionDialog selection(
+                {}, &dialog, {}, {}, actions.filesystem ? actions.filesystem() : FileSelectionDialog::Filesystem{});
+            if (selection.exec() == QDialog::Accepted && canControl && actions.manage && !roots->isReadOnly()) {
+                const auto path = selection.selectedDirectory();
+                const auto paths = roots->toPlainText().split('\n', Qt::SkipEmptyParts);
+                if (!paths.contains(path)) {
+                    roots->appendPlainText(path);
+                }
+            }
+        });
+        description = new UiStyle::DialogTextEdit;
+        description->setObjectName(QStringLiteral("projectDescription"));
+        description->setProperty("kind", "dialogEditor");
+        description->setReadOnly(readOnly);
+        const auto metadata = fields.value("metadata", nlohmann::json::object());
+        description->setPlainText(text(metadata.value(ProjectDescriptionKey, std::string{})));
+        form->addRow(QStringLiteral("Description"), description);
+        formLayout->addWidget(UiStyle::makeLabel(QStringLiteral("Descriptions organise work; they are not model instructions."), "muted"));
+        if (readOnly) {
+            auto* details = new QPlainTextEdit(text(fields.dump(2)));
+            details->setReadOnly(true);
+            details->setAccessibleName(QStringLiteral("Project metadata and timestamps"));
+            form->addRow(QStringLiteral("Metadata"), details);
+        }
+    } else {
+        formLayout->addWidget(
+            UiStyle::makeLabel(QStringLiteral("Sections are shared across projects. Changes apply everywhere."), "muted"));
+    }
+    formLayout->addLayout(form, 1);
+    auto* error = UiStyle::makeLabel({}, "muted");
+    error->setWordWrap(true);
+    layout->addWidget(error);
+    auto* buttons = new QDialogButtonBox(readOnly ? QDialogButtonBox::Close : QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        const auto paths = roots ? roots->toPlainText().split('\n', Qt::SkipEmptyParts) : QStringList{};
+        if (canControl && actions.manage) {
+            if (name->text().trimmed().isEmpty()) {
+                error->setText(QStringLiteral("Enter a name."));
+            } else if (project && std::ranges::any_of(paths, [](const auto& path) {
+                           return !QDir::isAbsolutePath(path.trimmed());
+                       })) {
+                error->setText(QStringLiteral("Workspace roots must be absolute paths."));
+            } else if (assignThread && !std::ranges::any_of(rows, [&assignThread](const auto& entry) {
+                           return entry.second->target == assignThread;
+                       })) {
+                error->setText(QStringLiteral("The target thread is no longer available."));
+            } else {
+                nlohmann::json parameters{{"name", name->text().trimmed().toStdString()}};
+                if (project) {
+                    parameters["roots"] = nlohmann::json::array();
+                    for (const auto& path : paths) {
+                        parameters["roots"].push_back({{"path", path.trimmed().toStdString()}});
+                    }
+                    const auto value = description->toPlainText().toStdString();
+                    if (id.empty()) {
+                        parameters["metadata"] = {{ProjectDescriptionKey, value}};
+                        parameters["idempotencyKey"] = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+                    } else {
+                        parameters["projectId"] = id;
+                        parameters["description"] = value;
+                    }
+                } else if (!id.empty()) {
+                    parameters["sectionId"] = id;
+                }
+                if (assignThread) {
+                    parameters["threadId"] = assignThread->id().canonical;
+                }
+                using enum nodegraph::RuntimeActionKind;
+                actions.manage(project ? (id.empty() ? CreateProject : UpdateProject) : (id.empty() ? CreateSection : UpdateSection),
+                               std::move(parameters));
+                dialog.accept();
             }
         }
     });
-    description = new UiStyle::DialogTextEdit;
-    description->setObjectName(QStringLiteral("projectDescription"));
-    description->setProperty("kind", "dialogEditor");
-    description->setReadOnly(readOnly);
-    const auto metadata = fields.value("metadata", nlohmann::json::object());
-    description->setPlainText(
-        text(metadata.value(ProjectDescriptionKey, std::string{})));
-    form->addRow(QStringLiteral("Description"), description);
-    layout->addWidget(UiStyle::makeLabel(
-        QStringLiteral(
-            "Descriptions organise work; they are not model instructions."),
-        "muted"));
-    if (readOnly) {
-      auto *details = new QPlainTextEdit(text(fields.dump(2)));
-      details->setReadOnly(true);
-      details->setAccessibleName(
-          QStringLiteral("Project metadata and timestamps"));
-      form->addRow(QStringLiteral("Metadata"), details);
-    }
-  } else {
-    layout->addWidget(UiStyle::makeLabel(
-        QStringLiteral(
-            "Sections are shared across projects. Changes apply everywhere."),
-        "muted"));
-  }
-  layout->addLayout(form, 1);
-  auto *error = UiStyle::makeLabel({}, "muted");
-  error->setWordWrap(true);
-  layout->addWidget(error);
-  auto *buttons = new QDialogButtonBox(readOnly ? QDialogButtonBox::Close
-                                                : QDialogButtonBox::Save |
-                                                      QDialogButtonBox::Cancel);
-  layout->addWidget(buttons);
-  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-  connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-    if (!canControl || !actions.manage)
-      return;
-    if (name->text().trimmed().isEmpty()) {
-      error->setText(QStringLiteral("Enter a name."));
-      return;
-    }
-    nlohmann::json parameters{{"name", name->text().trimmed().toStdString()}};
-    if (project) {
-      parameters["roots"] = nlohmann::json::array();
-      for (const auto &path :
-           roots->toPlainText().split('\n', Qt::SkipEmptyParts)) {
-        if (!QDir::isAbsolutePath(path.trimmed())) {
-          error->setText(
-              QStringLiteral("Workspace roots must be absolute paths."));
-          return;
-        }
-        parameters["roots"].push_back({{"path", path.trimmed().toStdString()}});
-      }
-      const auto value = description->toPlainText().toStdString();
-      if (id.empty()) {
-        parameters["metadata"] = {{ProjectDescriptionKey, value}};
-        parameters["idempotencyKey"] =
-            QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-      } else {
-        parameters["projectId"] = id;
-        parameters["description"] = value;
-      }
-    } else if (!id.empty()) {
-        parameters["sectionId"] = id;
-    }
-    using enum nodegraph::RuntimeActionKind;
-    actions.manage(project ? (id.empty() ? CreateProject : UpdateProject)
-                           : (id.empty() ? CreateSection : UpdateSection),
-                   std::move(parameters));
-    dialog.accept();
-  });
-  dialog.exec();
+    dialog.exec();
 }
 
 void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
@@ -1972,6 +1989,11 @@ void ThreadPane::showGroupMenu(QMenu *menu, ThreadTreeItem *item) {
     auto *assign = menu->addMenu(isProject ? QStringLiteral("Assign project")
                                            : QStringLiteral("Assign section"));
     assign->setEnabled(canControl && groupingAvailable);
+    assign->addAction(
+        isProject ? QStringLiteral("New project…") : QStringLiteral("New section…"), this, [this, isProject, target = item->target] {
+            editGroup(isProject, {}, false, target);
+        });
+    assign->addSeparator();
     for (const auto &destination : isProject ? projects : sections)
       assign->addAction(
           text(destination.label).replace("&", "&&"), this,

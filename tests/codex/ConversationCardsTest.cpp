@@ -4897,6 +4897,28 @@ bool testMessageImagePresentation() {
           openedImages.urls.back() == QUrl::fromLocalFile(path),
       "keyboard activation opens the image with the desktop file handler");
 
+  QStringList launchFailures;
+  QObject::connect(card, &ConversationCard::noticeRequested, card, [&](QString message, bool error) {
+      if (error) {
+          launchFailures.push_back(std::move(message));
+      }
+  });
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &openedImages, "missingOpenSlot");
+  if (thumbnail) {
+      QKeyEvent failedOpen(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+      QApplication::sendEvent(thumbnail, &failedOpen);
+      const QPointF local(thumbnail->rect().center());
+      QMouseEvent press(
+          QEvent::MouseButtonPress, local, local, thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+      QMouseEvent release(
+          QEvent::MouseButtonRelease, local, local, thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(thumbnail, &press);
+      QApplication::sendEvent(thumbnail, &release);
+  }
+  result &= expect(launchFailures.size() == 2 && launchFailures.front().contains(path),
+                   "keyboard and pointer image launch failures reach the shared notice surface");
+  QDesktopServices::setUrlHandler(QStringLiteral("file"), &openedImages, "open");
+
   const QString missingPath = directory.filePath(QStringLiteral("missing.png"));
   QPointer<QLabel> retainedGuard(retainedThumbnail);
   payload.imagePaths = {utf8(missingPath)};

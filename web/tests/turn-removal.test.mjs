@@ -299,3 +299,31 @@ test("external removal preserves queued input and fences late prompt acknowledge
         assert.equal(requests(socket, "turn/start").length, 1);
     } finally { session.dispose(); }
 });
+
+for (const options of [false, true]) {
+    test(`fork from intermediate turn, options=${options}: stale target and rejection preserve source`, async () => {
+        const {session, socket, key} = await fixture();
+        try {
+            const source = session.model.thread("cut");
+            const selected = source.turns.get("t2");
+            const before = [...source.turnOrder];
+            session.forkThread("cut", undefined, key, "t2", {});
+            session.forkThread("cut", undefined, "stale-presentation", "t2", selected);
+            session.forkThread("cut", undefined, key, "missing", selected);
+            assert.equal(requests(socket, "thread/fork").length, 0, "invalid boundaries never become full forks");
+            const draft = options ? {...session.forkDraft("cut"), workspace: "/chosen", name: "Chosen fork"} : undefined;
+            session.forkThread("cut", draft, key, "t2", selected);
+            const request = requests(socket, "thread/fork").at(-1);
+            assert.equal(request.payload.params.lastTurnId, "t2");
+            assert.equal(request.payload.params.cwd, options ? "/chosen" : undefined);
+            reject(socket, request, "fork denied");
+            await settle();
+            assert.equal(session.getSnapshot().selectedThreadId, "cut");
+            assert.deepEqual(source.turnOrder, before);
+            assert.equal(source.turns.get("t2"), selected);
+            assert.match(session.getSnapshot().notice, /fork denied/u);
+            assert.equal(requests(socket, "thread/revert").length, 0);
+            assert.equal(requests(socket, "thread/fork").length, 1, "failure is not retried automatically");
+        } finally { session.dispose(); }
+    });
+}

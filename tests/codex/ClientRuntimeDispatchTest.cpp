@@ -1213,6 +1213,10 @@ void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
            "fork error retires its correlated operation");
   }
   expect(!bridge.receiveAppServer(100ms), "fork is never dual-sent");
+  NodeAction invalidFork{thread, NodeActionKind::Fork};
+  invalidFork.payload.emplace("lastTurnId", Value("missing-boundary"));
+  expect(sendAction(runtime.channels(), std::move(invalidFork)), "stale boundary reaches worker validation");
+  expect(!bridge.receiveAppServer(100ms), "missing turn cannot silently fall back to a full-thread fork");
 
   const auto archivedIs = [&](bool expected) {
     std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
@@ -1704,11 +1708,18 @@ void forksPersistSourceMembership(UnixBridge& bridge, RunningRuntime& runtime) {
                                     {"section", section(sectionId)},
                                     {"status", "idle"},
                                     {"forkedFromId", nullptr},
-                                    {"parentThreadId", nullptr}};
+                                    {"parentThreadId", nullptr},
+                                    {"turns",
+                                     nlohmann::json::array({{{"id", "first"}, {"status", "completed"}},
+                                                            {{"id", "middle"}, {"status", "completed"}},
+                                                            {{"id", "last"}, {"status", "completed"}}})}};
         expect(bridge.appServerNotification("thread/started", {{"thread", source}}), name + ": source metadata delivered");
         const auto sourceNode = findNode(runtime.graph(), {NodeKind::Thread, sourceId});
         expect(static_cast<bool>(sourceNode), name + ": source exists");
         NodeAction action{sourceNode, NodeActionKind::Fork};
+        if (fixture.contains("lastTurnId")) {
+            action.payload.emplace("lastTurnId", Value(fixture.at("lastTurnId").get<std::string>()));
+        }
         const bool ephemeral = fixture.value("ephemeral", false);
         if (!ephemeral) {
             action.payload.emplace("requestedName", Value("Find Slides (fork 1)"));
@@ -1723,6 +1734,10 @@ void forksPersistSourceMembership(UnixBridge& bridge, RunningRuntime& runtime) {
         const auto request = bridge.receiveAppServer();
         expect(request && request->value("method", "") == "thread/fork", name + ": one fork request");
         if (request) {
+            expect(request->at("params").value("lastTurnId", "") == fixture.value("lastTurnId", ""),
+                   name + ": fork retains the selected inclusive boundary");
+            expect(static_cast<bool>(findNode(runtime.graph(), scopedTurnNodeId(sourceId, "last"))),
+                   name + ": source retains later history");
             expect(request->at("params").value("cwd", "") == (fixture.at("options").get<bool>() ? "/fork-workspace" : ""),
                    name + ": workspace option is independent of grouping");
             if (fixture.value("moveSource", false)) {
@@ -1841,6 +1856,104 @@ void forksPersistSourceMembership(UnixBridge& bridge, RunningRuntime& runtime) {
                 expect(nested, name + ": fork is nested beneath its source in the project tree");
             }
             expect(!bridge.receiveAppServer(80ms), name + ": no duplicate request or automatic mutation retry");
+        }
+        runtime.drainNotifications();
+    }
+}
+
+void creationAssignsOnlyTheReturnedGroup(UnixBridge& bridge, RunningRuntime& runtime) {
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/context-menu-creation.json");
+    const auto fixtures = nlohmann::json::parse(input);
+    for (const auto& fixture : fixtures) {
+        const std::string kind = fixture.at("kind"), failure = fixture.at("failure");
+        const bool project = kind == "project";
+        const std::string sourceId = "creation-source-" + kind + "-" + failure;
+        const nlohmann::json source{{"id", sourceId},
+                                    {"name", "Original"},
+                                    {"status", "idle"},
+                                    {"projectId", "old-project"},
+                                    {"section", {{"id", "old-section"}, {"name", "Old"}}}};
+        expect(bridge.appServerNotification("thread/started", {{"thread", source}}), "creation source delivered");
+        const auto target = findNode(runtime.graph(), {NodeKind::Thread, sourceId});
+        expect(bool(target), "creation source is authoritative");
+        RuntimeAction action{project ? RuntimeActionKind::CreateProject : RuntimeActionKind::CreateSection};
+        action.payload = {{"name", Value("Chosen name")}, {"threadId", Value(sourceId)}};
+        if (project) {
+            action.payload.emplace("idempotencyKey", Value("identity-" + sourceId));
+            action.payload.emplace("roots", Value(Value::Array{}));
+        }
+        expect(sendAction(runtime.channels(), std::move(action)), "create-and-assign enters the existing runtime path");
+        const auto request = bridge.receiveAppServer();
+        expect(request && request->value("method", "") == (project ? "project/create" : "threadSection/create"),
+               "one group creation is sent");
+        if (request) {
+            expect(!request->at("params").contains("threadId"), "assignment context is not sent in the creation request");
+            if (failure == "create") {
+                expect(bridge.replyError(*request, -32000, "creation denied"), "creation failure delivered");
+            } else {
+                if (failure == "retired-target") {
+                    expect(bridge.appServerNotification("thread/deleted", {{"threadId", sourceId}}), "target retirement delivered");
+                    expect(waitUntil([&] {
+                               return !findNode(runtime.graph(), {NodeKind::Thread, sourceId});
+                           }),
+                           "target retires before creation completes");
+                }
+                const nlohmann::json group{{"id", "returned-" + sourceId}, {"name", "Chosen name"}};
+                expect(bridge.reply(*request, {{kind, group}}), "creation returns an authoritative group ID");
+            }
+            int assignments = 0;
+            bool receiving = true;
+            for (int count = 0; receiving && count < 12; ++count) {
+                const auto pending = bridge.receiveAppServer(100ms);
+                receiving = bool(pending);
+                if (pending) {
+                    const auto method = pending->value("method", "");
+                    if (method == "thread/metadata/update" || method == "thread/section/move") {
+                        ++assignments;
+                        expect(pending->at("params") == nlohmann::json{{"threadId", sourceId}, {kind + "Id", "returned-" + sourceId}},
+                               "assignment uses the returned ID and original context thread");
+                        if (failure == "assign") {
+                            expect(bridge.replyError(*pending, -32000, "assignment denied"), "assignment failure delivered");
+                        } else {
+                            auto assigned = source;
+                            if (project) {
+                                assigned["projectId"] = "returned-" + sourceId;
+                            }
+                            expect(bridge.reply(*pending,
+                                                project ? nlohmann::json{{"thread", assigned}}
+                                                        : nlohmann::json{{"threadId", sourceId}, {"sectionId", "returned-" + sourceId}}),
+                                   "assignment acknowledged");
+                        }
+                    } else {
+                        expect(method == "thread/list" || method == "project/list" || method == "threadSection/list",
+                               "only existing browser queries are refreshed");
+                        expect(bridge.reply(*pending, {{"data", nlohmann::json::array()}, {"nextCursor", nullptr}}),
+                               "query refresh acknowledged");
+                    }
+                }
+            }
+            expect(assignments == (failure == "create" || failure == "retired-target" ? 0 : 1),
+                   "creation and target failures cannot dispatch assignments or retries");
+            if (!failure.empty()) {
+                expect(waitUntil([&] {
+                           auto read = runtime.graph().tryRead();
+                           const auto notice = read ? read->find({NodeKind::Notice, "local-worker-notice"}) : NodeRef{};
+                           const auto message = notice ? exactStringFromValue(valueMember(*read->state(notice), "message")) : std::string{};
+                           return message.find(failure == "retired-target" ? "Group created, but assignment could not be sent"
+                                               : failure == "create"       ? "creation denied"
+                                                                           : "assignment denied") != std::string::npos;
+                       }),
+                       "creation and assignment failures are reported accurately");
+            }
+            if (failure != "retired-target") {
+                ui::NodeGraphUiAdapter adapter(runtime.graph());
+                expect(waitUntil([&] {
+                           const auto row = adapter.threadRow(target);
+                           return row &&
+                                  (project ? row->projectId : row->sectionId) == (failure.empty() ? "returned-" + sourceId : "old-" + kind);
+                       }),
+                       "confirmed membership changes only after successful assignment");
+            }
         }
         runtime.drainNotifications();
     }
@@ -3708,6 +3821,7 @@ int main(int argc, char **argv) {
                                                                 runtime);
     codexui::codex::firstPromptAfterForkStartsANewTurn(bridge, runtime);
     codexui::codex::forksPersistSourceMembership(bridge, runtime);
+    codexui::codex::creationAssignsOnlyTheReturnedGroup(bridge, runtime);
     codexui::codex::runtimeRefreshActionsHaveExactRequestCardinality(bridge,
                                                                      runtime);
     codexui::codex::failedWakeUsesBoundedWorkerRecovery(bridge, runtime);
