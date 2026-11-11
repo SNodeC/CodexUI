@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "title": "CodexUI",
+  "package": "codexui",
+  "depends_on": [
+    "aisuite"
+  ],
+  "build": {
+    "native": "ci/package/native.sh"
+  },
+  "matrix": [
+    {
+      "id": "debian-trixie-amd64"
+    },
+    {
+      "id": "debian-trixie-arm64"
+    },
+    {
+      "id": "debian-trixie-armhf"
+    },
+    {
+      "id": "debian-trixie-riscv64"
+    },
+    {
+      "id": "debian-forky-amd64"
+    },
+    {
+      "id": "debian-forky-arm64"
+    },
+    {
+      "id": "debian-forky-armhf"
+    },
+    {
+      "id": "debian-forky-riscv64"
+    },
+    {
+      "id": "debian-sid-amd64"
+    },
+    {
+      "id": "debian-sid-arm64"
+    },
+    {
+      "id": "debian-sid-armhf"
+    },
+    {
+      "id": "debian-sid-riscv64"
+    },
+    {
+      "id": "ubuntu-resolute-amd64"
+    },
+    {
+      "id": "ubuntu-resolute-arm64"
+    },
+    {
+      "id": "rocky-10-x86_64"
+    },
+    {
+      "id": "rocky-10-aarch64"
+    },
+    {
+      "id": "fedora-43-x86_64"
+    },
+    {
+      "id": "fedora-43-aarch64"
+    },
+    {
+      "id": "fedora-44-x86_64"
+    },
+    {
+      "id": "fedora-44-aarch64"
+    },
+    {
+      "id": "raspberrypios-trixie-arm64"
+    }
+  ],
+  "build_dependencies": {
+    "deb": [
+      "cmake",
+      "ninja-build",
+      "libbluetooth-dev",
+      "libmagic-dev",
+      "libmariadb-dev",
+      "libssl-dev",
+      "openssl",
+      "libncurses-dev",
+      "nlohmann-json3-dev",
+      "libsqlite3-dev",
+      "qt6-base-dev",
+      "libkf6sonnet-dev",
+      "sonnet6-plugins",
+      "hunspell-en-us",
+      "hunspell-de-at",
+      "libgit2-dev",
+      "xvfb",
+      "xauth"
+    ],
+    "rpm": [
+      "cmake",
+      "ninja-build",
+      "bluez-libs-devel",
+      "file-devel",
+      "mariadb-connector-c-devel",
+      "openssl-devel",
+      "openssl",
+      "ncurses-devel",
+      "json-devel",
+      "sqlite-devel",
+      "qt6-qtbase-devel",
+      "kf6-sonnet-devel",
+      "kf6-sonnet-hunspell",
+      "hunspell-en-US",
+      "hunspell-de",
+      "libgit2-devel",
+      "xorg-x11-server-Xvfb",
+      "xorg-x11-xauth"
+    ]
+  }
+}

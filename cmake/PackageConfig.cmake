@@ -1,0 +1,4 @@
+file(MAKE_DIRECTORY "${CPACK_OUTPUT_FILE_PREFIX}")
+file(WRITE "${CPACK_OUTPUT_FILE_PREFIX}/codexui.packages"
+     "${CPACK_PACKAGE_NAME}\n"
+)
