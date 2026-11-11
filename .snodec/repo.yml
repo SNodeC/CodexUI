@@ -6,6 +6,7 @@ ci:
   - qt6-base-dev
   - libkf6sonnet-dev
   - sonnet6-plugins
+  - kde-style-breeze
   - hunspell-en-us
   - hunspell-de-at
   - xvfb
