@@ -14,6 +14,10 @@ For profile-manager planning or implementation, follow [Codex Profile Manager re
 
 This canonical checkout uses the nested layout: approved persistent checkouts belong in `<parent>/checkouts/<task>` and persistent builds in `<parent>/build/codex/<configuration>`. Temporary build/check output belongs in `/tmp/codex/build/CodexUI/<task>`. Do not reuse the historical `build-qualification` directory for new work. The repository copies the shared formatting and analysis baseline; use explicit formatting targets or format only files changed by the current task.
 
+## Native packages
+
+`VERSION` supplies the CMake project version. `ci/packages.json` declares only the full Linux targets qualified in `docs/qualification/package-targets.md`, depends on `aisuite`, and uses the existing install rules for both desktop applications, icons, desktop files and manager web assets. The package hook follows the native CI configuration with `CODEXUI_INSTALL_WEB=OFF`; the separate CodexWebUI production artifact retains its existing build/release workflow. GUI checks use Xvfb with `QT_QPA_PLATFORM=offscreen`. CPack DEB/RPM configuration is under `cmake/`; never install verification packages on this host.
+
 ## Markdown formatting
 
 - Write each prose paragraph on one physical source line. Do not manually wrap prose to a fixed column width; let the renderer wrap to the available width.

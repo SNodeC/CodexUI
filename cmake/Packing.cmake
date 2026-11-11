@@ -1,0 +1,25 @@
+set(CPACK_PACKAGE_NAME "codexui")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VENDOR "SNodeC")
+set(CPACK_PACKAGE_CONTACT "Volker Christian <me@vchrist.at>")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Native Codex desktop and profile manager"
+)
+set(CPACK_VERBATIM_VARIABLES YES)
+set(CPACK_STRIP_FILES YES)
+set(CPACK_OUTPUT_FILE_PREFIX "${CMAKE_BINARY_DIR}/_packages")
+set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "aisuite, sonnet6-plugins")
+set(CPACK_RPM_PACKAGE_REQUIRES "aisuite, kf6-sonnet-hunspell")
+set(CPACK_RPM_PACKAGE_LICENSE "MIT AND LGPL-3.0-or-later")
+set(CPACK_RPM_PACKAGE_RELEASE 1)
+set(CPACK_RPM_PACKAGE_RELEASE_DIST OFF)
+set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
+set(CPACK_SOURCE_IGNORE_FILES
+    "/build[^/]*/;/checkouts/;/.git/;/.qtcreator/;/.local-credentials/;/secrets/;/web/(node_modules|dist|app-dist)/;~$"
+)
+set(CPACK_PROJECT_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/PackageConfig.cmake")
+include(CPack)

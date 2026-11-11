@@ -95,7 +95,7 @@ h1, h2, h3, p { margin: 0; }
 .turn-outline .menu-popover button[aria-current] { background: var(--presentation-selected-surface); color: var(--text-strong); }
 .turn-outline-count { padding: 4px 9px 8px; color: var(--text-secondary); font-size: 12px; }
 @media (pointer: coarse) and (max-width: 520px) {
-    .conversation-view-controls, .thread-heading-context { justify-content: flex-start; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+    .conversation-view-controls, .thread-heading-context { justify-content: flex-start; min-width: 0; overflow-x: auto; scroll-padding-inline: 44px; scrollbar-width: none; }
     .conversation-view-controls > button, .thread-heading-context > button, .conversation-state { flex: none; }
 }
 .conversation-scroll { position: relative; overflow: auto; padding: 8px 24px calc(var(--composer-overlay-height) + 8px); }
