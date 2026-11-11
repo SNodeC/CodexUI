@@ -6,8 +6,15 @@ target_link_libraries(
                               codexui-build-options
 )
 add_test(NAME codexmanager COMMAND codexmanager-test)
+find_program(CODEXMANAGER_TEST_BRIDGE codex-bridge REQUIRED)
+get_filename_component(
+    CODEXMANAGER_TEST_BIN "${CODEXMANAGER_TEST_BRIDGE}" DIRECTORY
+)
 set_tests_properties(
-    codexmanager PROPERTIES TIMEOUT 90 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    codexmanager
+    PROPERTIES
+        TIMEOUT 90 ENVIRONMENT
+        "QT_QPA_PLATFORM=offscreen;PATH=${CODEXMANAGER_TEST_BIN}:$ENV{PATH}"
 )
 
 target_compile_definitions(
