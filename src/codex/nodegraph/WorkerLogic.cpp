@@ -12,7 +12,24 @@
 
 namespace codexui::nodegraph {
 
-    std::string threadWorkspaceChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread) {
+    ChannelSendStatus WorkerLogic::threadSubscription(const NodeRef& thread, std::string phase, std::optional<Value::Object> options) {
+        auto write = graph_.write();
+        if (thread && write.find(thread->id()) == thread) {
+            if (phase.empty()) {
+                write.eraseField(thread, "subscriptionPhase");
+            } else {
+                write.setField(thread, "subscriptionPhase", Value(std::move(phase)));
+            }
+            if (options) {
+                write.setField(thread, "resumeOptions", Value(std::move(*options)));
+            } else {
+                write.eraseField(thread, "resumeOptions");
+            }
+        }
+        return publish(write.finish());
+    }
+
+    std::string threadContextChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread, NodeActionKind action) {
         std::string reason;
         const auto connection = read.find({NodeKind::Connection, "connection"});
         const auto state = thread && read.live(thread) ? read.state(thread) : nullptr;
@@ -25,12 +42,27 @@ namespace codexui::nodegraph {
             reason = "Workspace changes require a ready provider and controller access.";
         } else if (state->status == NodeStatus::Running || read.relatedCount(thread, RelationKind::ActiveTurn) != 0) {
             reason = "Wait until the active turn completes before changing workspace.";
+        } else if (action == NodeActionKind::ChangeWorkspace && valueMember(*state, "subscriptionPhase")) {
+            reason = "Resume this thread before changing workspace.";
+        } else if (action != NodeActionKind::ChangeWorkspace &&
+                   (boolFromValue(valueMember(*state, "ephemeral")) ||
+                    (state->status != NodeStatus::NotLoaded && exactStringFromValue(valueMember(*state, "path")).empty()))) {
+            reason = "A persisted thread is required to unsubscribe and resume safely.";
+        } else if (action != NodeActionKind::ChangeWorkspace &&
+                   std::ranges::any_of(read.related(thread, RelationKind::PendingPrompt), [&read](const auto& prompt) {
+                       return read.state(prompt)->status == NodeStatus::Pending || read.state(prompt)->status == NodeStatus::Running;
+                   })) {
+            reason = "Resolve pending prompts before changing the thread subscription.";
         } else if (exactStringFromValue(valueMember(*state, "hydrationState")) == "loading") {
             reason = "Thread context is loading; wait for app-server confirmation.";
         } else {
             for (const auto& operation : read.related(thread, RelationKind::PendingOperation)) {
                 const std::string method = exactStringFromValue(valueMember(*read.state(operation), "method"));
-                if (method == "thread/resume") {
+                if ((method == "thread/unsubscribe" || method == "fs/getMetadata") &&
+                    !(action == NodeActionKind::Unsubscribe &&
+                      exactStringFromValue(valueMember(*state, "subscriptionPhase")) == "unsubscribing")) {
+                    reason = "Wait for the pending subscription operation.";
+                } else if (method == "thread/resume") {
                     reason = "Thread context is loading; wait for app-server confirmation.";
                 } else if (method == "thread/settings/update") {
                     reason = "Workspace change pending app-server confirmation.";
@@ -59,7 +91,7 @@ namespace codexui::nodegraph {
             reason = "Only persistent threads with paginated history support removing turns.";
         } else if (state->status == NodeStatus::Running || read.relatedCount(thread, RelationKind::ActiveTurn) != 0) {
             reason = "Wait until the active turn completes before removing turns.";
-        } else if (exactStringFromValue(valueMember(*state, "hydrationState")) != "ready" ||
+        } else if (valueMember(*state, "subscriptionPhase") || exactStringFromValue(valueMember(*state, "hydrationState")) != "ready" ||
                    boolFromValue(valueMember(*state, "historyStale")) || read.relatedCount(thread, RelationKind::PendingOperation) != 0) {
             reason = "Wait for thread operations and history loading to finish.";
         } else {
@@ -411,6 +443,14 @@ ChannelSendStatus WorkerLogic::bridgeState(
               : std::string{};
       write.setField(connection, "connectionId",
                      Value(std::move(connectionId)));
+      if (role != "controller") {
+          for (const auto& node : write.orderedNodes()) {
+              if (node->id().kind == NodeKind::Thread && valueMember(*write.state(node), "subscriptionPhase")) {
+                  write.setField(node, "subscriptionPhase", Value("paused"));
+                  write.eraseField(node, "resumeOptions");
+              }
+          }
+      }
       write.setField(connection, "role", Value(std::move(role)));
       write.setField(connection, "controllerConnectionId",
                      Value(std::move(controllerConnectionId)));

@@ -1347,6 +1347,117 @@ namespace codexui::codex {
             runtime.drainNotifications();
         }
 
+        void subscriptionsPreserveHistoryAndWaitForClosure(UnixBridge& bridge, RunningRuntime& runtime) {
+            std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/thread-subscriptions.json");
+            const auto fixtures = nlohmann::json::parse(input);
+            unsigned serial = 0;
+            for (const auto& scenario : fixtures.at("cases")) {
+                const std::string id = "subscription-fixture-" + std::to_string(++serial);
+                NodeRef thread;
+                NodeRef turn;
+                {
+                    auto write = runtime.graph().write();
+                    NodeState state;
+                    state.status = NodeStatus::Completed;
+                    state.fields = {{"path", Value("/saved/" + id)}, {"cwd", Value("/tmp")}, {"hydrationState", Value("ready")}};
+                    thread = write.upsert({NodeKind::Thread, id}, std::move(state));
+                    turn = write.upsert(scopedTurnNodeId(id, "retained"));
+                    write.setParent(thread, turn);
+                    static_cast<void>(write.finish());
+                }
+                const auto phase = [&] {
+                    auto read = runtime.graph().tryRead();
+                    return read ? exactStringFromValue(valueMember(*read->state(thread), "subscriptionPhase")) : std::string("busy");
+                };
+                NodeAction change{thread, NodeActionKind::ChangeDeveloperInstructions};
+                change.payload = objectFromJson(scenario.at("options"));
+                expect(sendAction(runtime.channels(), std::move(change)), "instruction change enters the worker");
+                const auto metadata = bridge.receiveAppServer();
+                expect(metadata && metadata->value("method", "") == "fs/getMetadata" &&
+                           metadata->at("params").value("path", "") == "/saved/" + id,
+                       "saved rollout is checked through the server before unsubscribing");
+                const bool materialized = scenario.value("failure", "") != "persistence";
+                if (metadata) {
+                    expect(bridge.reply(*metadata, {{"isFile", materialized}}), "server confirms whether the rollout is materialized");
+                }
+                const auto unsubscribe = bridge.receiveAppServer(materialized ? 5s : 100ms);
+                expect(!materialized || (unsubscribe && unsubscribe->value("method", "") == "thread/unsubscribe" &&
+                                         unsubscribe->at("params").value("threadId", "") == id),
+                       "combined change starts with one targeted unsubscribe");
+                if (scenario.value("closeBeforeAck", false)) {
+                    expect(bridge.appServerNotification("thread/closed", {{"threadId", id}}), "closure can precede acknowledgement");
+                }
+                if (scenario.value("cancelBeforeAck", false)) {
+                    expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Unsubscribe}),
+                           "unsubscribe cancels before acknowledgement");
+                    expect(waitUntil([&] {
+                               auto read = runtime.graph().tryRead();
+                               return read && !valueMember(*read->state(thread), "resumeOptions");
+                           }),
+                           "cancellation removes the unsent resume options");
+                }
+                if (unsubscribe) {
+                    if (scenario.value("failure", "") == "unsubscribe") {
+                        expect(bridge.replyError(*unsubscribe, -32000, "unsubscribe rejected"), "unsubscribe failure is delivered");
+                    } else {
+                        expect(bridge.reply(*unsubscribe, {{"status", scenario.at("status")}}), "unsubscribe acknowledgement is delivered");
+                    }
+                }
+                if (scenario.value("cancelAfterAck", false)) {
+                    expect(waitUntil([&] {
+                               return phase() == "waiting";
+                           }),
+                           "combined operation waits for server closure");
+                    expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::Unsubscribe}),
+                           "unsubscribe cancels after acknowledgement");
+                    expect(waitUntil([&] {
+                               return phase() == "paused";
+                           }),
+                           "cancellation retains the unsubscribed thread");
+                }
+                if (materialized && !scenario.value("closeBeforeAck", false) && scenario.value("status", "") != "notLoaded" &&
+                    scenario.value("failure", "") != "unsubscribe") {
+                    expect(!bridge.receiveAppServer(40ms), "acknowledgement alone cannot resume the thread");
+                    expect(bridge.appServerNotification("thread/closed", {{"threadId", id}}), "server confirms actual unloading");
+                }
+                const bool shouldResume = materialized && !scenario.value("cancelBeforeAck", false) &&
+                                          !scenario.value("cancelAfterAck", false) && scenario.value("failure", "") != "unsubscribe";
+                if (shouldResume) {
+                    const auto resume = bridge.receiveAppServer();
+                    auto parameters = scenario.at("options");
+                    parameters["threadId"] = id;
+                    parameters["excludeTurns"] = true;
+                    if (!resume || resume->value("method", "") != "thread/resume" || resume->at("params") != parameters) {
+                        std::cerr << "Subscription scenario " << scenario.at("name") << ": received "
+                                  << (resume ? resume->dump() : "no request") << '\n';
+                    }
+                    expect(resume && resume->value("method", "") == "thread/resume" && resume->at("params") == parameters,
+                           "resume preserves exact authored replacements and omits unrelated settings");
+                    if (resume) {
+                        if (scenario.value("failure", "") == "resume") {
+                            expect(bridge.replyError(*resume, -32000, "resume rejected"), "resume failure is delivered");
+                        } else {
+                            expect(bridge.reply(*resume, {{"thread", {{"id", id}, {"status", {{"type", "idle"}}}}}}),
+                                   "resume confirms loaded metadata");
+                        }
+                    }
+                    expect(waitUntil([&] {
+                               return phase() == (scenario.value("failure", "") == "resume" ? "paused" : "");
+                           }),
+                           "resume retires its pending phase without inventing success on failure");
+                } else {
+                    expect(!bridge.receiveAppServer(40ms), "cancelled or failed operations never send resume");
+                }
+                expect(materialized || !unsubscribe, "unmaterialized threads remain subscribed and loaded");
+                {
+                    auto read = runtime.graph().tryRead();
+                    expect(read && read->find(thread->id()) == thread && read->parent(turn) == thread,
+                           "unsubscribe and closure preserve thread identity and existing history");
+                }
+                runtime.drainNotifications();
+            }
+        }
+
         void staleHistoryFailureIsSemanticallyInert(UnixBridge& bridge, RunningRuntime& runtime) {
             constexpr std::string_view ThreadId = "stale-history-thread";
             constexpr std::string_view ErrorText = "late history failure must remain invisible";
@@ -3244,6 +3355,7 @@ int main(int argc, char** argv) {
         codexui::codex::cachedSettingsRefreshDoesNotReloadHistory(bridge, runtime);
         codexui::codex::workspaceChangesUseAcknowledgedThreadContext(bridge, runtime);
         codexui::codex::filesystemRequestsRetainResultsUntilCollected(bridge, runtime);
+        codexui::codex::subscriptionsPreserveHistoryAndWaitForClosure(bridge, runtime);
         codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
         codexui::codex::remainingUiCommandFamiliesUseExactWirePaths(bridge, runtime);
         codexui::codex::itemHistoryHydrationHasAnExactConcurrencyCeiling(bridge, runtime);

@@ -2576,30 +2576,27 @@ void ProtocolUpdater::applyGraphUpdate(
     return;
   }
 
-  if (method == "thread/archived" || method == "thread/unarchived" ||
-      method == "thread/closed" ||
-      (message.kind == DecodedMessageKind::ClientResult &&
-       (method == "thread/archive" || method == "thread/unarchive"))) {
-    const std::string id = addressedId(message.payload, NodeKind::Thread);
-    if (!id.empty()) {
-      NodeRef thread = write.upsert({NodeKind::Thread, id});
-      if (method == "thread/archived" || method == "thread/archive") {
-        write.setField(thread, "archived", Value(true));
-        write.setField(thread, "lifecycle", Value("archived"));
-      } else if (method == "thread/unarchived" ||
-                 method == "thread/unarchive") {
-        write.setField(thread, "archived", Value(false));
-        write.setField(thread, "lifecycle", Value("unarchived"));
-        admitRootThread(write, thread, false);
-      } else {
-        write.setField(thread, "lifecycle", Value("closed"));
-        write.setField(thread, "status", Value("notLoaded"));
-        write.setStatus(thread, NodeStatus::NotLoaded);
-        write.replaceRelated(thread, RelationKind::ActiveTurn,
-                             std::span<const NodeRef>{});
+  if (method == "thread/archived" || method == "thread/unarchived" || method == "thread/closed" ||
+      (message.kind == DecodedMessageKind::ClientResult && method == "thread/unsubscribe") ||
+      (message.kind == DecodedMessageKind::ClientResult && (method == "thread/archive" || method == "thread/unarchive"))) {
+      const std::string id = addressedId(message.payload, NodeKind::Thread);
+      if (!id.empty()) {
+          NodeRef thread = write.upsert({NodeKind::Thread, id});
+          if (method == "thread/archived" || method == "thread/archive") {
+              write.setField(thread, "archived", Value(true));
+              write.setField(thread, "lifecycle", Value("archived"));
+          } else if (method == "thread/unarchived" || method == "thread/unarchive") {
+              write.setField(thread, "archived", Value(false));
+              write.setField(thread, "lifecycle", Value("unarchived"));
+              admitRootThread(write, thread, false);
+          } else if (method == "thread/closed" || exactStringFromValue(valueMember(message.payload, "status")) == "notLoaded") {
+              write.setField(thread, "lifecycle", Value("closed"));
+              write.setField(thread, "status", Value("notLoaded"));
+              write.setStatus(thread, NodeStatus::NotLoaded);
+              write.replaceRelated(thread, RelationKind::ActiveTurn, std::span<const NodeRef>{});
+          }
       }
-    }
-    return;
+      return;
   }
 
   if (method == "thread/goal/updated" || method == "thread/goal/cleared") {

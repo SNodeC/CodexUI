@@ -47,7 +47,7 @@ function retainedProtocolFrame(frame: JsonObject): unknown {
 const actionMethods = {
     "fs.readDirectory": "fs/readDirectory", "fs.getMetadata": "fs/getMetadata", "fs.writeFile": "fs/writeFile",
     "threads.list": "thread/list", "thread.read": "thread/read", "thread.create": "thread/start",
-    "thread.workspace": "thread/settings/update", "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
+    "thread.workspace": "thread/settings/update", "thread.resume": "thread/resume", "thread.unsubscribe": "thread/unsubscribe", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
     "thread.turns.list": "thread/turns/list", "thread.items.list": "thread/items/list",
     "thread.revert": "thread/revert", "thread.archive": "thread/archive", "thread.unarchive": "thread/unarchive", "thread.delete": "thread/delete",
     "projects.list": "project/list", "project.read": "project/read", "project.create": "project/create",
@@ -70,7 +70,8 @@ export interface BrowserSessionSnapshot {
     readonly notice: string;
     readonly bridgeUrl: string;
 }
-export interface NewThreadDraft extends PromptRecoveryContext {attachments?: AttachmentDraft[]}
+export interface NewThreadDraft extends PromptRecoveryContext {attachments?: AttachmentDraft[]; resumeBaseInstructions?: string; resumeDeveloperInstructions?: string}
+export interface ResumeOptions extends JsonObject {cwd?: string; baseInstructions?: string; developerInstructions?: string}
 
 export type ThreadSortCriterion = "alphanumeric" | "created" | "recent" | "section";
 export interface ThreadBrowserOptions {
@@ -118,6 +119,8 @@ export function suggestForkName(sourceTitle: string, existingThreadTitles: reado
 type ThreadPhase = "cold" | "hydrating" | "ready" | "resuming" | "failed";
 interface ThreadRuntimeState {
     phase: ThreadPhase;
+    subscriptionPhase?: "unsubscribing" | "waiting" | "resuming" | "paused" | undefined;
+    resumeOptions?: ResumeOptions | undefined;
     historyPageInFlight: boolean;
     itemRequests: number;
     readonly seenHistoryCursors: Set<string>;
@@ -343,6 +346,7 @@ export class BrowserFrontendSession {
             && (presentationKey === undefined
                 || (this.matchesThreadPresentation(this.selectedThreadId, presentationKey)
                     && !this.operationPending("thread.revert", this.selectedThreadId)
+                    && ["", "paused"].includes(this.threadSubscriptionPhase(this.selectedThreadId))
                     && this.model.thread(this.selectedThreadId)?.raw.historyStale !== true));
     }
 
@@ -498,9 +502,9 @@ export class BrowserFrontendSession {
 
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {},
         threadOptions: JsonObject = {}, presentationKey?: string): Promise<boolean> {
-        if (this.operationPending("thread.revert", this.selectedThreadId)
+        if (this.operationPending("thread.revert", this.selectedThreadId) || !["", "paused"].includes(this.threadSubscriptionPhase(this.selectedThreadId))
             || this.model.thread(this.selectedThreadId)?.raw.historyStale === true) {
-            this.setNotice("History removal is pending; wait before sending.");
+            this.setNotice("Resume the thread or wait for its pending operation before sending.");
             return false;
         }
         if (prompt.trim() === "" && attachments.length === 0) return false;
@@ -618,7 +622,7 @@ export class BrowserFrontendSession {
         return this.historyPagePending(threadId, presentationKey) || (this.matchesThreadPresentation(threadId, presentationKey)
             && ((this.runtimeByThread.get(threadId)?.itemRequests ?? 0) > 0 || this.itemPageQueue.some(page => page.threadId === threadId)));
     }
-    workspaceChangeUnavailable(threadId: string, presentationKey?: string, currentOperation?: object): string {
+    workspaceChangeUnavailable(threadId: string, presentationKey?: string, currentOperation?: object, action: "thread.workspace" | "thread.resume" = "thread.workspace"): string {
         const thread = this.model.thread(threadId);
         let reason = "";
         if (!thread || !this.matchesThreadPresentation(threadId, presentationKey)) {
@@ -627,9 +631,11 @@ export class BrowserFrontendSession {
             reason = "Workspace changes require a ready provider and controller access.";
         } else if (thread.status.semantic === "running" || this.model.activeTurnId(threadId) || this.prompts.hasInFlight(threadId)) {
             reason = "Wait until the active turn completes before changing workspace.";
+        } else if (action === "thread.workspace" && this.threadSubscriptionPhase(threadId)) {
+            reason = "Resume this thread before changing workspace.";
         } else if (["hydrating", "resuming"].includes(this.runtimeByThread.get(threadId)?.phase ?? "")) {
             reason = "Thread context is loading; wait for app-server confirmation.";
-        } else if (this.operationPending("thread.workspace", threadId, presentationKey, currentOperation)) {
+        } else if ((this.operationPending("thread.workspace", threadId, presentationKey, currentOperation) || this.operationPending("thread.revert", threadId))) {
             reason = "Workspace change pending app-server confirmation.";
         }
         return reason;
@@ -654,6 +660,91 @@ export class BrowserFrontendSession {
             developerInstructions: stringMember(source?.raw, "developerInstructions"),
             ephemeral: source?.raw.ephemeral === true,
         };
+    }
+    threadSubscriptionPhase(threadId: string): string {
+        return this.runtimeByThread.get(threadId)?.subscriptionPhase ?? "";
+    }
+    resumeOptions(threadId: string): ResumeOptions {
+        return this.runtimeByThread.get(threadId)?.resumeOptions ?? {};
+    }
+    subscriptionUnavailable(threadId: string, presentationKey?: string): string {
+        let reason = this.workspaceChangeUnavailable(threadId, presentationKey, undefined, "thread.resume");
+        const thread = this.model.thread(threadId);
+        if (!reason && (thread?.raw.ephemeral === true || thread?.status.semantic !== "notLoaded" && !stringMember(thread?.raw, "path"))) {
+            reason = "A persisted thread is required to unsubscribe and resume safely.";
+        } else if (!reason && this.threadSubscriptionPhase(threadId) === "paused" &&
+            (this.operationPending("thread.unsubscribe", threadId) || this.operationPending("thread.resume", threadId))) {
+            reason = "Wait for the pending subscription operation.";
+        } else if (!reason && this.prompts.submissions(threadId).some(prompt => prompt.state === "queued" || prompt.state === "inFlight")) {
+            reason = "Resolve pending prompts before changing the thread subscription.";
+        }
+        return reason;
+    }
+    resumeThread(threadId: string, options: ResumeOptions = {}, presentationKey?: string, unsubscribeFirst = false): void {
+        const reason = this.subscriptionUnavailable(threadId, presentationKey);
+        const phase = this.threadSubscriptionPhase(threadId);
+        if (reason) {
+            this.setNotice(reason);
+        } else if (phase && phase !== "paused") {
+            this.setNotice("Wait for the pending subscription operation.");
+        } else if (unsubscribeFirst) {
+            this.unsubscribeThread(threadId, presentationKey, options);
+        } else if (this.model.thread(threadId)?.status.semantic !== "notLoaded" && (phase !== "paused" || Object.keys(options).length)) {
+            this.setNotice("Resume options require an unloaded thread.");
+        } else {
+            this.resumeThreadNow(threadId, options);
+        }
+    }
+    private resumeThreadNow(threadId: string, options: ResumeOptions): void {
+        const runtime = this.threadRuntime(threadId);
+        runtime.subscriptionPhase = "resuming";
+        runtime.resumeOptions = options;
+        void this.performUserOperation("thread.resume", "thread.resume", {...options, threadId, excludeTurns: true}, "Resume thread")?.then(response => {
+            if (!response.stale && this.runtimeByThread.get(threadId) === runtime && runtime.subscriptionPhase === "resuming") {
+                const loaded = response.ok && stringMember(member(response.data, "thread"), "id") === threadId
+                    && this.model.thread(threadId)?.status.semantic !== "notLoaded";
+                runtime.subscriptionPhase = loaded ? undefined : "paused";
+                if (loaded) {
+                    delete runtime.resumeOptions;
+                }
+                if (!loaded) {
+                    this.setNotice(response.ok ? "Resume did not confirm a loaded thread." : this.errorMessage(response));
+                }
+                this.publish();
+            }
+        });
+        this.publish();
+    }
+    unsubscribeThread(threadId: string, presentationKey?: string, options?: ResumeOptions): void {
+        const reason = this.subscriptionUnavailable(threadId, presentationKey);
+        const runtime = this.threadRuntime(threadId);
+        if (reason) {
+            this.setNotice(reason);
+        } else if (!options && (runtime.subscriptionPhase === "waiting" || runtime.subscriptionPhase === "unsubscribing")) {
+            delete runtime.resumeOptions;
+            if (runtime.subscriptionPhase === "waiting") {
+                runtime.subscriptionPhase = "paused";
+            }
+        } else if (runtime.subscriptionPhase && runtime.subscriptionPhase !== "paused") {
+            this.setNotice("Wait for the pending subscription operation.");
+        } else {
+            runtime.subscriptionPhase = "unsubscribing";
+            runtime.resumeOptions = options;
+            void this.performUserOperation("thread.unsubscribe", "thread.unsubscribe", {threadId}, "Unsubscribe", presentationKey)?.then(response => {
+                if (!response.stale && this.runtimeByThread.get(threadId) === runtime && runtime.subscriptionPhase === "unsubscribing") {
+                    runtime.subscriptionPhase = response.ok ? (runtime.resumeOptions ? "waiting" : "paused") : undefined;
+                    if (!response.ok) {
+                        this.setNotice(this.errorMessage(response));
+                    } else if (runtime.resumeOptions && this.model.thread(threadId)?.status.semantic === "notLoaded") {
+                        this.resumeThreadNow(threadId, runtime.resumeOptions);
+                    } else if (runtime.resumeOptions) {
+                        this.setNotice("Waiting for app-server to unload the thread. Unsubscribe cancels the pending resume; other subscribers can delay unloading.", false);
+                    }
+                    this.publish();
+                }
+            });
+        }
+        this.publish();
     }
     forkUnavailable(threadId: string, presentationKey?: string, lastTurnId?: string, expectedTurn?: object): string {
         let reason = "";
@@ -731,7 +822,7 @@ export class BrowserFrontendSession {
             reason = "Removing turns requires a ready provider and controller access.";
         } else if (thread.raw.ephemeral === true || thread.raw.historyMode !== "paginated") {
             reason = "Only persistent threads with paginated history support removing turns.";
-        } else if (thread.status.semantic === "running" || this.model.activeTurnId(threadId)) {
+        } else if (this.threadSubscriptionPhase(threadId) || thread.status.semantic === "running" || this.model.activeTurnId(threadId)) {
             reason = "Wait until the active turn completes before removing turns.";
         } else if (!runtime || runtime.phase !== "ready" || runtime.historyPageInFlight || runtime.itemRequests !== 0
             || this.itemPageQueue.some(page => page.threadId === threadId && page.runtime === runtime)
@@ -864,7 +955,7 @@ export class BrowserFrontendSession {
         this.schedulePublish();
         const current = () => this.runtimeByThread.get(threadId) === runtime && runtime.phase === phase;
         let resumeSucceeded = false;
-        const resumeAttempted = interactive && this.sdk.role === "controller";
+        const resumeAttempted = interactive && this.sdk.role === "controller" && !runtime.subscriptionPhase;
         if (resumeAttempted) {
             const response = await this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current);
             if (response.stale || !current()) return;
@@ -886,7 +977,7 @@ export class BrowserFrontendSession {
             this.queueActiveAgentChildren(threadId);
         }
         runtime.phase = "ready";
-        if ((interactive || this.selectedThreadId === threadId) && this.sdk.role === "controller" && !resumeAttempted) {
+        if ((interactive || this.selectedThreadId === threadId) && this.sdk.role === "controller" && !resumeAttempted && !runtime.subscriptionPhase) {
             await this.hydrateThread(threadId, true);
         } else {
             this.publish();
@@ -1010,7 +1101,7 @@ export class BrowserFrontendSession {
     }
     private resumePromptQueue(threadId: string): void {
         const runtime = this.threadRuntime(threadId);
-        if (runtime.phase !== "ready" || this.model.thread(threadId)?.status.semantic !== "notLoaded"
+        if (runtime.phase !== "ready" || (this.model.thread(threadId)?.status.semantic !== "notLoaded" && runtime.subscriptionPhase !== "paused")
             || !this.canSubmit()) return;
         runtime.phase = "resuming";
         this.requestPromise("thread.resume", {threadId, excludeTurns: true}, () =>
@@ -1020,6 +1111,8 @@ export class BrowserFrontendSession {
             if (current !== runtime || current.phase !== "resuming") return;
             if (response.ok && this.model.thread(threadId)?.status.semantic !== "notLoaded") {
                 current.phase = "ready";
+                delete current.subscriptionPhase;
+                delete current.resumeOptions;
                 queueMicrotask(() => this.dispatchNextPrompt(threadId));
                 return;
             }
@@ -1379,8 +1472,19 @@ export class BrowserFrontendSession {
         const boundary = stringMember(parameters, "lastTurnId") || stringMember(parameters, "beforeTurnId");
         const expectedTurn = this.model.thread(threadId)?.turns.get(boundary);
         const current = () => this.matchesThreadPresentation(threadId, targetKey)
+            && (keyAction !== "thread.unsubscribe" || this.threadSubscriptionPhase(threadId) === "unsubscribing")
+            && (keyAction !== "thread.resume" || this.threadSubscriptionPhase(threadId) === "resuming")
             && ((keyAction !== "thread.revert" && !(keyAction === "thread.fork" && boundary)) || this.model.thread(threadId)?.turns.get(boundary) === expectedTurn);
-        const operation = (keyAction === "thread.workspace" || keyAction === "thread.revert") && this.model.thread(threadId)?.status.semantic === "notLoaded"
+        const operation = keyAction === "thread.unsubscribe"
+            ? this.requestPromise("fs.getMetadata", {path: stringMember(this.model.thread(threadId)?.raw, "path")}, current, false).then(response => {
+                let result: OperationResponse | Promise<OperationResponse> = response;
+                if (response.ok && !response.stale) {
+                    result = member(response.data, "isFile") === true ? this.requestPromise(action, parameters, current)
+                        : {ok: false, error: {message: "Saved rollout is not materialized; thread was not unsubscribed."}};
+                }
+                return result;
+            })
+            : (keyAction === "thread.workspace" || keyAction === "thread.revert") && this.model.thread(threadId)?.status.semantic === "notLoaded"
             ? this.requestPromise("thread.resume", {threadId, excludeTurns: true}, current).then(response => {
                 let result: OperationResponse | Promise<OperationResponse> = response;
                 if (response.ok && !response.stale) {
@@ -1427,7 +1531,7 @@ export class BrowserFrontendSession {
         return presentationKey === undefined || this.threadVisualKey(threadId) === presentationKey;
     }
     private dispatchNextPrompt(threadId: string, metadataResumeAttempted = false): void {
-        if (!this.canSubmit() || this.prompts.hasInFlight(threadId)) return;
+        if (!this.canSubmit() || this.prompts.hasInFlight(threadId) || !["", "paused"].includes(this.threadSubscriptionPhase(threadId))) return;
         if (!this.prompts.submissions(threadId).some(submission => submission.state === "queued")) return;
         const runtime = this.threadRuntime(threadId);
         if (runtime.phase !== "ready") {
@@ -1440,7 +1544,7 @@ export class BrowserFrontendSession {
             this.ensureThreadHydrated(threadId);
             return;
         }
-        if (thread.status.semantic === "notLoaded" && !metadataResumeAttempted) {
+        if ((thread.status.semantic === "notLoaded" || runtime.subscriptionPhase === "paused") && !metadataResumeAttempted) {
             this.resumePromptQueue(threadId);
             return;
         }
@@ -1535,6 +1639,14 @@ export class BrowserFrontendSession {
             if (state === "ready") this.hydrateCatalogs();
             else if (!providerReset) this.invalidateProviderWork();
         } else if (type === "connection.bridge" || type === "connection.controller") {
+            if (this.sdk.role !== "controller") {
+                for (const runtime of this.runtimeByThread.values()) {
+                    if (runtime.subscriptionPhase) {
+                        runtime.subscriptionPhase = "paused";
+                        delete runtime.resumeOptions;
+                    }
+                }
+            }
             if (this.providerReady()) queueMicrotask(() => {
                 if (this.selectedThreadId !== "" && this.selectedThreadId !== DraftThreadId)
                     this.ensureThreadHydrated(this.selectedThreadId, true);
@@ -1543,6 +1655,13 @@ export class BrowserFrontendSession {
         } else if (type === "workspace.project.changed" || type === "thread.project.changed") {
             this.refreshGroups();
             this.refreshBrowser();
+        } else if (type === "thread.lifecycle" || type === "thread.status.changed") {
+            const threadId = stringMember(frame.scope, "threadId");
+            const runtime = this.runtimeByThread.get(threadId);
+            if (this.canSubmit() && runtime?.subscriptionPhase === "waiting" && runtime.resumeOptions
+                && this.model.thread(threadId)?.status.semantic === "notLoaded") {
+                this.resumeThreadNow(threadId, runtime.resumeOptions);
+            }
         } else if (type === "thread.settings.changed") {
             const threadId = stringMember(frame.scope, "threadId");
             const settings = isObject(data.threadSettings) ? data.threadSettings : data;

@@ -405,6 +405,9 @@ export class ProtocolNormalizer {
         } else {
             data = errorValue(response);
         }
+        if (ok && action === "thread.unsubscribe" && stringMember(response.result, "status") === "notLoaded") {
+            this.emitEvent("thread.lifecycle", {state: "closed"}, "merge", scope);
+        }
         this.emit(result(
             this.nextSequence++,
             this.connectionGeneration,

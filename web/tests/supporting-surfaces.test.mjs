@@ -102,3 +102,18 @@ test("workspace options form supports explicit root choices and one deliberate c
     assert.match(unknown, /Proposed workspace/u);
     assert.doesNotMatch(unknown, /Current workspace|Workspace not reported/u);
 });
+
+test("resume forms omit creation-only controls and retain failed replacement drafts", () => {
+    const markup = renderToStaticMarkup(createElement(NewThreadDialog, {
+        purpose: "resume", initialWorkspace: "/tmp", initialDraft: {
+            workspace: "/tmp", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false,
+            resumeDeveloperInstructions: "  Preserved replacement\n",
+        }, onCancel() {}, onContinue() {},
+    }));
+    assert.doesNotMatch(markup, /Temporary thread|Optional thread name/u);
+    assert.match(markup, /Current instruction text is unavailable/u);
+    assert.match(markup, /Replace base instructions/u);
+    assert.match(markup, /Replace developer instructions/u);
+    assert.match(markup, /  Preserved replacement/u);
+    assert.match(markup, /type="checkbox" checked=""/u);
+});

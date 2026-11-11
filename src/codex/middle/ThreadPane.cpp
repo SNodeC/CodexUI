@@ -142,6 +142,8 @@ public:
   std::string title;
   std::string cwd;
   std::string workspaceChangeUnavailable;
+  std::string subscriptionUnavailable;
+  std::string subscriptionPhase;
   UiStatus status;
   bool indirectActive = false;
   bool uninspectedResult = false;
@@ -2057,6 +2059,8 @@ bool ThreadPane::applyItemPresentation(
   assign(item->title, row.title);
   assign(item->cwd, row.cwd);
   assign(item->workspaceChangeUnavailable, row.workspaceChangeUnavailable);
+  assign(item->subscriptionUnavailable, row.subscriptionUnavailable);
+  assign(item->subscriptionPhase, row.subscriptionPhase);
   assign(item->status, row.status);
   assign(item->indirectActive, row.indirectActive);
   assign(item->uninspectedResult, row.uninspectedResult);
@@ -2665,6 +2669,25 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     });
   };
   QAction *reload = addAction(QStringLiteral("Reload"), &Actions::reload);
+  const bool subscriptionReady = canControl && item->subscriptionUnavailable.empty();
+  const bool waiting = item->subscriptionPhase == "waiting" || item->subscriptionPhase == "unsubscribing";
+  const bool unloaded = item->status.semantic == nodegraph::NodeStatus::NotLoaded;
+  for (const auto& entry : {std::pair{QStringLiteral("Resume"), &Actions::resume},
+                            {QStringLiteral("Resume with options…"), &Actions::resumeWithOptions},
+                            {QStringLiteral("Unsubscribe"), &Actions::unsubscribe},
+                            {QStringLiteral("Change developer instructions…"), &Actions::changeDeveloperInstructions}}) {
+      QAction* action = addAction(entry.first, entry.second);
+      const bool resume = entry.second == &Actions::resume;
+      const bool options = entry.second == &Actions::resumeWithOptions;
+      const bool unsubscribe = entry.second == &Actions::unsubscribe;
+      action->setEnabled(subscriptionReady && item->subscriptionPhase != "resuming" &&
+                         (unsubscribe ? (waiting || (!unloaded && item->subscriptionPhase.empty()))
+                                      : !waiting && (options  ? unloaded
+                                                     : resume ? (unloaded || item->subscriptionPhase == "paused")
+                                                              : !unloaded)));
+      action->setToolTip(unsubscribe && waiting ? QStringLiteral("Cancel the pending resume and keep this thread unsubscribed.")
+                                                : text(item->subscriptionUnavailable));
+  }
   addAction(QStringLiteral("Timing details"), &Actions::timing);
   QAction* workspace = addAction(QStringLiteral("Change workspace…"), &Actions::changeWorkspace);
   workspace->setEnabled(canControl && target && item->workspaceChangeUnavailable.empty());

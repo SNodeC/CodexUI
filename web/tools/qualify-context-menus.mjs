@@ -12,7 +12,7 @@ export async function qualifyContextMenus(devTools) {
         const turns = [1, 2, 3].map(index => ({id: "menu-turn-" + index, status: "completed", items: [
             {id: "menu-item-" + index, type: "userMessage", content: [{type: "text", text: "Menu prompt " + index}]}]}));
         const source = {id: "menu-source", name: "Menu source", cwd: "/source", historyMode: "paginated", ephemeral: false,
-            projectId: "", section: null, status: {type: "idle"}, turns};
+            projectId: "", path: "/saved/menu-source", section: null, status: {type: "idle"}, turns};
         const threads = new Map([[source.id, source]]);
         const groups = {project: [{id: "menu-project", name: "Existing project", roots: []}], section: [{id: "menu-section", name: "Existing section"}]};
         const held = [];
@@ -21,13 +21,17 @@ export async function qualifyContextMenus(devTools) {
         const requests = method => socket.sent.filter(message => message.kind === "appserver" && message.payload.method === method).map(message => message.payload);
         socket.send = data => {
             const envelope = JSON.parse(data), request = envelope.payload;
-            if (envelope.kind === "appserver" && (threads.has(request?.params?.threadId)
+            if (envelope.kind === "appserver" && request?.method === "fs/getMetadata" && request.params.path === source.path) {
+                socket.sent.push(envelope);
+                queueMicrotask(() => reply(request, {isFile: true}));
+            } else if (envelope.kind === "appserver" && (threads.has(request?.params?.threadId)
                 || ["project/create", "threadSection/create", "project/list", "threadSection/list", "thread/list"].includes(request?.method))) {
                 socket.sent.push(envelope);
-                if (["thread/fork", "project/create", "threadSection/create", "thread/metadata/update", "thread/section/move"].includes(request.method)) {
+                if (["thread/fork", "thread/unsubscribe", "project/create", "threadSection/create", "thread/metadata/update", "thread/section/move"].includes(request.method) || request.method === "thread/resume" && Object.hasOwn(request.params, "developerInstructions")) {
                     held.push(request);
                 } else {
                     const thread = threads.get(request.params.threadId);
+                    if (request.method === "thread/resume") { thread.status = {type: "idle"}; }
                     const result = request.method === "thread/resume" || request.method === "thread/read" ? {thread}
                         : request.method === "thread/turns/list" ? {data: thread.turns.toReversed(), nextCursor: null}
                         : request.method === "thread/items/list" ? {data: thread.turns.find(turn => turn.id === request.params.turnId).items.toReversed().map(item => ({turnId: request.params.turnId, item})), nextCursor: null}
@@ -120,11 +124,66 @@ export async function qualifyContextMenus(devTools) {
                 }
             }
         }
-        await openTurnMenu();
+        const threadAction = text => [...document.querySelector(".thread-context-menu").querySelectorAll("button")].find(button => button.textContent === text);
+        await openThreadMenu();
+        const subscriptions = threadAction("Resume").disabled && threadAction("Resume with options…").disabled
+            && !threadAction("Unsubscribe").disabled && !threadAction("Change developer instructions…").disabled;
+        threadAction("Change developer instructions…").click(); await frame();
+        dialog = document.querySelector('[aria-labelledby="thread-options-title"]');
+        const beforeUnsubscribe = requests("thread/unsubscribe").length;
+        [...dialog.querySelectorAll("button")].find(button => button.textContent === "Cancel").click(); await frame();
+        const cancelledInstructions = requests("thread/unsubscribe").length === beforeUnsubscribe;
+        for (const cancelPending of [true, false]) {
+            await openThreadMenu(); threadAction("Change developer instructions…").click(); await frame();
+            dialog = document.querySelector('[aria-labelledby="thread-options-title"]');
+            const developer = [...dialog.querySelectorAll("label")].find(label => label.querySelector("span")?.textContent === "Developer instructions").querySelector("textarea");
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(developer, "  Browser revision\\n");
+            developer.dispatchEvent(new Event("input", {bubbles: true})); await frame();
+            if (!cancelPending) { input(dialog.querySelector("input:not([type=checkbox])"), "/retry"); await frame(); }
+            dialog.querySelector('button[type="submit"]').click();
+            await waitFor(() => held.some(request => request.method === "thread/unsubscribe"), "unsubscribe missing");
+            const unsubscribe = held.splice(held.findIndex(request => request.method === "thread/unsubscribe"), 1)[0];
+            const beforeResume = requests("thread/resume").length;
+            reply(unsubscribe, {status: "unsubscribed"}); await frame();
+            if (requests("thread/resume").length !== beforeResume) { throw new Error("resume ran before closure"); }
+            if (cancelPending) {
+                await openThreadMenu(); threadAction("Unsubscribe").click(); await frame();
+            }
+            source.status = {type: "notLoaded"};
+            socket.receive({kind: "appserver", payload: {method: "thread/closed", params: {threadId: source.id}}}); await frame();
+            if (cancelPending) {
+                if (requests("thread/resume").length !== beforeResume) { throw new Error("cancelled change resumed"); }
+                await openThreadMenu();
+                if (threadAction("Resume").disabled || threadAction("Resume with options…").disabled) { throw new Error("unloaded resume actions unavailable"); }
+                threadAction("Resume").click(); await frame();
+                source.status = {type: "idle"};
+                socket.receive({kind: "appserver", payload: {method: "thread/status/changed", params: {threadId: source.id, status: source.status}}}); await frame();
+            } else {
+                await waitFor(() => held.some(request => request.method === "thread/resume"), "replacement resume missing");
+                const resume = held.splice(held.findIndex(request => request.method === "thread/resume"), 1)[0];
+                if (resume.params.developerInstructions !== "  Browser revision\\n" || Object.hasOwn(resume.params, "baseInstructions")) {
+                    throw new Error("resume changed the supplied instruction text or unrelated fields");
+                }
+                error(resume, "Resume rejected for retry qualification"); await frame();
+                await openThreadMenu(); threadAction("Resume with options…").click(); await frame();
+                dialog = document.querySelector('[aria-labelledby="thread-options-title"]');
+                if (dialog.querySelector("input:not([type=checkbox])").value !== "/retry" ||
+                    ![...dialog.querySelectorAll("textarea")].some(editor => editor.value === "  Browser revision\\n")) {
+                    throw new Error("failed resume lost the authored draft");
+                }
+                dialog.querySelector('button[type="submit"]').click();
+                await waitFor(() => held.some(request => request.method === "thread/resume"), "retry resume missing");
+                const retry = held.splice(held.findIndex(request => request.method === "thread/resume"), 1)[0];
+                if (JSON.stringify(retry.params) !== JSON.stringify(resume.params)) { throw new Error("retry changed the retained options"); }
+                source.cwd = "/retry"; source.status = {type: "idle"}; reply(retry, {thread: source}); await frame();
+            }
+        }
+        const subscriptionHistory = document.querySelectorAll('button[aria-label="Turn actions"]').length === 3 && !!row();
+        await openThreadMenu(); threadAction("Change developer instructions…").click(); await frame();
         socket.send = original;
         return {ordered, keyboard, visibleDivider, optionsTitle, cancelledFork, forks: requests("thread/fork").length === 2,
             sourcePreserved: source.turns.length === 3 && requests("thread/revert").length === 0,
-            creationOrder, cancelledCreation, assignmentTarget, failureNotice, submittedCreation};
+            creationOrder, cancelledCreation, assignmentTarget, failureNotice, submittedCreation, subscriptions, cancelledInstructions, subscriptionHistory};
     })()`);
     for (const [name, value] of Object.entries(result)) {
         assert.equal(value, true, `Context menus: ${name}`);

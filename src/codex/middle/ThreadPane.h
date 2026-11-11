@@ -45,6 +45,10 @@ public:
       std::function<void()> hide;
       ThreadAction select;
       ThreadAction reload;
+      ThreadAction resume;
+      ThreadAction resumeWithOptions;
+      ThreadAction unsubscribe;
+      ThreadAction changeDeveloperInstructions;
       ThreadAction rename;
       ThreadAction changeWorkspace;
       ThreadAction fork;

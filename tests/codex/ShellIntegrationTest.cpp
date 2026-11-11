@@ -3510,6 +3510,179 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
             "observer cannot mutate thread workspace");
 }
 
+void subscriptionActionsKeepTheConversationVisible(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    applyThread(worker, "subscription-source", "Subscription source");
+    applyThread(worker, "subscription-other", "Keep selected");
+    static_cast<void>(
+        worker.apply({DecodedMessageKind::ServerNotification,
+                      "thread/started",
+                      std::nullopt,
+                      {{"thread", Value::Object{{"id", "subscription-source"}, {"cwd", "/tmp"}, {"path", "/saved/source"}}}}}));
+    static_cast<void>(
+        worker.apply({DecodedMessageKind::ServerNotification, "thread/closed", std::nullopt, {{"threadId", "subscription-source"}}}));
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    require(spinUntil([&] {
+                return threadItem(list, "subscription-source");
+            }),
+            "unloaded thread remains in the actual list");
+    require(selectThread(list, "subscription-other"), "subscription action can target an unselected thread");
+    list->expandAll();
+    static_cast<void>(takeQtMessages(channels));
+    const auto openAction = [&](QStringView label) {
+        if (auto* popup = QApplication::activePopupWidget()) {
+            popup->close();
+        }
+        const QPoint point = list->visualItemRect(threadItem(list, "subscription-source")).center();
+        QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, point));
+        auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        QAction* found = nullptr;
+        if (menu) {
+            for (auto* action : menu->actions()) {
+                if (action->text() == label) {
+                    found = action;
+                }
+            }
+        }
+        return found;
+    };
+    for (const auto label : {u"Resume", u"Resume with options…", u"Unsubscribe", u"Change developer instructions…"}) {
+        auto* action = openAction(label);
+        const bool resume = QStringView(label).startsWith(u"Resume");
+        require(action && action->isEnabled() == resume, "unloaded menu offers exactly the two resume actions");
+    }
+    auto* resume = openAction(u"Resume");
+    if (resume) {
+        resume->trigger();
+    }
+    auto messages = takeQtMessages(channels);
+    require(std::ranges::any_of(messages,
+                                [](const auto& message) {
+                                    const auto* action = std::get_if<NodeAction>(&message);
+                                    return action && action->kind == NodeActionKind::Resume &&
+                                           action->target->id().canonical == "subscription-source" && action->payload.empty();
+                                }),
+            "Resume submits no overrides and uses the context target");
+
+    for (const bool cancel : {true, false}) {
+        if (!cancel) {
+            auto read = FrontendSessionTestPeer::graph(session).tryRead();
+            const auto source = read ? read->find({NodeKind::Thread, "subscription-source"}) : NodeRef{};
+            read.reset();
+            static_cast<void>(worker.threadSubscription(source, "", Value::Object{{"cwd", "/retry"}}));
+        }
+        auto* options = openAction(u"Resume with options…");
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            require(dialog && dialog->windowTitle() == "Resume with options", "resume reuses the options dialog");
+            if (dialog) {
+                require(std::ranges::any_of(dialog->findChildren<QLineEdit*>(),
+                                            [&](auto* edit) {
+                                                return edit->text() == (cancel ? "/tmp" : "/retry");
+                                            }),
+                        "resume reopens with the retained workspace after failure");
+                for (auto* check : dialog->findChildren<QCheckBox*>()) {
+                    if (check->text() == "Replace developer instructions") {
+                        check->setChecked(true);
+                    }
+                }
+                for (auto* edit : dialog->findChildren<QPlainTextEdit*>()) {
+                    if (edit->accessibleName() == "Developer instructions") {
+                        edit->setPlainText("  Revised instructions\n");
+                    }
+                }
+                const auto evidence = qEnvironmentVariable("CODEXUI_SUBSCRIPTION_EVIDENCE");
+                if (!evidence.isEmpty()) {
+                    require(dialog->grab().save(evidence), "resume dialog screenshot is captured");
+                }
+                if (cancel) {
+                    dialog->reject();
+                } else {
+                    dialog->accept();
+                }
+            }
+        });
+        if (options) {
+            options->trigger();
+        }
+        messages = takeQtMessages(channels);
+        const auto submitted = std::ranges::find_if(messages, [](const auto& message) {
+            const auto* action = std::get_if<NodeAction>(&message);
+            return action && action->kind == NodeActionKind::Resume;
+        });
+        require((submitted == messages.end()) == cancel, "Cancel leaves the subscription untouched");
+        if (!cancel && submitted != messages.end()) {
+            const auto& action = std::get<NodeAction>(*submitted);
+            require(action.payload == Value::Object{{"cwd", "/retry"}, {"developerInstructions", Value("  Revised instructions\n")}},
+                    "resume preserves exact developer text and omits unchanged fields");
+        }
+    }
+    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+    const auto source = read ? read->find({NodeKind::Thread, "subscription-source"}) : NodeRef{};
+    read.reset();
+    for (const auto* method : {"fs/getMetadata", "thread/unsubscribe"}) {
+        static_cast<void>(worker.threadSubscription(source, "unsubscribing", Value::Object{{"developerInstructions", "Pending"}}));
+        const ProtocolRequestId id(std::string("subscription-") + method);
+        DecodedMessage request{DecodedMessageKind::ClientRequest, method, id, {{"threadId", "subscription-source"}}};
+        request.requestTarget = source;
+        const auto pending = worker.applyDetailed(std::move(request));
+        require(spinUntil([&] {
+                    auto* action = openAction(u"Unsubscribe");
+                    return action && action->isEnabled() && action->toolTip().contains("Cancel");
+                }),
+                "the pending subscription request still allows cancellation from the menu");
+        const Value::Object result =
+            std::string_view(method) == "fs/getMetadata" ? Value::Object{{"isFile", true}} : Value::Object{{"status", "unsubscribed"}};
+        static_cast<void>(worker.apply({DecodedMessageKind::ClientResult, method, id, result, pending.primary}));
+    }
+    static_cast<void>(worker.threadSubscription(source, "waiting", Value::Object{{"developerInstructions", "Pending"}}));
+    require(spinUntil([&] {
+                auto* action = openAction(u"Unsubscribe");
+                return action && action->isEnabled() && action->toolTip().contains("Cancel");
+            }),
+            "Unsubscribe cancels a pending instruction change");
+    if (auto* popup = QApplication::activePopupWidget()) {
+        popup->close();
+    }
+    static_cast<void>(worker.threadSubscription(source, ""));
+    static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                    "thread/status/changed",
+                                    std::nullopt,
+                                    {{"threadId", "subscription-source"}, {"status", Value::Object{{"type", "idle"}}}}}));
+    require(spinUntil([&] {
+                auto* action = openAction(u"Change developer instructions…");
+                return action && action->isEnabled();
+            }),
+            "loaded thread offers the combined instruction change");
+    auto* change = openAction(u"Change developer instructions…");
+    QTimer::singleShot(0, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        require(dialog && dialog->windowTitle() == "Change developer instructions", "combined action opens the existing options form");
+        if (dialog) {
+            dialog->accept();
+        }
+    });
+    if (change) {
+        change->trigger();
+    }
+    messages = takeQtMessages(channels);
+    require(std::ranges::any_of(messages,
+                                [](const auto& message) {
+                                    const auto* action = std::get_if<NodeAction>(&message);
+                                    return action && action->kind == NodeActionKind::ChangeDeveloperInstructions &&
+                                           action->payload == Value::Object{{"developerInstructions", Value("")}};
+                                }),
+            "the combined action can explicitly clear developer instructions without unrelated overrides");
+    require(list->currentItem() == threadItem(list, "subscription-other") && threadItem(list, "subscription-source"),
+            "subscription options preserve selection and keep the target visible");
+}
+
 void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -7004,6 +7177,7 @@ int main(int argc, char **argv) {
   reloadAndReconnectHydrationStayExplicit(*configuration);
   connectionCapabilitiesRefreshOpenThreadActions(*configuration);
   forkActionsExposeLineageAndAdvancedOptions(*configuration);
+  subscriptionActionsKeepTheConversationVisible(*configuration);
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
   groupedStatusNotificationsRefreshAncestors(*configuration);
   inspectionAcknowledgementsTrackTheBoundConversation(*configuration);

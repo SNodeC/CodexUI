@@ -8,6 +8,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <optional>
 #include <string>
 
 class QCheckBox;
@@ -25,30 +26,34 @@ struct NewThreadDraft {
   bool ephemeral = false;
   std::string projectId{};
   std::string sectionId{};
+  std::optional<QString> resumeBaseInstructions{};
+  std::optional<QString> resumeDeveloperInstructions{};
 };
 
 class NewThreadDialog final : public UiStyle::ScrollFormDialog {
 public:
-  enum class Purpose { Create, Fork };
+    enum class Purpose { Create, Fork, Resume, ChangeInstructions };
 
-  explicit NewThreadDialog(QString initialWorkspace, QWidget *parent = nullptr);
-  NewThreadDialog(NewThreadDraft initialDraft,
-                  Purpose purpose,
-                  QWidget* parent = nullptr,
-                  QStringList workspaceChoices = {},
-                  FileSelectionDialog::Access filesystem = {});
+    explicit NewThreadDialog(QString initialWorkspace, QWidget* parent = nullptr);
+    NewThreadDialog(NewThreadDraft initialDraft,
+                    Purpose purpose,
+                    QWidget* parent = nullptr,
+                    QStringList workspaceChoices = {},
+                    FileSelectionDialog::Access filesystem = {});
 
-  [[nodiscard]] NewThreadDraft draft() const;
+    [[nodiscard]] NewThreadDraft draft() const;
 
-  private:
-  void acceptDraft();
+private:
+    void acceptDraft();
 
-  QLineEdit *workspace = nullptr;
-  QLineEdit *name = nullptr;
-  QPlainTextEdit *baseInstructions = nullptr;
-  QPlainTextEdit *developerInstructions = nullptr;
-  QCheckBox *ephemeral = nullptr;
-  QLabel *errorLabel = nullptr;
+    QLineEdit* workspace = nullptr;
+    QLineEdit* name = nullptr;
+    QPlainTextEdit* baseInstructions = nullptr;
+    QPlainTextEdit* developerInstructions = nullptr;
+    QCheckBox* ephemeral = nullptr;
+    QCheckBox* replaceBase = nullptr;
+    QCheckBox* replaceDeveloper = nullptr;
+    QLabel* errorLabel = nullptr;
 };
 
 } // namespace codexui::codex

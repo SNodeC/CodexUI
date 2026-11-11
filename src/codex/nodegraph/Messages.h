@@ -55,6 +55,9 @@ struct Attachment final {
 enum class NodeActionKind : std::uint8_t {
     Hydrate,
     Reload,
+    Resume,
+    Unsubscribe,
+    ChangeDeveloperInstructions,
     LoadHistory,
     Rename,
     ChangeWorkspace,

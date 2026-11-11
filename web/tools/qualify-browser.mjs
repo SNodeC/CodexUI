@@ -967,6 +967,24 @@ try {
             await mkdir(process.env.CODEXUI_BROWSER_SCREENSHOTS, {recursive: true});
             const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
             await writeFile(join(process.env.CODEXUI_BROWSER_SCREENSHOTS, "context-menus.png"), Buffer.from(screenshot.data, "base64"));
+            if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY) {
+                for (const width of [380, 1280]) {
+                    for (const deviceScaleFactor of [1, 1.25, 1.5, 2]) {
+                        await devTools.call("Emulation.setDeviceMetricsOverride", {width, height: 900, deviceScaleFactor, mobile: false});
+                        await devTools.evaluate(`document.querySelector('[aria-labelledby="thread-options-title"] textarea:not(:disabled)').focus()`);
+                        await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9});
+                        await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9});
+                        assert.equal(await devTools.evaluate(`(() => {
+                            const dialog = document.querySelector('[aria-labelledby="thread-options-title"]');
+                            const box = dialog.getBoundingClientRect();
+                            return document.activeElement.textContent === "Cancel" && box.left >= 0 && box.right <= innerWidth + 1
+                                && box.top >= 0 && box.bottom <= innerHeight + 1;
+                        })()`), true, `Resume dialog keyboard access and bounds at ${width}px DPR ${deviceScaleFactor}`);
+                        const image = await devTools.call("Page.captureScreenshot", {format: "png"});
+                        await writeFile(join(process.env.CODEXUI_BROWSER_SCREENSHOTS, `resume-${width}-${deviceScaleFactor}.png`), Buffer.from(image.data, "base64"));
+                    }
+                }
+            }
         }
     } else {
     await setWidth(devTools, 760);

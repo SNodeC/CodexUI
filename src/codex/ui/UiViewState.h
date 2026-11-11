@@ -84,6 +84,8 @@ struct ThreadListRow {
   std::string title;
   std::string cwd;
   std::string workspaceChangeUnavailable;
+  std::string subscriptionUnavailable;
+  std::string subscriptionPhase;
   UiStatus status;
   bool indirectActive = false;
   bool uninspectedResult = false;

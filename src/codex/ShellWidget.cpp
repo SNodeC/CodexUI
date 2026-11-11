@@ -146,7 +146,7 @@ namespace codexui::codex {
                 }))
                 return {true, true, {}};
             const auto* read = &access;
-            constexpr std::array<std::string_view, 20> Fields{"projectId",
+            constexpr std::array<std::string_view, 23> Fields{"projectId",
                                                               "section",
                                                               "sectionEnteredAt",
                                                               "name",
@@ -164,6 +164,9 @@ namespace codexui::codex {
                                                               "localPromptActivityAt",
                                                               "confirmedLocalPromptActivityAt",
                                                               "hydrationState",
+                                                              "subscriptionPhase",
+                                                              "path",
+                                                              "ephemeral",
                                                               "uninspectedResult",
                                                               "archived"};
             ThreadPaneRoute route;
@@ -279,12 +282,13 @@ namespace codexui::codex {
                             return true;
                         if (!selectedThread || node != selectedThread)
                             return false;
-                        constexpr std::array<std::string_view, 15> Fields{"name",
+                        constexpr std::array<std::string_view, 16> Fields{"name",
                                                                           "title",
                                                                           "cwd",
                                                                           "workspace",
                                                                           "status",
                                                                           "hydrationState",
+                                                                          "subscriptionPhase",
                                                                           "recoveryOnly",
                                                                           "lastActivityAt",
                                                                           "recencyAt",
@@ -522,6 +526,7 @@ namespace codexui::codex {
         void beginForkThreadDialog(nodegraph::NodeRef thread, nodegraph::NodeRef turn = {});
         void renameThreadDialog(const nodegraph::NodeRef& thread);
         void changeWorkspaceDialog(const nodegraph::NodeRef& thread);
+        void resumeThreadDialog(const nodegraph::NodeRef& thread, bool changeInstructions);
         void confirmDeleteThread(const nodegraph::NodeRef& thread);
         void showTurnMenu(nodegraph::NodeRef item, QPoint position);
         [[nodiscard]] bool submitPrompt(QString prompt, std::vector<AttachmentDraft> attachments);
@@ -824,6 +829,20 @@ namespace codexui::codex {
         };
         threadActions.changeWorkspace = [this](const nodegraph::NodeRef& thread) {
             changeWorkspaceDialog(thread);
+        };
+        threadActions.resume = [this](const nodegraph::NodeRef& thread) {
+            static_cast<void>(
+                sendNodeAction({thread, nodegraph::NodeActionKind::Resume, {}, {}, {}, {}}, QStringLiteral("Resume was not admitted.")));
+        };
+        threadActions.unsubscribe = [this](const nodegraph::NodeRef& thread) {
+            static_cast<void>(sendNodeAction({thread, nodegraph::NodeActionKind::Unsubscribe, {}, {}, {}, {}},
+                                             QStringLiteral("Unsubscribe was not admitted.")));
+        };
+        threadActions.resumeWithOptions = [this](const nodegraph::NodeRef& thread) {
+            resumeThreadDialog(thread, false);
+        };
+        threadActions.changeDeveloperInstructions = [this](const nodegraph::NodeRef& thread) {
+            resumeThreadDialog(thread, true);
         };
         threadActions.rename = [this](const nodegraph::NodeRef& thread) {
             if (thread)
@@ -1973,14 +1992,18 @@ namespace codexui::codex {
                 if (values.title.empty())
                     values.title = "Untitled thread";
                 values.workspace = exactStringFromValue(valueMember(*state, "cwd"));
-                values.workspaceChangeUnavailable = nodegraph::threadWorkspaceChangeUnavailable(*read, selected);
+                values.workspaceChangeUnavailable =
+                    nodegraph::threadContextChangeUnavailable(*read, selected, nodegraph::NodeActionKind::ChangeWorkspace);
                 values.status = statusFromState(*state);
                 values.recoveryOnly = boolFromValue(valueMember(*state, "recoveryOnly"));
                 const std::string hydrationState = exactStringFromValue(valueMember(*state, "hydrationState"));
                 const bool local = boolFromValue(valueMember(*state, "local"));
                 values.conversationReadyForDisplay = hydrationState == "ready" || local || values.recoveryOnly;
                 values.hydrationFailed = hydrationState == "failed";
-                values.threadAdmissionReady = !values.recoveryOnly && hydrationState != "loading" && hydrationState != "failed" &&
+                values.threadAdmissionReady = !values.recoveryOnly &&
+                                              (exactStringFromValue(valueMember(*state, "subscriptionPhase")).empty() ||
+                                               exactStringFromValue(valueMember(*state, "subscriptionPhase")) == "paused") &&
+                                              hydrationState != "loading" && hydrationState != "failed" &&
                                               (state->status != nodegraph::NodeStatus::NotLoaded || hydrationState == "ready");
                 for (const auto& operation : read->related(selected, nodegraph::RelationKind::PendingOperation)) {
                     if (exactStringFromValue(valueMember(*read->state(operation), "method")) == "thread/revert") {
@@ -2202,6 +2225,57 @@ namespace codexui::codex {
                 nodegraph::NodeAction action{
                     thread, nodegraph::NodeActionKind::ChangeWorkspace, {}, {}, {{"cwd", utf8(dialog.selectedDirectory())}}, {}};
                 static_cast<void>(sendNodeAction(std::move(action), QStringLiteral("Workspace change was not admitted; try again.")));
+            }
+        }
+    }
+
+    void ShellWidget::Impl::resumeThreadDialog(const nodegraph::NodeRef& thread, bool changeInstructions) {
+        const auto row = uiAdapter.threadRow(thread);
+        if (!row || !row->subscriptionUnavailable.empty()) {
+            showNotice(row ? text(row->subscriptionUnavailable) : QStringLiteral("Thread state is unavailable."));
+        } else {
+            NewThreadDraft initial;
+            initial.workspace = text(row->cwd);
+            if (auto read = session.nodeGraph().tryRead(); read && read->live(thread)) {
+                const auto* retained = valueMember(*read->state(thread), "resumeOptions");
+                if (retained && retained->asObject()) {
+                    if (const auto* value = valueMember(*retained->asObject(), "cwd"); value && value->asString()) {
+                        initial.workspace = text(*value->asString());
+                    }
+                    if (const auto* value = valueMember(*retained->asObject(), "baseInstructions"); value && value->asString()) {
+                        initial.resumeBaseInstructions = text(*value->asString());
+                    }
+                    if (const auto* value = valueMember(*retained->asObject(), "developerInstructions"); value && value->asString()) {
+                        initial.resumeDeveloperInstructions = text(*value->asString());
+                    }
+                }
+            }
+            NewThreadDialog dialog(initial,
+                                   changeInstructions ? NewThreadDialog::Purpose::ChangeInstructions : NewThreadDialog::Purpose::Resume,
+                                   owner,
+                                   projectWorkspaceRoots(row->projectId),
+                                   [this] {
+                                       return session.filesystemAccess();
+                                   });
+            if (dialog.exec() == QDialog::Accepted) {
+                const auto draft = dialog.draft();
+                nodegraph::NodeAction action{thread,
+                                             changeInstructions ? nodegraph::NodeActionKind::ChangeDeveloperInstructions
+                                                                : nodegraph::NodeActionKind::Resume,
+                                             {},
+                                             {},
+                                             {},
+                                             {}};
+                if (draft.workspace != text(row->cwd)) {
+                    action.payload.emplace("cwd", utf8(draft.workspace));
+                }
+                if (draft.resumeBaseInstructions) {
+                    action.payload.emplace("baseInstructions", utf8(*draft.resumeBaseInstructions));
+                }
+                if (draft.resumeDeveloperInstructions) {
+                    action.payload.emplace("developerInstructions", utf8(*draft.resumeDeveloperInstructions));
+                }
+                static_cast<void>(sendNodeAction(std::move(action), QStringLiteral("Resume options were not admitted.")));
             }
         }
     }

@@ -53,17 +53,23 @@ NewThreadDialog::NewThreadDialog(
     : UiStyle::ScrollFormDialog(parent) {
     setModal(true);
     const bool forFork = purpose == Purpose::Fork;
-    const QString heading = forFork ? QStringLiteral("Fork with options") : QStringLiteral("New thread");
+    const bool forResume = purpose == Purpose::Resume || purpose == Purpose::ChangeInstructions;
+    const QString heading = purpose == Purpose::ChangeInstructions ? QStringLiteral("Change developer instructions")
+                            : forResume                            ? QStringLiteral("Resume with options")
+                            : forFork                              ? QStringLiteral("Fork with options")
+                                                                   : QStringLiteral("New thread");
     setWindowTitle(heading);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 22, 24, 20);
     root->setSpacing(14);
     root->addWidget(label(heading, "heading"));
-    root->addWidget(label(forFork ? QStringLiteral("Adjust the copied thread context. Model, access, "
-                                                   "reasoning, and style remain in the upcoming-turn "
-                                                   "controls.")
-                                  : QStringLiteral("Set the thread context. Model, access, reasoning, and "
-                                                   "style remain in the upcoming-turn controls."),
+    root->addWidget(label(forResume ? QStringLiteral("Current instruction text is unavailable. Select Replace to supply new text; an empty "
+                                                     "replacement clears it. Unchecked instructions are unchanged.")
+                          : forFork ? QStringLiteral("Adjust the copied thread context. Model, access, "
+                                                     "reasoning, and style remain in the upcoming-turn "
+                                                     "controls.")
+                                    : QStringLiteral("Set the thread context. Model, access, reasoning, and "
+                                                     "style remain in the upcoming-turn controls."),
                           "muted"));
 
     auto* scroll = formScrollArea();
@@ -97,7 +103,9 @@ NewThreadDialog::NewThreadDialog(
         name->setText(std::move(initialDraft.name));
     }
     name->setEnabled(!initialDraft.ephemeral);
-    form->addWidget(field(QStringLiteral("Name"), name));
+    auto* nameField = field(QStringLiteral("Name"), name);
+    form->addWidget(nameField);
+    nameField->setVisible(!forResume);
 
     baseInstructions = new UiStyle::DialogTextEdit;
     baseInstructions->setPlaceholderText(QStringLiteral("Optional base instructions"));
@@ -112,6 +120,20 @@ NewThreadDialog::NewThreadDialog(
     developerInstructions->setProperty("kind", "dialogEditor");
     developerInstructions->setPlainText(std::move(initialDraft.developerInstructions));
     form->addWidget(field(QStringLiteral("Developer instructions"), developerInstructions));
+    if (forResume) {
+        replaceBase = new QCheckBox(QStringLiteral("Replace base instructions"));
+        replaceDeveloper = new QCheckBox(QStringLiteral("Replace developer instructions"));
+        for (const auto& [check, editor] : {std::pair{replaceBase, baseInstructions}, {replaceDeveloper, developerInstructions}}) {
+            editor->clear();
+            editor->setEnabled(false);
+            form->insertWidget(form->indexOf(editor->parentWidget()), check);
+            connect(check, &QCheckBox::toggled, editor, &QWidget::setEnabled);
+        }
+        baseInstructions->setPlainText(initialDraft.resumeBaseInstructions.value_or(QString{}));
+        developerInstructions->setPlainText(initialDraft.resumeDeveloperInstructions.value_or(QString{}));
+        replaceBase->setChecked(initialDraft.resumeBaseInstructions.has_value());
+        replaceDeveloper->setChecked(initialDraft.resumeDeveloperInstructions.has_value() || purpose == Purpose::ChangeInstructions);
+    }
 
     auto* ephemeralSurface = new QFrame;
     ephemeralSurface->setProperty("kind", "summary");
@@ -122,6 +144,7 @@ NewThreadDialog::NewThreadDialog(
     ephemeralLayout->addWidget(ephemeral);
     ephemeralLayout->addWidget(label(QStringLiteral("Temporary threads are not retained in normal Codex history."), "meta"));
     form->addWidget(ephemeralSurface);
+    ephemeralSurface->setVisible(!forResume);
     form->addStretch();
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
@@ -170,11 +193,18 @@ NewThreadDialog::NewThreadDialog(
 }
 
 NewThreadDraft NewThreadDialog::draft() const {
-    return {workspace->text().trimmed(),
-            ephemeral->isChecked() ? QString{} : name->text().trimmed(),
-            baseInstructions->toPlainText().trimmed(),
-            developerInstructions->toPlainText().trimmed(),
-            ephemeral->isChecked()};
+    NewThreadDraft result{workspace->text().trimmed(),
+                          ephemeral->isChecked() ? QString{} : name->text().trimmed(),
+                          baseInstructions->toPlainText().trimmed(),
+                          developerInstructions->toPlainText().trimmed(),
+                          ephemeral->isChecked()};
+    if (replaceBase && replaceBase->isChecked()) {
+        result.resumeBaseInstructions = baseInstructions->toPlainText();
+    }
+    if (replaceDeveloper && replaceDeveloper->isChecked()) {
+        result.resumeDeveloperInstructions = developerInstructions->toPlainText();
+    }
+    return result;
 }
 
 void NewThreadDialog::acceptDraft() {

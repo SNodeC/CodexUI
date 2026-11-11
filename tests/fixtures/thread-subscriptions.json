@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {"name": "closure after acknowledgement", "status": "unsubscribed", "options": {"developerInstructions": "  Revised instructions\n"}},
+    {"name": "closure before acknowledgement", "status": "unsubscribed", "closeBeforeAck": true, "options": {"developerInstructions": ""}},
+    {"name": "already unloaded response", "status": "notLoaded", "options": {"baseInstructions": "Replacement base"}},
+    {"name": "cancel before acknowledgement", "status": "unsubscribed", "cancelBeforeAck": true, "options": {"developerInstructions": "Cancelled"}},
+    {"name": "cancel after acknowledgement", "status": "unsubscribed", "cancelAfterAck": true, "options": {"developerInstructions": "Cancelled"}},
+    {"name": "unmaterialized rollout", "failure": "persistence", "options": {"developerInstructions": "Preserve me"}},
+    {"name": "unsubscribe failure", "failure": "unsubscribe", "options": {"developerInstructions": "Preserve me"}},
+    {"name": "resume failure", "status": "unsubscribed", "failure": "resume", "options": {"developerInstructions": "Preserve me"}}
+  ]
+}

@@ -17,7 +17,8 @@
 namespace codexui::nodegraph {
 
     // One application policy shared by worker admission and toolkit projections.
-    [[nodiscard]] std::string threadWorkspaceChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread);
+    [[nodiscard]] std::string
+    threadContextChangeUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& thread, NodeActionKind action);
 
     [[nodiscard]] std::string threadRevertUnavailable(const NodeGraph::ReadAccess& read, const NodeRef& turn);
 
@@ -96,6 +97,7 @@ public:
                                                      Value::Object fields);
 
   [[nodiscard]] ChannelSendStatus filesystemState(std::string key, Value::Object fields);
+  [[nodiscard]] ChannelSendStatus threadSubscription(const NodeRef& thread, std::string phase, std::optional<Value::Object> options = {});
 
   [[nodiscard]] ChannelSendStatus threadHydration(const NodeRef &thread,
                                                   std::string state,

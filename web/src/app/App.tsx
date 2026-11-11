@@ -217,7 +217,7 @@ const ThreadSortControl = memo(function ThreadSortControl({value, onChange}: {va
         <option value="recent">Recent</option><option value="section">Section order</option></select></label>;
 });
 
-function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkWithOptions, onRequestWorkspace, drawer = false, paneRef, onClose, onHide}: {session: BrowserFrontendSession; onRequestNewThread: (draft?: NewThreadDraft) => void; onRequestGroup: (kind: "project" | "section", group?: WorkspaceGroup, readOnly?: boolean, assignTarget?: ThreadPresentationTarget) => void; onRequestForkWithOptions: (target: ThreadPresentationTarget) => void; onRequestWorkspace: (target: ThreadPresentationTarget) => void} & DrawerPaneProps) {
+function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkWithOptions, onRequestResumeOptions, onRequestWorkspace, drawer = false, paneRef, onClose, onHide}: {session: BrowserFrontendSession; onRequestNewThread: (draft?: NewThreadDraft) => void; onRequestGroup: (kind: "project" | "section", group?: WorkspaceGroup, readOnly?: boolean, assignTarget?: ThreadPresentationTarget) => void; onRequestForkWithOptions: (target: ThreadPresentationTarget) => void; onRequestResumeOptions: (target: ThreadPresentationTarget, change: boolean) => void; onRequestWorkspace: (target: ThreadPresentationTarget) => void} & DrawerPaneProps) {
     const snapshot = session.getSnapshot();
     const selected = snapshot.selectedThreadId;
     useEffect(() => session.refreshGroups(), [session]);
@@ -267,6 +267,10 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     useEffect(() => { if (contextMenu && !contextGroup && !contextThread) setContextMenu(null); }, [contextMenu, contextThread, contextGroup]);
     const connection = session.model.connection();
     const providerReady = connection.connected && connection.providerState === "ready";
+    const subscriptionPhase = contextThread ? session.threadSubscriptionPhase(contextThread.id) : "";
+    const subscriptionReason = contextThread ? session.subscriptionUnavailable(contextThread.id) : "";
+    const waitingForUnload = subscriptionPhase === "waiting" || subscriptionPhase === "unsubscribing";
+    const unloaded = contextThread?.status.semantic === "notLoaded";
     const invokeContextAction = (action: () => void) => { contextMenu?.trigger.focus(); setContextMenu(null); action(); };
 
     const toggle = (threadId: string, presentationKey: string, expanded: boolean) => {
@@ -422,6 +426,15 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
             {(["project", "section"] as const).map(kind => <label key={kind}>Assign {kind}<select aria-label={`Assign ${kind}`} value="" disabled={!session.canSubmit() || !session.groupingAvailable()} onChange={event => { const value = event.target.value; if (value) { invokeContextAction(() => { if (value === "__new__") { onRequestGroup(kind, undefined, false, {threadId: contextThread.id, presentationKey: contextMenu.presentationKey}); } else { void session.assignThreadGroup(contextThread.id, kind, value === "__none__" ? "" : value); } }); } }}><option value="" disabled hidden>Choose {kind}</option><option value="__new__">New {kind}…</option><hr /><option value="__none__">Remove from {kind}</option>{[...(kind === "project" ? session.model.projects : session.model.sections).values()].map(group => <option key={group.id} value={group.id}>{groupLabel(kind, group)}</option>)}</select></label>)}
             {contextThread.sectionId && <label>Move before in shared section<select aria-label="Move before in shared section" value="" disabled={!session.canSubmit()} onChange={event => { if (event.target.value) invokeContextAction(() => void session.assignThreadGroup(contextThread.id, "section", contextThread.sectionId, event.target.value === "__end__" ? undefined : event.target.value)); }}><option value="">Choose destination</option>{session.model.threadIds().filter(id => id !== contextThread.id && session.model.thread(id)?.sectionId === contextThread.sectionId).map(id => <option key={id} value={id}>{session.model.thread(id)!.title}</option>)}<option value="__end__">Move to end</option></select></label>}
             <button role="menuitem" disabled={!providerReady} onClick={() => invokeContextAction(() => session.reloadThread(contextThread.id, contextMenu.presentationKey))}>Reload</button>
+            <button role="menuitem" disabled={!!subscriptionReason || !!subscriptionPhase && subscriptionPhase !== "paused" || !unloaded && subscriptionPhase !== "paused"}
+                title={subscriptionReason} onClick={() => invokeContextAction(() => session.resumeThread(contextThread.id, {}, contextMenu.presentationKey))}>Resume</button>
+            <button role="menuitem" disabled={!!subscriptionReason || !unloaded || !!subscriptionPhase && subscriptionPhase !== "paused"}
+                title={subscriptionReason} onClick={() => invokeContextAction(() => onRequestResumeOptions({threadId: contextThread.id, presentationKey: contextMenu.presentationKey}, false))}>Resume with options…</button>
+            <button role="menuitem" disabled={!!subscriptionReason || subscriptionPhase === "resuming" || !waitingForUnload && (unloaded || !!subscriptionPhase)}
+                title={waitingForUnload ? "Cancel the pending resume and keep this thread unsubscribed." : subscriptionReason}
+                onClick={() => invokeContextAction(() => session.unsubscribeThread(contextThread.id, contextMenu.presentationKey))}>Unsubscribe</button>
+            <button role="menuitem" disabled={!!subscriptionReason || unloaded || !!subscriptionPhase && subscriptionPhase !== "paused"}
+                title={subscriptionReason} onClick={() => invokeContextAction(() => onRequestResumeOptions({threadId: contextThread.id, presentationKey: contextMenu.presentationKey}, true))}>Change developer instructions…</button>
             <button role="menuitem" disabled={session.workspaceChangeUnavailable(contextThread.id, contextMenu.presentationKey) !== ""} title={session.workspaceChangeUnavailable(contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => onRequestWorkspace({threadId: contextThread.id, presentationKey: contextMenu.presentationKey}))}>Change workspace…</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.rename", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => { const name = window.prompt("Thread name", contextThread.title); if (name?.trim()) session.renameThread(contextThread.id, name.trim(), contextMenu.presentationKey); })}>Rename</button>
             <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id, contextMenu.presentationKey)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id, undefined, contextMenu.presentationKey))}>Quick fork</button>
@@ -674,15 +687,18 @@ function FileSelectionDialog({session, initial, onChoose, onClose, onAttach, rem
     </dialog>;
 }
 
-export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "create", workspaceChoices = [], session, onCancel, onContinue}: {session?: BrowserFrontendSession; initialWorkspace: string; initialDraft?: NewThreadDraft; purpose?: "create" | "fork" | "workspace"; workspaceChoices?: readonly string[]; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
+export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "create", workspaceChoices = [], session, onCancel, onContinue}: {session?: BrowserFrontendSession; initialWorkspace: string; initialDraft?: NewThreadDraft; purpose?: "create" | "fork" | "workspace" | "resume" | "instructions"; workspaceChoices?: readonly string[]; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
     const [browsing, setBrowsing] = useState(false);
     const dialog = useRef<HTMLElement>(null);
     const workspaceInput = useRef<HTMLInputElement>(null);
     const [workspace, setWorkspace] = useState(initialDraft?.workspace ?? initialWorkspace);
     const [name, setName] = useState(initialDraft?.ephemeral ? "" : (initialDraft?.name ?? ""));
-    const [baseInstructions, setBaseInstructions] = useState(initialDraft?.baseInstructions ?? "");
-    const [developerInstructions, setDeveloperInstructions] = useState(initialDraft?.developerInstructions ?? "");
+    const [baseInstructions, setBaseInstructions] = useState(initialDraft?.resumeBaseInstructions ?? initialDraft?.baseInstructions ?? "");
+    const [developerInstructions, setDeveloperInstructions] = useState(initialDraft?.resumeDeveloperInstructions ?? initialDraft?.developerInstructions ?? "");
     const [ephemeral, setEphemeral] = useState(initialDraft?.ephemeral ?? false);
+    const resuming = purpose === "resume" || purpose === "instructions";
+    const [replaceBase, setReplaceBase] = useState(initialDraft?.resumeBaseInstructions !== undefined);
+    const [replaceDeveloper, setReplaceDeveloper] = useState(initialDraft?.resumeDeveloperInstructions !== undefined || purpose === "instructions");
     const [error, setError] = useState("");
     useBrowserLayoutEffect(() => {
         const previous = typeof document === "undefined" ? null : document.activeElement as HTMLElement | null;
@@ -694,6 +710,8 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
         if (workspace.trim() === "") { setError("Enter the app-server workspace path."); workspaceInput.current?.focus(); return; }
         onContinue({workspace: workspace.trim(), name: ephemeral ? "" : name.trim(), baseInstructions: baseInstructions.trim(),
             developerInstructions: developerInstructions.trim(), ephemeral,
+            ...(resuming && replaceBase ? {resumeBaseInstructions: baseInstructions} : {}),
+            ...(resuming && replaceDeveloper ? {resumeDeveloperInstructions: developerInstructions} : {}),
             ...(initialDraft?.projectId ? {projectId: initialDraft.projectId} : {}), ...(initialDraft?.sectionId ? {sectionId: initialDraft.sectionId} : {})});
     };
     const keyDown = (event: React.KeyboardEvent<HTMLElement>) => {
@@ -705,17 +723,20 @@ export function NewThreadDialog({initialWorkspace, initialDraft, purpose = "crea
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     };
-    const title = purpose === "workspace" ? "Change workspace…" : purpose === "fork" ? "Fork with options" : "New thread";
+    const title = purpose === "instructions" ? "Change developer instructions" : purpose === "resume" ? "Resume with options" : purpose === "workspace" ? "Change workspace…" : purpose === "fork" ? "Fork with options" : "New thread";
     return <div className="modal-backdrop"><section ref={dialog} className="new-thread-dialog" role="dialog" aria-modal="true" aria-labelledby="thread-options-title" onKeyDown={keyDown}>
         <header><h2 id="thread-options-title">{title}</h2><p>{purpose === "workspace" ? `Thread: ${initialDraft?.name ?? ""}` : purpose === "fork" ? "Adjust the copied thread context." : "Set thread context."}</p><p>Workspace paths refer to the app-server filesystem.</p></header>
         <form onSubmit={submit}>
+            {resuming && <p>Current instruction text is unavailable. Select Replace to supply new text; an empty replacement clears it. Unchecked instructions are unchanged.</p>}
             <label><span>{purpose === "workspace" ? "Proposed workspace" : "Workspace"}</span><input list={workspaceChoices.length ? "workspace-roots" : undefined} ref={workspaceInput} value={workspace} onChange={event => { setWorkspace(event.target.value); setError(""); }} placeholder="App-server directory path" /></label>
             {session && <button className="subtle-button" type="button" onClick={() => setBrowsing(true)}>Browse app-server…</button>}
             {workspaceChoices.length > 0 && <datalist id="workspace-roots">{workspaceChoices.map(path => <option key={path} value={path} />)}</datalist>}
-            {purpose !== "workspace" && <><label><span>Name</span><input value={name} disabled={ephemeral} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>
-            <label><span>Base instructions</span><textarea value={baseInstructions} onChange={event => setBaseInstructions(event.target.value)} placeholder="Optional base instructions" /></label>
-            <label><span>Developer instructions</span><textarea value={developerInstructions} onChange={event => setDeveloperInstructions(event.target.value)} placeholder="Optional developer instructions" /></label>
-            <label className="ephemeral-choice"><input type="checkbox" checked={ephemeral} onChange={event => setEphemeral(event.target.checked)} /><span><strong>Temporary thread</strong><small>Temporary threads are not retained in normal Codex history.</small></span></label></>}
+            {purpose !== "workspace" && <>{!resuming && <label><span>Name</span><input value={name} disabled={ephemeral} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>}
+            {resuming && <label className="ephemeral-choice"><input type="checkbox" checked={replaceBase} onChange={event => setReplaceBase(event.target.checked)} /><span><strong>Replace base instructions</strong></span></label>}
+            <label><span>Base instructions</span><textarea disabled={resuming && !replaceBase} value={baseInstructions} onChange={event => setBaseInstructions(event.target.value)} placeholder="Optional base instructions" /></label>
+            {resuming && <label className="ephemeral-choice"><input type="checkbox" checked={replaceDeveloper} onChange={event => setReplaceDeveloper(event.target.checked)} /><span><strong>Replace developer instructions</strong></span></label>}
+            <label><span>Developer instructions</span><textarea disabled={resuming && !replaceDeveloper} value={developerInstructions} onChange={event => setDeveloperInstructions(event.target.value)} placeholder="Optional developer instructions" /></label>
+            {!resuming && <label className="ephemeral-choice"><input type="checkbox" checked={ephemeral} onChange={event => setEphemeral(event.target.checked)} /><span><strong>Temporary thread</strong><small>Temporary threads are not retained in normal Codex history.</small></span></label>}</>}
             {error && <p className="dialog-error" role="alert">{error}</p>}
             <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">{purpose === "workspace" ? "Change workspace" : "Continue"}</button></footer>
         </form>
@@ -1714,7 +1735,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
         const roots = member(session.model.projects.get(projectId ?? "")?.raw, "roots", []);
         return Array.isArray(roots) ? roots.map(root => stringMember(root, "path")) : [];
     };
-    const [optionsTarget, setOptionsTarget] = useState<(ThreadPresentationTarget & {purpose: "fork" | "workspace"}) | null>(null);
+    const [optionsTarget, setOptionsTarget] = useState<(ThreadPresentationTarget & {purpose: "fork" | "workspace" | "resume" | "instructions"}) | null>(null);
     const shell = useRef<HTMLDivElement>(null);
     const resizeStart = useRef<{x: number; width: number; side: "left" | "right"}>();
     const threadTrigger = useRef<HTMLButtonElement>(null);
@@ -1728,6 +1749,8 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const activeOptionsTarget = optionsTarget
         && session.threadVisualKey(optionsTarget.threadId) === optionsTarget.presentationKey
         ? optionsTarget : null;
+    const retainedResume = activeOptionsTarget && (activeOptionsTarget.purpose === "resume" || activeOptionsTarget.purpose === "instructions")
+        ? session.resumeOptions(activeOptionsTarget.threadId) : {};
     const modalOpen = Boolean(activeDrawer || newThreadDialog || activeOptionsTarget);
     const closeDrawer = () => setDrawer(null);
     const requestNewThread = (draft?: NewThreadDraft) => { setGroupDraft(draft); closeDrawer(); setNewThreadDialog(true); };
@@ -1738,11 +1761,21 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const requestWorkspace = (target: ThreadPresentationTarget) => {
         closeDrawer(); setOptionsTarget({...target, purpose: "workspace"});
     };
+    const requestResumeOptions = (target: ThreadPresentationTarget, change: boolean) => {
+        closeDrawer(); setOptionsTarget({...target, purpose: change ? "instructions" : "resume"});
+    };
     const createNewThreadDraft = (draft: NewThreadDraft) => {
         session.beginNewThread(draft); setNewThreadDialog(false); closeDrawer();
     };
     const forkThreadWithOptions = (draft: NewThreadDraft) => {
-        if (activeOptionsTarget?.purpose === "workspace") {
+        if (activeOptionsTarget?.purpose === "resume" || activeOptionsTarget?.purpose === "instructions") {
+            const options = {
+                ...(draft.workspace !== session.model.thread(activeOptionsTarget.threadId)?.cwd ? {cwd: draft.workspace} : {}),
+                ...(draft.resumeBaseInstructions !== undefined ? {baseInstructions: draft.resumeBaseInstructions} : {}),
+                ...(draft.resumeDeveloperInstructions !== undefined ? {developerInstructions: draft.resumeDeveloperInstructions} : {}),
+            };
+            session.resumeThread(activeOptionsTarget.threadId, options, activeOptionsTarget.presentationKey, activeOptionsTarget.purpose === "instructions");
+        } else if (activeOptionsTarget?.purpose === "workspace") {
             session.changeWorkspace(activeOptionsTarget.threadId, draft.workspace, activeOptionsTarget.presentationKey);
         } else if (activeOptionsTarget) {
             session.forkThread(activeOptionsTarget.threadId, draft, activeOptionsTarget.presentationKey, activeOptionsTarget.lastTurnId, activeOptionsTarget.turn);
@@ -1827,7 +1860,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
         </header>
         {snapshot.notice && <div className="notice-banner" data-modal-background role="alert" aria-hidden={modalOpen || undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
         <div className="workspace-grid" style={responsiveMode === "desktop" ? {gridTemplateColumns: `${panes.threads ? `minmax(180px, ${panes.left}px) 8px ` : ""}minmax(420px, 1fr)${panes.inspector ? ` 8px minmax(180px, ${panes.right}px)` : ""}`} : undefined} data-modal-background aria-hidden={modalOpen || undefined}>
-            {!threadsOverlay && (responsiveMode !== "desktop" || panes.threads) && <ThreadPane {...(responsiveMode === "desktop" ? {onHide: () => setPanes(current => ({...current, threads: false}))} : {})} session={session} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} onRequestWorkspace={requestWorkspace} />}
+            {!threadsOverlay && (responsiveMode !== "desktop" || panes.threads) && <ThreadPane {...(responsiveMode === "desktop" ? {onHide: () => setPanes(current => ({...current, threads: false}))} : {})} session={session} onRequestResumeOptions={requestResumeOptions} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} onRequestWorkspace={requestWorkspace} />}
             {responsiveMode === "desktop" && panes.threads && separator("left")}
             <Conversation onRequestForkWithOptions={requestForkWithOptions} onRequestWorkspace={requestWorkspace} usage={usage.thread} onInspect={inspect} session={session} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
             {responsiveMode === "desktop" && panes.inspector && separator("right")}
@@ -1839,10 +1872,10 @@ export function App({session}: {session: BrowserFrontendSession}) {
             <TokenUsage content={usage.overall} />
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
         {activeDrawer && <button type="button" className="drawer-backdrop" tabIndex={-1} onClick={closeDrawer} aria-label={`Close ${activeDrawer === "threads" ? "Threads" : "Inspector"} drawer`} />}
-        {activeDrawer === "threads" && <ThreadPane session={session} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} onRequestWorkspace={requestWorkspace} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "threads" && <ThreadPane session={session} onRequestResumeOptions={requestResumeOptions} onRequestNewThread={requestNewThread} onRequestGroup={requestGroup} onRequestForkWithOptions={requestForkWithOptions} onRequestWorkspace={requestWorkspace} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
         {activeDrawer === "inspector" && <Inspector session={session} inspection={inspection} onInspect={setInspection} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
         {groupDialog && <GroupDialog session={session} {...groupDialog} onClose={() => setGroupDialog(current => current === groupDialog ? undefined : current)} />}
         {newThreadDialog && <NewThreadDialog session={session} {...(groupDraft ? {initialDraft: groupDraft} : {})} initialWorkspace="" workspaceChoices={projectWorkspaceRoots(groupDraft?.projectId)} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
-        {activeOptionsTarget && <NewThreadDialog session={session} workspaceChoices={projectWorkspaceRoots(session.model.thread(activeOptionsTarget.threadId)?.projectId)} purpose={activeOptionsTarget.purpose} initialWorkspace={session.model.thread(activeOptionsTarget.threadId)?.cwd ?? ""} initialDraft={activeOptionsTarget.purpose === "fork" ? session.forkDraft(activeOptionsTarget.threadId) : {workspace: session.model.thread(activeOptionsTarget.threadId)?.cwd ?? "", name: session.model.thread(activeOptionsTarget.threadId)?.title ?? "", baseInstructions: "", developerInstructions: "", ephemeral: false}} onCancel={() => setOptionsTarget(null)} onContinue={forkThreadWithOptions} />}
+        {activeOptionsTarget && <NewThreadDialog session={session} workspaceChoices={projectWorkspaceRoots(session.model.thread(activeOptionsTarget.threadId)?.projectId)} purpose={activeOptionsTarget.purpose} initialWorkspace={session.model.thread(activeOptionsTarget.threadId)?.cwd ?? ""} initialDraft={activeOptionsTarget.purpose === "fork" ? session.forkDraft(activeOptionsTarget.threadId) : {workspace: retainedResume.cwd ?? session.model.thread(activeOptionsTarget.threadId)?.cwd ?? "", name: session.model.thread(activeOptionsTarget.threadId)?.title ?? "", baseInstructions: "", developerInstructions: "", ephemeral: false, ...(retainedResume.baseInstructions !== undefined ? {resumeBaseInstructions: retainedResume.baseInstructions} : {}), ...(retainedResume.developerInstructions !== undefined ? {resumeDeveloperInstructions: retainedResume.developerInstructions} : {})}} onCancel={() => setOptionsTarget(null)} onContinue={forkThreadWithOptions} />}
     </div>;
 }

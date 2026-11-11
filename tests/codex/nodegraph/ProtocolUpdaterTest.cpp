@@ -4627,6 +4627,17 @@ void lifecycleFactsAndRemovalPreserveThreadHierarchy() {
             "thread/closed marks provider loading state without removal");
   }
 
+  for (const std::string status : {"unsubscribed", "notSubscribed", "notLoaded"}) {
+      static_cast<void>(applyCorrelatedResult(updater,
+                                              {DecodedMessageKind::ClientResult, "thread/unsubscribe", {}, {{"status", Value(status)}}},
+                                              {{"threadId", Value("lifecycle-parent")}}));
+      auto read = graph.tryRead();
+      const NodeRef parent = read->find({NodeKind::Thread, "lifecycle-parent"});
+      require(parent && read->state(parent)->status == NodeStatus::NotLoaded &&
+                  exactStringFromValue(field(read->state(parent), "status")) == "notLoaded",
+              "unsubscribe result status cannot overwrite a confirmed thread closure");
+  }
+
   const ApplyResult deleted = updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
        Value::Object{{"threadId", Value("lifecycle-parent")}}});

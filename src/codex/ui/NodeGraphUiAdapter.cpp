@@ -1298,7 +1298,10 @@ namespace codexui::codex::ui {
             if (row.title.empty())
                 row.title = row.id.substr(0, std::min<std::size_t>(12, row.id.size()));
             row.cwd = scalarTextFromValue(valueMember(*state, "cwd"));
-            row.workspaceChangeUnavailable = nodegraph::threadWorkspaceChangeUnavailable(read, thread);
+            row.workspaceChangeUnavailable =
+                nodegraph::threadContextChangeUnavailable(read, thread, nodegraph::NodeActionKind::ChangeWorkspace);
+            row.subscriptionUnavailable = nodegraph::threadContextChangeUnavailable(read, thread, nodegraph::NodeActionKind::Unsubscribe);
+            row.subscriptionPhase = exactStringFromValue(valueMember(*state, "subscriptionPhase"));
             row.status = statusFromState(*state);
             row.uninspectedResult = boolFromValue(valueMember(*state, "uninspectedResult"));
             row.createdAt = timestamp("createdAt");
