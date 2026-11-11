@@ -27,6 +27,8 @@ ci:
   - '14'
   ipv6: true
   runtime_dirs: true
-  parallel: 14
+  # Hosted runners repeatedly shut down during the 14-job dependency build.
+  # Restore the original build limit; CTest and local qualification retain 14 jobs.
+  parallel: 4
   env: {CODEXUI_TIMING_POLICY: report}
   ctest_launcher: [xvfb-run, -a, env, QT_QPA_PLATFORM=offscreen]
