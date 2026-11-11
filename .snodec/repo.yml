@@ -3,6 +3,8 @@ ci:
   profile: cpp
   apt:
   - libgit2-dev
+  - nodejs
+  - npm
   - qt6-base-dev
   - libkf6sonnet-dev
   - sonnet6-plugins
