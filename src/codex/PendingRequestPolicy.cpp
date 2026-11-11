@@ -582,61 +582,46 @@ bool mcpPersistence(const nlohmann::json &request, std::string_view mode) {
          });
 }
 
-bool validMcpApprovalMetadata(const nlohmann::json &request) {
-  if (mcpApprovalKind(request) != "mcp_tool_call" ||
-      !privilegedMcpApproval(request))
-    return true;
-  const nlohmann::json &metadata = request.at("_meta");
-  if (!knownKeys(metadata,
-                 {"approvals_reviewer", "codex_approval_kind",
-                  "codex_request_type", "codex_strict_auto_review",
-                  "connector_description", "connector_id", "connector_name",
-                  "persist", "source", "tool_description", "tool_name",
-                  "tool_params", "tool_params_display", "tool_title"}))
-    return false;
-  const auto persist = metadata.find("persist");
-  if (persist != metadata.end() && !persist->is_null()) {
-    const auto validMode = [](const nlohmann::json &mode) {
-      return mode.is_string() && (mode == "session" || mode == "always");
-    };
-    if (!(validMode(*persist) ||
-          (persist->is_array() && !persist->empty() && persist->size() <= 2 &&
-           std::ranges::all_of(*persist, validMode))))
-      return false;
-  }
-  const auto display = metadata.find("tool_params_display");
-  const bool validDisplay =
-      display != metadata.end() && display->is_array() && !display->empty() &&
-      display->size() <= 64 &&
-      std::ranges::all_of(*display, [](const nlohmann::json &entry) {
-        return knownKeys(entry, {"display_name", "name", "value"}) &&
-               nonEmptyString(entry, "name") &&
-               nonEmptyString(entry, "display_name") && entry.contains("value");
-      });
-  if (display != metadata.end() && !display->is_null() && !validDisplay)
-    return false;
-  const auto parameters = metadata.find("tool_params");
-  if (parameters == metadata.end() || parameters->is_null())
-    return true;
-  if (!parameters->is_object() || parameters->empty())
-    return parameters->is_object();
-  if (!validDisplay || display->size() != parameters->size())
-    return false;
-  std::unordered_set<std::string> displayedNames;
-  return std::ranges::all_of(*display, [&](const nlohmann::json &entry) {
-    const std::string name = entry.at("name").get<std::string>();
-    const auto parameter = parameters->find(name);
-    if (!displayedNames.insert(name).second || parameter == parameters->end())
-      return false;
-    bool truncated = false;
-    std::size_t remaining = 64;
-    const nlohmann::json displayed =
-        boundedDisclosureValue(entry.at("value"), 0, remaining, truncated);
-    remaining = 64;
-    const nlohmann::json actual =
-        boundedDisclosureValue(*parameter, 0, remaining, truncated);
-    return !truncated && displayed == actual;
-  });
+bool validMcpApprovalMetadata(const nlohmann::json& request) {
+    bool valid = true;
+    if (mcpApprovalKind(request) == "mcp_tool_call" && privilegedMcpApproval(request)) {
+        const nlohmann::json& metadata = request.at("_meta");
+        const auto persist = metadata.find("persist");
+        const auto validMode = [](const nlohmann::json& mode) {
+            return mode.is_string() && (mode == "session" || mode == "always");
+        };
+        valid = persist == metadata.end() || persist->is_null() || validMode(*persist) ||
+                (persist->is_array() && !persist->empty() && persist->size() <= 2 && std::ranges::all_of(*persist, validMode));
+        const auto display = metadata.find("tool_params_display");
+        const bool validDisplay = display != metadata.end() && display->is_array() && !display->empty() && display->size() <= 64 &&
+                                  std::ranges::all_of(*display, [](const nlohmann::json& entry) {
+                                      return knownKeys(entry, {"display_name", "name", "value"}) && nonEmptyString(entry, "name") &&
+                                             nonEmptyString(entry, "display_name") && entry.contains("value");
+                                  });
+        valid &= display == metadata.end() || display->is_null() || validDisplay;
+        const auto parameters = metadata.find("tool_params");
+        if (parameters != metadata.end() && !parameters->is_null()) {
+            valid &= parameters->is_object();
+            if (valid && validDisplay && !parameters->empty()) {
+                std::unordered_set<std::string> displayedNames;
+                valid = display->size() == parameters->size() && std::ranges::all_of(*display, [&](const nlohmann::json& entry) {
+                            const std::string name = entry.at("name").get<std::string>();
+                            const auto parameter = parameters->find(name);
+                            bool matches = false;
+                            if (displayedNames.insert(name).second && parameter != parameters->end()) {
+                                bool truncated = false;
+                                std::size_t remaining = 64;
+                                const nlohmann::json displayed = boundedDisclosureValue(entry.at("value"), 0, remaining, truncated);
+                                remaining = 64;
+                                const nlohmann::json actual = boundedDisclosureValue(*parameter, 0, remaining, truncated);
+                                matches = !truncated && displayed == actual;
+                            }
+                            return matches;
+                        });
+            }
+        }
+    }
+    return valid;
 }
 
 nlohmann::json boundedDisclosureValue(const nlohmann::json &value,
@@ -736,22 +721,31 @@ nlohmann::json mcpDisclosure(const nlohmann::json &raw,
                         "requestedSchema", "elicitationId", "url"},
                        {"_meta", "meta"}, context);
   const std::string approvalKind = mcpApprovalKind(raw);
-  if (!mcpMessageOnly(raw) ||
-      (approvalKind.empty() && !mcpPersistence(raw, "session") &&
-       !mcpPersistence(raw, "always")))
-    return result;
-
-  const auto metadata = raw.find("_meta");
-  nlohmann::json approval = disclosedMembers(
-      *metadata,
-      {"connector_description", "connector_name", "install_url", "persist",
-       "source", "suggest_reason", "suggest_type", "tool_description",
-       "tool_name", "tool_params_display", "tool_title", "tool_type"},
-      {"approvals_reviewer", "codex_approval_kind", "codex_request_type",
-       "codex_strict_auto_review", "connector_id", "tool_id", "tool_params"},
-      context);
-  if (!approval.empty())
-    result["approval"] = std::move(approval);
+  if (mcpMessageOnly(raw) && (!approvalKind.empty() || mcpPersistence(raw, "session") || mcpPersistence(raw, "always"))) {
+      const auto metadata = raw.find("_meta");
+      nlohmann::json approval = nlohmann::json::object();
+      bool truncated = false;
+      for (const auto* field : {"connector_description",
+                                "connector_name",
+                                "install_url",
+                                "persist",
+                                "source",
+                                "suggest_reason",
+                                "suggest_type",
+                                "tool_description",
+                                "tool_name",
+                                "tool_params_display",
+                                "tool_title",
+                                "tool_type"}) {
+          if (const auto found = metadata->find(field); found != metadata->end()) {
+              approval[field] = boundedDisclosureValue(*found, 0, context.remaining, truncated);
+          }
+      }
+      context.complete &= !truncated;
+      if (!approval.empty()) {
+          result["approval"] = std::move(approval);
+      }
+  }
   return result;
 }
 

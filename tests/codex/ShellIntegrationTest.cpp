@@ -64,6 +64,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <optional>
@@ -6625,6 +6627,70 @@ void pendingRequestTextBoundaries() {
           "the bounded MCP URL is literal text rather than active markup");
 }
 
+void mcpApprovalMetadataKeepsAuthoredChoices() {
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/frontend-presentation.json");
+    const auto fixture = nlohmann::json::parse(input);
+    const auto entry = std::ranges::find_if(fixture.at("pendingRequestCases"), [](const auto& value) {
+        return value.at("id") == "mcp-browser-upload-extension-metadata";
+    });
+    require(entry != fixture.at("pendingRequestCases").end(), "the browser-upload regression fixture exists");
+    if (entry != fixture.at("pendingRequestCases").end()) {
+        const auto request = dialogRequest(PendingRequestKind::McpElicitation, entry->at("raw"));
+        for (const auto& attempt : entry->at("submissions")) {
+            const QString choice = QString::fromStdString(attempt.at("choice").get<std::string>());
+            QTimer::singleShot(0, [&] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                require(dialog, "MCP approval opens its real dialog");
+                if (dialog) {
+                    auto* decision = dialog->findChild<QComboBox*>();
+                    auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                    require(decision && decision->count() == 4, "MCP upload approval offers Accept, session, always, and Cancel");
+                    require(std::ranges::none_of(dialog->findChildren<QLabel*>(),
+                                                 [](auto* label) {
+                                                     return label->text().contains("must-not-be-displayed") ||
+                                                            label->text().contains("Omitted for display");
+                                                 }),
+                            "private metadata stays hidden without declaring the approval context incomplete");
+                    if (decision && buttons) {
+                        const int wanted = decision->findData(choice);
+                        require(wanted >= 0, "each advertised approval decision is selectable");
+                        decision->setFocus(Qt::TabFocusReason);
+                        auto* scroll = dialog->findChild<QScrollArea*>();
+                        require(spinUntil([&] {
+                                    return decision->hasFocus() && scroll &&
+                                           scroll->viewport()->rect().contains(
+                                               QRect(decision->mapTo(scroll->viewport(), QPoint{}), decision->size()));
+                                }),
+                                "the focused approval control stays visible at every display scale");
+                        QKeyEvent home(QEvent::KeyPress, Qt::Key_Home, Qt::NoModifier);
+                        QApplication::sendEvent(decision, &home);
+                        for (int index = 0; index < wanted; ++index) {
+                            QKeyEvent down(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+                            QApplication::sendEvent(decision, &down);
+                        }
+                        require(decision->currentData().toString() == choice, "approval choices work with keyboard navigation");
+                        const QString evidence = qEnvironmentVariable("CODEXUI_MCP_APPROVAL_EVIDENCE");
+                        if (choice == "accept" && !evidence.isEmpty()) {
+                            require(dialog->grab().save(evidence), "MCP approval dialog screenshot is captured");
+                        }
+                        buttons->button(QDialogButtonBox::Ok)->click();
+                    } else {
+                        dialog->reject();
+                    }
+                }
+            });
+            const auto submission = PendingRequestDialog::present(request, nullptr);
+            require(submission && submission->choice == choice.toStdString(), "the dialog preserves the authored MCP choice");
+            if (submission) {
+                const auto response = PendingRequestPolicy::responseForSubmission(request.kind, request.raw, *submission);
+                require(response && std::holds_alternative<nlohmann::json>(*response) &&
+                            std::get<nlohmann::json>(*response) == attempt.at("expected").at("result"),
+                        "MCP dialog approval encodes exactly the selected decision and persistence scope");
+            }
+        }
+    }
+}
+
 void pendingRequestValidationRetainsInput() {
   bool incompleteWarning = false;
   bool questionDialogRetained = false;
@@ -7213,6 +7279,7 @@ int main(int argc, char **argv) {
   openRequestTracksAuthorityAndRetirement(*configuration);
   compactAttentionKeepsExactVisibleTarget(*configuration);
   pendingRequestTextBoundaries();
+  mcpApprovalMetadataKeepsAuthoredChoices();
   pendingRequestValidationRetainsInput();
   dialogControlsHaveSemanticLabels();
   structuredRequestCaretRemainsInsideTheForm();

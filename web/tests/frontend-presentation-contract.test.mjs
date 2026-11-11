@@ -383,6 +383,24 @@ for (const entry of contract.pendingRequestCases) {
     }
 }
 
+test("MCP metadata extensions stay private without suppressing approval choices", () => {
+    const entry = contract.pendingRequestCases.find(value => value.id === "mcp-browser-upload-extension-metadata");
+    const request = pendingFixtureRequest(entry);
+    const metadata = request.raw._meta;
+    Object.defineProperty(metadata, "providerPrivate", {enumerable: true, get() {
+        throw new Error("Private MCP metadata must not be traversed for approval presentation");
+    }});
+    Object.defineProperty(metadata.tool_params, "origin", {enumerable: true, get() {
+        throw new Error("Private tool parameters without display metadata must not be traversed");
+    }});
+    const details = pendingRequestDetails(request);
+    assert.equal(details.truncated, false);
+    assert.ok(details.entries.every(value => !value.path.includes("tool_params")));
+    assert.ok(details.entries.some(value => value.path === "approval / tool_title" && value.value === "Upload browser files"));
+    assert.deepEqual(pendingDecisionOptions(request).map(value => value.value), ["accept", "acceptForSession", "acceptAlways", "cancel"]);
+    assert.deepEqual(pendingResponse(request, {choice: "acceptForSession"}), {result: {action: "accept", content: null, _meta: {persist: "session"}}});
+});
+
 for (const entry of contract.pendingRequestBoundaryCases) {
     test(`pending request boundary contract: ${entry.id}`, () => {
         const request = pendingFixtureRequest(entry);

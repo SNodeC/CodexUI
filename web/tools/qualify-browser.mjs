@@ -4,6 +4,7 @@ import {qualifyListWindowing} from "./qualify-list-windowing.mjs";
 import {qualifyUiInventory} from "./qualify-ui-inventory.mjs";
 import {qualifyCatchup} from "./qualify-catchup.mjs";
 import {qualifyAsyncQuestions} from "./qualify-async-questions.mjs";
+import {qualifyMcpApprovals} from "./qualify-mcp-approvals.mjs";
 import {spawn} from "node:child_process";
 import {constants as fsConstants} from "node:fs";
 import {access, mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
@@ -957,7 +958,13 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
-    if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY || process.env.CODEXUI_BROWSER_UI_INVENTORY_ONLY || process.env.CODEXUI_BROWSER_LARGE_LISTS_ONLY) {
+    if (process.env.CODEXUI_BROWSER_MCP_APPROVALS_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        const contract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/frontend-presentation.json"), "utf8"));
+        const fixture = contract.pendingRequestCases.find(entry => entry.id === "mcp-browser-upload-extension-metadata");
+        console.log(JSON.stringify({mcpApprovals: await qualifyMcpApprovals(devTools, fixture), browser: browserVersion.product}));
+    } else if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY || process.env.CODEXUI_BROWSER_UI_INVENTORY_ONLY || process.env.CODEXUI_BROWSER_LARGE_LISTS_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         console.log(JSON.stringify({contextMenus: await qualifyContextMenus(devTools), browser: browserVersion.product}));

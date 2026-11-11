@@ -386,34 +386,34 @@ function mcpPersistence(raw: unknown, mode: "session" | "always"): boolean {
 }
 
 function validMcpApprovalMetadata(raw: unknown): boolean {
-    if (mcpApprovalKind(raw) !== "mcp_tool_call" || !privilegedMcpApproval(raw)) return true;
-    const metadata = isObject(raw) && isObject(raw._meta) ? raw._meta : undefined;
-    if (!knownObject(metadata, ["approvals_reviewer", "codex_approval_kind", "codex_request_type",
-        "codex_strict_auto_review", "connector_description", "connector_id", "connector_name", "persist",
-        "source", "tool_description", "tool_name", "tool_params", "tool_params_display", "tool_title"])) return false;
-    const validMode = (value: unknown) => value === "session" || value === "always";
-    if (metadata.persist !== undefined && metadata.persist !== null
-        && !validMode(metadata.persist) && !(Array.isArray(metadata.persist) && metadata.persist.length > 0
-            && metadata.persist.length <= 2 && metadata.persist.every(validMode))) return false;
-    const display = metadata.tool_params_display;
-    const validDisplay = Array.isArray(display) && display.length > 0 && display.length <= 64
-        && display.every(entry => knownObject(entry, ["display_name", "name", "value"])
-            && nonEmptyString(entry, "name") && nonEmptyString(entry, "display_name") && Object.hasOwn(entry, "value"));
-    if (display !== undefined && display !== null && !validDisplay) return false;
-    const parameters = metadata.tool_params;
-    if (parameters === undefined || parameters === null) return true;
-    if (!isObject(parameters)) return false;
-    const parameterKeys = boundedKeys(parameters, 64);
-    if (parameterKeys === undefined) return false;
-    if (parameterKeys.length === 0) return true;
-    if (!validDisplay || display.length !== parameterKeys.length) return false;
-    const names = new Set<string>();
-    return display.every(entry => {
-        const name = String(entry.name);
-        if (names.has(name) || !Object.hasOwn(parameters, name)) return false;
-        names.add(name);
-        return boundedJsonEqual(parameters[name], entry.value);
-    });
+    let valid = true;
+    if (mcpApprovalKind(raw) === "mcp_tool_call" && privilegedMcpApproval(raw)) {
+        const metadata = isObject(raw) && isObject(raw._meta) ? raw._meta : {};
+        const validMode = (value: unknown) => value === "session" || value === "always";
+        valid = metadata.persist === undefined || metadata.persist === null || validMode(metadata.persist)
+            || (Array.isArray(metadata.persist) && metadata.persist.length > 0 && metadata.persist.length <= 2 && metadata.persist.every(validMode));
+        const display = metadata.tool_params_display;
+        const validDisplay = Array.isArray(display) && display.length > 0 && display.length <= 64
+            && display.every(entry => knownObject(entry, ["display_name", "name", "value"])
+                && nonEmptyString(entry, "name") && nonEmptyString(entry, "display_name") && Object.hasOwn(entry, "value"));
+        valid &&= display === undefined || display === null || validDisplay;
+        const parameters = metadata.tool_params;
+        if (parameters !== undefined && parameters !== null) {
+            valid &&= isObject(parameters);
+            if (valid && validDisplay && isObject(parameters)) {
+                const parameterKeys = boundedKeys(parameters, 64);
+                const names = new Set<string>();
+                valid = parameterKeys !== undefined && (parameterKeys.length === 0 || (display.length === parameterKeys.length
+                    && display.every(entry => {
+                        const name = String(entry.name);
+                        const matches = !names.has(name) && Object.hasOwn(parameters, name) && boundedJsonEqual(parameters[name], entry.value);
+                        names.add(name);
+                        return matches;
+                    })));
+            }
+        }
+    }
+    return valid;
 }
 
 const disclosureFields: Readonly<Record<string, readonly [readonly string[], readonly string[]]>> = {
@@ -485,13 +485,8 @@ function requestContext(request: PendingRequestPresentation): {value: Record<str
         const approval: Record<string, unknown> = {};
         const shown = ["connector_description", "connector_name", "install_url", "persist", "source", "suggest_reason",
             "suggest_type", "tool_description", "tool_name", "tool_params_display", "tool_title", "tool_type"];
-        const suppressed = ["approvals_reviewer", "codex_approval_kind", "codex_request_type", "codex_strict_auto_review",
-            "connector_id", "tool_id", "tool_params"];
         for (const field of shown) if (Object.hasOwn(metadata, field))
             approval[field] = boundedDisclosureValue(metadata[field], 0, state);
-        const metadataKeys = boundedKeys(metadata, shown.length + suppressed.length);
-        if (metadataKeys === undefined
-            || metadataKeys.some(key => !shown.includes(key) && !suppressed.includes(key))) state.truncated = true;
         if (Object.keys(approval).length > 0) result.approval = approval;
     }
     return {value: result, complete: !state.truncated};

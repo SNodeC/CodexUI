@@ -2801,6 +2801,24 @@ namespace codexui::codex {
                            nlohmann::json{{"action", "accept"}, {"content", {{"choice", "safe"}}}, {"_meta", {{"source", "qt"}}}},
                    "MCP elicitation encodes action, content, and metadata exactly");
 
+            std::ifstream fixtureInput(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/frontend-presentation.json");
+            const auto fixture = nlohmann::json::parse(fixtureInput);
+            for (const auto& entry : fixture.at("pendingRequestCases")) {
+                if (entry.at("id") == "mcp-browser-upload-extension-metadata") {
+                    for (const auto& attempt : entry.at("submissions")) {
+                        auto request = entry.at("raw");
+                        request["threadId"] = "runtime-thread";
+                        request["turnId"] = "reverse-turn";
+                        response = roundTrip("browser-approval-" + attempt.at("id").get<std::string>(),
+                                             "mcpServer/elicitation/request",
+                                             std::move(request),
+                                             {{"choice", Value(attempt.at("choice").get<std::string>())}});
+                        expect(response && response->contains("result") && response->at("result") == attempt.at("expected").at("result"),
+                               "MCP approval with extension metadata sends the exact authored response once");
+                    }
+                }
+            }
+
             const nlohmann::json requestedPermissions{{"fileSystem", {{"read", nlohmann::json::array({"/workspace"})}}},
                                                       {"network", {{"enabled", false}}}};
             nlohmann::json permissionsRequest = address;

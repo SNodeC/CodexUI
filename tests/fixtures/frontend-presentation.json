@@ -675,6 +675,126 @@
       ]
     },
     {
+      "id": "mcp-browser-upload-extension-metadata",
+      "method": "mcpServer/elicitation/request",
+      "raw": {
+        "serverName": "cua_repl",
+        "threadId": "thread",
+        "turnId": "turn",
+        "message": "Allow upload to https://example.test/course/upload?folder=6?",
+        "mode": "form",
+        "requestedSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "_meta": {
+          "codex_approval_kind": "mcp_tool_call",
+          "connector_name": "Browser use",
+          "tool_name": "upload_browser_files",
+          "tool_title": "Upload browser files",
+          "persist": [
+            "session",
+            "always"
+          ],
+          "tool_params": {"origin": "https://example.test"},
+          "origin": "https://example.test",
+          "file_transfer": "upload",
+          "callId": "browser-upload-call",
+          "x-codex-turn-metadata": {"turn_id": "opaque"},
+          "tool_id": "browser-upload",
+          "openai/approval": {
+            "id": "opaque"
+          },
+          "providerPrivate": {
+            "credential": "must-not-be-displayed"
+          }
+        }
+      },
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {
+          "value": "accept",
+          "label": "Accept",
+          "tone": "approve",
+          "requiresInput": false
+        },
+        {
+          "value": "acceptForSession",
+          "label": "Accept for session",
+          "tone": "approve",
+          "requiresInput": false
+        },
+        {
+          "value": "acceptAlways",
+          "label": "Always allow",
+          "tone": "approve",
+          "requiresInput": false
+        },
+        {
+          "value": "cancel",
+          "label": "Cancel",
+          "tone": "neutral",
+          "requiresInput": false
+        }
+      ],
+      "submissions": [
+        {
+          "id": "once",
+          "choice": "accept",
+          "expected": {
+            "result": {
+              "action": "accept",
+              "content": null,
+              "_meta": null
+            }
+          }
+        },
+        {
+          "id": "session",
+          "choice": "acceptForSession",
+          "input": {
+            "ignored": true
+          },
+          "metadata": {
+            "ignored": true
+          },
+          "expected": {
+            "result": {
+              "action": "accept",
+              "content": null,
+              "_meta": {
+                "persist": "session"
+              }
+            }
+          }
+        },
+        {
+          "id": "always",
+          "choice": "acceptAlways",
+          "expected": {
+            "result": {
+              "action": "accept",
+              "content": null,
+              "_meta": {
+                "persist": "always"
+              }
+            }
+          }
+        },
+        {
+          "id": "cancel",
+          "choice": "cancel",
+          "expected": {
+            "result": {
+              "action": "cancel",
+              "content": null,
+              "_meta": null
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": "mcp-privileged-null-persistence",
       "method": "mcpServer/elicitation/request",
       "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "persist": null}},
@@ -686,9 +806,37 @@
       "submissions": []
     },
     {
-      "id": "mcp-malformed-tool-context",
+      "id": "mcp-private-tool-params-without-display",
       "method": "mcpServer/elicitation/request",
       "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {"secret": "hidden"}}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "message-consent", "choice": "accept", "expected": {"result": {"action": "accept", "content": null, "_meta": null}}},
+        {"id": "no-unoffered-session", "choice": "acceptForSession", "expected": null}
+      ]
+    },
+    {
+      "id": "mcp-private-tool-params-null-display",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {"secret": "hidden"}, "tool_params_display": null}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "message-consent", "choice": "accept", "expected": {"result": {"action": "accept", "content": null, "_meta": null}}},
+        {"id": "no-unoffered-session", "choice": "acceptForSession", "expected": null}
+      ]
+    },
+    {
+      "id": "mcp-malformed-tool-parameters",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Allow tool?", "mode": "form", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": "invalid"}},
       "expectedKind": "mcp-elicitation",
       "expectedActions": [
         {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
