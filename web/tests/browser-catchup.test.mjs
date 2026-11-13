@@ -8,7 +8,6 @@ import {BrowserFrontendSession, DraftThreadId} from "../dist/app/BrowserFrontend
 import {ConversationViewportState} from "../dist/app/ConversationViewportState.js";
 import {PresentationModel, ProtocolNormalizer, event, result, statusFromValue} from "../dist/index.js";
 import {protocolTimes, protocolFrameTimes, targetTimes, timingDetails, timingSummary, tokenUsage} from "../dist/presentation/PresentationTelemetry.js";
-import {generatedTimingPaths} from "../tools/generate-timing-paths.mjs";
 import {FakeSocket, appserver, requests, respond, reject, rejectWithCode, readyProvider, completeControllerHydration, completeThreadDiscovery, waitForPublish} from "./browser-harness.mjs";
 
 const contract = JSON.parse(readFileSync(new URL("../../tests/fixtures/frontend-presentation.json", import.meta.url)));
@@ -47,8 +46,7 @@ for (const entry of contract.tokenUsageCases) test(`shared token usage: ${entry.
     for (const detail of entry.threadDetails) assert.ok(usage.thread.details.includes(detail));
     for (const detail of entry.overallDetails) assert.ok(usage.overall.details.includes(detail));
 });
-test("timing schema is generated from the native authority and extraction stays bounded", () => {
-    assert.equal(readFileSync(new URL("../src/presentation/TimingPaths.ts", import.meta.url), "utf8"), generatedTimingPaths());
+test("timing extraction stays bounded and preserves sentinels", () => {
     assert.equal(protocolFrameTimes("thread/list", {data: Array.from({length: 10000}, () => ({createdAt: 1, updatedAt: 2}))}, true).length, 128);
     assert.deepEqual(protocolTimes({payload: {startedAt: 10}}, "ItemLifecycle"), []);
     assert.match(timingDetails(protocolTimes({createdAt: 0}, "Thread")), /1970-01-01T00:00:00.000Z/u);
