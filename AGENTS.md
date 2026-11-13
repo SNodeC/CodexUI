@@ -16,7 +16,7 @@ This canonical checkout uses the nested layout: approved persistent checkouts be
 
 ## Native packages
 
-`VERSION` supplies the CMake project version. `ci/packages.json` declares only the full Linux targets qualified in `docs/qualification/package-targets.md`, depends on `aisuite`, and uses the existing install rules for both desktop applications, icons, desktop files and manager web assets. The package hook follows the native CI configuration with `CODEXUI_INSTALL_WEB=OFF`; the separate CodexWebUI production artifact retains its existing build/release workflow. GUI checks use Xvfb with `QT_QPA_PLATFORM=offscreen`. CPack DEB/RPM configuration is under `cmake/`; never install verification packages on this host.
+`VERSION` supplies the CMake project version. The existing install rules cover both desktop applications, icons, desktop files and manager web assets. Native-only validation uses `CODEXUI_INSTALL_WEB=OFF`; the separate CodexWebUI production artifact retains its local build and release commands. GUI checks use Xvfb with `QT_QPA_PLATFORM=offscreen`. CPack DEB/RPM configuration is under `cmake/`; never install verification packages on this host.
 
 ## Markdown formatting
 
