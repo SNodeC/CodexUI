@@ -404,23 +404,20 @@ export class PresentationModel {
     threadOrder(): readonly string[] { return this.orderedThreads; }
     threadIds(): readonly string[] { return [...this.threads.keys()]; }
     threadTitles(): readonly string[] { return [...this.threads.values()].map(thread => thread.title); }
-    threadIndicatorTones(): Map<string, string> {
-        const tones = new Map<string, string>(), parents = new Map<string, string[]>(), pending: string[] = [];
+    threadIndicatorTones(attentionFamily: (parent: string, child: string) => boolean = () => true): Map<string, string> {
+        const tones = new Map<string, string>(), pending: string[] = [];
         for (const thread of this.threads.values()) {
             tones.set(thread.id, isActiveStatus(thread.status) ? "active" : thread.uninspectedResult ? "uninspected" : statusTone(thread.status));
             if (isActiveStatus(thread.status) || thread.uninspectedResult) { pending.push(thread.id); }
-            for (const child of thread.childThreadOrder) {
-                parents.set(child, [...(parents.get(child) ?? []), thread.id]);
-            }
         }
         while (pending.length > 0) {
             const child = pending.pop()!;
-            for (const parent of parents.get(child) ?? []) {
-                const tone = ["active", "indirect"].includes(tones.get(child) ?? "") ? "indirect" : "uninspected";
-                if (tones.get(parent) !== "active" && tones.get(parent) !== "indirect" && tones.get(parent) !== tone) {
-                    tones.set(parent, tone);
-                    pending.push(parent);
-                }
+            const parent = this.childOwnerships.get(child)?.parentThreadId;
+            const tone = ["active", "indirect"].includes(tones.get(child) ?? "") ? "indirect" : "uninspected";
+            if (parent && tones.get(parent) !== "active" && tones.get(parent) !== "indirect" && tones.get(parent) !== tone
+                && (tone !== "uninspected" || attentionFamily(parent, child))) {
+                tones.set(parent, tone);
+                pending.push(parent);
             }
         }
         return tones;

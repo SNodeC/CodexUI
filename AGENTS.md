@@ -12,7 +12,7 @@ For profile-manager planning or implementation, follow [Codex Profile Manager re
 
 ## Workspace and tooling layout
 
-This canonical checkout uses the nested layout: approved persistent checkouts belong in `<parent>/checkouts/<task>` and persistent builds in `<parent>/build/codex/<configuration>`. Temporary build/check output belongs in `/tmp/codex/build/CodexUI/<task>`. Do not reuse the historical `build-qualification` directory for new work. The repository copies the shared formatting and analysis baseline; use explicit formatting targets or format only files changed by the current task.
+The canonical source checkout is `/home/voc/projects/snodec/CodexUI/`. Persistent manual/Qt Creator builds belong in `/home/voc/projects/snodec/build/qtcreator/CodexUI/<configuration>/`; persistent agent builds belong in `/home/voc/projects/snodec/build/codex/CodexUI/<configuration>/`. Never place a build tree inside the repository. Temporary builds belong in `/tmp/codex/build/CodexUI/<task>/`, and other temporary task artifacts belong in `/tmp/codex/artifacts/CodexUI/<task>/`. Additional checkouts require explicit approval and use `/tmp/codex/checkouts/CodexUI/<task>/` unless another location is explicitly approved. Do not reuse the historical `build-qualification` directory for new work. The repository copies the shared formatting and analysis baseline; use explicit formatting targets or format only files changed by the current task.
 
 ## Native packages
 

@@ -1635,7 +1635,7 @@ namespace codexui::codex::ui {
                         continue;
                     ThreadListRow projected = self(self, child);
                     if (!projected.id.empty()) {
-                        row.uninspectedResult |= projected.uninspectedResult;
+                        row.uninspectedResult |= !browser && projected.uninspectedResult;
                         row.children.push_back(std::move(projected));
                     }
                 }
@@ -1892,12 +1892,10 @@ namespace codexui::codex::ui {
                 UiStatus aggregate{nodegraph::NodeStatus::NotLoaded};
                 for (auto& row : rows) {
                     const UiStatus descendants = self(self, row.children);
+                    row.uninspectedResult |= std::ranges::any_of(row.children, &ThreadListRow::uninspectedResult);
                     if (row.kind == ThreadRowKind::Project || row.kind == ThreadRowKind::Section) {
                         row.status = descendants;
                         row.indirectActive = isActiveStatus(descendants);
-                        row.uninspectedResult = std::ranges::any_of(row.children, [](const auto& child) {
-                            return child.uninspectedResult;
-                        });
                     }
                     // Fold descendants without changing an individual thread's own status.
                     for (const auto& status : {row.status, descendants}) {

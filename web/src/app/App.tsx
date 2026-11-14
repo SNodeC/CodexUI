@@ -280,7 +280,11 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const visibleRows: {id: string; presentationKey: string; depth: number; position: number;
         setSize: number; expanded: boolean}[] = [];
     const eligibleThreads = new Set(session.browserThreadIds());
-    const indicatorTones = session.model.threadIndicatorTones();
+    const sameFamily = (parent: string, child: string) => session.browser.grouping === "ungrouped"
+        || ["projectId", "sectionId"].every(key => session.model.thread(child)?.[key as "projectId" | "sectionId"]
+            === session.model.thread(parent)?.[key as "projectId" | "sectionId"]);
+    const indicatorTones = session.model.threadIndicatorTones((parent, child) =>
+        eligibleThreads.has(parent) && eligibleThreads.has(child) && sameFamily(parent, child));
     const appendVisibleRows = (ids: readonly string[], depth: number) => {
         const present = ids.filter(id => eligibleThreads.has(id) || id === DraftThreadId && snapshot.newThreadDraft);
         for (let index = 0; index < present.length; ++index) {
@@ -289,8 +293,9 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
             const thread = session.model.thread(id);
             const expanded = session.viewportState.threadExpanded(id, presentationKey);
             visibleRows.push({id, presentationKey, depth, position: index + 1, setSize: present.length, expanded});
-            if (thread && expanded) appendVisibleRows(thread.childThreadOrder.filter(child => session.browser.grouping === "ungrouped"
-                || ["projectId", "sectionId"].every(key => session.model.thread(child)?.[key as "projectId" | "sectionId"] === thread[key as "projectId" | "sectionId"])), depth + 1);
+            if (thread && expanded) {
+                appendVisibleRows(thread.childThreadOrder.filter(child => sameFamily(id, child)), depth + 1);
+            }
         }
     };
     const roots = [...(snapshot.newThreadDraft ? [DraftThreadId] : []), ...session.threadOrder(sortCriterion)];
@@ -365,7 +370,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         const members = session.model.threadIds().filter(id => membership(id, `${kind}Id`) === group.id
             && (!nested || membership(id, "projectId") === projectId));
         const tone = members.some(id => ["active", "indirect"].includes(indicatorTones.get(id) ?? "")) ? "indirect"
-            : members.some(id => indicatorTones.get(id) === "uninspected") ? "uninspected"
+            : members.some(id => eligibleThreads.has(id) && indicatorTones.get(id) === "uninspected") ? "uninspected"
             : members.some(id => statusTone(session.model.thread(id)!.status) !== "") ? "success" : "muted";
         const statusDescription = tone === "uninspected" ? "Finished result not yet inspected in a descendant" : tone === "indirect" ? "Indirect activity: running descendant" : tone === "success" ? "Threads: loaded" : "Threads: not loaded";
         return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-level={nested ? 2 : 1} aria-label={`${groupLabel(kind, group)}, ${statusDescription}`} aria-expanded={expanded}>
