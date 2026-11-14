@@ -11,7 +11,6 @@ The native interactive test suite and its recorded execution results.
 ## Sections
 
 <!-- snodec:begin section-pages -->
-- [Native package target availability](package-targets.md#banner)
 - [Native qualification execution record — 2026-09-27](native-results-2026-09-27.md#banner)
 - [CodexUI canonical interactive Xvfb test suite](native-test-suite.md#banner)
 - [CodexManager implementation qualification](codexmanager-2026-10-16.md)
