@@ -1,0 +1,132 @@
+[
+  {
+    "label": "visible-child",
+    "child": {},
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    }
+  },
+  {
+    "label": "archived-child-hidden",
+    "child": {
+      "archived": true
+    },
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": false,
+      "childVisible": false,
+      "childNested": false,
+      "project": false,
+      "section": false
+    }
+  },
+  {
+    "label": "archived-child-revealed",
+    "child": {
+      "archived": true
+    },
+    "grouping": "projects",
+    "archive": "all",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    }
+  },
+  {
+    "label": "child-in-other-section",
+    "child": {
+      "section": {
+        "id": "other-section"
+      }
+    },
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": false,
+      "childVisible": true,
+      "childNested": false,
+      "project": true,
+      "section": false
+    }
+  },
+  {
+    "label": "child-in-other-project",
+    "child": {
+      "projectId": "other-project",
+      "section": {
+        "id": "other-section"
+      }
+    },
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": false,
+      "childVisible": true,
+      "childNested": false,
+      "project": false,
+      "section": false
+    }
+  },
+  {
+    "label": "ungrouped-child-across-groups",
+    "child": {
+      "projectId": "other-project",
+      "section": {
+        "id": "other-section"
+      }
+    },
+    "grouping": "ungrouped",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    }
+  },
+  {
+    "label": "section-grouped-child",
+    "child": {},
+    "grouping": "sections",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    }
+  },
+  {
+    "label": "title-filter-hides-child",
+    "child": {},
+    "grouping": "projects",
+    "archive": "active",
+    "title": "ready-parent",
+    "expected": {
+      "parent": false,
+      "childVisible": false,
+      "childNested": false,
+      "project": false,
+      "section": false
+    }
+  }
+]

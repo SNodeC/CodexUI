@@ -2804,6 +2804,137 @@ namespace codexui::codex {
             return passed;
         }
 
+        bool inspectionAttentionFollowsThePresentedHierarchy() {
+            using namespace nodegraph;
+            const auto fixtures = std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures";
+            std::ifstream baseInput(fixtures / "thread-inspection.json");
+            std::ifstream casesInput(fixtures / "thread-inspection-visibility.json");
+            const auto fixture = nlohmann::json::parse(baseInput);
+            const auto cases = nlohmann::json::parse(casesInput);
+            bool passed = true;
+            for (const auto& scenario : cases) {
+                NodeGraph graph;
+                ThreadChannels channels;
+                WorkerLogic logic(graph, channels);
+                ui::NodeGraphUiAdapter adapter(graph);
+                {
+                    auto write = graph.write();
+                    for (const auto& [key, kind] :
+                         std::array{std::pair{"project", NodeKind::Project}, std::pair{"section", NodeKind::ThreadSection}}) {
+                        NodeState state;
+                        state.fields = *valueFromJson(fixture.at(key)).asObject();
+                        static_cast<void>(write.upsert({kind, fixture.at(key).at("id").get<std::string>()}, std::move(state)));
+                    }
+                    for (const auto method : {"project/list", "threadSection/list"}) {
+                        NodeState state;
+                        state.fields = {{"loaded", true}};
+                        static_cast<void>(
+                            write.upsert({NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object())}, std::move(state)));
+                    }
+                    static_cast<void>(write.finish());
+                }
+                for (auto thread : fixture.at("threads")) {
+                    if (thread.at("id") == "ready-child") {
+                        thread.update(scenario.at("child"));
+                    }
+                    static_cast<void>(
+                        logic.apply({DecodedMessageKind::ServerNotification, "thread/started", {}, {{"thread", valueFromJson(thread)}}}));
+                }
+                NodeRef parent;
+                NodeRef child;
+                {
+                    auto read = graph.tryRead();
+                    parent = read->find({NodeKind::Thread, "ready-parent"});
+                    child = read->find({NodeKind::Thread, "ready-child"});
+                }
+                for (const auto id : {"ready-parent", "ready-child"}) {
+                    static_cast<void>(
+                        logic.apply({DecodedMessageKind::ServerNotification,
+                                     "turn/completed",
+                                     {},
+                                     {{"threadId", id}, {"turn", Value::Object{{"id", "finished"}, {"status", "completed"}}}}}));
+                }
+                static_cast<void>(logic.inspectThread(parent));
+                middle::ThreadPane pane;
+                pane.resize(480, 780);
+                pane.show();
+                middle::ThreadPane::Actions actions;
+                actions.browserChanged = [&] {
+                    pane.refresh(*adapter.threads(parent, nullptr, &pane.browserOptions()));
+                };
+                pane.setActions(std::move(actions));
+                pane.refresh(*adapter.threads(parent, nullptr, &pane.browserOptions()));
+                const auto grouping = scenario.at("grouping").get<std::string>();
+                const int groupingIndex = grouping == "projects" ? 0 : grouping == "sections" ? 1 : 2;
+                auto* groupButton = pane.findChild<QToolButton*>(QStringLiteral("threadGroupingButton"));
+                groupButton->menu()->actions().at(groupingIndex)->trigger();
+                auto* archive = pane.findChild<QComboBox*>(QStringLiteral("threadArchiveFilter"));
+                archive->setCurrentIndex(scenario.at("archive") == "all" ? 2 : 0);
+                auto* search = pane.findChild<QLineEdit*>(QStringLiteral("threadTitleSearch"));
+                search->setText(QString::fromStdString(scenario.at("title").get<std::string>()));
+                QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QApplication::sendEvent(search, &enter);
+                auto* tree = threadTree(pane);
+                tree->expandAll();
+                QApplication::processEvents();
+                auto* parentItem = threadItem(tree, "ready-parent");
+                auto* childItem = threadItem(tree, "ready-child");
+                const auto& expected = scenario.at("expected");
+                const auto label = scenario.at("label").get<std::string>();
+                const auto check = [&](bool condition, const char* message) {
+                    if (!condition) {
+                        std::cerr << "Inspection visibility fixture: " << label << '\n';
+                    }
+                    passed &= require(condition, message);
+                };
+                check(parentItem && parentItem == tree->currentItem(), "the inspected parent remains visibly selected");
+                check(bool(childItem) == expected.at("childVisible").get<bool>(), "child visibility follows the browser filter");
+                check(bool(childItem && childItem->parent() == parentItem) == expected.at("childNested").get<bool>(),
+                      "child placement follows the displayed hierarchy");
+                for (const auto& [id, key] : std::array{std::pair{"ready-parent", "parent"},
+                                                        std::pair{"ready-project", "project"},
+                                                        std::pair{"ready-section", "section"}}) {
+                    auto* item = threadItem(tree, id);
+                    if (item) {
+                        const bool attention = expected.at(key).get<bool>();
+                        check(rowDotUsesColor(tree, item, QColor(attention ? UiStyle::statusUninspected : UiStyle::statusSuccess)),
+                              "painted attention follows only the displayed descendants");
+                        check(item->toolTip(0).contains("not yet inspected") == attention,
+                              "accessible attention matches the painted indicator");
+                    }
+                }
+                if (parentItem) {
+                    parentItem->setExpanded(false);
+                    QApplication::processEvents();
+                    check(parentItem->toolTip(0).contains("not yet inspected") == expected.at("parent").get<bool>(),
+                          "collapsing a displayed hierarchy preserves attention");
+                }
+                {
+                    auto read = graph.tryRead();
+                    check(!boolFromValue(valueMember(*read->state(parent), "uninspectedResult")),
+                          "selection clears only the parent's own result");
+                    check(boolFromValue(valueMember(*read->state(child), "uninspectedResult")),
+                          "filtering preserves the child's unread state");
+                }
+                if (const auto path = qEnvironmentVariable("CODEXUI_INSPECTION_SCREENSHOT_DIR"); !path.isEmpty()) {
+                    check(pane.grab().save(path + "/" + QString::fromStdString(label) + "-dpr-" +
+                                           QString::number(pane.devicePixelRatioF()) + ".png"),
+                          "inspection visibility evidence saved");
+                }
+                archive->setCurrentIndex(2);
+                search->clear();
+                tree->expandAll();
+                QApplication::processEvents();
+                check(threadItem(tree, "ready-child"), "changing filters reveals the unread child");
+                static_cast<void>(logic.inspectThread(child));
+                pane.refresh(*adapter.threads(parent, nullptr, &pane.browserOptions()));
+                check(!threadItem(tree, "ready-parent")->toolTip(0).contains("not yet inspected"),
+                      "inspecting the responsible child clears its displayed ancestors");
+                groupButton->menu()->actions().at(0)->trigger();
+            }
+            return passed;
+        }
+
         bool threadIndicatorsDistinguishDirectAndIndirectActivity() {
             using namespace nodegraph;
             std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/thread-activity.json");
@@ -3687,6 +3818,7 @@ int main(int argc, char** argv) {
     passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
     passed &= codexui::codex::threadIndicatorsDistinguishDirectAndIndirectActivity();
     passed &= codexui::codex::uninspectedResultsFollowCompletionAndSelection();
+    passed &= codexui::codex::inspectionAttentionFollowsThePresentedHierarchy();
     passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
     passed &= codexui::codex::optimisticDiscardRetiresAuthorityBeforeSelectionReentry();
     passed &= codexui::codex::pagingFollowsTheVisibleListEnd();
