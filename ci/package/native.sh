@@ -7,7 +7,7 @@ export TMPDIR="$build" QT_QPA_PLATFORM=offscreen
 cmake -S "$SOURCE_DIR" -B "$build" -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=ON -DCODEXUI_INSTALL_WEB=OFF
 cmake --build "$build" --parallel "$(nproc)"
-ctest --test-dir "$build" -LE mariadb --output-on-failure
+xvfb-run -a ctest --test-dir "$build" -LE mariadb --output-on-failure
 case "$family" in
     deb)
         cpack --config "$build/CPackConfig.cmake" -G DEB -B "$OUTPUT_DIR" \
