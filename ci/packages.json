@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "package": "codexui",
+  "title": "CodexUI",
+  "depends_on": [
+    "aisuite"
+  ],
+  "build": {
+    "deb": "ci/package/native.sh",
+    "rpm": "ci/package/native.sh"
+  },
+  "build_dependencies": {
+    "deb": [
+      "cmake",
+      "g++",
+      "make",
+      "pkg-config",
+      "libssl-dev",
+      "nlohmann-json3-dev",
+      "libmagic-dev",
+      "libbluetooth-dev",
+      "libmariadb-dev",
+      "libncurses-dev",
+      "qt6-base-dev",
+      "libkf6sonnet-dev",
+      "libgit2-dev",
+      "python3",
+      "xvfb",
+      "xauth"
+    ],
+    "rpm": [
+      "cmake",
+      "gcc-c++",
+      "make",
+      "pkgconf-pkg-config",
+      "openssl-devel",
+      "json-devel",
+      "file-devel",
+      "bluez-libs-devel",
+      "mariadb-connector-c-devel",
+      "ncurses-devel",
+      "qt6-qtbase-devel",
+      "kf6-sonnet-devel",
+      "libgit2-devel",
+      "python3",
+      "xorg-x11-server-Xvfb",
+      "xorg-x11-xauth"
+    ]
+  },
+  "targets": [
+    "debian-trixie-amd64",
+    "debian-trixie-arm64",
+    "debian-trixie-armhf",
+    "debian-trixie-riscv64",
+    "debian-forky-amd64",
+    "debian-forky-arm64",
+    "debian-forky-armhf",
+    "debian-forky-riscv64",
+    "debian-sid-amd64",
+    "debian-sid-arm64",
+    "debian-sid-armhf",
+    "debian-sid-riscv64",
+    "ubuntu-resolute-amd64",
+    "ubuntu-resolute-arm64",
+    "fedora-43-x86_64",
+    "fedora-43-aarch64",
+    "fedora-44-x86_64",
+    "fedora-44-aarch64",
+    "raspberrypios-trixie-arm64"
+  ]
+}
