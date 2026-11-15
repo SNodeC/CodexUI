@@ -883,10 +883,16 @@ namespace codexui::codex {
         const FileSelectionDialog::Access filesystem = [this] {
             return session.filesystemAccess();
         };
+        threadActions.hasUnsentDraft = [this](const std::string& identity) {
+            return middleRegion->composer().hasUnsentDraft(identity);
+        };
         threadActions.filesystem = filesystem;
         middleRegion->threads().setActions(std::move(threadActions));
 
         middle::ComposerPane::Actions composerActions;
+        composerActions.draftChanged = [this](const std::string& identity) {
+            middleRegion->threads().updateDraftIndicator(identity);
+        };
         composerActions.filesystem = filesystem;
         composerActions.workspace = [this] {
             const auto row = uiAdapter.threadRow(boundGraphThread);

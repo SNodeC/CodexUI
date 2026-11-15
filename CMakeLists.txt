@@ -726,6 +726,7 @@ if(BUILD_TESTING)
         codexui-application-layout-test
         PRIVATE
             CODEXUI_FILE_SELECTION_CONTRACT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/file-selection.json"
+            CODEXUI_DRAFT_INDICATOR_CONTRACT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/thread-draft-indicator.json"
     )
     target_include_directories(codexui-application-layout-test PRIVATE src)
     target_link_libraries(

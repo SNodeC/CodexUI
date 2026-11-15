@@ -500,6 +500,16 @@ void ComposerPane::setSettingsEnabled(bool enabled) {
               : QStringLiteral("Settings apply when starting a turn"));
 }
 
+bool ComposerPane::hasUnsentDraft(const std::string& identity) const {
+    bool present = false;
+    if (identity == turnSettingsPolicy_.context().identity) {
+        present = !promptEditor_->document()->isEmpty() || !attachments_.empty();
+    } else if (const auto found = drafts_.find(identity); found != drafts_.end()) {
+        present = !found->second.text.isEmpty() || !found->second.attachments.empty();
+    }
+    return present;
+}
+
 void ComposerPane::saveDraft() {
     const auto found = drafts_.find(turnSettingsPolicy_.context().identity);
     if (found != drafts_.end()) {
@@ -720,6 +730,9 @@ void ComposerPane::refreshSubmissionEnabled() {
       canSubmit_ && preparingAttachments_ == 0 &&
       (!attachments_.empty() ||
        !promptEditor_->document()->find(NonWhitespace).isNull()));
+  if (actions_.draftChanged) {
+      actions_.draftChanged(turnSettingsPolicy_.context().identity);
+  }
 }
 
 } // namespace codexui::codex::middle

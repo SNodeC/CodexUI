@@ -777,6 +777,29 @@ test("settings drafts follow thread incarnations and remain bounded across retir
     session.dispose();
 });
 
+test("composer publishes ring transitions without publishing every keystroke", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => new FakeSocket());
+    let publications = 0;
+    const unsubscribe = session.subscribe(() => { ++publications; });
+    const key = "thread-key";
+    session.setComposerDraft(key, {text:"a", attachments:[]});
+    assert.equal(publications, 1);
+    session.setComposerDraft(key, {text:"ab", attachments:[]});
+    assert.equal(publications, 1, "editing a populated draft updates its owner without refreshing the whole shell");
+    const attachment = {path:"/workspace/a.txt",name:"a.txt",mimeType:"text/plain",size:12};
+    session.setComposerDraft(key, {text:"",attachments:[attachment]});
+    assert.equal(session.hasUnsentDraft(key), true, "attachment-only input keeps the ring");
+    assert.equal(publications, 1);
+    session.setComposerDraft(key, {text:"",attachments:[]});
+    assert.equal(publications, 2, "clearing the final text or attachment removes the ring immediately");
+    session.beginNewThread({workspace:"/workspace",name:"",baseInstructions:"",developerInstructions:"",ephemeral:false,attachments:[attachment]});
+    const draftKey = session.threadVisualKey(DraftThreadId);
+    assert.equal(session.hasUnsentDraft(draftKey), true, "initial recovered attachments already count as an unsent draft");
+    session.setComposerDraft(draftKey, {text:"",attachments:[]});
+    assert.equal(session.hasUnsentDraft(draftKey), false, "cleared recovered attachments cannot resurrect a ring");
+    unsubscribe(); session.dispose();
+});
+
 test("thread ordering exposes Alphanumeric, Created, and Recent contracts", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => new FakeSocket());
     session.model.applyEvent(result(96, 1, "threads.list", "list", true, {threads: [

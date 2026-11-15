@@ -44,6 +44,7 @@ public:
       std::function<void()> review;
       std::function<void()> deny;
       std::function<void(QString)> attachmentError;
+      std::function<void(const std::string&)> draftChanged;
   };
 
   explicit ComposerPane(QWidget *parent = nullptr);
@@ -67,6 +68,7 @@ public:
   void forgetThreadDraft(std::string_view identity);
   void forgetThreadDraft(std::string_view identity, std::uint64_t incarnation);
   void clearDraft();
+  [[nodiscard]] bool hasUnsentDraft(const std::string& identity) const;
   [[nodiscard]] codexui::ExpandingPromptEditor *promptEditor() const noexcept {
     return promptEditor_;
   }

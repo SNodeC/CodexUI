@@ -5462,6 +5462,8 @@ void promptDraftsFollowVisibleThreadSelection(Configuration& configuration) {
         require(selectThread(list, "draft-a"), "the first thread becomes visibly selected");
         const QString first = QStringLiteral("  draft A α\n\nlast line\n");
         editor->insertPlainText(first);
+        require(threadAccessibleText(list, threadItem(list, "draft-a"), QAccessible::Description).contains("Unsent draft"),
+                "the real shell exposes its active thread's unsent draft accessibly");
         require(selectThread(list, "draft-b") && editor->toPlainText().isEmpty(),
                 "selecting a hydrating thread immediately shows its own empty prompt");
         editor->insertPlainText(QStringLiteral("draft B"));
@@ -5476,6 +5478,9 @@ void promptDraftsFollowVisibleThreadSelection(Configuration& configuration) {
         static_cast<void>(takeQtMessages(channels));
         send->click();
         require(editor->toPlainText().isEmpty(), "admission clears the visibly submitted prompt");
+        require(!threadAccessibleText(list, threadItem(list, "draft-a"), QAccessible::Description).contains("Unsent draft") &&
+                    threadAccessibleText(list, threadItem(list, "draft-b"), QAccessible::Description).contains("Unsent draft"),
+                "admission clears A's ring description while B retains its independent draft");
         const auto messages = takeQtMessages(channels);
         std::size_t submissions = 0;
         for (const auto& message : messages) {

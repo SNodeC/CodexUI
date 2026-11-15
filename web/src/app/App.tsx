@@ -207,7 +207,7 @@ function persistConversationPresentation(options: ConversationPresentationOption
     writeBrowserStorage("codexui.conversation.fileChangesInitiallyExpanded", String(options.fileChangesInitiallyExpanded));
 }
 
-function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
+function StatusDot({tone, unsent = false}: {tone: string; unsent?: boolean}) { return <span className={`status-dot ${tone}${unsent ? " unsent-draft" : ""}`} aria-hidden="true" />; }
 
 const ThreadSortControl = memo(function ThreadSortControl({value, onChange}: {value: ThreadSortCriterion;
     onChange: (value: ThreadSortCriterion) => void}) {
@@ -307,6 +307,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         const draftSubmissions = draft ? session.prompts.submissions(id) : [];
         const draftActive = draftSubmissions.some(value => value.state === "queued" || value.state === "inFlight");
         const draftFailed = !draftActive && draftSubmissions.some(value => value.state === "failed");
+        const unsent = session.hasUnsentDraft(presentationKey);
         const status = thread?.status ?? UnknownStatus;
         const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
         const promptAnimating = session.threadPromptAnimating(id);
@@ -325,6 +326,9 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
             `Created: ${thread?.createdAt === undefined ? "Unknown" : threadTimestampText(thread.createdAt)}`,
             `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : threadTimestampText(thread.lastActivityAt)}`,
             ...(parentId ? [`Parent: ${session.model.thread(parentId)?.title || parentId}`] : [])];
+        if (unsent) {
+            hoverDetails.push("Unsent draft");
+        }
         if (indicatorTones.get(id) === "uninspected") {
             hoverDetails.push("Finished result not yet inspected in this thread or a descendant");
         }
@@ -338,7 +342,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id, presentationKey, expanded)} aria-label={expanded ? "Collapse child threads" : "Expand child threads"}>{hasChildren && <FoldIcon collapsed={!expanded} leading />}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
                     aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id, presentationKey), onClose)}>
-                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : indicatorTones.get(id) || "muted"} /><span className="thread-title">{title}</span>
+                    <StatusDot tone={draftFailed ? "danger" : draft ? "warning" : indicatorTones.get(id) || "muted"} unsent={unsent} /><span className="thread-title">{title}</span>
                 </button>
                 {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
                     aria-haspopup="menu" aria-expanded={contextOpen}
@@ -1142,12 +1146,12 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     const attachments = authored?.attachments ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.attachments ?? [] : []);
     const setPrompt = (text: string) => {
         const current = session.composerDrafts.get(presentationKey);
-        session.composerDrafts.set(presentationKey, {text, attachments: current?.attachments ?? attachments});
+        session.setComposerDraft(presentationKey, {text, attachments: current?.attachments ?? attachments});
         forceCardState(value => value + 1);
     };
     const setAttachments = (files: AttachmentDraft[]) => {
         const current = session.composerDrafts.get(presentationKey);
-        session.composerDrafts.set(presentationKey, {text: current?.text ?? prompt, attachments: files});
+        session.setComposerDraft(presentationKey, {text: current?.text ?? prompt, attachments: files});
         forceCardState(value => value + 1);
     };
     const attention = [...session.model.pendingRequestPresentations().values()][0];

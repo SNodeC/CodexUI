@@ -1399,6 +1399,109 @@ bool turnSettingsCatalogProjectionScalesLinearly() {
       "settings catalog projection remains quantitatively linear");
 }
 
+class DraftRowPaintProbe final : public QObject {
+public:
+    int paints = 0;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::Paint) {
+            ++paints;
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+bool unsentDraftRingUsesTheExistingOwner() {
+    ComposerPane composer;
+    ThreadPane pane;
+    pane.resize(300, 400);
+    pane.show();
+    TurnSettingsContext context;
+    context.identity = "thread-a";
+    context.threadIncarnation = 17;
+    context.providerAuthorityRevision = 1;
+    composer.setTurnSettingsContext(context);
+    ThreadPane::Actions threadActions;
+    threadActions.hasUnsentDraft = [&](const std::string& identity) {
+        return composer.hasUnsentDraft(identity);
+    };
+    pane.setActions(std::move(threadActions));
+    ComposerPane::Actions composerActions;
+    composerActions.draftChanged = [&](const std::string& identity) {
+        pane.updateDraftIndicator(identity);
+    };
+    composer.setActions(std::move(composerActions));
+    ui::ThreadListRow row;
+    row.id = "thread-a";
+    row.presentationKey = "thread:17";
+    row.title = "Retained prompt thread";
+    row.status = nodegraph::NodeStatus::Running;
+    ui::ThreadListSnapshot snapshot;
+    snapshot.roots = {row};
+    snapshot.selectedThreadId = row.id;
+    pane.refresh(snapshot);
+    auto* tree = pane.findChild<QTreeWidget*>("threadList");
+    bool passed = expect(tree && tree->topLevelItemCount() == 1, "draft ring fixture exposes its thread row");
+    QFile source(CODEXUI_DRAFT_INDICATOR_CONTRACT_PATH);
+    const bool opened = source.open(QIODevice::ReadOnly);
+    passed &= expect(opened, "shared draft-indicator fixture opens");
+    if (tree && tree->topLevelItemCount() == 1 && opened) {
+        const auto fixtures = nlohmann::json::parse(source.readAll().toStdString());
+        auto* item = tree->topLevelItem(0);
+        DraftRowPaintProbe probe;
+        tree->viewport()->installEventFilter(&probe);
+        for (const auto& entry : fixtures) {
+            composer.clearDraft();
+            QCoreApplication::processEvents();
+            const auto rect = tree->visualItemRect(item);
+            const QImage before = tree->viewport()->grab().toImage();
+            const int priorPaints = probe.paints;
+            composer.promptEditor()->setPlainText(QString::fromStdString(entry.at("text").get<std::string>()));
+            std::vector<AttachmentDraft> attachments;
+            for (const auto& attachment : entry.at("attachments")) {
+                attachments.push_back({attachment.at("path"), attachment.at("name"), attachment.at("mimeType"), attachment.at("size")});
+            }
+            composer.setAttachments(std::move(attachments));
+            QCoreApplication::processEvents();
+            const bool present = entry.at("present");
+            passed &= expect(composer.hasUnsentDraft(context.identity) == present, "the shared corpus determines unsent draft presence");
+            passed &= expect(item->data(0, Qt::ToolTipRole).toString().contains("Unsent draft") == present,
+                             "the thread tooltip exposes exactly the retained draft state");
+            passed &= expect(probe.paints > priorPaints, "editing invalidates the native thread row without a graph refresh");
+            const QImage after = tree->viewport()->grab().toImage();
+            passed &= expect(rect == tree->visualItemRect(item) && before.size() == after.size(),
+                             "draft presence does not alter thread row geometry");
+            passed &= expect((before != after) == present, "only nonempty drafts paint a status ring");
+            const qreal dpr = after.devicePixelRatio();
+            const QPointF center(rect.left() + 14, QRectF(rect).center().y());
+            const QRectF allowed(center.x() - 8, center.y() - 8, 16, 16);
+            bool contained = true;
+            for (int y = 0; y < after.height(); ++y) {
+                for (int x = 0; x < after.width(); ++x) {
+                    if (before.pixel(x, y) != after.pixel(x, y)) {
+                        contained &= allowed.contains(QPointF((x + 0.5) / dpr, (y + 0.5) / dpr));
+                    }
+                }
+            }
+            passed &= expect(contained, "ring pixels remain inside the inspected allowance without moving text or borders");
+            const QPoint sample(qRound(center.x() * dpr), qRound(center.y() * dpr));
+            passed &= expect(before.pixel(sample) == after.pixel(sample), "the existing activity dot keeps its color");
+        }
+        composer.clearDraft();
+        composer.promptEditor()->setPlainText("retained after creation");
+        composer.promoteThreadDraft(context.identity, "canonical-thread", 18);
+        context.identity = "canonical-thread";
+        context.threadIncarnation = 18;
+        composer.setTurnSettingsContext(context);
+        snapshot.roots.front().id = context.identity;
+        pane.refresh(snapshot);
+        passed &= expect(tree->topLevelItem(0) == item && item->data(0, Qt::ToolTipRole).toString().contains("Unsent draft"),
+                         "canonical promotion keeps the ring on the same presentation row");
+    }
+    return passed;
+}
+
 bool composerDraftsFollowThreadIdentity() {
     ComposerPane composer;
     TurnSettingsContext a;
@@ -2843,6 +2946,7 @@ int main(int argc, char **argv) {
       turnSettingsCatalogProjectionScalesLinearly);
   run("controlsRetainUsableGeometryAndAuthority",
       controlsRetainUsableGeometryAndAuthority);
+  run("unsentDraftRingUsesTheExistingOwner", unsentDraftRingUsesTheExistingOwner);
   run("composerDraftsFollowThreadIdentity", composerDraftsFollowThreadIdentity);
   run("attachmentLayoutFollowsFontAndWidth", attachmentLayoutFollowsFontAndWidth);
   run("threadPaneSnapshotAndActionContract",

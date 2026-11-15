@@ -1,0 +1,8 @@
+[
+  {"name":"empty", "text":"", "attachments":[], "present":false},
+  {"name":"text", "text":"retained prompt", "attachments":[], "present":true},
+  {"name":"whitespace", "text":"   ", "attachments":[], "present":true},
+  {"name":"line-breaks", "text":"\n\n", "attachments":[], "present":true},
+  {"name":"unicode", "text":"α 📝", "attachments":[], "present":true},
+  {"name":"attachment-only", "text":"", "attachments":[{"path":"/workspace/a.txt","name":"a.txt","mimeType":"text/plain","size":12}], "present":true}
+]

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {readFileSync} from "node:fs";
 import {renderToStaticMarkup} from "react-dom/server";
 import {createElement} from "react";
 
@@ -82,6 +83,23 @@ test("composer renders the selected thread's retained draft", () => {
     assert.equal(input(), "first draft", "returning restores the original draft");
     session.selectThread("b");
     assert.equal(input(), "second draft", "each thread retains its own text");
+    session.dispose();
+});
+
+test("thread status rings consume the shared unsent-draft corpus", () => {
+    const fixtures = JSON.parse(readFileSync(new URL("../../tests/fixtures/thread-draft-indicator.json", import.meta.url), "utf8"));
+    const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
+    session.model.applyEvent(result(1, 1, "threads.list", "list", true,
+        {threads: [{id:"a",name:"Thread A"}, {id:"b",name:"Thread B"}]}, "replace"));
+    const key = session.threadVisualKey("a");
+    for (const entry of fixtures) {
+        session.setComposerDraft(key, {text:entry.text, attachments:entry.attachments});
+        const markup = renderToStaticMarkup(createElement(App, {session}));
+        assert.equal(session.hasUnsentDraft(key), entry.present, entry.name);
+        assert.equal([...markup.matchAll(/class="status-dot [^"]*unsent-draft[^"]*"/gu)].length, entry.present ? 1 : 0, entry.name);
+        assert.equal(markup.includes("Unsent draft"), entry.present, "tooltip and accessibility describe only retained drafts");
+        assert.deepEqual([...markup.matchAll(/class="thread-title">([^<]*)</gu)].map(match => match[1]).sort(), ["Thread A", "Thread B"]);
+    }
     session.dispose();
 });
 

@@ -40,6 +40,7 @@ public:
 
   struct Actions {
       FileSelectionDialog::Access filesystem;
+      std::function<bool(const std::string&)> hasUnsentDraft;
       std::function<void()> newThread;
       std::function<void()> loadMore;
       std::function<void()> hide;
@@ -67,6 +68,7 @@ public:
   ~ThreadPane() override;
 
   void setActions(Actions actions);
+  void updateDraftIndicator(const std::string& identity);
   [[nodiscard]] QAbstractScrollArea* scrollArea() const;
   void refresh(const ui::ThreadListSnapshot &snapshot);
   [[nodiscard]] bool applyRowPresentation(const ui::ThreadListRow &row);

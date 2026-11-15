@@ -247,6 +247,10 @@ public:
     [[nodiscard]] ThreadTreeItem* threadItem(const QModelIndex& index) const {
         return index.isValid() ? threadItem(itemFromIndex(index)) : nullptr;
     }
+    [[nodiscard]] bool hasUnsentDraft(const ThreadTreeItem& item) const {
+        return item.kind == ui::ThreadRowKind::Thread && owner_->actions.hasUnsentDraft &&
+               (owner_->actions.hasUnsentDraft(item.id) || owner_->actions.hasUnsentDraft(item.presentationKey));
+    }
     [[nodiscard]] QTreeView* rowView(const QModelIndex& index) const {
         QTreeView* result = const_cast<ThreadTreeWidget*>(this);
         QModelIndex root = index;
@@ -674,6 +678,9 @@ QString itemDescription(const ThreadTreeItem& item) {
                 << QStringLiteral("Created: %1").arg(activityText(item.createdAt))
                 << QStringLiteral("Last activity: %1").arg(activityText(item.lastActivityAt))
                 << QStringLiteral("Level %1").arg(itemLevel(&item));
+        if (item.owner->hasUnsentDraft(item)) {
+            details.push_back(QStringLiteral("Unsent draft"));
+        }
         if (item.pending != 0) {
             details.push_back(QStringLiteral("%1 pending request(s)").arg(item.pending));
         }
@@ -853,6 +860,11 @@ public:
     painter->setBrush(statusColor(item->status, item->pending, item->draft, item->indirectActive, item->uninspectedResult));
     if (item->kind != ui::ThreadRowKind::Page) {
         painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
+    }
+    if (tree_->hasUnsentDraft(*item)) {
+        painter->setPen(QPen(QColor(QString::fromLatin1(UiStyle::secondary)), 1.0));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawEllipse(dotCenter, StatusRadius + 1.5, StatusRadius + 1.5);
     }
 
     const QFont font = titleFont(option.font, *item);
@@ -1729,6 +1741,15 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 ThreadPane::~ThreadPane() { delete tree; }
 
 void ThreadPane::setActions(Actions next) { actions = std::move(next); }
+
+void ThreadPane::updateDraftIndicator(const std::string& identity) {
+    tree->forEachVisibleRow([&](const QModelIndex& index) {
+        const auto* item = tree->threadItem(index);
+        if (item->id == identity || item->presentationKey == identity) {
+            tree->updateRow(index);
+        }
+    });
+}
 
 QAbstractScrollArea* ThreadPane::scrollArea() const {
     return tree;

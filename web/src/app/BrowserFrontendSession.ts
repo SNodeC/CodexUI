@@ -396,6 +396,19 @@ export class BrowserFrontendSession {
         this.settingDrafts.delete(identity);
         this.composerDrafts.delete(identity);
     }
+    hasUnsentDraft(identity: string): boolean {
+        const draft = this.composerDrafts.get(identity);
+        const attachments = draft?.attachments ?? (this.viewportState.presentationKey(DraftThreadId) === identity
+            ? this.newThreadDraft?.attachments : undefined);
+        return Boolean(draft?.text || attachments?.length);
+    }
+    setComposerDraft(identity: string, draft: {text: string; attachments: AttachmentDraft[]}): void {
+        const previous = this.hasUnsentDraft(identity);
+        this.composerDrafts.set(identity, draft);
+        if (previous !== this.hasUnsentDraft(identity)) {
+            this.publish();
+        }
+    }
     composerVisualKey(): number { return this.composerGeneration; }
     threadVisualKey(threadId: string): string {
         if (threadId === DraftThreadId) {
