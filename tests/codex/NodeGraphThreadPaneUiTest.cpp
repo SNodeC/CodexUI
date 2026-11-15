@@ -2696,19 +2696,22 @@ namespace codexui::codex {
         }
 
         bool rowDotUsesColor(QTreeWidget* tree, QTreeWidgetItem* item, const QColor& expected) {
-            if (!tree || !item)
-                return false;
-            QRect rect = tree->visualItemRect(item);
-            if (item->childCount() > 0) {
-                const QRect child = tree->visualItemRect(item->child(0));
-                if (child.isValid() && rect.contains(child.center())) {
-                    rect.setTop(rect.top() + UiStyle::projectCardEdgePadding);
-                    rect.setBottom(child.top() - 1);
+            bool matched = false;
+            if (tree && item) {
+                QRect rect = tree->visualItemRect(item).intersected(tree->viewport()->rect());
+                if (item->childCount() > 0) {
+                    const QRect child = tree->visualItemRect(item->child(0));
+                    if (child.isValid() && rect.contains(child.center())) {
+                        rect.setBottom(child.top() - 1);
+                    }
+                }
+                // Group-card padding is part of the row, not the status dot.
+                const QImage image = tree->viewport()->grab().toImage();
+                for (int y = rect.top(); rect.isValid() && y <= rect.bottom() && !matched; ++y) {
+                    matched = colorDistance(logicalPixel(image, QPoint(rect.left() + 14, y)), expected) <= 6;
                 }
             }
-            return rect.isValid() &&
-                   colorDistance(logicalPixel(tree->viewport()->grab().toImage(), QPoint(rect.left() + 14, rect.center().y())), expected) <=
-                       6;
+            return matched;
         }
 
         bool uninspectedResultsFollowCompletionAndSelection() {
