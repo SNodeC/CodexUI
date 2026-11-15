@@ -47,7 +47,7 @@ h1, h2, h3, p { margin: 0; }
 .tree-toggle:disabled { visibility: hidden; cursor: default; }
 .thread-row { display: grid; grid-template-columns: 9px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; flex: 1; min-height: 38px; border: 0; background: transparent; padding: 4px 0; text-align: left; cursor: pointer; }
 .thread-row .status-dot { background: var(--thread-status-idle); }
-.thread-row .status-dot.unsent-draft { outline: 1px solid var(--text-secondary); outline-offset: 1px; }
+.thread-row .status-dot.unsent-draft { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
 .thread-row .status-dot.success { background: var(--thread-status-success); }
 .thread-row .status-dot.active { background: var(--thread-status-active); }
 .thread-row .status-dot.indirect { background: var(--thread-status-indirect); }

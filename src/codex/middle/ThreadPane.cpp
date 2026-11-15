@@ -862,9 +862,9 @@ public:
         painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
     }
     if (tree_->hasUnsentDraft(*item)) {
-        painter->setPen(QPen(QColor(QString::fromLatin1(UiStyle::secondary)), 1.0));
+        painter->setPen(QPen(QColor(QString::fromLatin1(UiStyle::secondary)), 2.0));
         painter->setBrush(Qt::NoBrush);
-        painter->drawEllipse(dotCenter, StatusRadius + 1.5, StatusRadius + 1.5);
+        painter->drawEllipse(dotCenter, StatusRadius + 3.0, StatusRadius + 3.0);
     }
 
     const QFont font = titleFont(option.font, *item);

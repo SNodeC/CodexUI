@@ -1475,16 +1475,21 @@ bool unsentDraftRingUsesTheExistingOwner() {
             passed &= expect((before != after) == present, "only nonempty drafts paint a status ring");
             const qreal dpr = after.devicePixelRatio();
             const QPointF center(rect.left() + 14, QRectF(rect).center().y());
-            const QRectF allowed(center.x() - 8, center.y() - 8, 16, 16);
+            const QRectF allowed(center.x() - 10, center.y() - 10, 20, 20);
             bool contained = true;
+            bool gapPreserved = true;
             for (int y = 0; y < after.height(); ++y) {
                 for (int x = 0; x < after.width(); ++x) {
                     if (before.pixel(x, y) != after.pixel(x, y)) {
-                        contained &= allowed.contains(QPointF((x + 0.5) / dpr, (y + 0.5) / dpr));
+                        const QPointF position((x + 0.5) / dpr, (y + 0.5) / dpr);
+                        contained &= allowed.contains(position);
+                        const QPointF offset = position - center;
+                        gapPreserved &= QPointF::dotProduct(offset, offset) >= 36;
                     }
                 }
             }
             passed &= expect(contained, "ring pixels remain inside the inspected allowance without moving text or borders");
+            passed &= expect(gapPreserved, "the status dot and clear space before the ring remain unchanged");
             const QPoint sample(qRound(center.x() * dpr), qRound(center.y() * dpr));
             passed &= expect(before.pixel(sample) == after.pixel(sample), "the existing activity dot keeps its color");
         }
