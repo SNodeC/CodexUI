@@ -136,6 +136,7 @@ export class BrowserFrontendSession {
     readonly model = new PresentationModel();
     readonly prompts = new PromptCoordinator();
     readonly settingDrafts = new Map<string, SettingDraft>();
+    readonly composerDrafts = new Map<string, {text: string; attachments: AttachmentDraft[]}>();
     readonly viewportState = new ConversationViewportState();
     private readonly sdk = new CodexBridgeClient();
     private readonly connection: ClientConnection;
@@ -358,7 +359,7 @@ export class BrowserFrontendSession {
         if (this.prompts.submissions(DraftThreadId).length === 0) {
             if (this.newThreadDraft) {
                 const retiredIdentity = this.viewportState.retire(DraftThreadId);
-                if (retiredIdentity) this.settingDrafts.delete(retiredIdentity);
+                if (retiredIdentity) { this.forgetThreadDraft(retiredIdentity); }
             } else this.viewportState.retire(DraftThreadId);
             this.newThreadDraft = undefined;
         }
@@ -376,7 +377,7 @@ export class BrowserFrontendSession {
         this.prompts.clearThread(DraftThreadId);
         if (this.newThreadDraft) {
             const retiredIdentity = this.viewportState.retire(DraftThreadId);
-            if (retiredIdentity) this.settingDrafts.delete(retiredIdentity);
+            if (retiredIdentity) { this.forgetThreadDraft(retiredIdentity); }
         } else this.viewportState.retire(DraftThreadId);
         this.newThreadDraft = {
             workspace: draft.workspace.trim(), name: draft.ephemeral ? "" : draft.name.trim(),
@@ -390,6 +391,10 @@ export class BrowserFrontendSession {
         ++this.composerGeneration;
         this.viewportState.bind(DraftThreadId, this.newThreadDraft);
         this.publish();
+    }
+    private forgetThreadDraft(identity: string): void {
+        this.settingDrafts.delete(identity);
+        this.composerDrafts.delete(identity);
     }
     composerVisualKey(): number { return this.composerGeneration; }
     threadVisualKey(threadId: string): string {
@@ -557,8 +562,9 @@ export class BrowserFrontendSession {
             if (threadPresentation) {
                 const displacedIdentity = this.viewportState.presentationKey(id);
                 const promotedIdentity = this.viewportState.promote(DraftThreadId, id, threadPresentation);
-                if (promotedIdentity && displacedIdentity && displacedIdentity !== promotedIdentity)
-                    this.settingDrafts.delete(displacedIdentity);
+                if (promotedIdentity && displacedIdentity && displacedIdentity !== promotedIdentity) {
+                    this.forgetThreadDraft(displacedIdentity);
+                }
             }
             if (this.selectedThreadId === DraftThreadId) this.selectedThreadId = id;
             destination = id;
@@ -928,8 +934,9 @@ export class BrowserFrontendSession {
     }
     private retireProviderPresentations(): void {
         const retainedDraftId = this.newThreadDraft ? DraftThreadId : "";
-        for (const identity of this.viewportState.retireExcept(retainedDraftId))
-            this.settingDrafts.delete(identity);
+        for (const identity of this.viewportState.retireExcept(retainedDraftId)) {
+            this.forgetThreadDraft(identity);
+        }
     }
     private ensureThreadHydrated(threadId: string, refreshSettings = false): void {
         if (!this.providerReady() || threadId === "" || threadId === DraftThreadId) return;
@@ -1698,7 +1705,7 @@ export class BrowserFrontendSession {
             this.runtimeByThread.delete(threadId);
             const retiredIdentity = this.viewportState.retire(threadId);
             if (retiredIdentity) {
-                this.settingDrafts.delete(retiredIdentity);
+                this.forgetThreadDraft(retiredIdentity);
                 for (const operation of this.pendingUserOperations.keys())
                     if (operation.endsWith(`:${retiredIdentity}`)) this.pendingUserOperations.delete(operation);
             }

@@ -11,6 +11,7 @@
 #include <QWidget>
 #include <cstddef>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 
 class QFrame;
@@ -62,6 +63,9 @@ public:
   void setCanSubmit(bool canSubmit);
   void setSettingsEnabled(bool enabled);
   void setTurnSettingsContext(TurnSettingsContext context);
+  void promoteThreadDraft(std::string_view source, std::string_view destination, std::uint64_t incarnation);
+  void forgetThreadDraft(std::string_view identity);
+  void forgetThreadDraft(std::string_view identity, std::uint64_t incarnation);
   void clearDraft();
   [[nodiscard]] codexui::ExpandingPromptEditor *promptEditor() const noexcept {
     return promptEditor_;
@@ -71,49 +75,56 @@ public:
   }
 
 private:
-  void submitDraft();
-  void refreshAttachments();
-  bool eventFilter(QObject *watched, QEvent *event) override;
-  void refreshAdaptiveLayout();
-  void refreshActionStyle();
-  void refreshSubmissionEnabled();
-  void insertAttachments(const QMimeData* source, QString directory = {}, FileSelectionDialog::Filesystem access = {});
-  void finishAttachmentInput(QString error);
-  void finishAttachmentPreparation(QString error, std::uint64_t generation);
-  void uploadAttachments(std::shared_ptr<std::vector<AttachmentDraft>> prepared,
-                         std::size_t index,
-                         QString directory,
-                         std::uint64_t generation,
-                         FileSelectionDialog::Filesystem access);
+    void saveDraft();
+    void submitDraft();
+    void refreshAttachments();
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void refreshAdaptiveLayout();
+    void refreshActionStyle();
+    void refreshSubmissionEnabled();
+    void insertAttachments(const QMimeData* source, QString directory = {}, FileSelectionDialog::Filesystem access = {});
+    void finishAttachmentInput(QString error);
+    void finishAttachmentPreparation(QString error, std::uint64_t generation);
+    void uploadAttachments(std::shared_ptr<std::vector<AttachmentDraft>> prepared,
+                           std::size_t index,
+                           QString directory,
+                           std::uint64_t generation,
+                           FileSelectionDialog::Filesystem access);
 
-  QFrame *attention_ = nullptr;
-  QLabel *attentionTitle_ = nullptr;
-  QLabel *attentionDetail_ = nullptr;
-  QPushButton *attentionRejectButton_ = nullptr;
-  QPushButton *attentionAcceptButton_ = nullptr;
-  QPushButton *attentionReviewButton_ = nullptr;
-  TurnSettingsPolicy turnSettingsPolicy_;
-  TurnSettingsWidget *turnSettings_ = nullptr;
-  QFrame *composer_ = nullptr;
-  QFrame *attachmentPanel_ = nullptr;
-  QScrollArea *attachmentListScroll_ = nullptr;
-  QVBoxLayout *attachmentListLayout_ = nullptr;
-  QWidget *composerBody_ = nullptr;
-  QGridLayout *composerGrid_ = nullptr;
-  QToolButton *attachmentButton_ = nullptr;
-  codexui::ExpandingPromptEditor *promptEditor_ = nullptr;
-  QPushButton *sendButton_ = nullptr;
-  QPushButton *stopButton_ = nullptr;
+    QFrame* attention_ = nullptr;
+    QLabel* attentionTitle_ = nullptr;
+    QLabel* attentionDetail_ = nullptr;
+    QPushButton* attentionRejectButton_ = nullptr;
+    QPushButton* attentionAcceptButton_ = nullptr;
+    QPushButton* attentionReviewButton_ = nullptr;
+    TurnSettingsPolicy turnSettingsPolicy_;
+    TurnSettingsWidget* turnSettings_ = nullptr;
+    QFrame* composer_ = nullptr;
+    QFrame* attachmentPanel_ = nullptr;
+    QScrollArea* attachmentListScroll_ = nullptr;
+    QVBoxLayout* attachmentListLayout_ = nullptr;
+    QWidget* composerBody_ = nullptr;
+    QGridLayout* composerGrid_ = nullptr;
+    QToolButton* attachmentButton_ = nullptr;
+    codexui::ExpandingPromptEditor* promptEditor_ = nullptr;
+    QPushButton* sendButton_ = nullptr;
+    QPushButton* stopButton_ = nullptr;
 
-  Actions actions_;
-  std::vector<AttachmentDraft> attachments_;
-  QThreadPool attachmentPool_;
-  std::uint64_t draftGeneration_ = 0;
-  std::uint64_t attachmentOrder_ = 0;
-  std::size_t preparingAttachments_ = 0;
-  bool activeTurn_ = false;
-  bool canSubmit_ = false;
-  bool expanded_ = false;
+    struct Draft {
+        QString text;
+        std::vector<AttachmentDraft> attachments;
+        std::uint64_t incarnation = 0;
+    };
+    std::unordered_map<std::string, Draft> drafts_;
+    Actions actions_;
+    std::vector<AttachmentDraft> attachments_;
+    QThreadPool attachmentPool_;
+    std::uint64_t draftGeneration_ = 0;
+    std::uint64_t attachmentOrder_ = 0;
+    std::size_t preparingAttachments_ = 0;
+    bool activeTurn_ = false;
+    bool canSubmit_ = false;
+    bool expanded_ = false;
 };
 
 } // namespace middle

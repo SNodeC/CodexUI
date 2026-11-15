@@ -736,14 +736,19 @@ test("settings drafts follow thread incarnations and remain bounded across retir
         catalog, thread.settingStamps);
     const authored = changeSettingDraft(session.settingDrafts, firstIdentity, thread.raw,
         catalog, initial.settingStamps, "approval", "never");
+    const promptDraft = {text: "unsent thread prompt", attachments: []};
+    session.composerDrafts.set(firstIdentity, promptDraft);
     session.selectThread("settings-thread");
     session.selectThread("another-thread");
     assert.equal(session.settingDrafts.get(firstIdentity), authored,
         "ordinary navigation preserves the semantic thread's exact draft");
+    assert.equal(session.composerDrafts.get(firstIdentity), promptDraft,
+        "ordinary navigation preserves its unsent prompt");
 
     socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
     await Promise.resolve();
     assert.equal(session.settingDrafts.size, 0, "provider replacement retires prior-authority drafts");
+    assert.equal(session.composerDrafts.size, 0, "provider replacement retires old prompt drafts");
     socket.receive(appserver({jsonrpc: "2.0", method: "thread/started", params: {
         thread: {id: "settings-thread", approvalPolicy: "on-request"},
     }}));
@@ -761,12 +766,14 @@ test("settings drafts follow thread incarnations and remain bounded across retir
         const current = session.model.thread(id);
         settingDraftFor(session.settingDrafts, session.threadVisualKey(id), current.raw, catalog,
             current.settingStamps);
+        session.composerDrafts.set(session.threadVisualKey(id), {text: "retire this draft", attachments: []});
         socket.receive(appserver({jsonrpc: "2.0", method: "thread/deleted", params: {threadId: id}}));
     }
     assert.equal(session.settingDrafts.size, 1,
         "explicit retirement removes each draft in constant work without a render-time sweep");
     assert.equal(session.viewportState.retainedPresentationCount(), 1,
         "viewport, fold, and presentation identity retire at the same boundary");
+    assert.equal(session.composerDrafts.size, 0, "thread deletion also releases its prompt draft");
     session.dispose();
 });
 

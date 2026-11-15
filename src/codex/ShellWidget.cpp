@@ -1600,7 +1600,7 @@ namespace codexui::codex {
             pendingUiDetachments.insert_or_assign(removed.get(), removed);
             if (removed->id().kind == nodegraph::NodeKind::Thread) {
                 middleRegion->conversation().forgetThreadPresentation(removed->id().canonical, removed->incarnation());
-                middleRegion->composer().turnSettings().forget(removed->id().canonical, removed->incarnation());
+                middleRegion->composer().forgetThreadDraft(removed->id().canonical, removed->incarnation());
             }
             if (removed->id().kind == nodegraph::NodeKind::Interaction)
                 localPendingRequests.erase(removed);
@@ -1778,7 +1778,7 @@ namespace codexui::codex {
                     const std::string targetId = thread->id().canonical;
                     const bool ownsCreation = !creationCorrelation.empty() && creationCorrelation == creationDraftCorrelation;
                     if (!local && !creationCorrelation.empty()) {
-                        middleRegion->composer().turnSettings().promote(
+                        middleRegion->composer().promoteThreadDraft(
                             ui::threadPresentationKey(targetId, creationCorrelation), targetId, thread->incarnation());
                     }
                     if (origin == ThreadSelectionOrigin::Graph && !creationCorrelation.empty()) {
@@ -1790,8 +1790,7 @@ namespace codexui::codex {
                     }
                     if (selected) {
                         if (origin == ThreadSelectionOrigin::User && newThreadDraft) {
-                            middleRegion->composer().turnSettings().forget(
-                                ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation));
+                            middleRegion->composer().forgetThreadDraft(ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation));
                             middleRegion->threads().discardOptimisticThread(DraftThreadId);
                             creationDraftCorrelation.clear();
                         }
@@ -2053,18 +2052,16 @@ namespace codexui::codex {
         const bool replacementHydrating = boundGraphThread && !presentedThreadId.empty() &&
                                           boundGraphThread->id().canonical != presentedThreadId && !values.hydrationFailed;
 
-        if (!replacementHydrating) {
-            const std::string draftIdentity = newThreadDraft || !creationDraftCorrelation.empty()
-                                                  ? ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation)
-                                                  : std::string{};
-            auto settingsContext = uiAdapter.turnSettings(boundGraphThread, draftIdentity);
-            if (!settingsContext) {
-                pendingChrome = true;
-                schedulePaneCommit();
-                return;
-            }
-            middleRegion->composer().setTurnSettingsContext(std::move(*settingsContext));
+        const std::string draftIdentity = newThreadDraft || !creationDraftCorrelation.empty()
+                                              ? ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation)
+                                              : std::string{};
+        auto settingsContext = uiAdapter.turnSettings(boundGraphThread, draftIdentity);
+        if (!settingsContext) {
+            pendingChrome = true;
+            schedulePaneCommit();
+            return;
         }
+        middleRegion->composer().setTurnSettingsContext(std::move(*settingsContext));
 
         if (values.canControl && renderedChrome && !renderedChrome->canControl && boundGraphThread && !values.recoveryOnly) {
             hydrateSelectedThreadIfNeeded(boundGraphThread);
@@ -2296,7 +2293,6 @@ namespace codexui::codex {
                 draft.projectId = std::move(project);
                 draft.sectionId = std::move(section);
                 beginThreadDraft(std::move(draft));
-                middleRegion->composer().clearDraft();
                 middleRegion->composer().promptEditor()->setFocus();
             }
         }

@@ -500,8 +500,67 @@ void ComposerPane::setSettingsEnabled(bool enabled) {
               : QStringLiteral("Settings apply when starting a turn"));
 }
 
+void ComposerPane::saveDraft() {
+    const auto found = drafts_.find(turnSettingsPolicy_.context().identity);
+    if (found != drafts_.end()) {
+        found->second.text = promptEditor_->toPlainText();
+        found->second.attachments = attachments_;
+    }
+}
+
 void ComposerPane::setTurnSettingsContext(TurnSettingsContext context) {
-  turnSettings_->setContext(std::move(context));
+    const auto& previous = turnSettingsPolicy_.context();
+    if (context.providerAuthorityRevision >= previous.providerAuthorityRevision) {
+        const bool authorityChanged = context.providerAuthorityRevision > previous.providerAuthorityRevision;
+        const bool switched = authorityChanged || context.identity != previous.identity ||
+                              context.threadIncarnation != previous.threadIncarnation || !drafts_.contains(context.identity);
+        if (authorityChanged) {
+            drafts_.clear();
+        } else if (switched) {
+            saveDraft();
+        }
+        turnSettings_->setContext(std::move(context));
+        if (switched) {
+            clearDraft();
+            const auto& current = turnSettingsPolicy_.context();
+            if (!current.identity.empty()) {
+                auto& draft = drafts_[current.identity];
+                if (draft.incarnation != 0 && current.threadIncarnation != 0 && draft.incarnation != current.threadIncarnation) {
+                    draft = {};
+                }
+                draft.incarnation = current.threadIncarnation;
+                promptEditor_->setPlainText(draft.text);
+                setAttachments(draft.attachments);
+            }
+        }
+    }
+}
+
+void ComposerPane::promoteThreadDraft(std::string_view source, std::string_view destination, std::uint64_t incarnation) {
+    if (source != destination) {
+        saveDraft();
+        auto draft = drafts_.extract(std::string(source));
+        if (!draft.empty()) {
+            drafts_.erase(std::string(destination));
+            draft.key() = destination;
+            draft.mapped().incarnation = incarnation;
+            drafts_.insert(std::move(draft));
+        }
+        turnSettingsPolicy_.promote(source, destination, incarnation);
+    }
+}
+
+void ComposerPane::forgetThreadDraft(std::string_view identity) {
+    drafts_.erase(std::string(identity));
+    turnSettingsPolicy_.forget(identity);
+}
+
+void ComposerPane::forgetThreadDraft(std::string_view identity, std::uint64_t incarnation) {
+    const auto found = drafts_.find(std::string(identity));
+    if (found != drafts_.end() && found->second.incarnation == incarnation) {
+        drafts_.erase(found);
+    }
+    turnSettingsPolicy_.forget(identity, incarnation);
 }
 
 void ComposerPane::clearDraft() {

@@ -5440,6 +5440,58 @@ void optimisticCreationIgnoresAnotherCreationCorrelation(
           "hijack the foreground optimistic selection");
 }
 
+void promptDraftsFollowVisibleThreadSelection(Configuration& configuration) {
+    FrontendSession session(configuration);
+    ThreadChannels& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    applyThread(worker, "draft-a", "Draft A");
+    applyThread(worker, "draft-b", "Draft B");
+    markThreadReady(session, worker, "draft-a");
+    auto* list = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
+    auto* send = shell.findChild<QPushButton*>(QStringLiteral("composerSendButton"));
+    const bool ready = list && editor && send && spinUntil([&] {
+                           return threadItem(list, "draft-a") && threadItem(list, "draft-b");
+                       });
+    require(ready, "per-thread prompt fixture exposes the real thread list and composer");
+    if (ready) {
+        require(selectThread(list, "draft-a"), "the first thread becomes visibly selected");
+        const QString first = QStringLiteral("  draft A α\n\nlast line\n");
+        editor->insertPlainText(first);
+        require(selectThread(list, "draft-b") && editor->toPlainText().isEmpty(),
+                "selecting a hydrating thread immediately shows its own empty prompt");
+        editor->insertPlainText(QStringLiteral("draft B"));
+        require(selectThread(list, "draft-a") && editor->toPlainText() == first,
+                "returning through the thread list restores exact unsent text");
+        require(selectThread(list, "draft-b") && editor->toPlainText() == QStringLiteral("draft B"),
+                "the hydrating thread also retains its independent unsent text");
+        require(selectThread(list, "draft-a") && spinUntil([&] {
+                    return send->isEnabled();
+                }),
+                "the selected ready thread permits submission of its own draft");
+        static_cast<void>(takeQtMessages(channels));
+        send->click();
+        require(editor->toPlainText().isEmpty(), "admission clears the visibly submitted prompt");
+        const auto messages = takeQtMessages(channels);
+        std::size_t submissions = 0;
+        for (const auto& message : messages) {
+            if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::SubmitPrompt) {
+                ++submissions;
+                require(action->target && action->target->id().canonical == "draft-a" && action->promptText == first.toStdString(),
+                        "the restored prompt is sent to its owning thread exactly");
+            }
+        }
+        require(submissions == 1, "Send admits exactly one prompt");
+        require(selectThread(list, "draft-b") && editor->toPlainText() == QStringLiteral("draft B"),
+                "sending A preserves B's unsent prompt");
+        require(selectThread(list, "draft-a") && editor->toPlainText().isEmpty(), "switching back does not resurrect an admitted prompt");
+    }
+}
+
 void saturatedShellKeepsTheEditorDraft(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -7265,6 +7317,7 @@ int main(int argc, char **argv) {
       }
   }
   optimisticCreationIgnoresAnotherCreationCorrelation(*configuration);
+  promptDraftsFollowVisibleThreadSelection(*configuration);
   saturatedShellKeepsTheEditorDraft(*configuration);
   saturatedRenameRetainsAuthoredName(*configuration);
   modalThreadActionCannotOutliveItsExactTarget(*configuration);

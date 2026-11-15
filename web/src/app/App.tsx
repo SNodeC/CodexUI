@@ -1137,12 +1137,19 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         };
     }, [presentationKey, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
-    const draftGeneration = session.composerVisualKey();
-    const [authored, setAuthored] = useState({generation: draftGeneration, text: "", attachments: snapshot.newThreadDraft?.attachments ?? [] as AttachmentDraft[]});
-    const prompt = authored.generation === draftGeneration ? authored.text : "";
-    const attachments = authored.generation === draftGeneration ? authored.attachments : snapshot.newThreadDraft?.attachments ?? [];
-    const setPrompt = (text: string) => setAuthored(current => ({generation: session.composerVisualKey(), text, attachments: current.generation === session.composerVisualKey() ? current.attachments : session.getSnapshot().newThreadDraft?.attachments ?? []}));
-    const setAttachments = (files: AttachmentDraft[]) => setAuthored({generation: draftGeneration, text: prompt, attachments: files});
+    const authored = session.composerDrafts.get(presentationKey);
+    const prompt = authored?.text ?? "";
+    const attachments = authored?.attachments ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.attachments ?? [] : []);
+    const setPrompt = (text: string) => {
+        const current = session.composerDrafts.get(presentationKey);
+        session.composerDrafts.set(presentationKey, {text, attachments: current?.attachments ?? attachments});
+        forceCardState(value => value + 1);
+    };
+    const setAttachments = (files: AttachmentDraft[]) => {
+        const current = session.composerDrafts.get(presentationKey);
+        session.composerDrafts.set(presentationKey, {text: current?.text ?? prompt, attachments: files});
+        forceCardState(value => value + 1);
+    };
     const attention = [...session.model.pendingRequestPresentations().values()][0];
     const settingsDrafts = session.settingDrafts;
     const [settingsStateRevision, forceSettingsState] = useState(0);
@@ -1412,7 +1419,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                     settingsDraft.settingStamps, field, value);
                 forceSettingsState(revision => revision + 1);
             }} />
-            <Composer key={`shared-composer:${draftGeneration}`} attachments={attachments} onAttachments={setAttachments} session={session} presentationKey={presentationKey}
+            <Composer key={`shared-composer:${presentationKey}`} attachments={attachments} onAttachments={setAttachments} session={session} presentationKey={presentationKey}
                 active={Boolean(thread || projectionId === DraftThreadId) && session.canSubmit()} options={settingsOptions} prompt={prompt} onChange={setPrompt} />
         </div>
     </main>;

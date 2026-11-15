@@ -67,6 +67,24 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     session.dispose();
 });
 
+test("composer renders the selected thread's retained draft", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
+    session.model.applyEvent(result(1, 1, "threads.list", "list", true,
+        {threads: [{id: "a"}, {id: "b"}]}, "replace"));
+    session.selectThread("a");
+    session.composerDrafts.set(session.threadVisualKey("a"), {text: "first draft", attachments: []});
+    const input = () => renderToStaticMarkup(createElement(App, {session})).match(/<textarea[^>]*aria-label="Message Codex"[^>]*>(.*?)<\/textarea>/su)?.[1];
+    assert.equal(input(), "first draft");
+    session.selectThread("b");
+    assert.equal(input(), "", "an unvisited thread renders an empty prompt");
+    session.composerDrafts.set(session.threadVisualKey("b"), {text: "second draft", attachments: []});
+    session.selectThread("a");
+    assert.equal(input(), "first draft", "returning restores the original draft");
+    session.selectThread("b");
+    assert.equal(input(), "second draft", "each thread retains its own text");
+    session.dispose();
+});
+
 test("thread-loading surface delays only its bounded visual spinner", () => {
     assert.equal(ThreadLoadingSpinnerDelayMilliseconds, 500);
     const blank = renderToStaticMarkup(createElement(ThreadLoadingSurface, {spinning: false}));

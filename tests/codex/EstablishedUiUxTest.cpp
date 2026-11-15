@@ -1399,6 +1399,66 @@ bool turnSettingsCatalogProjectionScalesLinearly() {
       "settings catalog projection remains quantitatively linear");
 }
 
+bool composerDraftsFollowThreadIdentity() {
+    ComposerPane composer;
+    TurnSettingsContext a;
+    a.identity = "thread-a";
+    a.providerAuthorityRevision = 1;
+    a.threadIncarnation = 1;
+    auto b = a;
+    b.identity = "thread-b";
+    b.threadIncarnation = 2;
+    composer.setTurnSettingsContext(a);
+    const QString exact = QStringLiteral("  first draft α\n\nlast line\n");
+    composer.promptEditor()->setPlainText(exact);
+    const std::vector<AttachmentDraft> attached{{"/workspace/a.txt", "a.txt", "text/plain", 12}};
+    composer.setAttachments(attached);
+    composer.setTurnSettingsContext(b);
+    bool passed = expect(composer.promptEditor()->toPlainText().isEmpty(), "an unvisited thread starts with an empty editor");
+    composer.promptEditor()->setPlainText(QStringLiteral("second draft"));
+    composer.setTurnSettingsContext(a);
+    passed &= expect(composer.promptEditor()->toPlainText() == exact, "switching back restores exact authored whitespace and Unicode");
+    passed &= expect(composer.attachments() == attached, "thread switching restores the text's own attachments");
+    composer.setCanSubmit(true);
+    ComposerPane::Actions actions;
+    actions.submit = [](QString, std::vector<AttachmentDraft>) {
+        return false;
+    };
+    composer.setActions(actions);
+    auto* send = composer.findChild<QPushButton*>("composerSendButton");
+    send->click();
+    passed &= expect(composer.promptEditor()->toPlainText() == exact && composer.attachments() == attached,
+                     "rejected admission retains the selected draft and its attachments");
+    QString sent;
+    actions.submit = [&sent](QString prompt, std::vector<AttachmentDraft>) {
+        sent = std::move(prompt);
+        return true;
+    };
+    composer.setActions(std::move(actions));
+    send->click();
+    passed &= expect(sent == exact && composer.promptEditor()->toPlainText().isEmpty() && composer.attachments().empty(),
+                     "successful admission clears only the submitted draft");
+    composer.setTurnSettingsContext(b);
+    passed &= expect(composer.promptEditor()->toPlainText() == "second draft", "clearing one draft preserves the other thread's text");
+    composer.setTurnSettingsContext(a);
+    passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "a cleared draft is not resurrected after switching");
+    composer.forgetThreadDraft(b.identity, b.threadIncarnation);
+    b.threadIncarnation = 3;
+    composer.setTurnSettingsContext(b);
+    passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "reusing a deleted thread id cannot restore its old draft");
+    composer.promptEditor()->setPlainText(exact);
+    composer.promoteThreadDraft(b.identity, "canonical-b", 4);
+    b.identity = "canonical-b";
+    b.threadIncarnation = 4;
+    composer.setTurnSettingsContext(a);
+    composer.setTurnSettingsContext(b);
+    passed &= expect(composer.promptEditor()->toPlainText() == exact, "creation promotion retains the same unsent draft");
+    b.providerAuthorityRevision = 2;
+    composer.setTurnSettingsContext(b);
+    passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "a new provider cannot inherit an old provider's drafts");
+    return passed;
+}
+
 bool attachmentLayoutFollowsFontAndWidth() {
   const QFont original = qApp->font();
   ComposerPane composer;
@@ -2783,6 +2843,7 @@ int main(int argc, char **argv) {
       turnSettingsCatalogProjectionScalesLinearly);
   run("controlsRetainUsableGeometryAndAuthority",
       controlsRetainUsableGeometryAndAuthority);
+  run("composerDraftsFollowThreadIdentity", composerDraftsFollowThreadIdentity);
   run("attachmentLayoutFollowsFontAndWidth", attachmentLayoutFollowsFontAndWidth);
   run("threadPaneSnapshotAndActionContract",
       threadPaneSnapshotAndActionContract);
