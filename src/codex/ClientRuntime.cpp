@@ -334,6 +334,8 @@ runtimeActionDiagnosticSubject(nodegraph::RuntimeActionKind kind) {
           return "connection/controller/claim";
       case ReleaseController:
           return "connection/controller/release";
+      case ReadThreadDefaults:
+          return "config/read";
       case RefreshCatalogs:
           return "catalog/refresh";
       case RefreshThreadGroups:
@@ -2192,6 +2194,8 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
     requestModelList(nlohmann::json::object());
     requestPermissionProfiles(nlohmann::json::object());
     requestAccountUsage();
+    dispatchRequest<codex::generated::client_requests::ConfigRead>(sdk, {{"includeLayers", false}}, workerLogic, {}, [](RequestOutcome) {
+    });
   };
 
   std::function<void(nodegraph::PromptCommand)> dispatchPrompt;
@@ -3670,6 +3674,18 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
       if (!sdk.releaseController())
         rejectRuntimeAction(action, "Controller release was rejected");
       return;
+    case ReadThreadDefaults: {
+        if (sdk.providerReady()) {
+            const auto parameters = jsonObject(std::move(action.payload));
+            const std::string cwd = jsonString(parameters, "cwd");
+            if (!cwd.empty()) {
+                dispatchRequest<codex::generated::client_requests::ConfigRead>(
+                    sdk, {{"cwd", cwd}, {"includeLayers", false}}, workerLogic, {}, [](RequestOutcome) {
+                    });
+            }
+        }
+        break;
+    }
     case RefreshCatalogs: {
       nlohmann::json parameters = jsonObject(std::move(action.payload));
       requestModelList(parameters);

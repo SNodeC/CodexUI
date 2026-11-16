@@ -56,7 +56,7 @@ const actionMethods = {
     "section.update": "threadSection/update", "section.delete": "threadSection/delete",
     "thread.metadata": "thread/metadata/update", "thread.section": "thread/section/move",
     "account.usage.read": "account/usage/read",
-    "models.list": "model/list", "permission-profiles.list": "permissionProfile/list",
+    "config.read": "config/read", "models.list": "model/list", "permission-profiles.list": "permissionProfile/list",
     "turn.start": "turn/start", "turn.steer": "turn/steer", "turn.interrupt": "turn/interrupt",
 } as const;
 type Action = keyof typeof actionMethods;
@@ -388,9 +388,18 @@ export class BrowserFrontendSession {
             ...(draft.sectionId ? {sectionId: draft.sectionId} : {}),
         };
         this.selectedThreadId = DraftThreadId;
+        this.readThreadDefaults();
         ++this.composerGeneration;
         this.viewportState.bind(DraftThreadId, this.newThreadDraft);
         this.publish();
+    }
+    private readThreadDefaults(): void {
+        const draft = this.newThreadDraft;
+        if (draft && draft.workspace !== "" && this.providerReady()) {
+            this.model.invalidateThreadDefaults();
+            this.request("config.read", {cwd: draft.workspace, includeLayers: false}, undefined,
+                () => this.newThreadDraft === draft);
+        }
     }
     private forgetThreadDraft(identity: string): void {
         this.settingDrafts.delete(identity);
@@ -1149,6 +1158,8 @@ export class BrowserFrontendSession {
         if (this.catalogHydrationKey !== key) {
             this.catalogHydrationKey = key;
             void this.requestInitialThreadPage();
+            this.request("config.read", {includeLayers: false});
+            this.readThreadDefaults();
             this.request("models.list", {});
             this.request("permission-profiles.list", {});
             this.request("account.usage.read", {});

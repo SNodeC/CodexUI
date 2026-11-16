@@ -1830,3 +1830,25 @@ for (const outcome of ["success", "failure", "active", "stale"]) test(`unloaded 
     assert.equal(session.getSnapshot().selectedThreadId, "");
     session.dispose();
 });
+
+test("new-thread defaults are workspace-scoped and late replies are ignored", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    try {
+        session.connect(); socket.open(); await readyProvider(socket, "defaults");
+        assert.ok(requests(socket, "config/read").some(request => !request.payload.params?.cwd));
+        session.beginNewThread({workspace: "/a", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false});
+        const first = requests(socket, "config/read").at(-1);
+        session.beginNewThread({workspace: "/b", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false});
+        const second = requests(socket, "config/read").at(-1);
+        respond(socket, second, {config: {model: "model-b"}});
+        respond(socket, first, {config: {model: "model-a"}});
+        assert.deepEqual(session.model.threadDefaults("/b"), {model: "model-b"});
+        assert.equal(session.model.threadDefaults("/a"), undefined);
+        session.beginNewThread({workspace: "/b", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false});
+        reject(socket, requests(socket, "config/read").at(-1), "unavailable");
+        assert.equal(session.model.threadDefaults("/b"), undefined);
+    } finally {
+        session.dispose();
+    }
+});

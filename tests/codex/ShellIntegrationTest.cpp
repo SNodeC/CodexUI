@@ -55,7 +55,9 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSplitter>
+#include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
 #include <QTreeWidget>
@@ -4498,6 +4500,22 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           "an exact selected-row removal does not reset the conversation");
 }
 
+bool selectProjectGrouping(ShellWidget& shell) {
+    auto* grouping = shell.findChild<QToolButton*>(QStringLiteral("threadGroupingButton"));
+    bool selected = false;
+    if (grouping && grouping->menu() && spinUntil([&] {
+            return grouping->text() != QStringLiteral("Groups unavailable");
+        })) {
+        for (auto* action : grouping->menu()->actions()) {
+            if (action->text() == QStringLiteral("Projects → Sections")) {
+                action->trigger();
+                selected = true;
+            }
+        }
+    }
+    return selected;
+}
+
 void groupedStatusNotificationsRefreshAncestors(Configuration& configuration) {
     FrontendSession session(configuration);
     auto& channels = FrontendSessionTestPeer::channels(session);
@@ -4529,10 +4547,11 @@ void groupedStatusNotificationsRefreshAncestors(Configuration& configuration) {
     }
     require(messageAdmitted(channels.sendGraphChanged(std::move(initial))), "group status fixture reaches the shell");
     auto* tree = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+    require(selectProjectGrouping(shell), "status fixture explicitly selects the project grouping");
     require(spinUntil([&] {
                 return threadItem(tree, "status-notify-project") && threadItem(tree, "status-notify-section");
             }),
-            "group status fixture renders project and section rows");
+            "the requested project grouping is rendered before status transitions");
     auto* project = threadItem(tree, "status-notify-project");
     auto* section = threadItem(tree, "status-notify-section");
     for (const auto& [status, description] :
@@ -4737,6 +4756,11 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration& configuration, bool 
     if (!newThread)
         return;
     if (grouped) {
+        require(selectProjectGrouping(shell), "grouped creation explicitly selects project grouping");
+        require(spinUntil([&] {
+                    return threadItem(list, "openwrt") != nullptr;
+                }),
+                "the project grouping is rendered before creation");
         QTreeWidgetItem* project = threadItem(list, "openwrt");
         require(project != nullptr, "the OpenWRT project is visible before draft creation");
         if (!project)
@@ -7265,6 +7289,10 @@ void turnRemovalConfirmationTargetsTheCapturedTurn(Configuration& configuration)
 } // namespace codexui::codex
 
 int main(int argc, char **argv) {
+  QTemporaryDir preferences;
+  codexui::codex::require(preferences.isValid(), "shell test preferences have an isolated writable directory");
+  QSettings::setDefaultFormat(QSettings::IniFormat);
+  QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferences.path());
   auto *configuration =
       utils::Config::configRoot.newSubCommand<codexui::codex::Configuration>();
   QApplication application(argc, argv);

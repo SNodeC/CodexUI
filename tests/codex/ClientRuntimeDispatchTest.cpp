@@ -479,7 +479,7 @@ namespace codexui::codex {
                 return false;
 
             std::unordered_map<std::string, std::size_t> methods;
-            for (int count = 0; count != 8; ++count) {
+            for (int count = 0; count != 9; ++count) {
                 std::optional<nlohmann::json> request = bridge.receiveAppServer();
                 if (!request || !request->contains("id"))
                     return false;
@@ -488,6 +488,12 @@ namespace codexui::codex {
                 nlohmann::json result{{"data", nlohmann::json::array()}};
                 if (method == "account/usage/read")
                     result = {{"summary", {{"lifetimeTokens", 12000}}}};
+                if (method == "config/read") {
+                    expect(request->at("params") == nlohmann::json{{"includeLayers", false}},
+                           "provider hydration requests configuration without layers or a workspace override");
+                    result = {{"config", {{"model", "configured-model"}, {"model_reasoning_effort", "high"}}},
+                              {"origins", nlohmann::json::object()}};
+                }
                 if (method == "thread/list") {
                     const bool firstThreadPage = methods[method] == 1;
                     expect(request->at("params").value("sortKey", std::string{}) == "recency_at" &&
@@ -516,7 +522,8 @@ namespace codexui::codex {
                                                                            {"threadSection/list", 1},
                                                                            {"model/list", 1},
                                                                            {"permissionProfile/list", 1},
-                                                                           {"account/usage/read", 1}} &&
+                                                                           {"account/usage/read", 1},
+                                                                           {"config/read", 1}} &&
                    static_cast<bool>(findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
         }
 
@@ -2700,7 +2707,7 @@ namespace codexui::codex {
                 findNode(runtime.graph(), {NodeKind::Interaction, ProtocolRequestId("generation-input").canonical()});
             expect(bridge.setProviderGeneration(2), "a new provider generation reaches the runtime");
             std::size_t refreshes = 0;
-            while (refreshes != 7) {
+            while (refreshes != 8) {
                 const std::optional<nlohmann::json> refresh = bridge.receiveAppServer();
                 if (!refresh)
                     break;
@@ -2709,10 +2716,15 @@ namespace codexui::codex {
                     result["nextCursor"] = nullptr;
                 if (refresh->value("method", std::string{}) == "account/usage/read")
                     result = {{"summary", {{"lifetimeTokens", 13000}}}};
+                if (refresh->value("method", std::string{}) == "config/read") {
+                    expect(refresh->at("params") == nlohmann::json{{"includeLayers", false}},
+                           "provider replacement refreshes inherited configuration without workspace overrides");
+                    result = {{"config", nlohmann::json::object()}, {"origins", nlohmann::json::object()}};
+                }
                 if (bridge.reply(*refresh, std::move(result)))
                     ++refreshes;
             }
-            expect(refreshes == 7 && generationInput && waitUntil([&] {
+            expect(refreshes == 8 && generationInput && waitUntil([&] {
                        std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
                        if (!read)
                            return false;

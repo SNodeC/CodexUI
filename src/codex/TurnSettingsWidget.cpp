@@ -296,17 +296,17 @@ TurnSettingsWidget::TurnSettingsWidget(TurnSettingsPolicy &policy,
 }
 
 void TurnSettingsWidget::setContext(TurnSettingsContext context) {
-  const bool modelsChanged = settings.context().models != context.models;
-  const bool profilesChanged =
-      settings.context().permissionProfiles != context.permissionProfiles;
-  const bool valuesChanged = settings.setContext(std::move(context));
-  if (!valuesChanged && !modelsChanged && !profilesChanged)
-    return;
-  if (modelsChanged)
-    refreshModels();
-  if (profilesChanged)
-    refreshPermissionProfiles();
-  render();
+    const bool defaultsChanged = settings.context().inherited != context.inherited;
+    const bool modelsChanged = settings.context().models != context.models;
+    const bool profilesChanged = settings.context().permissionProfiles != context.permissionProfiles;
+    const bool valuesChanged = settings.setContext(std::move(context));
+    if (!valuesChanged && !modelsChanged && !profilesChanged && !defaultsChanged)
+        return;
+    if (modelsChanged)
+        refreshModels();
+    if (profilesChanged)
+        refreshPermissionProfiles();
+    render();
 }
 
 void TurnSettingsWidget::markTouched(TurnSettingField field) {
@@ -338,6 +338,33 @@ void TurnSettingsWidget::render() {
   refreshModelOptions();
   refreshAccessCompatibility();
   refreshMoreIndicator();
+  for (std::size_t index = 0; index < combos.size(); ++index) {
+      QComboBox* control = combos[index];
+      const auto field = static_cast<TurnSettingField>(index);
+      const int inheritedIndex = control->findData(DefaultTurnSetting);
+      const std::string& inherited = settings.context().inherited[field];
+      const bool modelMatches = values[TurnSettingField::Model] == DefaultTurnSetting ||
+                                values[TurnSettingField::Model] == settings.context().inherited[TurnSettingField::Model];
+      const bool applicable =
+          field != TurnSettingField::Collaboration &&
+          ((field != TurnSettingField::Effort && field != TurnSettingField::Summary && field != TurnSettingField::ServiceTier) ||
+           modelMatches);
+      if (inheritedIndex >= 0 && field != TurnSettingField::Collaboration) {
+          const QSignalBlocker blocker(control);
+          const int concrete = control->findData(text(inherited));
+          const QString caption = concrete >= 0 ? control->itemText(concrete) : UiStyle::humanizeLabel(text(inherited));
+          const bool draft = settings.context().threadIncarnation == 0 && !settings.context().identity.empty();
+          const bool reported = draft && applicable && inherited != DefaultTurnSetting && !inherited.empty();
+          control->setItemText(inheritedIndex,
+                               reported ? QStringLiteral("Default — %1").arg(caption)
+                               : draft  ? QStringLiteral("Server default")
+                                        : QStringLiteral("Default (not reported)"));
+          control->setItemData(inheritedIndex,
+                               reported ? QStringLiteral("Inherited from app-server configuration for this workspace. No override is sent.")
+                                        : QStringLiteral("App-server has not reported a concrete default. No override is sent."),
+                               Qt::ToolTipRole);
+      }
+  }
 }
 
 void TurnSettingsWidget::refreshModels() {

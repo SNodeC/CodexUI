@@ -384,6 +384,8 @@ export class PresentationModel {
     private orderedThreads: string[] = [];
     private models: unknown = [];
     private permissionProfiles: unknown;
+    private configuration: unknown;
+    private workspaceConfiguration: unknown;
     private lastSequence = 0;
     private settingsAcknowledgement = 0;
 
@@ -481,6 +483,13 @@ export class PresentationModel {
     turnSettingsCatalogs(): {models: unknown; permissionProfiles: unknown} {
         return {models: this.models, permissionProfiles: this.permissionProfiles};
     }
+    invalidateThreadDefaults(): void {
+        this.workspaceConfiguration = undefined;
+    }
+    threadDefaults(cwd: string): unknown {
+        const source = this.workspaceConfiguration;
+        return isObject(source) && stringMember(source, "cwd") === cwd ? source.config : undefined;
+    }
     pendingRequestPresentations(): ReadonlyMap<string, PendingRequestPresentation> {
         return this.pendingRequests;
     }
@@ -559,6 +568,9 @@ export class PresentationModel {
                         thread.membershipSequence.set("status", sequence);
                     }
                 }
+            } else if (action === "config.read") {
+                if (stringMember(data, "cwd") !== "") { this.workspaceConfiguration = clone(data); }
+                else { this.configuration = clone(data); }
             } else if (action === "models.list") {
                 const listed = member(data, "models", []);
                 if (Array.isArray(listed)) this.models = clone(listed);
@@ -1314,6 +1326,8 @@ export class PresentationModel {
         this.pendingRequests.clear();
         this.models = [];
         this.permissionProfiles = undefined;
+        this.configuration = undefined;
+        this.workspaceConfiguration = undefined;
     }
 
     private findItem(thread: ThreadPresentation, params: unknown): ItemPresentation | undefined {

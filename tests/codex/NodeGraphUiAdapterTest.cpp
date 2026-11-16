@@ -65,6 +65,71 @@ NodeState itemState(std::string id, std::string type, std::string text) {
   return state;
 }
 
+bool threadDefaultsStayInherited() {
+    using namespace nodegraph;
+    std::ifstream input(std::filesystem::path(CODEXUI_PRESENTATION_CONTRACT_PATH).parent_path() / "thread-defaults.json");
+    nlohmann::json fixture;
+    input >> fixture;
+    bool passed = true;
+    const std::array fields{TurnSettingField::Model,
+                            TurnSettingField::Effort,
+                            TurnSettingField::Personality,
+                            TurnSettingField::Sandbox,
+                            TurnSettingField::Network,
+                            TurnSettingField::Approval,
+                            TurnSettingField::Reviewer,
+                            TurnSettingField::PermissionProfile,
+                            TurnSettingField::ServiceTier,
+                            TurnSettingField::Summary,
+                            TurnSettingField::Collaboration};
+    const std::array names{"model",
+                           "effort",
+                           "personality",
+                           "sandbox",
+                           "network",
+                           "approval",
+                           "reviewer",
+                           "permissionProfile",
+                           "serviceTier",
+                           "summary",
+                           "collaboration"};
+    for (const auto& entry : fixture.at("cases")) {
+        NodeGraph graph;
+        NodeGraphUiAdapter adapter(graph);
+        {
+            auto write = graph.write();
+            const auto node = write.upsert({NodeKind::Configuration, "config/read:workspace"});
+            NodeState state;
+            state.status = NodeStatus::Completed;
+            state.fields = {{"cwd", "/project"}, {"config", valueFromJson(entry.at("config"))}};
+            write.replaceState(node, std::move(state));
+            static_cast<void>(write.finish());
+        }
+        const auto context = adapter.turnSettings({}, "draft", "/project");
+        passed &= require(context.has_value(), "new-thread context is available");
+        if (context) {
+            for (std::size_t index = 0; index < fields.size(); ++index) {
+                const std::string expected =
+                    entry.at("expected").value(names[index], fields[index] == TurnSettingField::Collaboration ? "" : "default");
+                passed &= require(context->inherited[fields[index]] == expected, "shared fixture defaults match");
+            }
+            TurnSettingsPolicy policy;
+            static_cast<void>(policy.setContext(*context));
+            passed &= require(policy.startOptions(TurnSettingsScope::Thread).empty(), "reported defaults do not become thread overrides");
+            passed &= require(policy.startOptions(TurnSettingsScope::Turn).empty(), "reported defaults do not become turn overrides");
+            policy.change(TurnSettingField::Model, "chosen-model");
+            auto next = *context;
+            next.inherited[TurnSettingField::Model] = "updated-default";
+            static_cast<void>(policy.setContext(std::move(next)));
+            passed &= require(policy.values()[TurnSettingField::Model] == "chosen-model", "refresh preserves explicit selection");
+        }
+        const auto other = adapter.turnSettings({}, "other", "/other");
+        passed &=
+            require(other && other->inherited[TurnSettingField::Model] == DefaultTurnSetting, "defaults cannot leak across workspaces");
+    }
+    return passed;
+}
+
 bool activeTurnLifecycleUsesCurrentAuthority() {
     using namespace nodegraph;
     std::ifstream input(std::filesystem::path(CODEXUI_PRESENTATION_CONTRACT_PATH).parent_path() / "active-turn-lifecycle.json");
@@ -3616,6 +3681,7 @@ int main() {
   passed &= projectsBoundedInspectorPagesFromCanonicalGraph();
   passed &= settingsDraftLifetimeFollowsSemanticIncarnations();
   passed &= frontendPresentationContractIsShared();
+  passed &= threadDefaultsStayInherited();
   if (passed)
     std::cout << "NodeGraph UI adapter tests passed\n";
   return passed ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -171,14 +171,14 @@ bool TurnSettingsPolicy::touched(TurnSettingField field) const noexcept {
 }
 
 const TurnSettingModel *TurnSettingsPolicy::selectedModel() const noexcept {
-  const std::string &selected = values()[TurnSettingField::Model];
-  const auto found = std::ranges::find_if(
-      context_.models, [&selected](const TurnSettingModel &candidate) {
+    const std::string& authored = values()[TurnSettingField::Model];
+    const std::string& selected = authored == DefaultTurnSetting ? context_.inherited[TurnSettingField::Model] : authored;
+    const auto found = std::ranges::find_if(context_.models, [&selected](const TurnSettingModel& candidate) {
         return selected == DefaultTurnSetting
                    ? candidate.isDefault
                    : candidate.choice.value == selected;
-      });
-  return found == context_.models.end() ? nullptr : &*found;
+    });
+    return found == context_.models.end() ? nullptr : &*found;
 }
 
 bool TurnSettingsPolicy::personalityEnabled() const noexcept {

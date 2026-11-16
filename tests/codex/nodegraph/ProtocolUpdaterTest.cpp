@@ -3637,6 +3637,32 @@ void accountFacetsConvergeAndRateLimitPatchesStaySparse() {
   }
 }
 
+void workspaceConfigReadsRejectOlderResults() {
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    const auto first = updater.apply({DecodedMessageKind::ClientRequest, "config/read", ProtocolRequestId("first"), {{"cwd", "/a"}}});
+    const auto second = updater.apply({DecodedMessageKind::ClientRequest, "config/read", ProtocolRequestId("second"), {{"cwd", "/b"}}});
+    const Value::Object config{{"config", Value(Value::Object{{"model", "new-model"}})}};
+    static_cast<void>(
+        updater.apply({DecodedMessageKind::ClientResult, "config/read", ProtocolRequestId("second"), config, second.primary}));
+    static_cast<void>(updater.apply({DecodedMessageKind::ClientResult, "config/read", ProtocolRequestId("first"), config, first.primary}));
+    {
+        auto read = graph.tryRead();
+        const auto state = read->state(read->find({NodeKind::Configuration, "config/read:workspace"}));
+        require(field(state, "cwd") && field(state, "cwd")->asString() && *field(state, "cwd")->asString() == "/b",
+                "an older configuration response cannot replace the current workspace");
+        require(state->status == NodeStatus::Completed, "latest workspace read completes");
+    }
+    const auto failed = updater.apply({DecodedMessageKind::ClientRequest, "config/read", ProtocolRequestId("failed"), {{"cwd", "/b"}}});
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ClientError, "config/read", ProtocolRequestId("failed"), {{"message", "unavailable"}}, failed.primary}));
+    {
+        auto read = graph.tryRead();
+        const auto state = read->state(read->find({NodeKind::Configuration, "config/read:workspace"}));
+        require(state->status == NodeStatus::Failed && !field(state, "config"), "failed refresh never exposes an older default");
+    }
+}
+
 void successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -5503,6 +5529,7 @@ int main() {
   exactRequestTargetsOverridePayloadAddressingAndLifetime();
   accountFacetsConvergeAndRateLimitPatchesStaySparse();
   successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate();
+  workspaceConfigReadsRejectOlderResults();
   catalogResultsMaterializeNaturalEntityKinds();
   specializedNotificationFamiliesKeepCurrentSemantics();
   reusedWireIdsRequireExactCurrentNodes();

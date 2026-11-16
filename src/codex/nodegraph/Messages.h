@@ -98,6 +98,7 @@ enum class RuntimeActionKind : std::uint8_t {
     ClaimController,
     ReleaseController,
     RefreshCatalogs,
+    ReadThreadDefaults,
     RefreshThreadGroups,
     LoadThreadGroup,
     CreateProject,

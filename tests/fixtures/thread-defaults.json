@@ -1,0 +1,58 @@
+{
+  "cases": [
+    {
+      "id": "configured",
+      "config": {
+        "model": "configured-model",
+        "model_reasoning_effort": "high",
+        "sandbox_mode": "workspace-write",
+        "sandbox_workspace_write": {
+          "network_access": false
+        },
+        "approval_policy": "on-request",
+        "approvals_reviewer": "user",
+        "default_permissions": ":workspace",
+        "service_tier": "default",
+        "model_reasoning_summary": "auto"
+      },
+      "expected": {
+        "model": "configured-model",
+        "effort": "high",
+        "sandbox": "workspace-write",
+        "network": "restricted",
+        "approval": "on-request",
+        "reviewer": "user",
+        "permissionProfile": ":workspace",
+        "serviceTier": "default",
+        "summary": "auto"
+      }
+    },
+    {
+      "id": "missing",
+      "config": {},
+      "expected": {}
+    },
+    {
+      "id": "structured-policy-not-guessed",
+      "config": {
+        "approval_policy": {
+          "granular": {}
+        },
+        "model_reasoning_effort": null,
+        "sandbox_workspace_write": {
+          "network_access": true
+        }
+      },
+      "expected": {}
+    },
+    {
+      "id": "read-only-network-not-guessed",
+      "config": {
+        "sandbox_mode": "read-only"
+      },
+      "expected": {
+        "sandbox": "read-only"
+      }
+    }
+  ]
+}

@@ -1674,34 +1674,39 @@ bool applyAccountRateLimitsUpdate(NodeGraph::WriteAccess &write,
   return true;
 }
 
-bool applyConfigurationUpdate(NodeGraph::WriteAccess &write,
-                              const DecodedMessage &message) {
-  if (message.kind != DecodedMessageKind::ClientResult)
-    return false;
-
-  const bool readResult = message.method == "config/read";
-  const bool writeResult = message.method == "config/value/write" ||
-                           message.method == "config/batchWrite";
-  if (!readResult && !writeResult)
-    return false;
-
-  NodeRef configuration =
-      write.upsert({NodeKind::Configuration, "config/read"});
-  if (readResult) {
-    NodeState next;
-    next.fields = message.payload;
-    next.fields.insert_or_assign("lastMethod", Value(message.method));
-    write.replaceState(configuration, std::move(next));
-    return true;
-  }
-
-  // A successful write confirms that the prior effective snapshot is no
-  // longer authoritative, but its result does not contain enough information
-  // to reconstruct layered effective config safely.
-  write.setField(configuration, "stale", Value(true));
-  write.setField(configuration, "invalidatedBy", Value(message.method));
-  write.setField(configuration, "lastMethod", Value(message.method));
-  return true;
+bool applyConfigurationUpdate(NodeGraph::WriteAccess& write, const DecodedMessage& message) {
+    const bool reading = message.method == "config/read";
+    const bool writing = message.kind == DecodedMessageKind::ClientResult &&
+                         (message.method == "config/value/write" || message.method == "config/batchWrite");
+    const bool handled = reading || writing;
+    if (reading) {
+        const std::string cwd = scalarTextFromValue(valueMember(message.payload, "cwd"));
+        const NodeRef configuration = write.upsert({NodeKind::Configuration, cwd.empty() ? "config/read" : "config/read:workspace"});
+        const std::string request = message.requestId ? message.requestId->canonical() : std::string{};
+        const std::string expected = scalarTextFromValue(valueMember(write.state(configuration)->fields, "configurationRequestId"));
+        if (message.kind == DecodedMessageKind::ClientRequest) {
+            NodeState pending;
+            pending.status = NodeStatus::Pending;
+            pending.fields = {{"cwd", Value(cwd)}, {"configurationRequestId", Value(request)}};
+            write.replaceState(configuration, std::move(pending));
+        } else if (expected.empty() || expected == request) {
+            NodeState next;
+            next.status = message.kind == DecodedMessageKind::ClientResult ? NodeStatus::Completed : NodeStatus::Failed;
+            next.fields = message.payload;
+            next.fields.insert_or_assign("cwd", Value(cwd));
+            next.fields.insert_or_assign("configurationRequestId", Value(request));
+            next.fields.insert_or_assign("lastMethod", Value(message.method));
+            write.replaceState(configuration, std::move(next));
+        }
+    } else if (writing) {
+        for (const char* key : {"config/read", "config/read:workspace"}) {
+            if (const NodeRef configuration = write.find({NodeKind::Configuration, key})) {
+                write.setField(configuration, "stale", Value(true));
+                write.setField(configuration, "invalidatedBy", Value(message.method));
+            }
+        }
+    }
+    return handled;
 }
 
 void applyAddressedTurnError(NodeGraph::WriteAccess &write,
@@ -2024,6 +2029,9 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
     write.setField(operation, "method", Value(message.method));
     write.setField(operation, "requestPayload", Value(message.payload));
     write.setStatus(operation, NodeStatus::Pending);
+    if (message.method == "config/read") {
+        static_cast<void>(applyConfigurationUpdate(write, message));
+    }
     NodeRef target;
     const bool exactTargetSupplied = static_cast<bool>(message.requestTarget);
     if (exactTargetSupplied) {
@@ -2108,6 +2116,13 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
   const Value* requestedCwd = requestPayload ? valueMember(*requestPayload, "cwd") : nullptr;
   const bool awaitingWorkspace = message.kind == DecodedMessageKind::ClientResult && message.method == "thread/settings/update" &&
                                  requestedCwd && requestedCwd->asString();
+  if (message.method == "config/read" && message.kind == DecodedMessageKind::ClientError) {
+      DecodedMessage correlated = message;
+      if (requestedCwd) {
+          correlated.payload.insert_or_assign("cwd", *requestedCwd);
+      }
+      static_cast<void>(applyConfigurationUpdate(write, correlated));
+  }
   if (awaitingWorkspace) {
       // The empty response acknowledges enqueueing only. Keep the existing
       // operation until the authoritative settings notification arrives.

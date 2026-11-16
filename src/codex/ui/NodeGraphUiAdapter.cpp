@@ -2018,8 +2018,8 @@ namespace codexui::codex::ui {
         return projectPendingRequest(*read, target, canControlRequests(*read));
     }
 
-    std::optional<TurnSettingsContext> NodeGraphUiAdapter::turnSettings(const nodegraph::NodeRef& thread,
-                                                                        std::string_view draftIdentity) const {
+    std::optional<TurnSettingsContext>
+    NodeGraphUiAdapter::turnSettings(const nodegraph::NodeRef& thread, std::string_view draftIdentity, std::string_view draftCwd) const {
         if (!graph_)
             return std::nullopt;
         auto read = graph_->tryRead();
@@ -2033,6 +2033,33 @@ namespace codexui::codex::ui {
             result.providerAuthorityRevision =
                 nodegraph::unsignedIntegerFromValue(valueMember(*read->state(connection), "providerAuthorityRevision")).value_or(0);
         if (!thread) {
+            const auto configuration = read->find({nodegraph::NodeKind::Configuration, "config/read:workspace"});
+            const auto state = configuration ? read->state(configuration) : nullptr;
+            const bool current = state && state->status == nodegraph::NodeStatus::Completed &&
+                                 !boolFromValue(valueMember(*state, "stale")) &&
+                                 scalarTextFromValue(valueMember(*state, "cwd")) == draftCwd;
+            const auto* configValue = current ? valueMember(state->fields, "config") : nullptr;
+            const auto* config = configValue ? configValue->asObject() : nullptr;
+            if (config) {
+                const auto assignDefault = [&result, config](TurnSettingField field, std::string_view key) {
+                    result.inherited[field] = settingString(valueMember(*config, key), DefaultTurnSetting);
+                };
+                assignDefault(TurnSettingField::Model, "model");
+                assignDefault(TurnSettingField::Effort, "model_reasoning_effort");
+                assignDefault(TurnSettingField::Sandbox, "sandbox_mode");
+                assignDefault(TurnSettingField::Approval, "approval_policy");
+                assignDefault(TurnSettingField::Reviewer, "approvals_reviewer");
+                assignDefault(TurnSettingField::PermissionProfile, "default_permissions");
+                assignDefault(TurnSettingField::ServiceTier, "service_tier");
+                assignDefault(TurnSettingField::Summary, "model_reasoning_summary");
+                assignDefault(TurnSettingField::Personality, "personality");
+                const auto* workspaceValue = valueMember(*config, "sandbox_workspace_write");
+                const auto* workspace = workspaceValue ? workspaceValue->asObject() : nullptr;
+                const auto* network = workspace ? valueMember(*workspace, "network_access") : nullptr;
+                if (result.inherited[TurnSettingField::Sandbox] == "workspace-write" && network && network->asBool()) {
+                    result.inherited[TurnSettingField::Network] = *network->asBool() ? "enabled" : "restricted";
+                }
+            }
             result.identity = std::string(draftIdentity);
             return result;
         }

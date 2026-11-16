@@ -1159,6 +1159,7 @@ bool turnSettingsAreStableAccessibleProjections() {
   widget.resize(900, widget.sizeHint().height());
   TurnSettingsContext settings;
   settings.identity = "thread-a";
+  settings.threadIncarnation = 1;
   settings.canonical[TurnSettingField::Sandbox] = "danger-full-access";
   settings.canonical[TurnSettingField::Network] = "enabled";
   settings.canonical[TurnSettingField::Approval] = "future-policy";
@@ -1341,6 +1342,59 @@ bool turnSettingsAreStableAccessibleProjections() {
       result &= expect(widget.grab().save(capturePath), "turn-settings visual evidence is captured");
   }
   return result;
+}
+
+bool inheritedDefaultsRemainPresentationOnly() {
+    TurnSettingsPolicy policy;
+    TurnSettingsWidget widget(policy);
+    TurnSettingsContext context;
+    context.identity = "draft-settings";
+    TurnSettingModel model;
+    model.choice = {"configured-model", "Configured model", {}};
+    model.reasoningEfforts = {"low", "high"};
+    context.models.push_back(model);
+    widget.setContext(context);
+    auto* effort = widget.findChild<QComboBox*>(QStringLiteral("codexEffort"));
+    auto* models = widget.findChild<QComboBox*>(QStringLiteral("codexModel"));
+    bool passed = expect(effort && models, "draft exposes the actual model and reasoning controls");
+    if (effort && models) {
+        passed &= expect(effort->currentText() == QStringLiteral("Server default") &&
+                             effort->currentData() == QString::fromLatin1(DefaultTurnSetting),
+                         "unavailable draft defaults retain inheritance");
+        context.inherited[TurnSettingField::Model] = "configured-model";
+        context.inherited[TurnSettingField::Effort] = "high";
+        widget.setContext(context);
+        passed &= expect(models->currentText() == QStringLiteral("Default — Configured model") &&
+                             effort->currentText() == QStringLiteral("Default — High") && !policy.touched(TurnSettingField::Model) &&
+                             !policy.touched(TurnSettingField::Effort) && policy.startOptions(TurnSettingsScope::Thread).empty() &&
+                             policy.startOptions(TurnSettingsScope::Turn).empty(),
+                         "reported defaults populate native controls without authoring overrides");
+        context.inherited[TurnSettingField::Effort] = "low";
+        widget.setContext(context);
+        passed &= expect(effort->currentText() == QStringLiteral("Default — Low"), "refreshed defaults update the inherited label");
+        context.inherited = {};
+        widget.setContext(context);
+        passed &= expect(effort->currentText() == QStringLiteral("Server default") &&
+                             policy.startOptions(TurnSettingsScope::Thread).empty() && policy.startOptions(TurnSettingsScope::Turn).empty(),
+                         "loss of reported defaults clears stale labels without introducing overrides");
+        context.inherited[TurnSettingField::Model] = "configured-model";
+        context.inherited[TurnSettingField::Effort] = "low";
+        widget.setContext(context);
+        effort->setCurrentIndex(effort->findData(QStringLiteral("high")));
+        context.inherited[TurnSettingField::Effort] = "high";
+        widget.setContext(context);
+        passed &= expect(effort->currentData() == QStringLiteral("high") && policy.touched(TurnSettingField::Effort) &&
+                             policy.startOptions(TurnSettingsScope::Turn).at("effort") == "high" &&
+                             !policy.startOptions(TurnSettingsScope::Thread).contains("model"),
+                         "a defaults refresh preserves an explicitly authored choice");
+        context.identity = "existing-settings";
+        context.threadIncarnation = 1;
+        widget.setContext(context);
+        passed &= expect(effort->currentText() == QStringLiteral("Default (not reported)") &&
+                             effort->toolTip().contains(QStringLiteral("not reported")),
+                         "existing threads retain their unreported-settings presentation");
+    }
+    return passed;
 }
 
 bool turnSettingsCatalogProjectionScalesLinearly() {
@@ -2947,6 +3001,7 @@ int main(int argc, char **argv) {
     return passed ? 0 : 1;
   run("turnSettingsAreStableAccessibleProjections",
       turnSettingsAreStableAccessibleProjections);
+  run("inheritedDefaultsRemainPresentationOnly", inheritedDefaultsRemainPresentationOnly);
   run("turnSettingsCatalogProjectionScalesLinearly",
       turnSettingsCatalogProjectionScalesLinearly);
   run("controlsRetainUsableGeometryAndAuthority",

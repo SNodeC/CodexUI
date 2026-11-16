@@ -378,6 +378,9 @@ export class ProtocolNormalizer {
                 authority = "merge";
             } else if (action === "projects.list" || action === "sections.list" || action.startsWith("project.") || action.startsWith("section.")) {
                 data = {...value, ...requestSequence}; authority = "merge";
+            } else if (action === "config.read") {
+                data = {...value, cwd: stringMember(context, "cwd"), ...requestSequence};
+                authority = "replace";
             } else if (action === "models.list") {
                 const models = member(value, "data", []);
                 data = {

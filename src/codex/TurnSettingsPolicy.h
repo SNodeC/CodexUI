@@ -84,6 +84,7 @@ struct TurnSettingsContext final {
   std::uint64_t providerAuthorityRevision = 0;
   std::uint64_t threadIncarnation = 0;
   TurnSettingValues canonical;
+  TurnSettingValues inherited;
   TurnSettingEpochs acknowledged{};
   std::vector<TurnSettingModel> models;
   std::vector<TurnSettingChoice> permissionProfiles;

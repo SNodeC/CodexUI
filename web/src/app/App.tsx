@@ -6,7 +6,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
     AuthoritativeHistoryPageSize, UnknownStatus, anchoredScrollTop, changeSettingDraft, displayStatus,
-    fixedSettingChoices, humanizeProtocolLabel as humanize, isObject, member,
+    configuredDefaults, inheritedSettingChoices, fixedSettingChoices, humanizeProtocolLabel as humanize, isObject, member,
     foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
     isEmptyStatus, isWorkingStatus, projectTurnPlan, settingDraftFor, settingPresentation, settingPromptOptions, statusTone,
@@ -1159,8 +1159,10 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     const [settingsStateRevision, forceSettingsState] = useState(0);
     const settingsIdentity = presentationKey;
     const catalogSource = session.model.turnSettingsCatalogs();
-    const settingsCatalog = useMemo(() => turnSettingCatalog(catalogSource),
-        [catalogSource.models, catalogSource.permissionProfiles]);
+    const defaults = !thread && projectionId === DraftThreadId
+        ? session.model.threadDefaults(snapshot.newThreadDraft?.workspace ?? "") : undefined;
+    const settingsCatalog = useMemo(() => ({...turnSettingCatalog(catalogSource), ...(!thread && projectionId === DraftThreadId ? {defaults: configuredDefaults(defaults)} : {})}),
+        [catalogSource.models, catalogSource.permissionProfiles, defaults]);
     const canonicalSettings = useMemo(() => thread?.raw ?? {}, [thread?.raw]);
     const [settingsDraft, settingsProjection, settingsOptions] = useMemo(() => {
         const draft = settingDraftFor(settingsDrafts, settingsIdentity, canonicalSettings,
@@ -1432,7 +1434,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
 const SettingsPanel = memo(function SettingsPanel({draft, presentation, onChange}: {draft: SettingDraft;
     presentation: SettingPresentation; onChange: (field: SettingField, value: string) => void}) {
     const {values, touched} = draft;
-    const select = (label: string, field: SettingField, choices: SettingPresentation["models"], enabled = true, tooltip = "") => <label title={tooltip || undefined}><span>{label}</span><select value={values[field]} disabled={!enabled} onChange={event => onChange(field, event.target.value)}>{choices.map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled} title={choice.description || undefined}>{choice.label}</option>)}</select></label>;
+    const select = (label: string, field: SettingField, choices: SettingPresentation["models"], enabled = true, tooltip = "") => <label title={tooltip || undefined}><span>{label}</span><select value={values[field]} disabled={!enabled} onChange={event => onChange(field, event.target.value)}>{inheritedSettingChoices(field, choices, presentation.defaults, values).map(choice => <option key={choice.value} value={choice.value} disabled={choice.disabled} title={choice.description || undefined}>{choice.label}</option>)}</select></label>;
     return <div className="settings-panel" onWheel={event => event.preventDefault()}><div className="settings-grid">
             {select("Model", "model", presentation.models)}
             {select("Reasoning", "effort", presentation.efforts)}

@@ -270,6 +270,7 @@ namespace codexui::codex {
                 if (!read->contains(node))
                     return true;
                 switch (node->id().kind) {
+                    case nodegraph::NodeKind::Configuration:
                     case nodegraph::NodeKind::Connection:
                         return true;
                     case nodegraph::NodeKind::Account:
@@ -520,6 +521,7 @@ namespace codexui::codex {
         [[nodiscard]] std::optional<ui::ThreadListSnapshot> threadSnapshot(std::uint64_t* revision = nullptr);
         [[nodiscard]] QStringList projectWorkspaceRoots(const std::string& project);
         void beginThreadDraft(NewThreadDraft draft);
+        void readThreadDefaults();
         void beginNewThreadDialog(std::string project = {}, std::string section = {});
         [[nodiscard]] std::optional<NewThreadDraft> suggestedForkDraft(const nodegraph::NodeRef& thread) const;
         void forkThread(const nodegraph::NodeRef& thread, NewThreadDraft draft, bool includeOptions, const nodegraph::NodeRef& turn = {});
@@ -1662,6 +1664,9 @@ namespace codexui::codex {
         pendingChrome = pendingChrome || updateChrome;
         const bool fallbackAffected = graphUiFallbackAffected(change, *read);
         read.reset();
+        if (authorityAdvanced && newThreadDraft) {
+            readThreadDefaults();
+        }
         if (fallbackAffected)
             reconcileGraphUiFallback();
 
@@ -2061,7 +2066,8 @@ namespace codexui::codex {
         const std::string draftIdentity = newThreadDraft || !creationDraftCorrelation.empty()
                                               ? ui::threadPresentationKey(DraftThreadId, creationDraftCorrelation)
                                               : std::string{};
-        auto settingsContext = uiAdapter.turnSettings(boundGraphThread, draftIdentity);
+        auto settingsContext =
+            uiAdapter.turnSettings(boundGraphThread, draftIdentity, newThreadDraft ? utf8(newThreadDraft->workspace) : std::string{});
         if (!settingsContext) {
             pendingChrome = true;
             schedulePaneCommit();
@@ -2069,6 +2075,9 @@ namespace codexui::codex {
         }
         middleRegion->composer().setTurnSettingsContext(std::move(*settingsContext));
 
+        if (values.canControl && (!renderedChrome || !renderedChrome->canControl) && newThreadDraft) {
+            readThreadDefaults();
+        }
         if (values.canControl && renderedChrome && !renderedChrome->canControl && boundGraphThread && !values.recoveryOnly) {
             hydrateSelectedThreadIfNeeded(boundGraphThread);
         }
@@ -2183,8 +2192,17 @@ namespace codexui::codex {
         return uiAdapter.threads(boundGraphThread, revision, &middleRegion->threads().browserOptions(), draft ? &*draft : nullptr);
     }
 
+    void ShellWidget::Impl::readThreadDefaults() {
+        if (newThreadDraft && !newThreadDraft->workspace.isEmpty()) {
+            nodegraph::RuntimeAction action{
+                nodegraph::RuntimeActionKind::ReadThreadDefaults, {{"cwd", utf8(newThreadDraft->workspace)}}, {}, {}, {}};
+            static_cast<void>(session.sendRuntimeAction(action));
+        }
+    }
+
     void ShellWidget::Impl::beginThreadDraft(NewThreadDraft draft) {
         newThreadDraft = draft;
+        readThreadDefaults();
         creationDraftCorrelation = "qt-draft:" + std::to_string(nextCreationDraftSerial++);
         selectedGraphThreadId.clear();
         bindGraphPanes({});

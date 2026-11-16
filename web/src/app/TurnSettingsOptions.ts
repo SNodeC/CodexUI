@@ -20,6 +20,7 @@ export interface SettingPresentation {
     serviceTiers: readonly SettingChoice[];
     networkDisabledReason: string;
     personalityDisabledReason: string;
+    defaults: Partial<SettingValues> | undefined;
 }
 
 const DefaultChoice: SettingChoice = {value: DefaultSetting, label: "Default (not reported)", description: "The effective value was not reported by app-server. No override will be sent unless you edit this setting."};
@@ -47,6 +48,7 @@ export interface ModelDefinition {
 export interface SettingCatalog {
     models: ModelDefinition[];
     permissionProfiles: SettingChoice[];
+    defaults?: Partial<SettingValues>;
 }
 
 const EmptySettingStamps = new Map<string, ThreadSettingStamp>();
@@ -145,8 +147,39 @@ export function turnSettingCatalog(source: {models: unknown; permissionProfiles:
     return {models: models(source.models), permissionProfiles: profiles(source.permissionProfiles)};
 }
 
-function selectedModel(values: SettingValues, definitions: readonly ModelDefinition[]): ModelDefinition | undefined {
-    return definitions.find(model => values.model === DefaultSetting ? model.isDefault : model.choice.value === values.model);
+export function configuredDefaults(config: unknown): Partial<SettingValues> {
+    const result: Partial<SettingValues> = {};
+    const names: Partial<Record<SettingField, string>> = {model: "model", effort: "model_reasoning_effort",
+        sandbox: "sandbox_mode", approval: "approval_policy", reviewer: "approvals_reviewer",
+        permissionProfile: "default_permissions", serviceTier: "service_tier", summary: "model_reasoning_summary",
+        personality: "personality"};
+    if (isObject(config)) {
+        for (const field of SettingFields) {
+            const key = names[field];
+            if (key && typeof config[key] === "string" && config[key] !== "") { result[field] = config[key] as string; }
+        }
+        const workspace = config.sandbox_workspace_write;
+        if (result.sandbox === "workspace-write" && isObject(workspace) && typeof workspace.network_access === "boolean") {
+            result.network = workspace.network_access ? "enabled" : "restricted";
+        }
+    }
+    return result;
+}
+
+export function inheritedSettingChoices(field: SettingField, choices: readonly SettingChoice[], defaults: Partial<SettingValues> | undefined, values: SettingValues): readonly SettingChoice[] {
+    const modelMatches = values.model === DefaultSetting || values.model === defaults?.model;
+    const applicable = field !== "collaboration" && (!["effort", "summary", "serviceTier"].includes(field) || modelMatches);
+    const inherited = applicable ? defaults?.[field] : undefined;
+    const concrete = choices.find(choice => choice.value === inherited);
+    return defaults && field !== "collaboration" ? choices.map(choice => choice.value === DefaultSetting ? {...choice,
+        label: inherited ? `Default — ${concrete?.label ?? humanize(inherited)}` : "Server default",
+        description: inherited ? "Inherited from app-server configuration for this workspace. No override is sent."
+            : "App-server has not reported a concrete default. No override is sent."} : choice) : choices;
+}
+
+function selectedModel(values: SettingValues, definitions: readonly ModelDefinition[], defaults: Partial<SettingValues> = {}): ModelDefinition | undefined {
+    const model = values.model === DefaultSetting ? defaults.model ?? DefaultSetting : values.model;
+    return definitions.find(entry => model === DefaultSetting ? entry.isDefault : entry.choice.value === model);
 }
 
 function normalize(values: SettingValues, catalog: SettingCatalog): SettingValues {
@@ -155,7 +188,7 @@ function normalize(values: SettingValues, catalog: SettingCatalog): SettingValue
         next.sandbox = DefaultSetting;
     if (next.sandbox === DefaultSetting) next.network = DefaultSetting;
     else if (next.sandbox === "danger-full-access") next.network = "enabled";
-    const model = selectedModel(next, catalog.models);
+    const model = selectedModel(next, catalog.models, catalog.defaults);
     if (model?.reasoningEfforts.length && next.effort !== DefaultSetting
         && !model.reasoningEfforts.includes(next.effort)) next.effort = DefaultSetting;
     if (model?.supportsPersonality === false) next.personality = DefaultSetting;
@@ -223,9 +256,10 @@ export function fixedSettingChoices(field: SettingField, current: string): reado
 }
 
 export function settingPresentation(draft: SettingDraft, catalog: SettingCatalog): SettingPresentation {
-    const definition = selectedModel(draft.values, catalog.models);
+    const definition = selectedModel(draft.values, catalog.models, catalog.defaults);
     const efforts = definition?.reasoningEfforts ?? [];
     return {
+        defaults: catalog.defaults,
         models: withCurrent([DefaultChoice, ...catalog.models.map(model => model.choice)], draft.values.model),
         efforts: withCurrent([DefaultChoice,
             ...efforts.map(value => ({value, label: humanize(value), description: ""}))], draft.values.effort),
@@ -279,7 +313,7 @@ function startOptions(draft: SettingDraft, turn: boolean, resolvedModel = ""): R
 }
 
 export function settingPromptOptions(draft: SettingDraft, catalog: SettingCatalog) {
-    const definition = selectedModel(draft.values, catalog.models);
+    const definition = selectedModel(draft.values, catalog.models, catalog.defaults);
     const model = draft.values.model === DefaultSetting ? definition?.choice.value ?? "" : draft.values.model;
     return {turn: startOptions(draft, true, model), thread: startOptions(draft, false)};
 }
