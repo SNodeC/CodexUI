@@ -12,12 +12,13 @@
 
 #include <QAbstractScrollArea>
 #include <QApplication>
+#include <QComboBox>
 #include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
-#include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -31,6 +32,7 @@
 #include <QSplitter>
 #include <QTimer>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
@@ -189,14 +191,15 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   };
   auto* previousTurn = headerButton(QStringLiteral("conversationPreviousTurn"));
   previousTurn->setText(QStringLiteral("↑"));
-  previousTurn->setToolTip(QStringLiteral("Turn opening; previous turn when already there"));
+  previousTurn->setToolTip(QStringLiteral("Previous checkpoint; current checkpoint opening when inside it"));
   auto* turns = headerButton(QStringLiteral("conversationTurnOutline"));
-  turns->setText(QStringLiteral("Turns"));
-  turns->setFixedWidth(62);
-  turns->setToolTip(QStringLiteral("Loaded turn prompts"));
+  turns->setText(QStringLiteral("All checkpoints"));
+  turns->setMaximumWidth(QWIDGETSIZE_MAX);
+  turns->setMinimumWidth(140);
+  turns->setToolTip(QStringLiteral("Loaded checkpoints"));
   auto* nextTurn = headerButton(QStringLiteral("conversationNextTurn"));
   nextTurn->setText(QStringLiteral("↓"));
-  nextTurn->setToolTip(QStringLiteral("Next turn opening"));
+  nextTurn->setToolTip(QStringLiteral("Next checkpoint"));
   auto* firstTurn = headerButton(QStringLiteral("conversationFirstTurn"));
   firstTurn->setText(QStringLiteral("↥"));
   firstTurn->setToolTip(QStringLiteral("First turn; load earlier history if needed"));
@@ -205,19 +208,41 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   latest->setToolTip(QStringLiteral("Latest output; resume following"));
   auto* outline = new QFrame(turns, Qt::Popup | Qt::FramelessWindowHint);
   outline->setObjectName(QStringLiteral("conversationTurnMenu"));
-  auto* list = new QListWidget(outline);
+  auto* list = new QTreeWidget(outline);
   list->setObjectName(QStringLiteral("conversationTurnList"));
-  list->setAccessibleName(QStringLiteral("Loaded turn prompts"));
+  list->setAccessibleName(QStringLiteral("Loaded checkpoints"));
   list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-  list->setUniformItemSizes(true);
+  list->setUniformRowHeights(true);
+  list->setColumnCount(3);
+  list->setHeaderHidden(true);
+  list->setRootIsDecorated(false);
+  list->header()->setStretchLastSection(true);
   auto* popupLayout = new QVBoxLayout(outline);
   popupLayout->setContentsMargins(6, 6, 6, 6);
   popupLayout->setSpacing(4);
+  auto* scope = new QComboBox(outline);
+  scope->setObjectName(QStringLiteral("conversationNavigationScope"));
+  scope->setAccessibleName(QStringLiteral("Checkpoint type"));
+  scope->addItems({QStringLiteral("All checkpoints"),
+                   QStringLiteral("Turn openings"),
+                   QStringLiteral("Codex updates"),
+                   QStringLiteral("Your steering"),
+                   QStringLiteral("Questions & answers"),
+                   QStringLiteral("Answers"),
+                   QStringLiteral("Final answers")});
+  auto* reveal = new QPushButton(QStringLiteral("Codex updates are hidden — Show updates"), outline);
+  reveal->setObjectName(QStringLiteral("conversationRevealUpdates"));
+  connect(reveal, &QPushButton::clicked, this, [this, turns] {
+      updateVisibility->setChecked(true);
+      turns->click();
+  });
   auto* count = new QLabel(outline);
   count->setObjectName(QStringLiteral("conversationTurnCount"));
   auto* load = new QPushButton(QStringLiteral("Load earlier turns"), outline);
   load->setObjectName(QStringLiteral("conversationTurnLoadEarlier"));
+  popupLayout->addWidget(scope);
+  popupLayout->addWidget(reveal);
   popupLayout->addWidget(count);
   popupLayout->addWidget(load);
   popupLayout->addWidget(list);
@@ -229,11 +254,13 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   connect(firstTurn, &QToolButton::clicked, this, [this] {
       conversationView->navigateToFirstTurn();
   });
-  connect(previousTurn, &QToolButton::clicked, this, [this] {
-      conversationView->navigateToTurn(conversationView->navigationTarget(-1));
+  connect(previousTurn, &QToolButton::clicked, this, [this, scope] {
+      conversationView->navigateToCheckpoint(
+          conversationView->navigationTarget(-1, static_cast<ConversationView::NavigationScope>(scope->currentIndex())));
   });
-  connect(nextTurn, &QToolButton::clicked, this, [this] {
-      conversationView->navigateToTurn(conversationView->navigationTarget(1));
+  connect(nextTurn, &QToolButton::clicked, this, [this, scope] {
+      conversationView->navigateToCheckpoint(
+          conversationView->navigationTarget(1, static_cast<ConversationView::NavigationScope>(scope->currentIndex())));
   });
   connect(latest, &QToolButton::clicked, this, [this] {
       conversationView->followLatest();
@@ -241,33 +268,44 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   const auto activate = [this, list, outline] {
       const auto* item = list->currentItem();
       if (item && item->flags().testFlag(Qt::ItemIsEnabled)) {
-          const auto key = item->data(Qt::UserRole).toString().toStdString();
-          const auto thread = item->data(Qt::UserRole + 1).toString().toStdString();
+          const auto key = item->data(0, Qt::UserRole).toString().toStdString();
+          const auto thread = item->data(0, Qt::UserRole + 1).toString().toStdString();
           outline->close();
           if (conversationView->presentedThreadId() == thread) {
-              conversationView->navigateToTurn(key);
+              conversationView->navigateToCheckpoint(key);
           }
       }
   };
-  connect(list, &QListWidget::itemClicked, this, activate);
+  connect(list, &QTreeWidget::itemClicked, this, activate);
   auto* accept = new QShortcut(list);
   accept->setKeys({QKeySequence(Qt::Key_Return), QKeySequence(Qt::Key_Enter)});
   accept->setContext(Qt::WidgetShortcut);
   connect(accept, &QShortcut::activated, this, activate);
-  connect(turns, &QToolButton::clicked, this, [this, outline, list, turns, count, load, popupLayout] {
+  connect(turns, &QToolButton::clicked, this, [this, outline, list, turns, count, load, popupLayout, scope, reveal] {
       list->clear();
-      const auto destinations = conversationView->turnDestinations();
+      const auto selected = static_cast<ConversationView::NavigationScope>(scope->currentIndex());
+      const auto destinations = conversationView->checkpointDestinations(selected);
+      reveal->setVisible(!conversationView->presentationOptions().showCodexUpdates &&
+                         (selected == ConversationView::NavigationScope::All || selected == ConversationView::NavigationScope::Updates));
       count->setText(QStringLiteral("%1 loaded").arg(destinations.size()));
       const auto threadId = QString::fromStdString(conversationView->presentedThreadId());
       const bool hasMore = conversationView->conversationModel()->hasMore();
       load->setVisible(hasMore);
       load->setEnabled(!conversationView->historyRequestPending());
-      const auto current = conversationView->navigationTarget();
+      const auto current = conversationView->navigationTarget(0, selected);
+      const auto metrics = list->fontMetrics();
+      list->setColumnWidth(0, metrics.horizontalAdvance(QString::number(destinations.empty() ? 1 : destinations.back().turn) + " |") + 12);
+      list->setColumnWidth(1, metrics.horizontalAdvance(QStringLiteral("final answer")) + 12);
       for (const auto& destination : destinations) {
-          auto* item = new QListWidgetItem(destination.prompt, list);
-          item->setToolTip(destination.prompt);
-          item->setData(Qt::UserRole, QString::fromStdString(destination.key));
-          item->setData(Qt::UserRole + 1, threadId);
+          const auto number = QString::number(destination.turn) + QStringLiteral(" |");
+          auto* item = new QTreeWidgetItem(list, {number, destination.action, destination.prompt});
+          const auto label = QStringLiteral("%1 %2 %3").arg(number, destination.action, destination.prompt);
+          for (int column = 0; column < 3; ++column) {
+              item->setToolTip(column, label);
+          }
+          item->setTextAlignment(0, Qt::AlignRight | Qt::AlignVCenter);
+          item->setData(0, Qt::UserRole, QString::fromStdString(destination.key));
+          item->setData(0, Qt::UserRole + 1, threadId);
           if (destination.key == current) {
               list->setCurrentItem(item);
           }
@@ -275,15 +313,16 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       const auto available = turns->screen()->availableGeometry();
       const int maximum = available.height() * 3 / 5;
       const int rowHeight = std::max(30, list->fontMetrics().height() + 12);
-      for (int row = 0; row < list->count(); ++row) {
-          list->item(row)->setSizeHint(QSize(0, rowHeight));
+      for (int row = 0; row < list->topLevelItemCount(); ++row) {
+          list->topLevelItem(row)->setSizeHint(0, QSize(0, rowHeight));
       }
       outline->ensurePolished();
       const auto margins = outline->contentsMargins() + popupLayout->contentsMargins();
-      const int chrome = margins.top() + margins.bottom() + count->sizeHint().height() + popupLayout->spacing() +
+      const int chrome = margins.top() + margins.bottom() + scope->sizeHint().height() + count->sizeHint().height() +
+                         2 * popupLayout->spacing() + (reveal->isHidden() ? 0 : reveal->sizeHint().height() + popupLayout->spacing()) +
                          (hasMore ? load->sizeHint().height() + popupLayout->spacing() : 0);
       list->setFixedSize(std::min(420, available.width() - margins.left() - margins.right() - 12),
-                         std::max(1, std::min(maximum - chrome, list->count() * rowHeight)));
+                         std::max(1, std::min(maximum - chrome, list->topLevelItemCount() * rowHeight)));
       popupLayout->activate();
       outline->adjustSize();
       const auto below = turns->mapToGlobal(QPoint(0, turns->height()));
@@ -435,18 +474,27 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationLayerLayout->setContentsMargins(0, 0, 0, 0);
   conversationLayerLayout->setSpacing(0);
   conversationView = new ConversationView(conversationLayer);
-  connect(conversationView, &ConversationView::navigationChanged, this, [this, firstTurn, previousTurn, turns, nextTurn, latest, outline] {
-      const bool available = !conversationView->navigationTarget().empty();
+  const auto refreshNavigation = [this, firstTurn, previousTurn, turns, nextTurn, latest, outline, scope] {
+      const auto selected = static_cast<ConversationView::NavigationScope>(scope->currentIndex());
+      const bool available = !conversationView->presentedThreadId().empty() && conversationView->conversationModel()->rowCount() > 0 &&
+                             !conversationView->structuralStagingActive();
+      turns->setText(QString(scope->currentText()).replace(QLatin1Char('&'), QStringLiteral("&&")));
       const bool historyPending = conversationView->historyRequestPending();
       firstTurn->setEnabled(available && !historyPending &&
+                            !conversationView->navigationTarget(0, ConversationView::NavigationScope::Turns).empty() &&
                             (conversationView->conversationModel()->hasMore() || conversationView->verticalScrollBar()->value() > 1));
-      previousTurn->setEnabled(available && !conversationView->navigationTarget(-1).empty());
-      nextTurn->setEnabled(available && !conversationView->navigationTarget(1).empty());
+      previousTurn->setEnabled(available && !conversationView->navigationTarget(-1, selected).empty());
+      nextTurn->setEnabled(available && !conversationView->navigationTarget(1, selected).empty());
       turns->setEnabled(available);
       latest->setEnabled(available && conversationView->mode() != ConversationView::Mode::Following);
       if (!available) {
           outline->close();
       }
+  };
+  connect(conversationView, &ConversationView::navigationChanged, this, refreshNavigation);
+  connect(scope, &QComboBox::currentIndexChanged, this, [refreshNavigation, turns] {
+      refreshNavigation();
+      turns->click();
   });
   connect(conversationView->conversationModel(), &QAbstractItemModel::modelReset, outline, &QFrame::close);
   connect(conversationView->conversationModel(), &QAbstractItemModel::rowsRemoved, outline, &QFrame::close);
@@ -537,6 +585,8 @@ bool MiddleRegionWidget::eventFilter(QObject *watched, QEvent *event) {
     if (watched == conversationTitle &&
         (event->type() == QEvent::Resize || event->type() == QEvent::FontChange || event->type() == QEvent::ToolTipChange)) {
         conversationTitle->setMaximumWidth(conversationTitle->fontMetrics().size(Qt::TextSingleLine, conversationTitle->toolTip()).width());
+        conversationTitle->setMinimumWidth(std::min(
+            conversationTitle->maximumWidth(), conversationTitle->fontMetrics().size(Qt::TextSingleLine, QStringLiteral("…")).width()));
         conversationTitle->setText(
             conversationTitle->fontMetrics().elidedText(conversationTitle->toolTip(), Qt::ElideRight, conversationTitle->width()));
     }

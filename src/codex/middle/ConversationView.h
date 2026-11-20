@@ -60,13 +60,16 @@ public:
   ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void(bool)> action);
-  struct TurnDestination {
+  enum class NavigationScope { All, Turns, Updates, Steering, Questions, Answers, FinalAnswers };
+  struct CheckpointDestination {
       std::string key;
+      int turn;
+      QString action;
       QString prompt;
   };
-  [[nodiscard]] std::vector<TurnDestination> turnDestinations() const;
-  [[nodiscard]] std::string navigationTarget(int direction = 0) const;
-  void navigateToTurn(const std::string& key, bool focus = true);
+  [[nodiscard]] std::vector<CheckpointDestination> checkpointDestinations(NavigationScope scope = NavigationScope::All) const;
+  [[nodiscard]] std::string navigationTarget(int direction = 0, NavigationScope scope = NavigationScope::All) const;
+  void navigateToCheckpoint(const std::string& key, bool focus = true);
   void navigateToFirstTurn();
   void followLatest();
   void loadEarlier(bool throughFirst = false);
@@ -271,6 +274,7 @@ private:
   retainCardState(const std::string &threadId, const std::string &stableKey);
   void forgetCardPresentation(const std::string &threadId,
                               const std::string &stableKey);
+  [[nodiscard]] std::optional<NavigationScope> checkpointKind(int position, NavigationScope scope) const;
   [[nodiscard]] bool rowPresented(int row) const;
   [[nodiscard]] static bool hasTurnSurface(const SectionRange &section);
   [[nodiscard]] int rowSpacing(int row) const;

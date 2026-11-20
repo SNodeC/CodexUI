@@ -64,6 +64,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -2566,6 +2567,186 @@ bool tokenDetailsRemainVisible() {
   return result;
 }
 
+bool checkpointNavigationUsesCardIdentity() {
+    using View = ConversationView;
+    QFile fixture(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath() + QStringLiteral("/../fixtures/checkpoint-navigation.json"));
+    bool result = expect(fixture.open(QIODevice::ReadOnly), "checkpoint differential fixture opens");
+    const auto contract = nlohmann::json::parse(fixture.readAll().toStdString());
+    ConversationSnapshot snapshot;
+    snapshot.threadId = contract.at("threadId");
+    std::unordered_map<std::string, std::string> keys;
+    for (const auto& turn : contract.at("turns")) {
+        TurnSection section;
+        section.key = section.turnId = turn.at("id").get<std::string>();
+        for (const auto& entry : turn.at("cards")) {
+            const std::string id = entry.at("id");
+            const bool user = entry.at("kind") == "userMessage";
+            auto item = card(user ? CardKind::UserMessage : CardKind::AgentMessage,
+                             id,
+                             user ? CardPayload(UserMessageData{entry.at("text")})
+                                  : CardPayload(AgentMessageData{entry.at("text"), entry.value("phase", "")}));
+            if (!user && entry.contains("questionRequest")) {
+                auto& message = std::get<AgentMessageData>(item.payload);
+                message.questionRequest = entry.at("questionRequest");
+                message.answers = entry.at("answers").get<std::vector<std::string>>();
+                message.questionStatus = entry.at("questionStatus");
+            }
+            item.threadId = snapshot.threadId;
+            item.turnId = section.turnId;
+            item.key = AuthoritativeItemKey{item.threadId, item.turnId, item.itemId};
+            keys[item.turnId + "/" + id] = stableKey(item.key);
+            if (section.cards.empty() && user) {
+                section.rootCardKey = item.key;
+            }
+            section.cards.push_back(item);
+        }
+        snapshot.sections.push_back(section);
+    }
+    MiddleRegionWidget region;
+    region.resize(1100, 720);
+    region.show();
+    region.showSidebar(false);
+    region.showInspector(false);
+    auto& view = region.conversation();
+    auto* scope = region.findChild<QComboBox*>("conversationNavigationScope");
+    auto* trigger = region.findChild<QToolButton*>("conversationTurnOutline");
+    auto* updates = region.findChild<QToolButton*>("conversationUpdatesToggle");
+    auto* list = region.findChild<QTreeWidget*>("conversationTurnList");
+    const auto settleNavigation = [&] {
+        QElapsedTimer wait;
+        wait.start();
+        while (view.structuralStagingActive() && wait.elapsed() < 2000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(1);
+        }
+        for (int phase = 0; phase < 4; ++phase) {
+            QCoreApplication::processEvents();
+        }
+    };
+    result &= expect(scope && trigger && updates && list && scope->currentIndex() == 0, "checkpoint UI defaults to All checkpoints");
+    if (scope && trigger && updates && list) {
+        updates->setChecked(true);
+        view.beginThreadSelection(snapshot.threadId);
+        static_cast<void>(view.reconcileStaged(snapshot));
+        settleNavigation();
+        const std::array<std::pair<std::string, View::NavigationScope>, 7> scopes{{{"all", View::NavigationScope::All},
+                                                                                   {"turns", View::NavigationScope::Turns},
+                                                                                   {"updates", View::NavigationScope::Updates},
+                                                                                   {"steering", View::NavigationScope::Steering},
+                                                                                   {"questions", View::NavigationScope::Questions},
+                                                                                   {"answers", View::NavigationScope::Answers},
+                                                                                   {"finalAnswers", View::NavigationScope::FinalAnswers}}};
+        for (const auto& [name, filter] : scopes) {
+            const auto destinations = view.checkpointDestinations(filter);
+            const auto& expected = contract.at("expected").at(name);
+            result &= expect(destinations.size() == expected.size(), "native checkpoint counts match the shared corpus");
+            for (std::size_t index = 0; index < std::min(destinations.size(), expected.size()); ++index) {
+                result &= expect(destinations[index].key == keys.at(expected[index].get<std::string>()) && destinations[index].turn > 0 &&
+                                     !destinations[index].action.isEmpty(),
+                                 "native ordered checkpoint identities and context match the shared corpus");
+                result &= expect(
+                    destinations[index].action.toStdString() ==
+                        (name == "turns" ? "opening" : contract.at("actions").at(expected[index].get<std::string>()).get<std::string>()),
+                    "checkpoint actions distinguish opening, update, steering, question, answer, and final answer");
+            }
+            for (const auto& query : contract.at("queries")) {
+                if (query.at("scope") == name) {
+                    view.navigateToCheckpoint(keys.at(query.at("anchor").get<std::string>()));
+                    settleNavigation();
+                    view.verticalScrollBar()->setValue(view.verticalScrollBar()->value() - query.at("offset").get<int>());
+                    settleNavigation();
+                    const auto target = view.navigationTarget(query.at("direction").get<int>(), filter);
+                    result &=
+                        expect(target == (query.at("target").is_null() ? std::string{} : keys.at(query.at("target").get<std::string>())),
+                               "native directional checkpoint jumps match shared card/offset queries");
+                }
+            }
+        }
+        view.navigateToCheckpoint(keys.at("one/opening"));
+        settleNavigation();
+        ConversationCard* root = nullptr;
+        for (auto* widget : view.findChildren<ConversationCard*>()) {
+            if (stableKey(widget->data().key) == keys.at("one/opening")) {
+                root = widget;
+            }
+        }
+        if (root) {
+            root->foldRequested(true);
+        }
+        settleNavigation();
+        view.navigateToCheckpoint(keys.at("one/steer"));
+        settleNavigation();
+        result &= expect(view.currentIndex() == view.conversationModel()->indexForStableKey(keys.at("one/steer")) &&
+                             view.visualRect(view.currentIndex()).height() > 0 && view.mode() == View::Mode::Paused,
+                         "jumping into a collapsed turn expands its existing parent and pauses following");
+        const int top = view.visualRect(view.currentIndex()).top();
+        updates->setChecked(false);
+        trigger->click();
+        settleNavigation();
+        for (const auto& [name, filter] : scopes) {
+            const auto destinations = view.checkpointDestinations(filter);
+            const auto& expected = contract.at("hiddenUpdates").at(name);
+            result &= expect(destinations.size() == expected.size(), "hidden-update checkpoint counts match the shared corpus");
+            for (std::size_t index = 0; index < std::min(destinations.size(), expected.size()); ++index) {
+                result &= expect(destinations[index].key == keys.at(expected[index].get<std::string>()),
+                                 "hidden updates preserve the same visible turn fallback in both frontends");
+            }
+        }
+        auto* reveal = region.findChild<QPushButton*>("conversationRevealUpdates");
+        result &= expect(view.checkpointDestinations(View::NavigationScope::Updates).empty() && reveal && reveal->isVisible(),
+                         "hidden updates require an explicit reveal action");
+        if (reveal) {
+            reveal->click();
+        }
+        settleNavigation();
+        result &= expect(updates->isChecked() && !view.checkpointDestinations(View::NavigationScope::Updates).empty(),
+                         "reveal reuses the existing presentation toggle");
+        scope->setCurrentIndex(3);
+        settleNavigation();
+        result &=
+            expect(trigger->text() == "Your steering" && list->topLevelItemCount() == 2, "scope changes refresh the same bounded outline");
+        scope->setCurrentIndex(4);
+        settleNavigation();
+        result &= expect(trigger->text() == "Questions && answers" && list->topLevelItemCount() == 2 &&
+                             list->topLevelItem(0)->text(2).contains("Which implementation should I use?") &&
+                             list->topLevelItem(1)->text(2).contains("Which edge cases need checking?"),
+                         "pending and answered questions have identifiable entries in the same outline");
+        result &=
+            expect(list->columnCount() == 3 && list->topLevelItem(0)->text(0) == "1 |" && list->topLevelItem(0)->text(1) == "question" &&
+                       list->topLevelItem(1)->text(1) == "answer" && list->columnWidth(2) >= list->viewport()->width() / 2,
+                   "compact number and action columns leave most popup width for message previews");
+        scope->setCurrentIndex(0);
+        settleNavigation();
+        if (!qEnvironmentVariableIsEmpty("CODEXUI_TEST_EVIDENCE_DIR")) {
+            region.findChild<QFrame*>("conversationTurnMenu")
+                ->grab()
+                .save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") + "/native-checkpoint-columns.png");
+        }
+        region.findChild<QFrame*>("conversationTurnMenu")->close();
+        auto streamed = snapshot.sections[0].cards[1];
+        streamed.itemId = "later-update";
+        streamed.key = AuthoritativeItemKey{streamed.threadId, streamed.turnId, streamed.itemId};
+        snapshot.sections[0].cards.push_back(streamed);
+        static_cast<void>(view.reconcileStaged(snapshot));
+        settleNavigation();
+        result &= expect(view.mode() == View::Mode::Paused &&
+                             std::abs(view.visualRect(view.conversationModel()->indexForStableKey(keys.at("one/steer"))).top() - top) <= 1,
+                         "streaming preserves the chosen checkpoint's reading anchor");
+        snapshot.sections = {*std::ranges::find(snapshot.sections, std::string("auto"), &TurnSection::turnId)};
+        snapshot.sections.front().cards.resize(1);
+        updates->setChecked(false);
+        static_cast<void>(view.reconcileStaged(snapshot));
+        settleNavigation();
+        result &= expect(trigger->isEnabled(), "a thread containing only hidden updates still permits opening navigation");
+        trigger->click();
+        settleNavigation();
+        result &= expect(reveal && reveal->isVisible() && list->topLevelItemCount() == 0,
+                         "empty hidden-only history retains the explicit reveal action");
+        region.findChild<QFrame*>("conversationTurnMenu")->close();
+    }
+    return result;
+}
+
 bool turnNavigationUsesTheExistingHeader() {
     MiddleRegionWidget region;
     region.setStyleSheet(UiStyle::applicationStyleSheet());
@@ -2588,6 +2769,11 @@ bool turnNavigationUsesTheExistingHeader() {
     if (first && latest) {
         result &= expect(first->isVisible() && !first->isEnabled() && latest->isVisible() && !latest->isEnabled(),
                          "empty navigation keeps both endpoint controls visible and disabled");
+    }
+    auto* scope = region.findChild<QComboBox*>(QStringLiteral("conversationNavigationScope"));
+    result &= expect(scope && scope->currentIndex() == 0 && outline->text() == "All checkpoints", "All checkpoints is the default");
+    if (scope) {
+        scope->setCurrentIndex(1);
     }
     ConversationSnapshot snapshot;
     snapshot.threadId = "header-navigation";
@@ -2637,7 +2823,7 @@ bool turnNavigationUsesTheExistingHeader() {
     result &= expect(outline && outline->isEnabled(), "navigation enables after staged history commits");
     if (first && previous && outline && next && latest && presentation && title && workspace && copy && state) {
         const QRect header = presentation->geometry();
-        region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
+        region.conversation().navigateToCheckpoint(stableKey(snapshot.sections.front().cards.front().key));
         QCoreApplication::processEvents();
         result &= expect(first->isVisible() && first->isEnabled(),
                          "First stays available at the oldest loaded prompt while earlier history exists");
@@ -2677,6 +2863,11 @@ bool turnNavigationUsesTheExistingHeader() {
         for (int width : {1100, 820, 460, 340}) {
             region.resize(width, 700);
             QCoreApplication::processEvents();
+            if (title->text().isEmpty() || region.minimumSizeHint().width() != minimumWidth) {
+                std::cerr << "checkpoint header width=" << region.width() << " titleWidth=" << title->width()
+                          << " minimum=" << region.minimumSizeHint().width() << " baseline=" << minimumWidth
+                          << " title=" << title->text().toStdString() << '\n';
+            }
             int right = bounds(state).right();
             for (auto* button : {previous, outline, next, first, latest, copy}) {
                 result &= expect(std::abs(bounds(button).center().y() - bounds(title).center().y()) <= 1 &&
@@ -2707,15 +2898,16 @@ bool turnNavigationUsesTheExistingHeader() {
         auto* menu = region.findChild<QFrame*>(QStringLiteral("conversationTurnMenu"));
         outline->click();
         QCoreApplication::processEvents();
-        auto* list = menu->findChild<QListWidget*>(QStringLiteral("conversationTurnList"));
-        result &= expect(menu->isVisible() && list && list->count() == 3 &&
+        auto* list = menu->findChild<QTreeWidget*>(QStringLiteral("conversationTurnList"));
+        result &= expect(menu->isVisible() && list && list->topLevelItemCount() == 3 &&
                              menu->findChild<QLabel*>(QStringLiteral("conversationTurnCount"))->text() == "3 loaded" &&
                              menu->findChild<QPushButton*>(QStringLiteral("conversationTurnLoadEarlier"))->isVisible(),
                          "the native outline exposes loaded-only counts and earlier loading above prompts");
         if (list) {
-            result &= expect(list->item(2)->text() == "Prompt & turn-2" && list->item(2)->toolTip() == "Prompt & turn-2",
+            result &= expect(list->topLevelItem(2)->text(2) == "Prompt & turn-2" &&
+                                 list->topLevelItem(2)->toolTip(2).endsWith(list->topLevelItem(2)->text(2)),
                              "list prompts preserve literal ampersands");
-            list->setCurrentRow(2);
+            list->setCurrentItem(list->topLevelItem(2));
             const auto point = list->visualItemRect(list->currentItem()).center();
             for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
                 QMouseEvent click(type,
@@ -2758,7 +2950,7 @@ bool turnNavigationUsesTheExistingHeader() {
         }
         snapshot.hasMore = false;
         static_cast<void>(region.conversation().reconcile(snapshot));
-        region.conversation().navigateToTurn(stableKey(snapshot.sections[50].cards.front().key));
+        region.conversation().navigateToCheckpoint(stableKey(snapshot.sections[50].cards.front().key));
         QCoreApplication::processEvents();
         const auto available = outline->screen()->availableGeometry();
         class PopupScrollRouter final : public QObject {
@@ -2784,7 +2976,7 @@ bool turnNavigationUsesTheExistingHeader() {
             result &= expect(available.contains(menu->geometry()) && menu->height() <= available.height() * 3 / 5,
                              "a hundred-turn popup stays within the work area and its sixty-percent height cap at screen edges");
             if (list) {
-                result &= expect(list->count() == 100 && list->verticalScrollBar()->maximum() > 0 && list->hasFocus(),
+                result &= expect(list->topLevelItemCount() == 100 && list->verticalScrollBar()->maximum() > 0 && list->hasFocus(),
                                  "the bounded native list owns a scrollbar and keyboard focus");
                 const auto reading = region.conversation().navigationTarget();
                 const auto readingIndex = region.conversation().conversationModel()->indexForStableKey(reading);
@@ -2804,7 +2996,7 @@ bool turnNavigationUsesTheExistingHeader() {
                 }
                 QCoreApplication::processEvents();
                 result &= expect(list->verticalScrollBar()->value() == 0 &&
-                                     list->viewport()->rect().contains(list->visualItemRect(list->item(0))) &&
+                                     list->viewport()->rect().contains(list->visualItemRect(list->topLevelItem(0))) &&
                                      region.conversation().navigationTarget() == reading &&
                                      std::abs(region.conversation().visualRect(readingIndex).top() - readingPixel) <= 1,
                                  "wheel scrolling reaches the very first prompt without moving the conversation");
@@ -2812,8 +3004,9 @@ bool turnNavigationUsesTheExistingHeader() {
                 QApplication::sendEvent(list, &end);
                 QKeyEvent home(QEvent::KeyPress, Qt::Key_Home, Qt::NoModifier);
                 QApplication::sendEvent(list, &home);
-                result &= expect(list->currentRow() == 0 && list->visualItemRect(list->item(0)).top() >= 0,
-                                 "Home returns to the first selectable prompt after End");
+                result &=
+                    expect(list->indexOfTopLevelItem(list->currentItem()) == 0 && list->visualItemRect(list->topLevelItem(0)).top() >= 0,
+                           "Home returns to the first selectable prompt after End");
                 QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
                 QApplication::sendEvent(list, &enter);
                 QCoreApplication::processEvents();
@@ -2857,7 +3050,7 @@ bool turnNavigationUsesTheExistingHeader() {
         region.conversation().setHistoryRequestPending(snapshot.threadId, false);
         if (!qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR").isEmpty()) {
             region.resize(1400, 850);
-            region.conversation().navigateToTurn(stableKey(snapshot.sections.front().cards.front().key));
+            region.conversation().navigateToCheckpoint(stableKey(snapshot.sections.front().cards.front().key));
             QCoreApplication::processEvents();
             region.grab().save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") + QStringLiteral("/native-thread-navigation.png"));
             outline->click();
@@ -2907,6 +3100,10 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
       region.grab().save(QStringLiteral("/tmp/codexui-header-%1.png").arg(width));
     wrappedUsage |= tokens && tokens->text().contains('\n');
     fullUsage |= tokens && !tokens->text().contains('\n');
+    if (title && (!title->width() || !title->text().endsWith(QChar(0x2026)))) {
+        std::cerr << "complete header width=" << region.width() << " titleWidth=" << title->width()
+                  << " title=" << title->text().toStdString() << '\n';
+    }
     result &= expect(tokens && title && title->width() > 0 &&
                          title->x() == title->parentWidget()->layout()->contentsMargins().left() &&
                          title->y() + title->height() <= tokens->y() &&
@@ -2979,11 +3176,16 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::string(argv[1]) == "--wheel-routing-performance")
     return nestedWheelGestureHasOneRoutingOwner(true) ? 0 : 1;
   bool passed = true;
-  const auto run = [&passed](const char *name, bool (*test)()) {
-    const bool casePassed = test();
-    if (!casePassed)
-      std::cerr << "CASE FAILED: " << name << '\n';
-    passed &= casePassed;
+  const bool navigationOnly = argc == 2 && std::string(argv[1]) == "--checkpoint-navigation";
+  const auto run = [&passed, navigationOnly](const char* name, bool (*test)()) {
+      if (!navigationOnly || std::string(name) == "checkpointNavigationUsesCardIdentity" ||
+          std::string(name) == "turnNavigationUsesTheExistingHeader") {
+          const bool casePassed = test();
+          if (!casePassed) {
+              std::cerr << "CASE FAILED: " << name << '\n';
+          }
+          passed &= casePassed;
+      }
   };
   run("promptKeyboardAndFocusContract", promptKeyboardAndFocusContract);
   run("promptDropCursorContract", promptDropCursorContract);
@@ -3016,6 +3218,7 @@ int main(int argc, char **argv) {
   run("nestedWheelGestureHasOneRoutingOwner",
       [] { return nestedWheelGestureHasOneRoutingOwner(false); });
   run("tokenDetailsRemainVisible", tokenDetailsRemainVisible);
+  run("checkpointNavigationUsesCardIdentity", checkpointNavigationUsesCardIdentity);
   run("turnNavigationUsesTheExistingHeader", turnNavigationUsesTheExistingHeader);
   run("completeMiddleSurfaceRetainsPaneAndHeadingBehavior",
       completeMiddleSurfaceRetainsPaneAndHeadingBehavior);

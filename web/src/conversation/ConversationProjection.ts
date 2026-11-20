@@ -28,11 +28,81 @@ export function turnOpenings(sections: readonly TurnSection[]): VisibleCardData[
     return result;
 }
 
-export function turnNavigationTarget(openings: readonly VisibleCardData[], turnId: string,
-    atOpening: boolean, direction: number): VisibleCardData | undefined {
-    const current = openings.findIndex(card => card.turnId === turnId);
-    const offset = direction > 0 ? 1 : direction < 0 && atOpening ? -1 : 0;
-    return current < 0 ? undefined : openings[current + offset];
+export const CheckpointScopes = {all: "All checkpoints", turns: "Turn openings", updates: "Codex updates", steering: "Your steering", questions: "Questions & answers", answers: "Answers", finalAnswers: "Final answers"} as const;
+export type CheckpointScope = keyof typeof CheckpointScopes;
+
+function checkpointKind(section: TurnSection, card: VisibleCardData, opening: VisibleCardData | undefined, scope: CheckpointScope): string | undefined {
+    const message = card.kind === "agentMessage" ? card.payload as AgentMessageData : undefined;
+    const prompt = card.kind === "userMessage" ? (card.payload as UserMessageData).text
+        : card.kind === "localPrompt" ? (card.payload as LocalPromptData).prompt : undefined;
+    const reply = prompt !== undefined && questionReplies(prompt).length > 0;
+    let kind: string | undefined;
+    if (section.turnId !== "") {
+        if (card === opening && ((scope === "all" && !message && !reply) || scope === "turns")) {
+            kind = "opening";
+        } else if (message?.questionRequest && (scope === "all" || scope === "questions" || scope === "answers" && message.answers?.some(Boolean))) {
+            kind = message.answers?.some(Boolean) ? "answer" : "question";
+        } else if (message && !message.questionRequest && message.phase === "final_answer" && (scope === "all" || scope === "finalAnswers")) {
+            kind = "final answer";
+        } else if (message && !message.questionRequest && message.phase === "partial_answer" && (scope === "all" || scope === "answers")) {
+            kind = "answer";
+        } else if (message && !message.questionRequest && !["final_answer", "partial_answer"].includes(message.phase)
+            && (scope === "all" || scope === "updates")) {
+            kind = "update";
+        } else if (reply
+            && !(card.kind === "localPrompt" && (card.payload as LocalPromptData).state === "failed") && (scope === "all" || scope === "answers")) {
+            kind = "answer";
+        } else if (section.rootCardKey && card !== opening && !reply && (card.kind === "userMessage"
+            || card.kind === "localPrompt" && (card.payload as LocalPromptData).state !== "failed")
+            && (scope === "all" || scope === "steering")) {
+            kind = "steering";
+        }
+    }
+    return kind;
+}
+
+export function checkpointDestinations(sections: readonly TurnSection[], scope: CheckpointScope = "all") {
+    const result: {card: VisibleCardData; turn: number; action: string; preview: string; label: string}[] = [];
+    for (const [index, section] of sections.filter(section => section.turnId !== "").entries()) {
+        const opening = turnOpenings([section])[0];
+        for (const card of section.cards) {
+            const kind = checkpointKind(section, card, opening, scope);
+            if (kind) {
+                const text = card.kind === "userMessage" ? (card.payload as UserMessageData).text
+                    : card.kind === "localPrompt" ? (card.payload as LocalPromptData).prompt
+                    : card.kind === "agentMessage" ? stringMember(((card.payload as AgentMessageData).questionRequest?.questions as JsonObject[] | undefined)?.[0], "question")
+                        || (card.payload as AgentMessageData).text : "Turn without an opening prompt";
+                const replies = questionReplies(text);
+                const preview = (replies.length ? questionReplyText(replies, true) : text).trim().replace(/\s+/gu, " ") || "Attachment prompt";
+                result.push({card, turn: index + 1, action: kind, preview, label: `${index + 1} | ${kind} ${preview}`});
+            }
+        }
+    }
+    return result;
+}
+
+export function checkpointNavigationTarget(sections: readonly TurnSection[], scope: CheckpointScope,
+    anchor: {cardKey: string; pixelOffset: number} | undefined, direction: number, atBottom = false): VisibleCardData | undefined {
+    let sectionIndex = sections.findIndex(section => section.cards.some(card => stableKey(card.key) === anchor?.cardKey));
+    let position = sectionIndex < 0 ? -1 : sections[sectionIndex]!.cards.findIndex(card => stableKey(card.key) === anchor?.cardKey);
+    const atStart = anchor !== undefined && (Math.abs(anchor.pixelOffset) <= 1 || (atBottom && anchor.pixelOffset >= 0));
+    let result: VisibleCardData | undefined;
+    if (sectionIndex >= 0 || direction > 0) {
+        sectionIndex = Math.max(0, sectionIndex);
+        position += direction > 0 ? 1 : direction < 0 && atStart ? -1 : 0;
+        while (sectionIndex >= 0 && sectionIndex < sections.length && !result) {
+            const section = sections[sectionIndex]!;
+            const opening = turnOpenings([section])[0];
+            while (position >= 0 && position < section.cards.length && !result) {
+                const card = section.cards[position]!;
+                if (checkpointKind(section, card, opening, scope)) { result = card; }
+                position += direction > 0 ? 1 : -1;
+            }
+            sectionIndex += direction > 0 ? 1 : -1;
+            position = direction > 0 ? 0 : (sections[sectionIndex]?.cards.length ?? 0) - 1;
+        }
+    }
+    return result;
 }
 
 function integerValue(object: unknown, key: string): number | undefined {
