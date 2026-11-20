@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationView.h"
+
+#include "codex/nodegraph/PromptText.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractSlider>
@@ -24,7 +26,6 @@
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QWheelEvent>
-
 #include <algorithm>
 #include <array>
 #include <ranges>
@@ -846,77 +847,124 @@ void ConversationView::setLoadMoreAction(std::function<void(bool)> action) {
     loadMoreAction_ = std::move(action);
 }
 
-std::vector<ConversationView::TurnDestination> ConversationView::turnDestinations() const {
-    std::vector<TurnDestination> result;
+std::optional<ConversationView::NavigationScope> ConversationView::checkpointKind(int position, NavigationScope scope) const {
+    std::optional<NavigationScope> result;
+    const auto* row = model_->row(position);
+    if (row && row->presented && !row->card.turnId.empty()) {
+        const auto section = sectionRanges_.find(row->sectionKey);
+        bool opening = section != sectionRanges_.end() &&
+                       row->stableKey == (section->second.root.empty() ? section->second.first : section->second.root);
+        if (section != sectionRanges_.end() && section->second.root.empty()) {
+            int previous = position - 1;
+            while (previous >= 0 && model_->row(previous)->sectionKey == row->sectionKey && !model_->row(previous)->presented) {
+                --previous;
+            }
+            opening = previous < 0 || model_->row(previous)->sectionKey != row->sectionKey;
+        }
+        const auto* message = std::get_if<AgentMessageData>(&row->card.payload);
+        const auto* local = std::get_if<LocalPromptData>(&row->card.payload);
+        const auto* prompt = std::get_if<UserMessageData>(&row->card.payload);
+        const bool reply = (prompt || local) && !nodegraph::questionReplies(prompt ? prompt->text : local->prompt).empty();
+        if (opening && ((scope == NavigationScope::All && !message && !reply) || scope == NavigationScope::Turns)) {
+            result = NavigationScope::Turns;
+        } else if (message && !message->questionRequest.is_null() &&
+                   (scope == NavigationScope::All || scope == NavigationScope::Questions ||
+                    (scope == NavigationScope::Answers && std::ranges::any_of(message->answers, [](const auto& answer) {
+                         return !answer.empty();
+                     })))) {
+            result = NavigationScope::Questions;
+        } else if (message && message->questionRequest.is_null() && message->phase == "final_answer" &&
+                   (scope == NavigationScope::All || scope == NavigationScope::FinalAnswers)) {
+            result = NavigationScope::FinalAnswers;
+        } else if (message && message->questionRequest.is_null() && message->phase == "partial_answer" &&
+                   (scope == NavigationScope::All || scope == NavigationScope::Answers)) {
+            result = NavigationScope::Answers;
+        } else if (message && message->questionRequest.is_null() && message->phase != "final_answer" &&
+                   message->phase != "partial_answer" && (scope == NavigationScope::All || scope == NavigationScope::Updates)) {
+            result = NavigationScope::Updates;
+        } else if (reply && (!local || local->state != PromptState::Failed) &&
+                   (scope == NavigationScope::All || scope == NavigationScope::Answers)) {
+            result = NavigationScope::Answers;
+        } else if (row->nested && !reply &&
+                   (std::holds_alternative<UserMessageData>(row->card.payload) || (local && local->state != PromptState::Failed)) &&
+                   (scope == NavigationScope::All || scope == NavigationScope::Steering)) {
+            result = NavigationScope::Steering;
+        }
+    }
+    return result;
+}
+
+std::vector<ConversationView::CheckpointDestination> ConversationView::checkpointDestinations(NavigationScope scope) const {
+    std::vector<CheckpointDestination> result;
+    int turn = 0;
     std::string previous;
     for (int position = 0; position < model_->rowCount(); ++position) {
         const auto* row = model_->row(position);
-        if (row && row->sectionKey != previous) {
-            previous = row->sectionKey;
-            const auto section = sectionRanges_.find(previous);
-            if (!row->card.turnId.empty() && section != sectionRanges_.end()) {
-                const auto opening = modelSectionRow(section->second.root.empty() ? section->second.first : section->second.root);
-                if (opening && rowPresented(*opening)) {
-                    const auto* card = model_->card(*opening);
-                    const auto* prompt = std::get_if<UserMessageData>(&card->payload);
-                    const QString label = prompt ? presentation::userMessageMarkdown(QString::fromStdString(prompt->text)).simplified()
-                                                 : QStringLiteral("Turn without an opening prompt");
-                    result.push_back({model_->row(*opening)->stableKey, label.isEmpty() ? QStringLiteral("Attachment prompt") : label});
-                }
+        if (row && !row->card.turnId.empty()) {
+            if (row->sectionKey != previous) {
+                previous = row->sectionKey;
+                ++turn;
+            }
+            if (const auto kind = checkpointKind(position, scope)) {
+                const auto* message = std::get_if<AgentMessageData>(&row->card.payload);
+                const auto* prompt = std::get_if<UserMessageData>(&row->card.payload);
+                const auto* local = std::get_if<LocalPromptData>(&row->card.payload);
+                const bool answered = message && std::ranges::any_of(message->answers, [](const auto& answer) {
+                                          return !answer.empty();
+                                      });
+                const QString type = *kind == NavigationScope::Updates ? QStringLiteral("update")
+                                     : *kind == NavigationScope::Questions
+                                         ? (answered ? QStringLiteral("answer") : QStringLiteral("question"))
+                                     : *kind == NavigationScope::Answers      ? QStringLiteral("answer")
+                                     : *kind == NavigationScope::FinalAnswers ? QStringLiteral("final answer")
+                                     : *kind == NavigationScope::Steering     ? QStringLiteral("steering")
+                                                                              : QStringLiteral("opening");
+                const QString text =
+                    prompt  ? QString::fromStdString(prompt->text)
+                    : local ? QString::fromStdString(local->prompt)
+                    : message && !message->questionRequest.is_null()
+                        ? QString::fromStdString(message->questionRequest.at("questions").at(0).at("question").get<std::string>())
+                    : message ? QString::fromStdString(message->text)
+                              : QStringLiteral("Turn without an opening prompt");
+                const QString preview = presentation::userMessageMarkdown(text).simplified();
+                result.push_back({row->stableKey, turn, type, preview.isEmpty() ? QStringLiteral("Attachment prompt") : preview});
             }
         }
     }
     return result;
 }
 
-std::string ConversationView::navigationTarget(int direction) const {
+std::string ConversationView::navigationTarget(int direction, NavigationScope scope) const {
     std::string result;
     if (!structuralStagingActive() && loadingThreadId_.empty()) {
         const Anchor anchor = captureAnchor();
-        auto member = modelSectionRow(anchor.stableKey);
-        const auto* row = member ? model_->row(*member) : nullptr;
-        while (row && row->card.turnId.empty() && member && *member > 0) {
-            const auto previous = heights_.previousRowWithExtent(static_cast<std::size_t>(*member - 1));
-            member = previous < heights_.size() ? std::optional<int>(static_cast<int>(previous)) : std::nullopt;
-            row = member ? model_->row(*member) : nullptr;
-        }
-        auto section = row ? sectionRanges_.find(row->sectionKey) : sectionRanges_.end();
-        if (section != sectionRanges_.end() && !row->card.turnId.empty()) {
-            const auto opening = modelSectionRow(section->second.root.empty() ? section->second.first : section->second.root);
-            const bool atOpening = opening && anchor.stableKey == model_->row(*opening)->stableKey &&
-                                   (std::abs(rowRect(*opening).top()) <= 1 || (isAtBottom() && rowRect(*opening).top() >= 0));
-            if (direction > 0 || (direction < 0 && atOpening)) {
-                const auto edge = modelSectionRow(direction > 0 ? section->second.last : section->second.first);
-                std::size_t adjacent = heights_.size();
-                if (edge && direction > 0) {
-                    adjacent = heights_.nextRowWithExtent(static_cast<std::size_t>(*edge + 1));
-                } else if (edge && *edge > 0) {
-                    adjacent = heights_.previousRowWithExtent(static_cast<std::size_t>(*edge - 1));
+        const auto member = modelSectionRow(anchor.stableKey);
+        if (member) {
+            const bool atStart = std::abs(rowRect(*member).top()) <= 1 || (isAtBottom() && rowRect(*member).top() >= 0);
+            int position = *member + (direction > 0 ? 1 : direction < 0 && atStart ? -1 : 0);
+            while (position >= 0 && position < model_->rowCount() && result.empty()) {
+                if (checkpointKind(position, scope)) {
+                    result = model_->row(position)->stableKey;
                 }
-                const auto* next = adjacent < heights_.size() ? model_->row(static_cast<int>(adjacent)) : nullptr;
-                while (next && next->card.turnId.empty()) {
-                    adjacent = direction > 0  ? heights_.nextRowWithExtent(adjacent + 1)
-                               : adjacent > 0 ? heights_.previousRowWithExtent(adjacent - 1)
-                                              : heights_.size();
-                    next = adjacent < heights_.size() ? model_->row(static_cast<int>(adjacent)) : nullptr;
-                }
-                section = next && !next->card.turnId.empty() ? sectionRanges_.find(next->sectionKey) : sectionRanges_.end();
-            }
-            if (section != sectionRanges_.end()) {
-                result = section->second.root.empty() ? section->second.first : section->second.root;
+                position += direction > 0 ? 1 : -1;
             }
         }
     }
     return result;
 }
 
-void ConversationView::navigateToTurn(const std::string& key, bool focus) {
+void ConversationView::navigateToCheckpoint(const std::string& key, bool focus) {
     const auto position = modelSectionRow(key);
     const auto* row = position ? model_->row(*position) : nullptr;
     const auto section = row ? sectionRanges_.find(row->sectionKey) : sectionRanges_.end();
-    const bool opening = section != sectionRanges_.end() && !row->card.turnId.empty() &&
-                         key == (section->second.root.empty() ? section->second.first : section->second.root);
-    if (opening && position && rowPresented(*position) && !applying_ && !structuralStagingActive() && loadingThreadId_.empty()) {
+    if (position && row->presented && !applying_ && !structuralStagingActive() && loadingThreadId_.empty()) {
+        if (row->nested && !rowPresented(*position) && section != sectionRanges_.end()) {
+            const auto root = modelSectionRow(section->second.root);
+            if (root) {
+                static_cast<void>(materializeRow(*root));
+                setCardCollapsed(section->second.root, cardForStableKey(section->second.root), false);
+            }
+        }
         stopFollowingAnimation();
         mode_ = Mode::Paused;
         pausedByCommandOutput_ = false;
@@ -938,9 +986,9 @@ void ConversationView::navigateToTurn(const std::string& key, bool focus) {
 }
 
 void ConversationView::navigateToFirstTurn() {
-    const auto destinations = turnDestinations();
-    if (!destinations.empty() && !navigationTarget().empty()) {
-        navigateToTurn(destinations.front().key);
+    const auto destinations = checkpointDestinations(NavigationScope::Turns);
+    if (!destinations.empty() && !navigationTarget(0, NavigationScope::Turns).empty()) {
+        navigateToCheckpoint(destinations.front().key);
         mode_ = Mode::First;
         loadEarlier(true);
     }
@@ -1239,14 +1287,10 @@ void ConversationView::publishReconciliation(
   const auto materializedAction = promptMaterializedAction_;
   const QPointer<ConversationView> lifetime(this);
   if (mode_ == Mode::First) {
-      const auto* first = model_->row(0);
-      const auto section = first ? sectionRanges_.find(first->sectionKey) : sectionRanges_.end();
-      if (section != sectionRanges_.end()) {
-          const auto& key = section->second.root.empty() ? section->second.first : section->second.root;
-          if (captureAnchor().stableKey != key) {
-              navigateToTurn(key, false);
-              mode_ = Mode::First;
-          }
+      const auto destinations = checkpointDestinations(NavigationScope::Turns);
+      if (!destinations.empty() && captureAnchor().stableKey != destinations.front().key) {
+          navigateToCheckpoint(destinations.front().key, false);
+          mode_ = Mode::First;
       }
   }
   Q_EMIT navigationChanged();

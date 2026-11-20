@@ -5,7 +5,7 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {App} from "../dist/app/App.js";
 import {BrowserFrontendSession, ConversationViewportState, PresentationModel, ProtocolNormalizer,
-    projectConversation, stableKey, turnOpenings, turnNavigationTarget} from "../dist/index.js";
+    projectConversation, stableKey, turnOpenings, checkpointDestinations, checkpointNavigationTarget} from "../dist/index.js";
 
 const contract = JSON.parse(readFileSync(new URL("../../tests/fixtures/conversation-navigation.json", import.meta.url), "utf8"));
 
@@ -24,6 +24,12 @@ function fixture() {
         }
     }
     return {model, normalizer, projection: () => projectConversation(model.thread(contract.threadId), [], 1000, 0)};
+}
+
+function turnNavigationTarget(openings, turnId, atOpening, direction) {
+    const sections = openings.map(card => ({turnId: card.turnId, cards: [card]}));
+    const card = openings.find(card => card.turnId === turnId);
+    return card ? checkpointNavigationTarget(sections, "turns", {cardKey: stableKey(card.key), pixelOffset: atOpening ? 0 : -20}, direction) : undefined;
 }
 
 for (const transition of contract.transitions) {
@@ -68,15 +74,75 @@ test("chosen anchor survives streaming and lifetime changes through the existing
 test("empty browser header offers disabled navigation alongside existing presentation controls", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("offline fixture"); });
     const markup = renderToStaticMarkup(createElement(App, {session}));
+    assert.match(markup, />All checkpoints<\/button>/u);
     assert.match(markup, /class="thread-heading-context"[\s\S]*class="turn-navigation"[\s\S]*class="thread-workspace-copy"[\s\S]*class="thread-workspace"/u);
-    assert.match(markup, /aria-label="Turn opening;[\s\S]*class="turn-outline[\s\S]*aria-label="Next turn opening"[\s\S]*aria-label="First turn;[\s\S]*class="conversation-latest"/u);
+    assert.match(markup, /aria-label="Previous checkpoint;[\s\S]*class="turn-outline[\s\S]*aria-label="Next checkpoint"[\s\S]*aria-label="First turn;[\s\S]*class="conversation-latest"/u);
     const presentation = markup.match(/<div class="conversation-view-controls"[^>]*>([\s\S]*?)<\/div>/u)?.[1];
     assert.ok(presentation);
     assert.doesNotMatch(presentation, /class="turn-navigation"/u);
-    assert.match(markup, /aria-label="Turn opening; previous turn when already there"[^>]*disabled/u);
+    assert.match(markup, /aria-label="Previous checkpoint; current checkpoint opening when inside it"[^>]*disabled/u);
     assert.match(markup, /aria-label="First turn; load earlier history if needed"[^>]*disabled/u);
-    assert.match(markup, /aria-label="Next turn opening"[^>]*disabled/u);
+    assert.match(markup, /aria-label="Next checkpoint"[^>]*disabled/u);
     assert.match(markup, /class="conversation-latest"[^>]*disabled/u);
     assert.doesNotMatch(markup, /\d+ of \d+/u);
     session.dispose();
+});
+
+const checkpointContract = JSON.parse(readFileSync(new URL("../../tests/fixtures/checkpoint-navigation.json", import.meta.url), "utf8"));
+export function checkpointSections() {
+    return checkpointContract.turns.map(turn => {
+        const cards = turn.cards.map(item => ({threadId: checkpointContract.threadId, turnId: turn.id, itemId: item.id,
+            kind: item.kind, key: {kind: "item", threadId: checkpointContract.threadId, turnId: turn.id, itemId: item.id},
+            payload: {text: item.text, phase: item.phase, questionRequest: item.questionRequest, answers: item.answers, questionStatus: item.questionStatus}}));
+        return {key: turn.id, turnId: turn.id, rootCardKey: cards[0].kind === "userMessage" ? cards[0].key : undefined, cards};
+    });
+}
+const checkpointId = card => card ? `${card.turnId}/${card.itemId}` : null;
+for (const [scope, expected] of Object.entries(checkpointContract.expected)) {
+    test(`checkpoint differential outline: ${scope}`, () => {
+        const destinations = checkpointDestinations(checkpointSections(), scope);
+        assert.deepEqual(destinations.map(({card}) => checkpointId(card)), expected);
+        assert.equal(new Set(destinations.map(({card}) => stableKey(card.key))).size, destinations.length);
+        assert(destinations.every(({card, action}) => action === (scope === "turns" ? "opening" : checkpointContract.actions[checkpointId(card)])));
+        assert(destinations.every(({card, action, preview, label}) => label === `${checkpointContract.turns.findIndex(turn => turn.id === card.turnId) + 1} | ${action} ${preview}`));
+        assert(destinations.every(({card, label}) => !card.payload.questionRequest
+            || label.includes(card.payload.questionRequest.questions[0].question)), "question text identifies pending and answered checkpoints");
+    });
+}
+for (const query of checkpointContract.queries) {
+    test(`checkpoint differential jump: ${query.scope} ${query.anchor} ${query.offset} ${query.direction}`, () => {
+        const sections = checkpointSections(), card = sections.flatMap(section => section.cards).find(card => checkpointId(card) === query.anchor);
+        assert.equal(checkpointId(checkpointNavigationTarget(sections, query.scope,
+            {cardKey: stableKey(card.key), pixelOffset: query.offset}, query.direction)), query.target);
+    });
+}
+test("checkpoint filters respect visible data and pending steering semantics", () => {
+    const sections = checkpointSections();
+    const steering = sections[0].cards.find(card => card.itemId === "steer");
+    const queued = {...steering, kind: "localPrompt", itemId: "local", key: {...steering.key, itemId: "local"}, payload: {prompt: "Pending steering", state: "queued"}};
+    sections[0].cards.push(queued);
+    assert.equal(checkpointDestinations(sections, "steering").at(1).card, queued);
+    queued.payload.state = "failed";
+    assert.equal(checkpointDestinations(sections, "steering").length, 2);
+    sections[0].cards[1].payload.questionRequest = {questions: [{question: "Extra question"}]};
+    assert.equal(checkpointDestinations(sections, "questions").length, 3, "pending and answered questions remain checkpoints");
+    assert.equal(checkpointDestinations(sections, "updates").length, 2, "async questions are not Codex updates");
+    for (const section of sections) { section.cards = section.cards.filter(card => card.kind !== "agentMessage" || card.payload.questionRequest || ["final_answer", "partial_answer"].includes(card.payload.phase)); }
+    assert.deepEqual(checkpointDestinations(sections, "updates"), []);
+    assert.equal(checkpointNavigationTarget(sections, "updates", undefined, 1), undefined);
+    assert.deepEqual(checkpointDestinations([]), []);
+});
+
+for (const [scope, expected] of Object.entries(checkpointContract.hiddenUpdates)) {
+    test(`checkpoint differential hidden updates: ${scope}`, () => {
+        const sections = checkpointSections().map(section => ({...section,
+            cards: section.cards.filter(card => card.kind !== "agentMessage" || card.payload.questionRequest || ["final_answer", "partial_answer"].includes(card.payload.phase))}));
+        assert.deepEqual(checkpointDestinations(sections, scope).map(({card}) => checkpointId(card)), expected);
+    });
+}
+
+test("unassigned prompts do not shift checkpoint turn context", () => {
+    const sections = checkpointSections();
+    sections.unshift({key: "unassigned", turnId: "", cards: [{...sections[0].cards[0], turnId: ""}]});
+    assert(checkpointDestinations(sections)[0].label.startsWith("1 | opening "));
 });

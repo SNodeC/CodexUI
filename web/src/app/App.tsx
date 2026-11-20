@@ -10,9 +10,9 @@ import {
     foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
     isEmptyStatus, isWorkingStatus, projectTurnPlan, settingDraftFor, settingPresentation, settingPromptOptions, statusTone,
-    statusToken, trimTrailingEmptyLines, turnSettingCatalog, turnOpenings, turnNavigationTarget,
+    statusToken, trimTrailingEmptyLines, turnSettingCatalog, turnOpenings, CheckpointScopes, checkpointDestinations, checkpointNavigationTarget,
 } from "../index.js";
-import type {ConversationViewportAnchor, PendingRequestPresentation, SettingCatalog, SettingDraft, SettingField, SettingPresentation, ThreadPresentation} from "../index.js";
+import type {CheckpointScope, ConversationViewportAnchor, PendingRequestPresentation, SettingCatalog, SettingDraft, SettingField, SettingPresentation, ThreadPresentation} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
@@ -1108,6 +1108,15 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     const previousPresentation = useRef(presentationKey);
     const pendingGeometry = useRef<PendingConversationGeometry>();
     const [cardStateRevision, forceCardState] = useState(0);
+    const updateScroll = (scrollTop: number, following: boolean, anchor?: ConversationViewportAnchor) => {
+        const previous = viewport.scroll(projectionId, presentationKey);
+        viewport.updateScroll(projectionId, presentationKey, scrollTop, following, anchor);
+        if (previous.following !== following || previous.anchor?.cardKey !== anchor?.cardKey
+            || ((previous.anchor?.pixelOffset ?? -Infinity) >= -1) !== ((anchor?.pixelOffset ?? -Infinity) >= -1)
+            || (Math.abs(previous.anchor?.pixelOffset ?? Infinity) <= 1) !== (Math.abs(anchor?.pixelOffset ?? Infinity) <= 1)) {
+            forceCardState(value => value + 1);
+        }
+    };
     const displayedPresentation = useRef(presentationKey);
     const transitionGeneration = useRef(0);
     const [spinnerProjection, setSpinnerProjection] = useState("");
@@ -1141,6 +1150,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         };
     }, [presentationKey, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
+    const [checkpointScope, setCheckpointScope] = useState<CheckpointScope>("all");
     const authored = session.composerDrafts.get(presentationKey);
     const prompt = authored?.text ?? "";
     const attachments = authored?.attachments ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.attachments ?? [] : []);
@@ -1204,7 +1214,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         }
         const following = transaction?.fold ? false : transaction?.following ?? saved.following;
         const anchor = conversationAnchor(element, following || transaction?.fold ? undefined : transaction?.anchor ?? saved.anchor);
-        viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, anchor);
+        updateScroll(element.scrollTop, following, anchor);
         const focusOwned = pane.current?.contains(document.activeElement) && !composerDock.current?.contains(document.activeElement);
         if (transaction?.focus && (!transaction.first || focusOwned)) {
             const target = anchor ? cardForKey(element, anchor.cardKey) : undefined;
@@ -1230,7 +1240,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             if (element && previousHeight !== 0) {
                 if (height > previousHeight && saved.following) element.scrollTop = element.scrollHeight;
                 else restoreConversationAnchor(element, anchor, saved.scrollTop);
-                viewport.updateScroll(projectionId, presentationKey, element.scrollTop, saved.following,
+                updateScroll(element.scrollTop, saved.following,
                     conversationAnchor(element, anchor));
             }
             previousHeight = height;
@@ -1242,7 +1252,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         if (!scroll.current) return;
         const anchor = conversationAnchor(scroll.current);
         pendingGeometry.current = {presentationKey, following: false, anchor};
-        viewport.updateScroll(projectionId, presentationKey, scroll.current.scrollTop, false, anchor);
+        updateScroll(scroll.current.scrollTop, false, anchor);
     };
     const updatePresentation = (change: Partial<ConversationPresentationOptions>) => setPresentation(current => {
         if (change.showReasoning !== undefined || change.showCodexUpdates !== undefined) pauseForRelayout();
@@ -1269,7 +1279,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             const anchor = conversationAnchor(element);
             pendingGeometry.current = {presentationKey, following: false, anchor,
                 fold: {cardKey: key, collapsed: !collapsed, previousTitleTop}};
-            viewport.updateScroll(projectionId, presentationKey, element.scrollTop, false, anchor);
+            updateScroll(element.scrollTop, false, anchor);
         }
         if (viewport.setCardCollapsed(projectionId, presentationKey, key, !collapsed))
             forceCardState(value => value + 1);
@@ -1282,15 +1292,13 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
     const historyLoading = session.historyLoading(projectionId, presentationKey);
     const navigation = viewport.scroll(projectionId, presentationKey);
     const openingCards = turnOpenings(visibleSections);
-    const anchoredCard = visibleSections.flatMap(section => section.cards)
-        .find(card => stableKey(card.key) === navigation.anchor?.cardKey);
-    const currentOpening = openingCards.find(card => card.turnId === anchoredCard?.turnId)
-        ?? (anchoredCard?.turnId === "" ? openingCards.at(-1) : openingCards[0]);
-    const atOpening = currentOpening !== undefined && navigation.anchor?.cardKey === stableKey(currentOpening.key)
-        && (Math.abs(navigation.anchor.pixelOffset) <= 1 || (navigation.anchor.pixelOffset >= 0
-            && Boolean(scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight <= 1)));
-    const navigationEnabled = !threadTransitionActive && currentOpening !== undefined;
-    const atFirstOpening = currentOpening === openingCards[0] && anchoredCard === currentOpening && (navigation.anchor?.pixelOffset ?? -Infinity) >= -1;
+    const navigationEnabled = !threadTransitionActive && conversation.sections.some(section => section.cards.length > 0);
+    const atFirstOpening = openingCards[0] !== undefined && navigation.anchor?.cardKey === stableKey(openingCards[0].key)
+        && (navigation.anchor?.pixelOffset ?? -Infinity) >= -1;
+    const loadedSections = () => session.conversation(authoritativeCount).sections
+        .map(section => ({...section, cards: section.cards.filter(cardVisible)}));
+    const navigationSections = navigationEnabled && navigation.anchor ? loadedSections() : [];
+    const atBottom = navigation.following || (navigation.anchor?.pixelOffset ?? 0) > 1 && Boolean(scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight <= 1);
     const loadEarlier = () => {
         if (!historyPagePending) {
             viewport.loadMore(projectionId, presentationKey);
@@ -1300,20 +1308,23 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             forceCardState(value => value + 1);
         }
     };
-    const loadedOpenings = () => turnOpenings(session.conversation(authoritativeCount).sections
-        .map(section => ({...section, cards: section.cards.filter(cardVisible)})));
     const navigateTo = (card?: VisibleCardData, first = false) => {
         if (card && navigationEnabled && session.threadVisualKey(projectionId) === presentationKey) {
             const key = stableKey(card.key);
             const loaded = session.conversation(authoritativeCount);
-            const target = turnOpenings(loaded.sections).find(opening => stableKey(opening.key) === key);
+            const section = loaded.sections.find(section => section.cards.some(item => stableKey(item.key) === key));
+            const target = section?.cards.find(item => stableKey(item.key) === key);
             if (target) {
+                const root = section?.cards.find(item => section.rootCardKey && stableKey(item.key) === stableKey(section.rootCardKey));
+                if (root && root !== target && cardCollapsed(root, stableKey(root.key))) {
+                    viewport.setCardCollapsed(projectionId, presentationKey, stableKey(root.key), false);
+                }
                 const position = loaded.sections.flatMap(section => section.cards).findIndex(item => stableKey(item.key) === key);
                 let requested = limit;
                 while (requested < authoritativeCount - position) { requested = viewport.loadMore(projectionId, presentationKey); }
                 const anchor = {cardKey: key, pixelOffset: 0};
                 pendingGeometry.current = {presentationKey, following: false, anchor, focus: true, first};
-                viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, false, anchor);
+                updateScroll(scroll.current?.scrollTop ?? 0, false, anchor);
                 if (first) {
                     pane.current?.focus({preventScroll: true});
                     session.loadMoreHistory(projectionId, presentationKey, true);
@@ -1323,7 +1334,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         }
     };
     const navigateAdjacent = (direction: number) => {
-        navigateTo(turnNavigationTarget(loadedOpenings(), currentOpening?.turnId ?? "", atOpening, direction));
+        navigateTo(checkpointNavigationTarget(loadedSections(), checkpointScope, navigation.anchor, direction, atBottom));
     };
 
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
@@ -1335,7 +1346,15 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 if (turn) { setTurnRemoval({threadId: card.threadId, turnId: card.turnId, presentationKey, turn, position, stage: "menu", cardKey: key, opener}); }
             }}
             onTiming={() => onInspect("timing", {threadId: card.threadId, turnId: card.turnId, ...(card.itemId ? {itemId: card.itemId} : {})})}
-            onRestore={() => { if (card.kind === "localPrompt") { const text = session.restorePrompt(projectionId, (card.payload as LocalPromptData).submissionId, presentationKey, prompt, attachments); if (text !== undefined) { setPrompt(text); queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message Codex']")?.focus()); } } }}
+            onRestore={() => {
+                if (card.kind === "localPrompt") {
+                    const text = session.restorePrompt(projectionId, (card.payload as LocalPromptData).submissionId, presentationKey, prompt, attachments);
+                    if (text !== undefined) {
+                        session.setComposerDraft(session.threadVisualKey(DraftThreadId), {text, attachments: session.getSnapshot().newThreadDraft?.attachments ?? []});
+                        queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message Codex']")?.focus());
+                    }
+                }
+            }}
             {...(card.kind === "commandExecution" ? {commandScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:command`, false), outputScroll: viewport.codeScroll(projectionId, presentationKey, `${key}:output`, true)} : {})} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
@@ -1354,21 +1373,26 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
             </div>
             <div className="conversation-lockup"><div className="thread-heading-context"><h1>{thread?.title ?? (projectionId === DraftThreadId ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
                 {thread && <span className={`conversation-state ${statusTone(thread.status)}`}>{displayStatus(thread.status)}</span>}
-                <div className="turn-navigation" aria-label="Turn navigation">
-                    <button aria-label="Turn opening; previous turn when already there" data-tooltip="Turn opening / previous turn" disabled={!navigationEnabled || (!turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, -1) && conversation.hiddenAuthoritativeItemCount === 0)} onClick={() => navigateAdjacent(-1)}>↑</button>
-                    <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label="Turns" disabled={!navigationEnabled}>{() => {
-                        const openings = loadedOpenings();
-                        return <><div className="turn-outline-count">{openings.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
-                            {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier turns…" : "Load earlier turns"}</button>}
-                            {openings.map(card => <button key={stableKey(card.key)} aria-current={card.turnId === currentOpening?.turnId ? "true" : undefined}
-                                autoFocus={card.turnId === currentOpening?.turnId} onClick={() => navigateTo(card)} title={card.kind === "userMessage" ? cardCopyContent(card).text : "Turn without an opening prompt"}>
-                                {card.kind === "userMessage" ? cardCopyContent(card).text.trim() || "Attachment prompt" : "Turn without an opening prompt"}</button>)}</>;
+                <div className="turn-navigation" aria-label="Checkpoint navigation">
+                    <button aria-label="Previous checkpoint; current checkpoint opening when inside it" data-tooltip="Previous checkpoint / checkpoint opening" disabled={!navigationEnabled || Boolean(navigation.anchor && !checkpointNavigationTarget(navigationSections, checkpointScope, navigation.anchor, -1, atBottom))} onClick={() => navigateAdjacent(-1)}>↑</button>
+                    <Menu key={`turns:${presentationKey}:${threadTransitionActive}`} className="turn-outline" label={CheckpointScopes[checkpointScope]} disabled={!navigationEnabled}>{() => {
+                        const destinations = checkpointDestinations(loadedSections(), checkpointScope);
+                        const current = checkpointNavigationTarget(loadedSections(), checkpointScope, navigation.anchor, 0, atBottom);
+                        const selectedKey = current ? stableKey(current.key) : "";
+                        return <><label>Checkpoint type <select aria-label="Checkpoint type" value={checkpointScope}
+                            onChange={event => setCheckpointScope(event.target.value as CheckpointScope)}>
+                            {Object.entries(CheckpointScopes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                            {!presentation.showCodexUpdates && ["all", "updates"].includes(checkpointScope) && <button onClick={() => updatePresentation({showCodexUpdates: true})}>Codex updates are hidden — Show updates</button>}
+                            <div className="turn-outline-count">{destinations.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
+                            {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier history…" : "Load earlier history"}</button>}
+                            {destinations.map(({card, turn, action, preview, label}) => <button className="checkpoint-entry" aria-label={label} key={stableKey(card.key)} aria-current={stableKey(card.key) === selectedKey ? "true" : undefined}
+                                autoFocus={stableKey(card.key) === selectedKey} onClick={() => navigateTo(card)} title={label}><span>{turn} |</span><span>{action}</span><span>{preview}</span></button>)}</>;
                     }}</Menu>
-                    <button aria-label="Next turn opening" data-tooltip="Next turn opening" disabled={!navigationEnabled || !turnNavigationTarget(openingCards, currentOpening?.turnId ?? "", atOpening, 1)} onClick={() => navigateAdjacent(1)}>↓</button>
-                    <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && atFirstOpening)} onClick={() => navigateTo(loadedOpenings()[0], true)}>↥</button>
+                    <button aria-label="Next checkpoint" data-tooltip="Next checkpoint" disabled={!navigationEnabled || Boolean(navigation.anchor && !checkpointNavigationTarget(navigationSections, checkpointScope, navigation.anchor, 1, atBottom))} onClick={() => navigateAdjacent(1)}>↓</button>
+                    <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && (openingCards.length === 0 || atFirstOpening))} onClick={() => navigateTo(turnOpenings(loadedSections())[0], true)}>↥</button>
                     <button className="conversation-latest" disabled={navigation.following || !navigationEnabled} aria-label="Latest output; resume following" data-tooltip="Latest output / resume following" onClick={() => {
                         pendingGeometry.current = {presentationKey, following: true, anchor: undefined, focus: true};
-                        viewport.updateScroll(projectionId, presentationKey, scroll.current?.scrollTop ?? 0, true);
+                        updateScroll(scroll.current?.scrollTop ?? 0, true);
                         forceCardState(value => value + 1);
                     }}>↧</button>
                 </div>
@@ -1390,12 +1414,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 pendingGeometry.current = undefined;
                 const following = element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
                 const anchor = conversationAnchor(element);
-                viewport.updateScroll(projectionId, presentationKey, element.scrollTop, following, anchor);
-                if (previous.following !== following || previous.anchor?.cardKey !== anchor?.cardKey
-                    || ((previous.anchor?.pixelOffset ?? -Infinity) >= -1) !== ((anchor?.pixelOffset ?? -Infinity) >= -1)
-                    || (Math.abs(previous.anchor?.pixelOffset ?? Infinity) <= 1) !== (Math.abs(anchor?.pixelOffset ?? Infinity) <= 1)) {
-                    forceCardState(value => value + 1);
-                }
+                updateScroll(element.scrollTop, following, anchor);
             }
         }}>
             {threadTransitionActive
@@ -1478,7 +1497,8 @@ function Menu({label, className, children, disabled = false, context, onClose, r
         onKeyDown={event => {
             if (role === "menu" && event.key === "Escape") {
                 event.preventDefault(); event.stopPropagation(); event.currentTarget.hidePopover();
-            } else if (typeof children === "function" && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+            } else if (typeof children === "function" && !(event.target as HTMLElement).closest("select, input, textarea")
+                && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
                 const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
                 const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
                 const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current + (event.key === "ArrowUp" ? -1 : 1);

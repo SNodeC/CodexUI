@@ -352,6 +352,10 @@ const applicationProfilePrepare = `(async()=>{
     profile.grid=grid;profile.controls=controls;profile.options=options;profile.cards=cards;
     profile.targetCard=targetCard;profile.targetText=targetText;profile.settingsObserver=settingsObserver;
     profile.conversationObserver=conversationObserver;profile.mutations=mutations;
+    profile.headerMutations=[];
+    profile.headerObserver=new MutationObserver(records=>profile.headerMutations.push(...records.map(record=>({
+        node:record.target.outerHTML,attribute:record.attributeName,oldValue:record.oldValue}))));
+    profile.headerObserver.observe(document.querySelector(".conversation-heading"),{attributes:true,attributeOldValue:true,subtree:true});
     profile.activityText=document.querySelector(".conversation-activity")?.textContent||"";
     profile.scroll=scroll;profile.focused=controls[0];profile.scrollTop=scroll.scrollTop;
     profile.followingGap=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight;
@@ -363,13 +367,14 @@ const applicationProfileNoOp = `(async()=>{
     profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",method:"thread/settings/updated",params:{
         threadId:"profile",threadSettings:{model:"gpt-a"}}}});
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
+    profile.headerObserver.disconnect();
     const grid=profile.grid;const controls=profile.controls;const options=profile.options;
     const nextControls=[...grid.querySelectorAll("select,input")];const nextOptions=[...grid.querySelectorAll("option")];
     return {gridStable:grid===document.querySelector(".settings-grid"),
         controlsStable:controls.length===nextControls.length&&controls.every((node,index)=>node===nextControls[index]),
         optionsStable:options.length===nextOptions.length&&options.every((node,index)=>node===nextOptions[index]),
         focusStable:document.activeElement===profile.focused,scrollStable:profile.scroll.scrollTop===profile.scrollTop,
-        activityBefore:profile.activityText,
+        headerMutations:profile.headerMutations,activityBefore:profile.activityText,
         activityAfter:document.querySelector(".conversation-activity")?.textContent||"",
         ...profile.mutations};
 })()`;
@@ -377,14 +382,16 @@ const applicationProfileNoOp = `(async()=>{
 const applicationProfileStream = `(async()=>{
     const profile=globalThis.codexuiApplicationProfile;profile.mutations.settingsStructuralMutations=0;
     profile.mutations.conversationStructuralMutations=0;profile.mutations.targetTextMutations=0;
+    profile.headerMutations=[];
+    profile.headerObserver.observe(document.querySelector(".conversation-heading"),{attributes:true,attributeOldValue:true,subtree:true});
     const beforeText=profile.targetText.data;const started=performance.now();
     for(let index=0;index<2000;++index)profile.socket.receive({kind:"appserver",payload:{jsonrpc:"2.0",
         method:"item/agentMessage/delta",params:{threadId:"profile",turnId:"turn-79",itemId:"item-79-124",delta:"x"}}});
     const ingestMilliseconds=performance.now()-started;
     await new Promise(complete=>requestAnimationFrame(()=>requestAnimationFrame(()=>complete())));
     const cards=[...document.querySelectorAll(".conversation-card")];const controls=[...profile.grid.querySelectorAll("select,input")];
-    const options=[...profile.grid.querySelectorAll("option")];profile.settingsObserver.disconnect();profile.conversationObserver.disconnect();
-    return {ingestMilliseconds,settledMilliseconds:performance.now()-started,streamedDeltas:2000,
+    const options=[...profile.grid.querySelectorAll("option")];profile.settingsObserver.disconnect();profile.conversationObserver.disconnect();profile.headerObserver.disconnect();
+    return {headerMutations:profile.headerMutations,ingestMilliseconds,settledMilliseconds:performance.now()-started,streamedDeltas:2000,
         textGrowth:profile.targetText.data.length-beforeText.length,targetCardStable:profile.targetCard===cards.at(-1),
         targetTextStable:profile.targetText===profile.targetCard.querySelector(".safe-markdown p")?.firstChild,
         cardsStable:profile.cards.length===cards.length&&profile.cards.every((node,index)=>node===cards[index]),
@@ -724,6 +731,91 @@ await access(join(artifactDirectory, "index.html"), fsConstants.R_OK);
 const executable = await chromeExecutable();
 const headerContract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/frontend-presentation.json"), "utf8")).cardHeader;
 const navigationContract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/conversation-navigation.json"), "utf8"));
+const checkpointContract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/checkpoint-navigation.json"), "utf8"));
+const checkpointCheck = `(async()=>{
+    const contract=${JSON.stringify(checkpointContract)},frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
+    const waitFor=async(predicate,label)=>{for(let attempt=0;attempt<300&&!predicate();++attempt){await new Promise(done=>setTimeout(done,5));}if(!predicate()){throw new Error('Checkpoint timeout: '+label);}};
+    const socket=globalThis.codexuiApplicationProfile.socket,original=socket.send.bind(socket);
+    const metadata={id:contract.threadId,name:'Checkpoint fixture',historyMode:'paginated',ephemeral:false,status:{type:'idle'},cwd:'/checkpoint'};
+    const turns=contract.turns.map(turn=>({id:turn.id,status:'completed',items:turn.cards.map(item=>item.kind==='userMessage'
+        ?{id:item.id,type:'userMessage',content:[{type:'text',text:item.text}]}
+        :{id:item.id,type:'agentMessage',phase:item.phase,text:item.text,...(item.questionRequest?{delivery:'async',questions:item.questionRequest.questions.map(question=>({title:question.question,options:question.options.map(option=>option.label)}))}:{})})}));
+    socket.send=data=>{const envelope=JSON.parse(data),request=envelope.payload;
+        if(envelope.kind==='appserver'&&request?.params?.threadId===metadata.id){
+            socket.sent.push(envelope);const result=request.method==='thread/resume'?{thread:metadata}
+                :request.method==='thread/turns/list'?{data:turns.toReversed(),nextCursor:null}
+                :{data:(turns.find(turn=>turn.id===request.params.turnId)?.items??[]).toReversed().map(item=>({turnId:request.params.turnId,item})),nextCursor:null};
+            queueMicrotask(()=>socket.receive({kind:'appserver',payload:{jsonrpc:'2.0',id:request.id,result}}));
+        }else{original(data);}};
+    socket.receive({kind:'appserver',payload:{method:'thread/started',params:{thread:metadata}}});
+    await waitFor(()=>[...document.querySelectorAll('.thread-row')].some(row=>row.textContent.includes(metadata.name)),'thread');
+    [...document.querySelectorAll('.thread-row')].find(row=>row.textContent.includes(metadata.name)).click();
+    await waitFor(()=>document.querySelectorAll('.turn-section').length===contract.turns.length,'fixture turns');await frame();
+    const trigger=document.querySelector('.turn-outline > button'),menu=()=>document.querySelector('.turn-outline .menu-popover');
+    const updates=document.querySelector('button[aria-label$="Codex update cards"]');
+    if(updates.getAttribute('aria-pressed')!=='true'){updates.click();await frame();}
+    const open=async()=>{if(!menu().matches(':popover-open')){trigger.click();}await waitFor(()=>menu().querySelector('select'),'scope');await frame();};
+    const setScope=async value=>{await open();const select=menu().querySelector('select');select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));await frame();};
+    const entries=()=>[...menu().querySelectorAll('button')].filter(button=>button.classList.contains('checkpoint-entry'));
+    const key=id=>'item:'+contract.threadId.length+':'+contract.threadId+id.split('/').map(value=>value.length+':'+value).join('');
+    const card=id=>[...document.querySelectorAll('.conversation-card')].find(card=>card.dataset.cardKey===key(id));
+    const jump=async id=>{await open();const expected=key(id),entry=entries().find(button=>button.title.endsWith(contract.turns.flatMap(turn=>turn.cards.map(item=>({...item,turnId:turn.id}))).find(item=>item.turnId+'/'+item.id===id).text.trim()));
+        if(!entry){throw new Error('Missing checkpoint '+id);}entry.click();await frame();return document.activeElement?.dataset.cardKey===expected;};
+    const defaultAll=trigger.textContent==='All checkpoints';let ordered=true;
+    for(const [scope,expected] of Object.entries(contract.expected)){
+        await setScope(scope);ordered&&=entries().length===expected.length;
+        for(let index=0;index<expected.length;++index){const [turn,id]=expected[index].split('/'),item=contract.turns.find(value=>value.id===turn).cards.find(value=>value.id===id);ordered&&=entries()[index]?.title.endsWith(item.preview??item.questionRequest?.questions[0].question??item.text.trim().replace(/\\s+/gu,' '));}
+    }
+    await setScope('all');
+    const columnDetails=entries().map(entry=>({cells:[...entry.children].map(cell=>({text:cell.textContent,width:cell.getBoundingClientRect().width})),width:entry.getBoundingClientRect().width}));
+    const columns=entries().every((entry,index)=>{
+        const cells=entry.querySelectorAll(':scope > span'),expected=contract.expected.all[index];
+        const action=contract.actions[expected];
+        return cells.length===3&&cells[1].textContent===action&&entry.getAttribute('aria-label')===entry.title
+            &&cells[2].getBoundingClientRect().width>=entry.getBoundingClientRect().width/2;
+    });
+    const aligned=entries().every(entry=>Math.abs(entry.children[2].getBoundingClientRect().left-entries()[0].children[2].getBoundingClientRect().left)<=1);
+    await setScope('questions');const questionEntry=entries()[0];questionEntry.click();await frame();
+    const questionJump=document.activeElement?.dataset.cardKey===key('one/question');
+    await setScope('all');const promptJump=await jump('one/opening');
+    const next=document.querySelector('button[aria-label="Next checkpoint"]');next.click();await frame();
+    const nextUpdate=document.activeElement?.dataset.cardKey===key('one/update');next.click();await frame();
+    const nextFinal=document.activeElement?.dataset.cardKey===key('one/final');next.click();await frame();
+    const nextSteering=document.activeElement?.dataset.cardKey===key('one/steer');
+    const scroll=document.querySelector('.conversation-scroll'),offset=()=>card('one/steer').querySelector(':scope > header').getBoundingClientRect().top-scroll.getBoundingClientRect().top;
+    const streamedItem={id:'stream',type:'agentMessage',phase:'commentary',text:'New update during detached reading'};
+    turns[0].items.push(streamedItem);
+    const before=offset();socket.receive({kind:'appserver',payload:{method:'item/completed',params:{threadId:metadata.id,turnId:'one',item:streamedItem}}});await frame();
+    const streamingAnchor=Math.abs(offset()-before)<=1;
+    await jump('one/opening');card('one/opening').querySelector('[aria-label="Collapse card"]').click();await frame();
+    const folded=card('one/opening').classList.contains('collapsed');await jump('one/steer');
+    const expandsParent=folded&&!card('one/opening').classList.contains('collapsed')&&document.activeElement?.dataset.cardKey===key('one/steer');
+    updates.click();await frame();await setScope('updates');
+    const hidden=entries().length===0,reveal=[...menu().querySelectorAll('button')].find(button=>button.textContent.includes('Show updates'));
+    const explicitReveal=hidden&&Boolean(reveal);reveal?.click();await frame();await open();
+    const revealed=updates.getAttribute('aria-pressed')==='true'&&entries().length===4;
+    await setScope('steering');const retainedFilter=trigger.textContent==='Your steering'&&entries().length===2;
+    await setScope('all');menu().hidePopover();
+    globalThis.codexuiCheckpointFixtureSend=socket.send;
+    const hiddenThread={...metadata,id:metadata.id+'-hidden',name:'Only hidden checkpoints'};
+    socket.send=data=>{const envelope=JSON.parse(data),request=envelope.payload;
+        if(envelope.kind==='appserver'&&request?.params?.threadId===hiddenThread.id){
+            socket.sent.push(envelope);const result=request.method==='thread/resume'?{thread:hiddenThread}
+                :request.method==='thread/turns/list'?{data:[{id:'hidden',status:'completed'}],nextCursor:null}
+                :{data:[{turnId:'hidden',item:{id:'update',type:'agentMessage',phase:'commentary',text:'The only update'}}],nextCursor:null};
+            queueMicrotask(()=>socket.receive({kind:'appserver',payload:{jsonrpc:'2.0',id:request.id,result}}));
+        }else{original(data);}};
+    socket.receive({kind:'appserver',payload:{method:'thread/started',params:{thread:hiddenThread}}});
+    await waitFor(()=>[...document.querySelectorAll('.thread-row')].some(row=>row.textContent.includes(hiddenThread.name)),'hidden-only thread');
+    [...document.querySelectorAll('.thread-row')].find(row=>row.textContent.includes(hiddenThread.name)).click();
+    await waitFor(()=>document.querySelector('.conversation-scroll').textContent.includes('The only update'),'hidden-only loaded');
+    updates.click();await frame();const hiddenTrigger=document.querySelector('.turn-outline > button');
+    const hiddenOnlySelector=!hiddenTrigger.disabled;hiddenTrigger.click();
+    await waitFor(()=>document.querySelector('.turn-outline select'),'hidden-only reveal');
+    const hiddenOnlyReveal=[...document.querySelectorAll('.turn-outline .menu-popover button')].some(button=>button.textContent.includes('Show updates'));
+    document.querySelector('.turn-outline .menu-popover').hidePopover();updates.click();await frame();socket.send=original;
+    return {defaultAll,ordered,columns:columns||JSON.stringify(columnDetails),aligned,questionJump,promptJump,nextUpdate,nextFinal,nextSteering,streamingAnchor,expandsParent,explicitReveal,revealed,retainedFilter,hiddenOnlySelector,hiddenOnlyReveal};
+})()`;
 const navigationCheck = `(async()=>{
     const contract=${JSON.stringify(navigationContract)};
     const frame=()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
@@ -756,12 +848,14 @@ const navigationCheck = `(async()=>{
     [...document.querySelectorAll(".thread-row")].find(row=>row.textContent.includes(metadata.name)).click();
     await waitFor(()=>document.querySelectorAll(".turn-section").length===4,"four loaded turns");await frame();
     const scroll=document.querySelector(".conversation-scroll");
-    const navigation=document.querySelector(".turn-navigation"),previous=navigation.querySelector('button[aria-label^="Turn opening;"]');
+    const navigation=document.querySelector(".turn-navigation"),previous=navigation.querySelector('button[aria-label^="Previous checkpoint;"]');
     const firstButton=navigation.querySelector('button[aria-label^="First turn;"]');
-    const next=navigation.querySelector('button[aria-label="Next turn opening"]'),latest=navigation.querySelector(".conversation-latest");
+    const next=navigation.querySelector('button[aria-label="Next checkpoint"]'),latest=navigation.querySelector(".conversation-latest");
     const trigger=navigation.querySelector(".turn-outline > button");
     const menu=()=>navigation.querySelector(".menu-popover");
-    const entries=()=>[...menu().querySelectorAll("button")].filter(button=>!button.textContent.includes("earlier turns"));
+    trigger.click();await waitFor(()=>menu().querySelector('select'),'scope selector');
+    const scope=menu().querySelector('select');scope.value='turns';scope.dispatchEvent(new Event('change',{bubbles:true}));await frame();menu().hidePopover();await frame();
+    const entries=()=>[...menu().querySelectorAll("button")].filter(button=>!button.textContent.includes("earlier history"));
     const open=async()=>{trigger.click();await waitFor(()=>menu().matches(":popover-open")&&entries().length>=4,"outline");await frame();};
     const jump=async index=>{await open();entries()[index].click();await frame();};
     const activeKey=()=>document.activeElement?.dataset.cardKey;
@@ -958,7 +1052,27 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
-    if (process.env.CODEXUI_BROWSER_MCP_APPROVALS_ONLY) {
+    if (process.env.CODEXUI_BROWSER_CHECKPOINTS_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        const checkpoints = await devTools.evaluate(checkpointCheck);
+        console.log(JSON.stringify({checkpoints}));
+        await devTools.evaluate(`globalThis.codexuiApplicationProfile.socket.send=globalThis.codexuiCheckpointFixtureSend;
+            [...document.querySelectorAll('.thread-row')].find(row=>row.textContent.includes('Checkpoint fixture')).click()`);
+        await waitUntil(devTools, `document.querySelectorAll('.turn-section').length===${checkpointContract.turns.length}`, "checkpoint screenshot fixture");
+        await devTools.evaluate(`document.querySelector('.turn-outline > button').click()`);
+        await waitUntil(devTools, `document.querySelectorAll('.turn-outline .checkpoint-entry').length===${checkpointContract.expected.all.length + 1}`, "checkpoint columns");
+        if (process.env.CODEXUI_TEST_EVIDENCE_DIR) {
+            await mkdir(process.env.CODEXUI_TEST_EVIDENCE_DIR, {recursive:true});
+            const screenshot = await devTools.call("Page.captureScreenshot", {format:"png"});
+            await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, "browser-checkpoint-columns.png"), Buffer.from(screenshot.data,"base64"));
+        }
+        console.log(JSON.stringify({checkpoints, browser:browserVersion.product}));
+        for (const [name, value] of Object.entries(checkpoints)) {
+            assert.equal(value, true, `Checkpoint navigation: ${name}`);
+        }
+
+    } else if (process.env.CODEXUI_BROWSER_MCP_APPROVALS_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         const contract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/frontend-presentation.json"), "utf8"));
@@ -1105,6 +1219,7 @@ try {
     "a semantic settings no-op changed focus, scroll, or displayed activity");
     assert.equal(noOpResult.settingsStructuralMutations, 0);
     assert.equal(noOpResult.conversationStructuralMutations, 0);
+    checkPerformance(noOpResult.headerMutations.length === 0, "a semantic settings no-op changed navigation header attributes");
     checkPerformance(noOpPerformance.layouts === 0, "a semantic settings no-op caused layout");
     checkPerformance(noOpPerformance.styleRecalculations === 0, "a semantic settings no-op caused style recalculation");
     checkTiming(noOpPerformance.taskMilliseconds <= applicationPerformanceLimits.semanticNoOpTaskMilliseconds,
@@ -1202,6 +1317,22 @@ try {
     });
 
     await devTools.call("Emulation.setDeviceMetricsOverride", {width: 1280, height: 1400, deviceScaleFactor: 1, mobile: false});
+    const checkpoints = await devTools.evaluate(checkpointCheck);
+    for (const [name, value] of Object.entries(checkpoints)) {
+        assert.equal(value, true, `Checkpoint navigation: ${name}`);
+    }
+    console.log(JSON.stringify({checkpoints}));
+    await devTools.evaluate(`document.querySelector('.turn-outline > button').click()`);
+    await waitUntil(devTools, `Boolean(document.querySelector('.turn-outline select'))`, "keyboard checkpoint scope");
+    await devTools.evaluate(`document.querySelector('.turn-outline select').focus()`);
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "ArrowDown", windowsVirtualKeyCode: 40});
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "ArrowDown", windowsVirtualKeyCode: 40});
+    assert.equal(await devTools.evaluate(`document.activeElement===document.querySelector('.turn-outline select')&&document.activeElement.value==='turns'`), true, "scope selector keeps native keyboard behavior");
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "Home", windowsVirtualKeyCode: 36});
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "Home", windowsVirtualKeyCode: 36});
+    assert.equal(await devTools.evaluate(`document.querySelector('.turn-outline select').value==='all'`), true, "keyboard restores All checkpoints");
+    await devTools.evaluate(`document.querySelector('.turn-outline .menu-popover').hidePopover()`);
+
     const navigation = await devTools.evaluate(navigationCheck);
     for (const [name, value] of Object.entries(navigation)) {
         assert.equal(value, name === "pages" ? 2 : true, `Thread navigation: ${name}`);
@@ -1217,16 +1348,16 @@ try {
     await devTools.evaluate(`document.querySelectorAll('.conversation-view-controls > button').item(4).focus()`);
     await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "Tab", windowsVirtualKeyCode: 9});
     await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "Tab", windowsVirtualKeyCode: 9});
-    const headerKeyboardOrder = await devTools.evaluate(`document.activeElement?.getAttribute('aria-label') === 'Turn opening; previous turn when already there'`);
+    const headerKeyboardOrder = await devTools.evaluate(`document.activeElement?.getAttribute('aria-label') === 'Previous checkpoint; current checkpoint opening when inside it'`);
     assert.equal(headerKeyboardOrder, true, "Tab proceeds from presentation controls to thread navigation");
     await devTools.evaluate(`(async()=>{const socket=globalThis.codexuiApplicationProfile.socket,threadId=socket.sent.filter(message=>message.payload?.method==='thread/resume').at(-1).payload.params.threadId;socket.receive({kind:'appserver',payload:{method:'thread/name/updated',params:{threadId,threadName:'A long thread name that must yield space to navigation and workspace Copy '.repeat(6)}}});await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));})()`);
     const navigationGeometry = [];
     for (const width of [1280, 760, 521, 360, 320]) {
         await setWidth(devTools, width);
         await devTools.evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
-        const geometry = await devTools.evaluate(`(()=>{const nav=document.querySelector('.turn-navigation'),heading=document.querySelector('.eyebrow'),title=document.querySelector('.thread-heading-context h1'),copy=document.querySelector('.thread-workspace-copy'),status=document.querySelector('.conversation-state'),workspace=document.querySelector('.thread-workspace'),buttons=[...nav.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),r=nav.getBoundingClientRect(),t=title.getBoundingClientRect(),c=copy.getBoundingClientRect(),s=status.getBoundingClientRect(),w=workspace.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth-innerWidth,singleRow:[...buttons,copy,status].every(button=>Math.abs(button.getBoundingClientRect().top+button.getBoundingClientRect().height/2-r.top-r.height/2)<=1),labelClear:heading.getBoundingClientRect().bottom<=r.top+1,titleBeforeNavigation:t.right<=r.left,statusBesideTitle:t.right<=s.left&&s.right<=r.left,copyAfterNavigation:r.right<=c.left,turnsBeforeThreadEnds:buttons.map(button=>button.textContent).join('|')==='↑|Turns|↓|↥|↧',groupGap:buttons[3].getBoundingClientRect().left-buttons[2].getBoundingClientRect().right===8,workspaceBelowTitle:w.top>=t.bottom&&Math.abs(w.left-t.left)<=1};})()`);
+        const geometry = await devTools.evaluate(`(()=>{const nav=document.querySelector('.turn-navigation'),heading=document.querySelector('.eyebrow'),title=document.querySelector('.thread-heading-context h1'),copy=document.querySelector('.thread-workspace-copy'),status=document.querySelector('.conversation-state'),workspace=document.querySelector('.thread-workspace'),buttons=[...nav.querySelectorAll('button')].filter(button=>!button.closest('.menu-popover')),r=nav.getBoundingClientRect(),t=title.getBoundingClientRect(),c=copy.getBoundingClientRect(),s=status.getBoundingClientRect(),w=workspace.getBoundingClientRect();return {overflow:document.documentElement.scrollWidth-innerWidth,singleRow:[...buttons,copy,status].every(button=>Math.abs(button.getBoundingClientRect().top+button.getBoundingClientRect().height/2-r.top-r.height/2)<=1),labelClear:heading.getBoundingClientRect().bottom<=r.top+1,titleBeforeNavigation:t.right<=r.left,titleVisible:t.width>=parseFloat(getComputedStyle(title).fontSize),statusBesideTitle:t.right<=s.left&&s.right<=r.left,copyAfterNavigation:r.right<=c.left,turnsBeforeThreadEnds:buttons.map(button=>button.textContent).join('|')==='↑|Turn openings|↓|↥|↧',groupGap:buttons[3].getBoundingClientRect().left-buttons[2].getBoundingClientRect().right===8,workspaceBelowTitle:w.top>=t.bottom&&Math.abs(w.left-t.left)<=1};})()`);
         navigationGeometry.push({width, ...geometry});
-        assert.deepEqual(geometry, {overflow: 0, singleRow: true, labelClear: true, titleBeforeNavigation: true, statusBesideTitle: true, copyAfterNavigation: true, turnsBeforeThreadEnds: true, groupGap: true, workspaceBelowTitle: true}, `Navigation header at ${width}px`);
+        assert.deepEqual(geometry, {overflow: 0, singleRow: true, labelClear: true, titleBeforeNavigation: true, titleVisible: true, statusBesideTitle: true, copyAfterNavigation: true, turnsBeforeThreadEnds: true, groupGap: true, workspaceBelowTitle: true}, `Navigation header at ${width}px`);
     }
     await devTools.call("Emulation.setTouchEmulationEnabled", {enabled: true, maxTouchPoints: 1});
     await waitUntil(devTools, `matchMedia('(pointer: coarse)').matches`, "touch navigation");

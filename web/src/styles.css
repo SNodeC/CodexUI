@@ -70,7 +70,7 @@ h1, h2, h3, p { margin: 0; }
 .thread-workspace { grid-column: 1; min-width: 0; max-width: 300px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; border: 0; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; }
 .thread-workspace-copy { flex: none; width: 24px; height: 24px; padding: 3px; border: 0; background: transparent; color: var(--text-secondary); }
 .thread-workspace-copy svg { width: 16px; height: 16px; }
-.conversation-heading h1 { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin: 0; font-size: 16px; font-weight: 600; }
+.conversation-heading h1 { min-width: 1em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin: 0; font-size: 16px; font-weight: 600; }
 .conversation-heading p { grid-column: 1 / -1; min-width: 0; margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
 .conversation-heading .conversation-activity { display: inline; color: var(--text-primary); white-space: normal; text-align: right; }
 .conversation-state { flex: none; white-space: nowrap; font-weight: 400; text-align: right; }.conversation-state.active { color: var(--activity-active-text); }.conversation-state.success { color: var(--status-success-text); }.conversation-state.warning { color: var(--status-warning-text); }.conversation-state.danger { color: var(--status-danger-text); }
@@ -80,22 +80,28 @@ h1, h2, h3, p { margin: 0; }
 .responsive-pane-button { display: flex; align-items: center; gap: 5px; height: 28px; border: 1px solid var(--pane-toggle-border); border-radius: 7px; padding: 0 8px; background: var(--raised-surface); color: var(--text-detail); font-size: 10px; font-weight: 700; cursor: pointer; }
 .responsive-pane-button:hover { border-color: var(--pane-toggle-hover-border); background: var(--pane-toggle-hover-surface); }
 .conversation-view-controls { grid-column: 2; grid-row: 1; display: flex; justify-content: flex-end; gap: 0; }
-:is(.conversation-view-controls, .turn-navigation) button { position: relative; display: grid; place-items: center; width: 28px; height: 24px; border: 1px solid var(--divider); border-radius: 7px; padding: 0; background: var(--panel); color: var(--text-secondary); cursor: pointer; }
-:is(.conversation-view-controls, .turn-navigation) svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-:is(.conversation-view-controls, .turn-navigation) button::after { content: attr(data-tooltip); position: absolute; z-index: 20; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); pointer-events: none; opacity: 0; white-space: nowrap; padding: 5px 8px; border: 1px solid var(--tooltip-border); border-radius: 6px; background: var(--tooltip-surface); color: var(--on-accent); font-size: 10px; line-height: 1.3; transition: opacity 80ms ease-out; }
-:is(.conversation-view-controls, .turn-navigation) button:last-child::after { right: 0; left: auto; transform: none; }
-:is(.conversation-view-controls, .turn-navigation) button:hover::after, :is(.conversation-view-controls, .turn-navigation) button:focus-visible::after { opacity: 1; }
-:is(.conversation-view-controls, .turn-navigation) button:hover { background: var(--control-hover-surface); border-color: var(--control-hover-border); }
-:is(.conversation-view-controls, .turn-navigation) button.active { background: var(--presentation-selected-surface); border-color: var(--presentation-selected-border); color: var(--text-strong); }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button { position: relative; display: grid; place-items: center; width: 28px; height: 24px; border: 1px solid var(--divider); border-radius: 7px; padding: 0; background: var(--panel); color: var(--text-secondary); cursor: pointer; }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button::after { content: attr(data-tooltip); position: absolute; z-index: 20; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); pointer-events: none; opacity: 0; white-space: nowrap; padding: 5px 8px; border: 1px solid var(--tooltip-border); border-radius: 6px; background: var(--tooltip-surface); color: var(--on-accent); font-size: 10px; line-height: 1.3; transition: opacity 80ms ease-out; }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button:last-child::after { right: 0; left: auto; transform: none; }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button:hover::after, :is(.conversation-view-controls, .turn-navigation, .turn-outline) > button:focus-visible::after { opacity: 1; }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button:hover { background: var(--control-hover-surface); border-color: var(--control-hover-border); }
+:is(.conversation-view-controls, .turn-navigation, .turn-outline) > button.active { background: var(--presentation-selected-surface); border-color: var(--presentation-selected-border); color: var(--text-strong); }
 .turn-navigation { display: flex; flex: none; align-items: center; margin-left: auto; }
 .turn-navigation > button[aria-label^="First turn;"] { margin-left: 8px; }
-.turn-outline > button { width: 52px; }
+.turn-outline > button { width: max-content; min-width: 140px; padding-inline: 8px; }
+.turn-outline select { max-width: 100%; }
 .turn-outline .menu-popover { width: min(380px, calc(100vw - 24px)); max-height: 60dvh; overscroll-behavior: contain; }
-.turn-outline .menu-popover button { display: block; width: 100%; height: auto; min-height: 32px; padding: 7px 9px; border: 0; border-radius: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-.turn-outline .menu-popover button::after { display: none; }
+.turn-outline .menu-popover button { display: block; width: 100%; height: auto; min-height: 32px; padding: 7px 9px; border: 0; border-radius: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; background: var(--panel); color: var(--text-secondary); cursor: pointer; }
+.turn-outline .menu-popover:popover-open { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); column-gap: 8px; }
+.turn-outline .menu-popover > * { grid-column: 1 / -1; }
+.turn-outline .menu-popover .checkpoint-entry { display: grid; grid-template-columns: subgrid; }
+.turn-outline .checkpoint-entry > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-outline .checkpoint-entry > span:first-child { text-align: right; font-variant-numeric: tabular-nums; }
+.turn-outline .menu-popover button:hover { background: var(--menu-item-hover-surface); }
 .turn-outline .menu-popover button[aria-current] { background: var(--presentation-selected-surface); color: var(--text-strong); }
 .turn-outline-count { padding: 4px 9px 8px; color: var(--text-secondary); font-size: 12px; }
-@media (pointer: coarse) and (max-width: 520px) {
+@media (max-width: 520px) {
     .conversation-view-controls, .thread-heading-context { justify-content: flex-start; min-width: 0; overflow-x: auto; scroll-padding-inline: 44px; scrollbar-width: none; }
     .conversation-view-controls > button, .thread-heading-context > button, .conversation-state { flex: none; }
 }
@@ -260,7 +266,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (pointer: coarse) {
     .card-meta { --card-control-width: 44px; }
     .tree-toggle, .thread-row, .thread-menu-trigger, .group-disclosure, .group-menu-trigger, .responsive-pane-button, .drawer-close,
-    :is(.conversation-view-controls, .turn-navigation) button, .thread-workspace-copy, .card-meta button, .send-button, .stop-button { min-width: 44px; min-height: 44px; }
+    :is(.conversation-view-controls, .turn-navigation, .turn-outline) > button, .thread-workspace-copy, .card-meta button, .send-button, .stop-button { min-width: 44px; min-height: 44px; }
     .thread-sort select, .connection-control input, .connection-control button,
     .settings-grid select, .settings-grid input, .request-button, .connection-menu > button, .thread-browser-menu > button, .additional-settings > button, .token-usage > button { min-height: 44px; }
 }

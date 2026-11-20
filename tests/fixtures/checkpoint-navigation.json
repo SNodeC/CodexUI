@@ -1,0 +1,363 @@
+{
+  "threadId": "checkpoint-contract",
+  "turns": [
+    {
+      "id": "one",
+      "cards": [
+        {
+          "id": "opening",
+          "kind": "userMessage",
+          "text": "Repeated prompt"
+        },
+        {
+          "id": "update",
+          "kind": "agentMessage",
+          "phase": "commentary",
+          "text": "Working on the first task"
+        },
+        {
+          "id": "final",
+          "kind": "agentMessage",
+          "phase": "final_answer",
+          "text": "A long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\nA long answer.\n\n"
+        },
+        {
+          "id": "steer",
+          "kind": "userMessage",
+          "text": "Please also check the edge cases"
+        },
+        {
+          "id": "question",
+          "kind": "agentMessage",
+          "phase": "commentary",
+          "text": "",
+          "questionRequest": {
+            "questions": [
+              {
+                "id": "0",
+                "question": "Which implementation should I use?",
+                "isOther": true,
+                "options": [
+                  {
+                    "label": "Existing implementation"
+                  }
+                ]
+              }
+            ]
+          },
+          "answers": [],
+          "questionStatus": ""
+        }
+      ]
+    },
+    {
+      "id": "two",
+      "cards": [
+        {
+          "id": "opening",
+          "kind": "userMessage",
+          "text": "Repeated prompt"
+        },
+        {
+          "id": "update",
+          "kind": "agentMessage",
+          "phase": "commentary",
+          "text": "Working on the second task"
+        },
+        {
+          "id": "partial",
+          "kind": "agentMessage",
+          "phase": "partial_answer",
+          "text": "Partial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\nPartial answer.\n\n"
+        },
+        {
+          "id": "steer",
+          "kind": "userMessage",
+          "text": "Use the existing controller"
+        },
+        {
+          "id": "question",
+          "kind": "agentMessage",
+          "phase": "partial_answer",
+          "text": "",
+          "questionRequest": {
+            "questions": [
+              {
+                "id": "0",
+                "question": "Which edge cases need checking?",
+                "isOther": true,
+                "options": [
+                  {
+                    "label": "Existing implementation"
+                  }
+                ]
+              }
+            ]
+          },
+          "answers": [
+            "Existing implementation"
+          ],
+          "questionStatus": "✓ Answer sent"
+        },
+        {
+          "id": "reply",
+          "kind": "userMessage",
+          "text": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Which edge cases need checking?\",\"answer\":\"Existing implementation\"}]\n</send_user_message_question_reply>",
+          "preview": "Which edge cases need checking? **Existing implementation**"
+        }
+      ]
+    },
+    {
+      "id": "auto",
+      "cards": [
+        {
+          "id": "update",
+          "kind": "agentMessage",
+          "phase": "commentary",
+          "text": "Automatic turn without a prompt"
+        },
+        {
+          "id": "final",
+          "kind": "agentMessage",
+          "phase": "final_answer",
+          "text": "Done.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\nDone.\n\n"
+        }
+      ]
+    },
+    {
+      "id": "reply-turn",
+      "cards": [
+        {
+          "id": "opening",
+          "kind": "userMessage",
+          "text": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Which edge cases need checking?\",\"answer\":\"Existing implementation\"}]\n</send_user_message_question_reply>",
+          "preview": "Which edge cases need checking? **Existing implementation**"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "all": [
+      "one/opening",
+      "one/update",
+      "one/final",
+      "one/steer",
+      "one/question",
+      "two/opening",
+      "two/update",
+      "two/partial",
+      "two/steer",
+      "two/question",
+      "two/reply",
+      "auto/update",
+      "auto/final",
+      "reply-turn/opening"
+    ],
+    "turns": [
+      "one/opening",
+      "two/opening",
+      "auto/update",
+      "reply-turn/opening"
+    ],
+    "updates": [
+      "one/update",
+      "two/update",
+      "auto/update"
+    ],
+    "steering": [
+      "one/steer",
+      "two/steer"
+    ],
+    "questions": [
+      "one/question",
+      "two/question"
+    ],
+    "answers": [
+      "two/partial",
+      "two/question",
+      "two/reply",
+      "reply-turn/opening"
+    ],
+    "finalAnswers": [
+      "one/final",
+      "auto/final"
+    ]
+  },
+  "queries": [
+    {
+      "scope": "all",
+      "anchor": "one/update",
+      "offset": 0,
+      "direction": -1,
+      "target": "one/opening"
+    },
+    {
+      "scope": "all",
+      "anchor": "one/update",
+      "offset": -20,
+      "direction": -1,
+      "target": "one/update"
+    },
+    {
+      "scope": "all",
+      "anchor": "one/final",
+      "offset": -20,
+      "direction": -1,
+      "target": "one/final"
+    },
+    {
+      "scope": "all",
+      "anchor": "one/update",
+      "offset": 0,
+      "direction": 1,
+      "target": "one/final"
+    },
+    {
+      "scope": "all",
+      "anchor": "one/steer",
+      "offset": 0,
+      "direction": 1,
+      "target": "one/question"
+    },
+    {
+      "scope": "updates",
+      "anchor": "two/update",
+      "offset": 0,
+      "direction": -1,
+      "target": "one/update"
+    },
+    {
+      "scope": "updates",
+      "anchor": "two/update",
+      "offset": 0,
+      "direction": 1,
+      "target": "auto/update"
+    },
+    {
+      "scope": "steering",
+      "anchor": "one/opening",
+      "offset": 0,
+      "direction": -1,
+      "target": null
+    },
+    {
+      "scope": "steering",
+      "anchor": "one/opening",
+      "offset": 0,
+      "direction": 1,
+      "target": "one/steer"
+    },
+    {
+      "scope": "turns",
+      "anchor": "one/update",
+      "offset": 0,
+      "direction": 1,
+      "target": "two/opening"
+    },
+    {
+      "scope": "all",
+      "anchor": "auto/update",
+      "offset": 0,
+      "direction": 1,
+      "target": "auto/final"
+    },
+    {
+      "scope": "questions",
+      "anchor": "one/question",
+      "offset": 0,
+      "direction": 1,
+      "target": "two/question"
+    },
+    {
+      "scope": "questions",
+      "anchor": "two/question",
+      "offset": 0,
+      "direction": -1,
+      "target": "one/question"
+    },
+    {
+      "scope": "all",
+      "anchor": "one/question",
+      "offset": 0,
+      "direction": 1,
+      "target": "two/opening"
+    },
+    {
+      "scope": "finalAnswers",
+      "anchor": "one/final",
+      "offset": 0,
+      "direction": 1,
+      "target": "auto/final"
+    },
+    {
+      "scope": "answers",
+      "anchor": "two/partial",
+      "offset": 0,
+      "direction": 1,
+      "target": "two/question"
+    },
+    {
+      "scope": "all",
+      "anchor": "auto/final",
+      "offset": 0,
+      "direction": 1,
+      "target": "reply-turn/opening"
+    }
+  ],
+  "hiddenUpdates": {
+    "all": [
+      "one/opening",
+      "one/final",
+      "one/steer",
+      "one/question",
+      "two/opening",
+      "two/partial",
+      "two/steer",
+      "two/question",
+      "two/reply",
+      "auto/final",
+      "reply-turn/opening"
+    ],
+    "turns": [
+      "one/opening",
+      "two/opening",
+      "auto/final",
+      "reply-turn/opening"
+    ],
+    "updates": [],
+    "steering": [
+      "one/steer",
+      "two/steer"
+    ],
+    "questions": [
+      "one/question",
+      "two/question"
+    ],
+    "answers": [
+      "two/partial",
+      "two/question",
+      "two/reply",
+      "reply-turn/opening"
+    ],
+    "finalAnswers": [
+      "one/final",
+      "auto/final"
+    ]
+  },
+  "actions": {
+    "one/opening": "opening",
+    "one/update": "update",
+    "one/final": "final answer",
+    "one/steer": "steering",
+    "one/question": "question",
+    "two/opening": "opening",
+    "two/update": "update",
+    "two/partial": "answer",
+    "two/steer": "steering",
+    "two/question": "answer",
+    "two/reply": "answer",
+    "auto/update": "update",
+    "auto/final": "final answer",
+    "reply-turn/opening": "answer"
+  }
+}
