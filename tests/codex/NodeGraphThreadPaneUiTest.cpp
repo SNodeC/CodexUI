@@ -24,6 +24,7 @@
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QHelpEvent>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -44,6 +45,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolTip>
 #include <QTreeWidget>
 #include <algorithm>
 #include <array>
@@ -2238,6 +2240,389 @@ namespace codexui::codex {
             return passed;
         }
 
+        bool projectGapsResizeOnlyTheUpperCard() {
+            bool passed = true;
+            const auto originalFont = QApplication::font();
+            for (const auto& [width, points] : std::array{std::pair{260, 10}, std::pair{440, 10}, std::pair{260, 16}, std::pair{440, 16}}) {
+                middle::ThreadPane pane;
+                auto font = pane.font();
+                font.setPointSize(points);
+                qApp->setFont(font);
+                pane.setFont(font);
+                pane.resize(width, 900);
+                pane.setStyleSheet(pane.styleSheet() + UiStyle::applicationStyleSheet());
+                ui::ThreadListRow project;
+                project.kind = ui::ThreadRowKind::Project;
+                project.id = project.presentationKey = "resize-a";
+                project.title = "Upper project — 日本語 and a long title";
+                ui::ThreadListRow section;
+                section.kind = ui::ThreadRowKind::Section;
+                section.id = section.presentationKey = "resize-section";
+                section.title = "Section";
+                for (int row = 0; row < 14; ++row) {
+                    section.children.push_back(localDraft("resize-member-" + std::to_string(row),
+                                                          "resize-member-" + std::to_string(row),
+                                                          "Thread " + std::to_string(row),
+                                                          "/workspace"));
+                }
+                project.children = {section};
+                ui::ThreadListRow lower = project;
+                lower.id = lower.presentationKey = "resize-b";
+                lower.title = "Lower project";
+                lower.children = {localDraft("resize-lower", "resize-lower", "Lower thread", "/workspace"),
+                                  localDraft("resize-lower-2", "resize-lower-2", "Another thread", "/workspace")};
+                ui::ThreadListSnapshot snapshot;
+                snapshot.roots = {project, lower};
+                for (int row = 0; row < 24; ++row) {
+                    auto empty = project;
+                    empty.id = empty.presentationKey = "resize-empty-" + std::to_string(row);
+                    empty.title = "Empty project " + std::to_string(row);
+                    empty.children.clear();
+                    snapshot.roots.push_back(empty);
+                }
+                pane.refresh(snapshot);
+                pane.show();
+                auto* tree = threadTree(pane);
+                tree->expandAll();
+                QApplication::processEvents();
+                auto* upper = threadItem(tree, project.id);
+                auto* below = threadItem(tree, lower.id);
+                auto* sectionItem = threadItem(tree, section.id);
+                const auto bodyFor = [&](QTreeWidgetItem* item) {
+                    QTreeView* result = nullptr;
+                    for (auto* candidate : pane.findChildren<QTreeView*>("projectThreadBody")) {
+                        if (candidate->rootIndex() == tree->indexFromItem(item)) {
+                            result = candidate;
+                        }
+                    }
+                    return result;
+                };
+                auto* body = bodyFor(upper);
+                auto* lowerBody = bodyFor(below);
+                passed &= require(body && lowerBody, "resize fixture exposes both native project bodies");
+                if (body && lowerBody) {
+                    const int rowHeight = body->visualRect(tree->indexFromItem(sectionItem)).height();
+                    tree->setCurrentItem(threadItem(tree, "resize-lower"));
+                    lowerBody->setFocus();
+                    body->verticalScrollBar()->setValue(1);
+                    QApplication::processEvents();
+                    passed &= require(lowerBody->hasFocus(), "resize fixture starts with lower body focus");
+                    auto* current = tree->currentItem();
+                    const auto selected = tree->selectionModel()->selectedRows();
+                    const auto accessibleId = QAccessible::uniqueId(threadAccessible(tree, upper));
+                    const QRect original = tree->visualItemRect(upper);
+                    const QRect lowerOriginal = tree->visualItemRect(below);
+                    const QRect bodyOriginal = body->geometry();
+                    const QRect lowerBodyOriginal = lowerBody->geometry();
+                    const int widgetCount = pane.findChildren<QWidget*>().size();
+                    const auto pointer = [&](QEvent::Type type, QPoint global, Qt::MouseButton button, Qt::MouseButtons buttons) {
+                        const QPoint local = tree->viewport()->mapFromGlobal(global);
+                        QMouseEvent event(type, QPointF(local), QPointF(local), QPointF(global), button, buttons, Qt::NoModifier);
+                        QApplication::sendEvent(tree->viewport(), &event);
+                        QApplication::processEvents();
+                    };
+                    const auto capture = [&](const QString& state) {
+                        const auto path = qEnvironmentVariable("CODEXUI_RESIZE_SCREENSHOT_DIR");
+                        if (!path.isEmpty()) {
+                            passed &=
+                                require(pane.grab().save(path + "/resize-" + QString::number(width) + "-font-" + QString::number(points) +
+                                                         "-dpr-" + QString::number(pane.devicePixelRatioF()) + "-" + state + ".png"),
+                                        "project resize screenshot saved");
+                        }
+                    };
+                    const QPoint start = tree->viewport()->mapToGlobal(QPoint(tree->viewport()->width() / 2, original.bottom()));
+                    pointer(QEvent::MouseMove, start, Qt::NoButton, Qt::NoButton);
+                    passed &=
+                        require(tree->viewport()->cursor().shape() == Qt::SizeVerCursor, "project gap offers a vertical resize cursor");
+                    capture("hover");
+                    pointer(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+                    capture("pressed");
+                    qint64 slowestMicros = 0;
+                    for (const int delta : {-17, -41, 36}) {
+                        QElapsedTimer timer;
+                        timer.start();
+                        pointer(QEvent::MouseMove, start + QPoint(0, delta), Qt::NoButton, Qt::LeftButton);
+                        slowestMicros = std::max(slowestMicros, timer.nsecsElapsed() / 1000);
+                        passed &= require(tree->visualItemRect(upper) == QRect(original.topLeft(), original.size() + QSize(0, delta)) &&
+                                              body->geometry() == QRect(bodyOriginal.topLeft(), bodyOriginal.size() + QSize(0, delta)),
+                                          "each drag movement resizes the upper card and its actual viewport by the exact pointer delta");
+                        passed &= require(tree->visualItemRect(below) == lowerOriginal.translated(0, delta) &&
+                                              lowerBody->geometry() == lowerBodyOriginal.translated(0, delta),
+                                          "the following project moves by the same delta without changing either dimension");
+                        passed &= require(tree->currentItem() == current && tree->selectionModel()->selectedRows() == selected,
+                                          "resizing preserves the current and selected thread");
+                        passed &= require(lowerBody->hasFocus(), "resizing preserves keyboard focus in the lower project body");
+                        passed &=
+                            require(body->verticalScrollBar()->value() == 1, "resizing preserves the upper project's scroll position");
+                        passed &= require(QAccessible::uniqueId(threadAccessible(tree, upper)) == accessibleId,
+                                          "resizing preserves the project's accessible identity");
+                        capture(delta < 0 ? "shrinking-" + QString::number(-delta) : QStringLiteral("growing"));
+                    }
+                    pointer(QEvent::MouseButtonRelease, start + QPoint(0, 36), Qt::LeftButton, Qt::NoButton);
+                    const int chosen = body->height();
+                    pane.refresh(snapshot);
+                    QApplication::processEvents();
+                    passed &=
+                        require(bodyFor(upper) == body && body->height() == chosen, "semantic refresh retains the chosen project height");
+                    upper->setExpanded(false);
+                    QApplication::processEvents();
+                    passed &= require(tree->visualItemRect(upper).height() == tree->sizeHintForIndex(tree->indexFromItem(upper)).height(),
+                                      "resized project collapses to the canonical heading height");
+                    upper->setExpanded(true);
+                    QApplication::processEvents();
+                    body = bodyFor(upper);
+                    passed &= require(body && body->height() == chosen, "expanding restores the chosen project height");
+                    tree->setFocus();
+                    tree->verticalScrollBar()->setValue(tree->verticalScrollBar()->maximum());
+                    QApplication::processEvents();
+                    passed &= require(!bodyFor(upper), "offscreen resized project releases its body");
+                    tree->verticalScrollBar()->setValue(0);
+                    QApplication::processEvents();
+                    body = bodyFor(upper);
+                    passed &=
+                        require(body && body->height() == chosen, "scrolling back restores the chosen height without retaining a widget");
+                    if (body) {
+                        tree->setCurrentItem(upper);
+                        tree->setFocus();
+                        auto* accessible = threadAccessible(tree, upper);
+                        auto* actions = accessible ? accessible->actionInterface() : nullptr;
+                        passed &=
+                            require(actions && actions->actionNames().contains(QAccessibleActionInterface::increaseAction()) &&
+                                        actions->actionNames().contains(QAccessibleActionInterface::decreaseAction()) &&
+                                        actions->keyBindingsForAction(QAccessibleActionInterface::decreaseAction()).contains("Alt+Up"),
+                                    "the existing project accessible exposes resize actions and their keyboard binding");
+                        const auto lowerBeforeKey = tree->visualItemRect(below);
+                        QKeyEvent up(QEvent::KeyPress, Qt::Key_Up, Qt::AltModifier);
+                        QApplication::sendEvent(tree, &up);
+                        QApplication::processEvents();
+                        passed &= require(body->height() == chosen - rowHeight &&
+                                              tree->visualItemRect(below) == lowerBeforeKey.translated(0, -rowHeight),
+                                          "Alt+Up shrinks the focused project by one row and shifts the next card");
+                        capture("keyboard-focus");
+                        QKeyEvent down(QEvent::KeyPress, Qt::Key_Down, Qt::AltModifier);
+                        QApplication::sendEvent(tree, &down);
+                        QApplication::processEvents();
+                        passed &= require(body->height() == chosen, "Alt+Down grows the focused project by one row");
+                        if (actions) {
+                            actions->doAction(QAccessibleActionInterface::decreaseAction());
+                            QApplication::processEvents();
+                            passed &=
+                                require(body->height() == chosen - rowHeight, "accessible decrease removes exactly one row of height");
+                            actions->doAction(QAccessibleActionInterface::increaseAction());
+                            QApplication::processEvents();
+                            passed &= require(body->height() == chosen, "accessible increase restores exactly one row of height");
+                        }
+                        const auto drag = [&](int delta) {
+                            const QPoint origin =
+                                tree->viewport()->mapToGlobal(QPoint(tree->viewport()->width() / 2, tree->visualItemRect(upper).bottom()));
+                            pointer(QEvent::MouseButtonPress, origin, Qt::LeftButton, Qt::LeftButton);
+                            pointer(QEvent::MouseMove, origin + QPoint(0, delta), Qt::NoButton, Qt::LeftButton);
+                            pointer(QEvent::MouseButtonRelease, origin + QPoint(0, delta), Qt::LeftButton, Qt::NoButton);
+                        };
+                        drag(10000);
+                        passed &= require(body->height() == 15 * rowHeight && body->verticalScrollBar()->maximum() == 0,
+                                          "growing beyond eight rows is bounded by the complete expanded content");
+                        capture("maximum");
+                        drag(-10000);
+                        passed &= require(body->height() == rowHeight && body->verticalScrollBar()->maximum() > 0,
+                                          "shrinking keeps one content row and the remaining threads stay scrollable");
+                        capture("minimum");
+                        const auto normalStyle = pane.styleSheet();
+                        const auto normalFont = QApplication::font();
+                        auto enlargedFont = normalFont;
+                        enlargedFont.setPointSize(points + 8);
+                        qApp->setFont(enlargedFont);
+                        pane.setStyleSheet(pane.styleSheet() + UiStyle::applicationStyleSheet());
+                        QApplication::processEvents();
+                        passed &= require(body->height() >= body->visualRect(tree->indexFromItem(sectionItem)).height(),
+                                          "enlarging the font preserves at least one complete content row at a chosen minimum");
+                        qApp->setFont(normalFont);
+                        pane.setStyleSheet(normalStyle);
+                        QApplication::processEvents();
+                        sectionItem->setExpanded(false);
+                        QApplication::processEvents();
+                        passed &= require(body->height() == rowHeight, "a folded section does not create blank reserved space");
+                        sectionItem->setExpanded(true);
+                        QApplication::processEvents();
+                        passed &= require(body->height() == rowHeight, "section expansion respects the manually chosen limit");
+                        passed &= require(pane.findChildren<QWidget*>().size() == widgetCount,
+                                          "project resizing adds no widgets or alternate renderer");
+                        const auto gap = [&] {
+                            return tree->viewport()->mapToGlobal(
+                                QPoint(tree->viewport()->width() / 2, tree->visualItemRect(upper).bottom()));
+                        };
+                        const QPoint boundary = gap();
+                        QHelpEvent help(QEvent::ToolTip, tree->viewport()->mapFromGlobal(boundary), boundary);
+                        QApplication::sendEvent(tree->viewport(), &help);
+                        QApplication::processEvents();
+                        passed &= require(QToolTip::isVisible() && QToolTip::text().contains("Alt+Up/Down"),
+                                          "the gap tooltip makes keyboard resizing discoverable");
+                        for (auto* popup : QApplication::topLevelWidgets()) {
+                            const auto path = qEnvironmentVariable("CODEXUI_RESIZE_SCREENSHOT_DIR");
+                            if (popup->windowType() == Qt::ToolTip && popup->isVisible() && !path.isEmpty()) {
+                                passed &= require(popup->grab().save(path + "/resize-tooltip-" + QString::number(width) + "-font-" +
+                                                                     QString::number(points) + "-dpr-" +
+                                                                     QString::number(pane.devicePixelRatioF()) + ".png"),
+                                                  "resize tooltip screenshot saved");
+                            }
+                        }
+                        QToolTip::hideText();
+                        pointer(QEvent::MouseMove, boundary, Qt::NoButton, Qt::NoButton);
+                        QEvent leave(QEvent::Leave);
+                        QApplication::sendEvent(tree->viewport(), &leave);
+                        passed &= require(tree->viewport()->cursor().shape() != Qt::SizeVerCursor,
+                                          "leaving an idle gap clears the resize cursor for project contents");
+                        auto* treeAccessible = QAccessible::queryAccessibleInterface(tree);
+                        const QPoint lowerHalf = boundary + QPoint(0, 3);
+                        passed &= require(treeAccessible && treeAccessible->childAt(lowerHalf.x(), lowerHalf.y()) == accessible,
+                                          "both halves of the gap resolve to the upper project's accessible actions");
+                        pointer(QEvent::MouseButtonPress, boundary, Qt::LeftButton, Qt::LeftButton);
+                        pointer(QEvent::MouseMove, boundary + QPoint(0, 9), Qt::NoButton, Qt::LeftButton);
+                        passed &= require(body->height() == rowHeight + 9, "a new drag starts from the chosen minimum without a jump");
+                        QEvent ungrab(QEvent::UngrabMouse);
+                        QApplication::sendEvent(tree->viewport(), &ungrab);
+                        const QRect cancelled = tree->visualItemRect(upper);
+                        pointer(QEvent::MouseMove, boundary + QPoint(0, 40), Qt::NoButton, Qt::LeftButton);
+                        pointer(QEvent::MouseButtonRelease, boundary + QPoint(0, 40), Qt::LeftButton, Qt::NoButton);
+                        passed &= require(tree->visualItemRect(upper) == cancelled, "losing mouse capture ends the resize gesture");
+                        sectionItem->setExpanded(false);
+                        QApplication::processEvents();
+                        passed &= require(body->height() == rowHeight, "a manually enlarged body shrinks naturally to its folded section");
+                        sectionItem->setExpanded(true);
+                        QApplication::processEvents();
+                        passed &=
+                            require(body->height() == rowHeight + 9, "unfolding restores the retained height limit after content shrank");
+                        const QPoint disabledGap = gap();
+                        tree->setEnabled(false);
+                        pointer(QEvent::MouseButtonPress, disabledGap, Qt::LeftButton, Qt::LeftButton);
+                        pointer(QEvent::MouseMove, disabledGap + QPoint(0, 40), Qt::NoButton, Qt::LeftButton);
+                        pointer(QEvent::MouseButtonRelease, disabledGap + QPoint(0, 40), Qt::LeftButton, Qt::NoButton);
+                        passed &= require(tree->visualItemRect(upper) == cancelled, "a disabled project gap cannot resize");
+                        capture("disabled");
+                        tree->setEnabled(true);
+                        pointer(QEvent::MouseButtonDblClick, gap(), Qt::LeftButton, Qt::LeftButton);
+                        pointer(QEvent::MouseButtonRelease, gap(), Qt::LeftButton, Qt::NoButton);
+                        passed &= require(upper->isExpanded(), "double-clicking a resize gap does not fold its project");
+                        upper->setExpanded(false);
+                        QApplication::processEvents();
+                        const QRect collapsed = tree->visualItemRect(upper);
+                        pointer(QEvent::MouseMove, gap(), Qt::NoButton, Qt::NoButton);
+                        passed &= require(tree->viewport()->cursor().shape() != Qt::SizeVerCursor && actions &&
+                                              !actions->actionNames().contains(QAccessibleActionInterface::increaseAction()),
+                                          "collapsed headings expose neither an active gap nor accessible resize actions");
+                        capture("collapsed");
+                        upper->setExpanded(true);
+                        QApplication::processEvents();
+                        body = bodyFor(upper);
+                        passed &=
+                            require(body && body->height() == rowHeight + 9 && tree->visualItemRect(upper).height() > collapsed.height(),
+                                    "cancelling and disabling a drag preserve the retained height");
+                        pointer(QEvent::MouseButtonPress, gap(), Qt::LeftButton, Qt::LeftButton);
+                        pane.hide();
+                        pane.show();
+                        QApplication::processEvents();
+                        const QRect shown = tree->visualItemRect(upper);
+                        pointer(QEvent::MouseMove, gap() + QPoint(0, 30), Qt::NoButton, Qt::LeftButton);
+                        pointer(QEvent::MouseButtonRelease, gap() + QPoint(0, 30), Qt::LeftButton, Qt::NoButton);
+                        passed &= require(tree->visualItemRect(upper) == shown, "hiding the panel cancels an active drag");
+                        const QRect nextSize = tree->visualItemRect(below);
+                        pointer(QEvent::MouseButtonPress, gap(), Qt::LeftButton, Qt::LeftButton);
+                        snapshot.roots.erase(snapshot.roots.begin());
+                        pane.refresh(snapshot);
+                        QApplication::processEvents();
+                        pointer(QEvent::MouseMove, boundary + QPoint(0, 50), Qt::NoButton, Qt::LeftButton);
+                        pointer(QEvent::MouseButtonRelease, boundary + QPoint(0, 50), Qt::LeftButton, Qt::NoButton);
+                        passed &= require(!threadItem(tree, project.id) && tree->visualItemRect(below).size() == nextSize.size(),
+                                          "removing a project during its drag cannot resize the following card or retain its index");
+
+                        std::cout << "PROJECT_RESIZE width=" << width << " font=" << points << " dpr=" << pane.devicePixelRatioF()
+                                  << " row_height=" << rowHeight << " slowest_input_to_paint_us=" << slowestMicros << '\n';
+                        passed &=
+                            require(testing::timingLimit(slowestMicros < 100000), "project drag exceeded the 100ms input-to-paint budget");
+                    }
+                }
+            }
+            qApp->setFont(originalFont);
+            return passed;
+        }
+
+        bool projectResizingRefreshesVisibleFeedback() {
+            middle::ThreadPane pane;
+            pane.resize(330, 800);
+            int requests = 0;
+            middle::ThreadPane::Actions actions;
+            actions.browse = [&](const nlohmann::json&) {
+                ++requests;
+            };
+            pane.setActions(std::move(actions));
+            ui::ThreadListRow project;
+            project.kind = ui::ThreadRowKind::Project;
+            project.id = project.presentationKey = "resize-feedback";
+            project.title = "Feedback follows the viewport";
+            for (int row = 0; row < 10; ++row) {
+                project.children.push_back(
+                    localDraft("feedback-" + std::to_string(row), "feedback-" + std::to_string(row), "Thread", "/workspace"));
+            }
+            project.children.back().awaitingPromptConversation = true;
+            project.children.back().pendingPromptAdmittedAtMs = QDateTime::currentMSecsSinceEpoch() - 1500;
+            ui::ThreadListRow page;
+            page.kind = ui::ThreadRowKind::Page;
+            page.id = page.presentationKey = "resize-feedback-page";
+            page.title = "Load more";
+            page.query = {{"method", "thread/list"}, {"parameters", {{"projectId", project.id}}}};
+            project.children.push_back(page);
+            ui::ThreadListSnapshot snapshot;
+            snapshot.providerReady = true;
+            snapshot.roots = {project};
+            pane.refresh(snapshot);
+            pane.show();
+            auto* tree = threadTree(pane);
+            installAnimationDurationStyle(*tree, 100);
+            tree->expandAll();
+            QApplication::processEvents();
+            auto* item = threadItem(tree, project.id);
+            auto* animation = pane.findChild<QTimer*>("optimisticThreadAnimation");
+            auto* body = pane.findChild<QTreeView*>("projectThreadBody");
+            bool passed = require(body && animation && !animation->isActive() && requests == 0,
+                                  "feedback and pagination beyond the default project height remain inactive");
+            const auto drag = [&](int delta) {
+                const QPoint origin =
+                    tree->viewport()->mapToGlobal(QPoint(tree->viewport()->width() / 2, tree->visualItemRect(item).bottom()));
+                QMouseEvent press(QEvent::MouseButtonPress,
+                                  tree->viewport()->mapFromGlobal(origin),
+                                  origin,
+                                  Qt::LeftButton,
+                                  Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(tree->viewport(), &press);
+                const QPoint destination = origin + QPoint(0, delta);
+                QMouseEvent move(QEvent::MouseMove,
+                                 tree->viewport()->mapFromGlobal(destination),
+                                 destination,
+                                 Qt::NoButton,
+                                 Qt::LeftButton,
+                                 Qt::NoModifier);
+                QApplication::sendEvent(tree->viewport(), &move);
+                QMouseEvent release(QEvent::MouseButtonRelease,
+                                    tree->viewport()->mapFromGlobal(destination),
+                                    destination,
+                                    Qt::LeftButton,
+                                    Qt::NoButton,
+                                    Qt::NoModifier);
+                QApplication::sendEvent(tree->viewport(), &release);
+                QApplication::processEvents();
+            };
+            if (body) {
+                const int growth = body->height() / 2;
+                drag(growth);
+                passed &= require(animation && animation->isActive() && requests > 0,
+                                  "growing a project activates newly visible pending feedback and its page request");
+                drag(-growth);
+                passed &= require(animation && !animation->isActive(), "shrinking a project stops feedback that is no longer visible");
+            }
+            return passed;
+        }
+
         bool projectDisclosureRestoresCollapsedGeometry() {
             bool passed = true;
             for (const int points : {10, 16}) {
@@ -3637,6 +4022,52 @@ namespace codexui::codex {
             const int indexWidgets = countIndexWidgets({});
 
             QTreeWidget* tree = qobject_cast<QTreeWidget*>(view);
+            qint64 resizeMicros = 0;
+            bool resizeStable = true;
+            if (grouped && tree && tree->topLevelItemCount() > 1) {
+                tree->scrollToTop();
+                settleThreadPane();
+                auto* upper = tree->topLevelItem(0);
+                auto* following = tree->topLevelItem(1);
+                const QRect upperBefore = tree->visualItemRect(upper);
+                const QRect followingBefore = tree->visualItemRect(following);
+                const auto drag = [&](int delta) {
+                    const QPoint origin =
+                        view->viewport()->mapToGlobal(QPoint(view->viewport()->width() / 2, tree->visualItemRect(upper).bottom()));
+                    QMouseEvent press(QEvent::MouseButtonPress,
+                                      view->viewport()->mapFromGlobal(origin),
+                                      origin,
+                                      Qt::LeftButton,
+                                      Qt::LeftButton,
+                                      Qt::NoModifier);
+                    QApplication::sendEvent(view->viewport(), &press);
+                    const QPoint destination = origin + QPoint(0, delta);
+                    QMouseEvent move(QEvent::MouseMove,
+                                     view->viewport()->mapFromGlobal(destination),
+                                     destination,
+                                     Qt::NoButton,
+                                     Qt::LeftButton,
+                                     Qt::NoModifier);
+                    QApplication::sendEvent(view->viewport(), &move);
+                    QApplication::processEvents();
+                    QMouseEvent release(QEvent::MouseButtonRelease,
+                                        view->viewport()->mapFromGlobal(destination),
+                                        destination,
+                                        Qt::LeftButton,
+                                        Qt::NoButton,
+                                        Qt::NoModifier);
+                    QApplication::sendEvent(view->viewport(), &release);
+                    QApplication::processEvents();
+                };
+                QElapsedTimer timer;
+                timer.start();
+                drag(-12);
+                resizeMicros = timer.nsecsElapsed() / 1000;
+                resizeStable = tree->visualItemRect(upper) == QRect(upperBefore.topLeft(), upperBefore.size() - QSize(0, 12)) &&
+                               tree->visualItemRect(following) == followingBefore.translated(0, -12);
+                drag(12);
+                resizeStable &= tree->visualItemRect(upper) == upperBefore && tree->visualItemRect(following) == followingBefore;
+            }
             QTreeWidgetItem* selectedItem = tree ? threadItem(tree, snapshot->selectedThreadId) : nullptr;
             const QModelIndex selectedIndex = selectedItem ? tree->indexFromItem(selectedItem) : QModelIndex{};
             gate(selectedIndex.isValid(), QStringLiteral("authoritative selection is absent from the tree"));
@@ -3739,9 +4170,10 @@ namespace codexui::codex {
                       << " actual_dpr=" << actualDpr << " adapter_us=" << adapterMicros << " population_us=" << populationMicros
                       << " fixed_widgets=" << fixedWidgets << " populated_widgets=" << populatedWidgets << " index_widgets=" << indexWidgets
                       << " documents=" << documents << " no_op_us=" << noOpMicros << " no_op_paints=" << noOpPaints
-                      << " no_op_stable=" << noOpStable << " offscreen_animation_paints=" << offscreenAnimationPaints
-                      << " offscreen_timer_active=" << offscreenTimerActive << " visible_animation_paints=" << visibleAnimationPaints
-                      << " visible_paints_bounded=" << visiblePaintsBounded << '\n';
+                      << " no_op_stable=" << noOpStable << " resize_us=" << resizeMicros << " resize_stable=" << resizeStable
+                      << " offscreen_animation_paints=" << offscreenAnimationPaints << " offscreen_timer_active=" << offscreenTimerActive
+                      << " visible_animation_paints=" << visibleAnimationPaints << " visible_paints_bounded=" << visiblePaintsBounded
+                      << '\n';
 
             gate(std::abs(actualDpr - expectedDpr) < 0.02, QStringLiteral("actual DPR did not match the requested profile"));
             gate(rootRows == static_cast<int>(snapshot->roots.size()), QStringLiteral("thread model cardinality is not exact"));
@@ -3749,6 +4181,8 @@ namespace codexui::codex {
             if (enforceGates) {
                 const qint64 scaleAllowance = InstrumentedBuild ? 4 : 1;
                 gate(indexWidgets == 0, QStringLiteral("thread rows retained index widgets"));
+                gate(resizeStable && testing::timingLimit(resizeMicros < 100000 * scaleAllowance),
+                     QStringLiteral("project resizing changed following card sizes or exceeded the 100ms complete gesture budget"));
                 const int projectBodies = pane.findChildren<QTreeView*>("projectThreadBody").size();
                 gate(projectBodies <= 3 && populatedWidgets <= fixedWidgets + 12 * projectBodies + 4,
                      QStringLiteral("QWidget residency grew with thread count"));
@@ -3814,6 +4248,8 @@ int main(int argc, char** argv) {
     passed &= codexui::codex::sortingAndPromptAnimationAreFixed();
     passed &= codexui::codex::reducedMotionStopsThreadFeedbackAtTheStyleBoundary();
     passed &= codexui::codex::projectBodiesCapVisibleRows();
+    passed &= codexui::codex::projectGapsResizeOnlyTheUpperCard();
+    passed &= codexui::codex::projectResizingRefreshesVisibleFeedback();
     passed &= codexui::codex::projectDisclosureRestoresCollapsedGeometry();
     passed &= codexui::codex::groupsReportDescendantThreadStatus();
     passed &= codexui::codex::selectedThreadUsesSemanticSurface();

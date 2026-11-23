@@ -22,6 +22,7 @@
 #include <QEvent>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QHelpEvent>
 #include <QHideEvent>
 #include <QItemSelectionModel>
 #include <QKeyEvent>
@@ -49,6 +50,7 @@
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolTip>
 #include <QTreeWidget>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -165,6 +167,7 @@ public:
   nlohmann::json query;
   bool pendingPage = false;
   int projectScroll = 0;
+  int projectHeight = 0;
 #if QT_CONFIG(accessibility)
   QAccessible::Id accessibleId = 0;
 #endif
@@ -295,10 +298,16 @@ public:
     [[nodiscard]] int compactRowHeight() const {
         return std::max(DisclosureHitExtent, fontMetrics().height() + 2 * ProjectRowVerticalPadding);
     }
-    [[nodiscard]] int projectBodyHeight(const QModelIndex& project) const {
+    [[nodiscard]] int projectBodyHeight(const QModelIndex& project, int limit = 0) const {
+        const int rowHeight = compactRowHeight();
+        if (limit <= 0) {
+            const int chosen = threadItem(project)->projectHeight;
+            limit = chosen > 0 ? chosen : UiStyle::projectVisibleRows * rowHeight;
+        }
+        limit = std::max(rowHeight, limit);
         int count = 0;
         const std::function<void(const QModelIndex&)> countRows = [&](const QModelIndex& parent) {
-            for (int row = 0; row < model()->rowCount(parent) && count < UiStyle::projectVisibleRows; ++row) {
+            for (int row = 0; row < model()->rowCount(parent) && count * rowHeight < limit; ++row) {
                 const QModelIndex index = model()->index(row, 0, parent);
                 ++count;
                 if (isExpanded(index)) {
@@ -307,7 +316,31 @@ public:
             }
         };
         countRows(project);
-        return count * compactRowHeight();
+        return std::min(limit, count * rowHeight);
+    }
+    [[nodiscard]] bool canResizeProject(const QModelIndex& index) const {
+        const auto* item = threadItem(index);
+        return isEnabled() && item && item->kind == ui::ThreadRowKind::Project && isExpanded(index) && item->childCount();
+    }
+    [[nodiscard]] QModelIndex projectResizeAt(const QPoint& point) const {
+        const QModelIndex index = QTreeWidget::indexAt(point - QPoint(0, 4));
+        return viewport()->rect().contains(point) && canResizeProject(index) &&
+                       std::abs(point.y() - QTreeWidget::visualRect(index).bottom() - 1) <= 3
+                   ? index
+                   : QModelIndex{};
+    }
+    void resizeProject(const QModelIndex& index, int height) {
+        if (canResizeProject(index)) {
+            auto* item = threadItem(index);
+            const int chosen = projectBodyHeight(index, std::max(compactRowHeight(), height));
+            if (item->projectHeight != chosen) {
+                item->projectHeight = chosen;
+                doItemsLayout();
+                viewport()->update();
+                owner_->updateAnimationTimer();
+                owner_->requestMoreNearListEnd();
+            }
+        }
     }
     [[nodiscard]] const ThreadTreeItem* lastVisibleItem(const ThreadTreeItem* item) const {
         while (item && item->isExpanded() && item->childCount()) {
@@ -472,6 +505,35 @@ public:
 
   bool viewportEvent(QEvent* event) override {
       bool handled = contextMouseEvent(event);
+      if (event->type() == QEvent::MouseMove || event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease ||
+          event->type() == QEvent::MouseButtonDblClick) {
+          auto* mouse = static_cast<QMouseEvent*>(event);
+          const QModelIndex boundary = projectResizeAt(mouse->position().toPoint());
+          if (event->type() == QEvent::MouseButtonPress && mouse->button() == Qt::LeftButton && boundary.isValid()) {
+              resizingProject_.emplace(boundary);
+              resizeOffset_ = qRound(mouse->globalPosition().y()) - projectBodyHeight(boundary);
+              handled = true;
+          } else if (event->type() == QEvent::MouseMove && resizingProject_.has_value() && mouse->buttons().testFlag(Qt::LeftButton)) {
+              resizeProject(*resizingProject_, qRound(mouse->globalPosition().y()) - resizeOffset_);
+              handled = true;
+          } else if (event->type() == QEvent::MouseButtonRelease && mouse->button() == Qt::LeftButton && resizingProject_.has_value()) {
+              resizingProject_.reset();
+              handled = true;
+          } else if (event->type() == QEvent::MouseButtonDblClick && boundary.isValid()) {
+              handled = true;
+          }
+          viewport()->setCursor(boundary.isValid() || resizingProject_.has_value() ? Qt::SizeVerCursor : Qt::ArrowCursor);
+      } else if (event->type() == QEvent::ToolTip) {
+          auto* help = static_cast<QHelpEvent*>(event);
+          if (projectResizeAt(help->pos()).isValid()) {
+              QToolTip::showText(help->globalPos(), QStringLiteral("Resize project · Alt+Up/Down on its heading"), viewport());
+              handled = true;
+          }
+      } else if (event->type() == QEvent::UngrabMouse || event->type() == QEvent::Hide ||
+                 (event->type() == QEvent::Leave && !resizingProject_.has_value())) {
+          resizingProject_.reset();
+          viewport()->unsetCursor();
+      }
       if (!handled && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)) {
           auto* mouse = static_cast<QMouseEvent*>(event);
           const QModelIndex index = QTreeWidget::indexAt(mouse->position().toPoint());
@@ -497,8 +559,12 @@ public:
   void keyPressEvent(QKeyEvent* event) override {
       const QModelIndex current = currentIndex();
       const auto* item = threadItem(current);
-      if ((event->key() == Qt::Key_Down || event->key() == Qt::Key_Right) && item && item->kind == ui::ThreadRowKind::Project &&
-          isExpanded(current) && item->childCount()) {
+      if (canResizeProject(current) && event->modifiers() == Qt::AltModifier &&
+          (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+          resizeProject(current, projectBodyHeight(current) + (event->key() == Qt::Key_Down ? 1 : -1) * compactRowHeight());
+          event->accept();
+      } else if ((event->key() == Qt::Key_Down || event->key() == Qt::Key_Right) && item && item->kind == ui::ThreadRowKind::Project &&
+                 isExpanded(current) && item->childCount()) {
           const QModelIndex child = model()->index(0, 0, current);
           setCurrentIndex(child);
           scrollTo(child);
@@ -585,6 +651,9 @@ private:
 
   // A lifetime-safe projection of the active conversation, not keyboard focus.
   QList<ProjectThreadView*> projectViews_;
+  // A removed target must not hand the rest of its gesture to another row.
+  std::optional<QPersistentModelIndex> resizingProject_;
+  int resizeOffset_ = 0;
   QPersistentModelIndex activeThreadIndex_;
   ThreadPane *owner_ = nullptr;
   QCollator collator_;
@@ -671,6 +740,9 @@ QString itemDescription(const ThreadTreeItem& item) {
                                                                                                   : QStringLiteral("not loaded")));
         }
         details.push_back(text(item.details));
+        if (item.kind == ui::ThreadRowKind::Project) {
+            details.push_back(QStringLiteral("Resize height: drag the lower gap or use Alt+Up/Down on the heading"));
+        }
     } else {
         details << QStringLiteral("Status: %1").arg(text(displayStatus(item.status)))
                 << QStringLiteral("Workspace: %1").arg(item.cwd.empty() ? QStringLiteral("Unknown") : text(item.cwd))
@@ -896,6 +968,10 @@ public:
                                8.0);
     }
     painter->restore();
+    if (tree_->canResizeProject(index)) {
+        painter->setPen(QColor(QString::fromLatin1(UiStyle::dividerStrong)));
+        painter->drawLine(row.center().x() - 12, row.bottom() - 1, row.center().x() + 12, row.bottom() - 1);
+    }
     painter->restore();
   }
 
@@ -1029,41 +1105,52 @@ public:
                : nullptr;
   }
   QStringList actionNames() const override {
-    ThreadTreeItem *current = item();
-    if (!itemIsVisible(*tree_, current) || !tree_->isEnabled())
-      return {};
-    QStringList result{QAccessibleActionInterface::pressAction(),
-                       QAccessibleActionInterface::setFocusAction()};
-    if (current->childCount() != 0)
-      result.push_back(QAccessibleActionInterface::toggleAction());
-    return result;
+      ThreadTreeItem* current = item();
+      QStringList result;
+      if (itemIsVisible(*tree_, current) && tree_->isEnabled()) {
+          result = {QAccessibleActionInterface::pressAction(), QAccessibleActionInterface::setFocusAction()};
+          if (current->childCount() != 0) {
+              result.push_back(QAccessibleActionInterface::toggleAction());
+          }
+          if (tree_->canResizeProject(tree_->indexFromItem(current))) {
+              result << QAccessibleActionInterface::increaseAction() << QAccessibleActionInterface::decreaseAction();
+          }
+      }
+      return result;
   }
-  void doAction(const QString &action) override {
-    ThreadTreeItem *current = item();
-    if (!itemIsVisible(*tree_, current) || !tree_->isEnabled())
-      return;
-    if (action == QAccessibleActionInterface::toggleAction() &&
-        current->childCount() != 0) {
-      current->setExpanded(!current->isExpanded());
-      return;
-    }
-    if (action == QAccessibleActionInterface::pressAction() ||
-        action == QAccessibleActionInterface::setFocusAction()) {
-      tree_->setCurrentItem(current);
-      current->setSelected(true);
-      tree_->scrollTo(tree_->indexFromItem(current));
-      tree_->rowView(tree_->indexFromItem(current))->setFocus(Qt::OtherFocusReason);
-      if (action == QAccessibleActionInterface::pressAction() &&
-          current->kind != ui::ThreadRowKind::Thread)
-        tree_->activateItem(current);
-    }
+  void doAction(const QString& action) override {
+      ThreadTreeItem* current = item();
+      if (itemIsVisible(*tree_, current) && tree_->isEnabled()) {
+          const QModelIndex index = tree_->indexFromItem(current);
+          if (action == QAccessibleActionInterface::increaseAction() || action == QAccessibleActionInterface::decreaseAction()) {
+              tree_->resizeProject(index,
+                                   tree_->projectBodyHeight(index) +
+                                       (action == QAccessibleActionInterface::increaseAction() ? 1 : -1) * tree_->compactRowHeight());
+          } else if (action == QAccessibleActionInterface::toggleAction() && current->childCount() != 0) {
+              current->setExpanded(!current->isExpanded());
+          } else if (action == QAccessibleActionInterface::pressAction() || action == QAccessibleActionInterface::setFocusAction()) {
+              tree_->setCurrentItem(current);
+              current->setSelected(true);
+              tree_->scrollTo(tree_->indexFromItem(current));
+              tree_->rowView(tree_->indexFromItem(current))->setFocus(Qt::OtherFocusReason);
+              if (action == QAccessibleActionInterface::pressAction() && current->kind != ui::ThreadRowKind::Thread) {
+                  tree_->activateItem(current);
+              }
+          }
+      }
   }
-  QStringList keyBindingsForAction(const QString &action) const override {
-    if (action == QAccessibleActionInterface::toggleAction())
-      return {QStringLiteral("Left/Right")};
-    if (action == QAccessibleActionInterface::pressAction())
-      return {QStringLiteral("Space")};
-    return {};
+  QStringList keyBindingsForAction(const QString& action) const override {
+      QStringList result;
+      if (action == QAccessibleActionInterface::toggleAction()) {
+          result = {QStringLiteral("Left/Right")};
+      } else if (action == QAccessibleActionInterface::pressAction()) {
+          result = {QStringLiteral("Space")};
+      } else if (action == QAccessibleActionInterface::increaseAction()) {
+          result = {QStringLiteral("Alt+Down")};
+      } else if (action == QAccessibleActionInterface::decreaseAction()) {
+          result = {QStringLiteral("Alt+Up")};
+      }
+      return result;
   }
 
 private:
@@ -1099,14 +1186,18 @@ public:
                ? tree()->indexOfTopLevelItem(accessible->item())
                : -1;
   }
-  QAccessibleInterface *childAt(int x, int y) const override {
-    if (!tree())
-      return nullptr;
-    ThreadTreeItem *item = tree()->threadItem(
-        tree()->itemAt(tree()->viewport()->mapFromGlobal(QPoint(x, y))));
-    while (item && item->parent())
-      item = tree()->threadItem(item->parent());
-    return item ? tree()->accessibleItem(item) : nullptr;
+  QAccessibleInterface* childAt(int x, int y) const override {
+      QAccessibleInterface* result = nullptr;
+      if (tree()) {
+          const QPoint point = tree()->viewport()->mapFromGlobal(QPoint(x, y));
+          const QModelIndex boundary = tree()->projectResizeAt(point);
+          ThreadTreeItem* item = boundary.isValid() ? tree()->threadItem(boundary) : tree()->threadItem(tree()->itemAt(point));
+          while (item && item->parent()) {
+              item = tree()->threadItem(item->parent());
+          }
+          result = item ? tree()->accessibleItem(item) : nullptr;
+      }
+      return result;
   }
   QAccessibleInterface *focusChild() const override {
     ThreadTreeWidget *view = tree();
@@ -2353,6 +2444,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       return false;
     structureChanged = true;
     QTreeWidgetItem *currentParent = item->parent();
+    const bool expanded = item->isExpanded();
     const bool parentChanged = currentParent != parent;
     const int currentPosition =
         currentParent                ? currentParent->indexOfChild(item)
@@ -2366,6 +2458,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       parent->insertChild(position, item);
     else
       tree->insertTopLevelItem(position, item);
+    item->setExpanded(expanded);
     return parentChanged;
   };
 
