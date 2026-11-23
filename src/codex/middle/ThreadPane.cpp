@@ -335,6 +335,7 @@ public:
             const int chosen = projectBodyHeight(index, std::max(compactRowHeight(), height));
             if (item->projectHeight != chosen) {
                 item->projectHeight = chosen;
+                QSettings().setValue(owner_->settingsKey() + "/projectHeight/" + text(item->presentationKey), chosen);
                 doItemsLayout();
                 viewport()->update();
                 owner_->updateAnimationTimer();
@@ -2349,7 +2350,8 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
   projects = snapshot.projects;
   sections = snapshot.sections;
   groupingAvailable = snapshot.groupingAvailable;
-  if (serverIdentity != snapshot.serverIdentity) {
+  const bool serverChanged = serverIdentity != snapshot.serverIdentity;
+  if (serverChanged) {
     serverIdentity = snapshot.serverIdentity;
     const QSettings settings;
     browser.grouping = static_cast<ui::ThreadGrouping>(std::clamp(
@@ -2509,6 +2511,9 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
     for (std::size_t child = 0; child < children.size(); ++child)
       reconcile(*children[child], item, static_cast<int>(child),
                 reparented || ancestorReparented);
+    if ((createdItem || serverChanged) && row.kind == ui::ThreadRowKind::Project) {
+        item->projectHeight = std::max(0, QSettings().value(settingsKey() + "/projectHeight/" + text(item->presentationKey), 0).toInt());
+    }
     if (createdItem && row.kind != ui::ThreadRowKind::Page) {
         item->setExpanded(row.kind == ui::ThreadRowKind::Thread ||
                           QSettings().value(settingsKey() + "/expanded/" + text(item->presentationKey), false).toBool());
@@ -2578,8 +2583,8 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
       (!hadCurrent && !selected) ||
       (hadCurrent && selected && selected->presentationKey == currentKey &&
        selected->target == currentTarget && !selectedReparented);
-  if (tree->isVisible() && (structureChanged || !sameSelection)) {
-      // QAbstractItemView defers scrollbar geometry; settle a structural refresh
+  if (tree->isVisible() && (serverChanged || structureChanged || !sameSelection)) {
+      // QAbstractItemView defers scrollbar geometry; settle restored or structural geometry
       // before restoring its stable semantic anchor or requesting another page.
       tree->doItemsLayout();
       const auto retainedAnchor = rows.find(anchorKey);
@@ -2622,8 +2627,9 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &snapshot) {
                     QAccessible::Focus);
 #endif
   updateAnimationTimer();
-  if (tree->isVisible() && (structureChanged || !sameSelection))
+  if (tree->isVisible() && (serverChanged || structureChanged || !sameSelection)) {
     requestMoreNearListEnd();
+  }
 }
 
 bool ThreadPane::applyRowPresentation(const ui::ThreadListRow &row) {

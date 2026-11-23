@@ -4611,6 +4611,7 @@ void projectGapResizingUsesTheRealShell(Configuration& configuration) {
     const auto originalStyle = qApp->styleSheet();
     for (const int points : {10, 16}) {
         for (const int width : {1500, 1800}) {
+            const std::string projectPrefix = "resize-shell-" + std::to_string(points) + "-" + std::to_string(width) + "-project-";
             FrontendSession session(configuration);
             auto& channels = FrontendSessionTestPeer::channels(session);
             auto& graph = FrontendSessionTestPeer::graph(session);
@@ -4634,7 +4635,7 @@ void projectGapResizingUsesTheRealShell(Configuration& configuration) {
                     return write.upsert({kind, id}, std::move(state));
                 };
                 for (int group = 0; group < 2; ++group) {
-                    const auto id = "resize-shell-project-" + std::to_string(group);
+                    const auto id = projectPrefix + std::to_string(group);
                     const auto project = entity(NodeKind::Project, id, {{"name", "Project " + std::to_string(group)}});
                     for (int row = 0; row < 14; ++row) {
                         const auto thread =
@@ -4653,14 +4654,14 @@ void projectGapResizingUsesTheRealShell(Configuration& configuration) {
             require(selectProjectGrouping(shell), "resize shell uses project grouping");
             auto* tree = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
             const bool ready = spinUntil([&] {
-                return threadItem(tree, "resize-shell-project-0") && threadItem(tree, "resize-shell-project-1");
+                return threadItem(tree, projectPrefix + "0") && threadItem(tree, projectPrefix + "1");
             });
             require(ready, "both resize projects are rendered through graph projection");
             if (ready) {
                 tree->expandAll();
                 spin();
-                auto* upper = threadItem(tree, "resize-shell-project-0");
-                auto* below = threadItem(tree, "resize-shell-project-1");
+                auto* upper = threadItem(tree, projectPrefix + "0");
+                auto* below = threadItem(tree, projectPrefix + "1");
                 const QRect original = tree->visualItemRect(upper);
                 const QRect following = tree->visualItemRect(below);
                 const QPoint origin = tree->viewport()->mapToGlobal(QPoint(tree->viewport()->width() / 2, original.bottom()));

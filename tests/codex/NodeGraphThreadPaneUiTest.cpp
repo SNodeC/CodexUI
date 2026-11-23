@@ -36,6 +36,7 @@
 #include <QPersistentModelIndex>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QProcess>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QScrollBar>
@@ -2272,6 +2273,7 @@ namespace codexui::codex {
                 lower.children = {localDraft("resize-lower", "resize-lower", "Lower thread", "/workspace"),
                                   localDraft("resize-lower-2", "resize-lower-2", "Another thread", "/workspace")};
                 ui::ThreadListSnapshot snapshot;
+                snapshot.serverIdentity = "resize-" + std::to_string(width) + "-" + std::to_string(points);
                 snapshot.roots = {project, lower};
                 for (int row = 0; row < 24; ++row) {
                     auto empty = project;
@@ -2543,6 +2545,136 @@ namespace codexui::codex {
                 }
             }
             qApp->setFont(originalFont);
+            return passed;
+        }
+
+        bool projectHeightRestartPhase(const QString& phase) {
+            middle::ThreadPane pane;
+            pane.resize(qEnvironmentVariableIntValue("CODEXUI_HEIGHT_WIDTH"), 1100);
+            pane.setStyleSheet(UiStyle::applicationStyleSheet());
+            ui::ThreadListSnapshot snapshot;
+            snapshot.serverIdentity = "height-restart-server-a";
+            for (int project = 0; project < 3; ++project) {
+                ui::ThreadListRow row;
+                row.kind = ui::ThreadRowKind::Project;
+                row.id = row.presentationKey = "height-restart-" + std::to_string(project);
+                row.title = "Restart project " + std::to_string(project);
+                for (int child = 0; child < 14; ++child) {
+                    const auto key = row.id + "-" + std::to_string(child);
+                    row.children.push_back(localDraft(key, key, "Thread 日本語 " + std::to_string(child), "/workspace"));
+                }
+                snapshot.roots.push_back(std::move(row));
+            }
+            pane.refresh(snapshot);
+            pane.show();
+            auto* tree = threadTree(pane);
+            QApplication::processEvents();
+            const auto height = [&](int project) {
+                auto* item = threadItem(tree, "height-restart-" + std::to_string(project));
+                int result = 0;
+                for (auto* body : pane.findChildren<QTreeView*>("projectThreadBody")) {
+                    if (body->rootIndex() == tree->indexFromItem(item)) {
+                        result = body->height();
+                    }
+                }
+                return result;
+            };
+            const auto shrink = [&](int project, int rows) {
+                tree->setCurrentItem(threadItem(tree, "height-restart-" + std::to_string(project)));
+                for (int row = 0; row < rows; ++row) {
+                    QKeyEvent event(QEvent::KeyPress, Qt::Key_Up, Qt::AltModifier);
+                    QApplication::sendEvent(tree, &event);
+                }
+                QApplication::processEvents();
+            };
+            bool passed = true;
+            const auto capture = [&] {
+                const auto directory = qEnvironmentVariable("CODEXUI_HEIGHT_SCREENSHOT_DIR");
+                if (!directory.isEmpty()) {
+                    passed &= require(pane.grab().save(directory + "/restart-" + QString::number(pane.devicePixelRatioF()) + "-" +
+                                                       qEnvironmentVariable("CODEXUI_HEIGHT_WIDTH") + "-" +
+                                                       qEnvironmentVariable("CODEXUI_GROUP_FONT") + "-" + phase + ".png"),
+                                      "restart project-height screenshot saved");
+                }
+            };
+            auto* first = threadItem(tree, "height-restart-0");
+            if (phase == "write") {
+                tree->expandAll();
+                QApplication::processEvents();
+            } else {
+                passed &= require(!first->isExpanded() && threadItem(tree, "height-restart-1")->isExpanded(),
+                                  "a fresh process restores collapsed and expanded projects alongside their sizes");
+                first->setExpanded(true);
+                QApplication::processEvents();
+            }
+            const int rowHeight = tree->sizeHintForIndex(tree->indexFromItem(first->child(0))).height();
+            if (phase == "write") {
+                shrink(0, 5);
+                shrink(1, 3);
+                passed &= require(height(0) == 3 * rowHeight && height(1) == 5 * rowHeight,
+                                  "keyboard resizing chooses distinct project heights before process exit");
+                capture();
+                first->setExpanded(false);
+            } else {
+                passed &= require(height(0) == 3 * rowHeight && height(1) == 5 * rowHeight,
+                                  "a fresh process restores each project's chosen height");
+                capture();
+                tree->scrollToItem(threadItem(tree, "height-restart-2"));
+                QApplication::processEvents();
+                passed &= require(height(2) == 8 * rowHeight, "projects without saved heights retain the eight-row default");
+                tree->scrollToTop();
+                snapshot.roots.front().title = "Renamed project";
+                std::swap(snapshot.roots[0], snapshot.roots[1]);
+                pane.refresh(snapshot);
+                QApplication::processEvents();
+                passed &= require(height(0) == 3 * rowHeight && height(1) == 5 * rowHeight,
+                                  "renaming and reordering retain heights by project identity");
+                auto& changed = snapshot.roots[1];
+                const auto children = changed.children;
+                changed.children.resize(2);
+                pane.refresh(snapshot);
+                QApplication::processEvents();
+                passed &= require(height(0) == 2 * rowHeight, "restored height clamps to the currently loaded content");
+                changed.children = children;
+                pane.refresh(snapshot);
+                QApplication::processEvents();
+                passed &= require(height(0) == 3 * rowHeight, "loading more content restores the saved height limit");
+                snapshot.serverIdentity = "height-restart-server-b";
+                pane.refresh(snapshot);
+                QApplication::processEvents();
+                passed &= require(height(0) == 8 * rowHeight, "another server does not inherit a matching project's saved height");
+                shrink(0, 1);
+                passed &= require(height(0) == 7 * rowHeight, "the other server owns an independent chosen height");
+                snapshot.serverIdentity = "height-restart-server-a";
+                pane.refresh(snapshot);
+                QApplication::processEvents();
+                passed &= require(height(0) == 3 * rowHeight, "switching back restores the original server's project height");
+            }
+            QSettings().sync();
+            return passed;
+        }
+
+        bool projectHeightsSurviveRestart() {
+            bool passed = true;
+            for (const auto& [width, points] : std::array{std::pair{260, 10}, std::pair{440, 10}, std::pair{260, 16}, std::pair{440, 16}}) {
+                QTemporaryDir settings;
+                for (const auto& phase : {QStringLiteral("write"), QStringLiteral("read")}) {
+                    QProcess child;
+                    auto environment = QProcessEnvironment::systemEnvironment();
+                    environment.insert("CODEXUI_GROUP_FONT", QString::number(points));
+                    environment.insert("CODEXUI_HEIGHT_WIDTH", QString::number(width));
+                    child.setProcessEnvironment(environment);
+                    child.start(QCoreApplication::applicationFilePath(), {"--project-height", phase, settings.path()});
+                    const bool finished = child.waitForFinished(5000);
+                    passed &= require(
+                        finished && child.exitStatus() == QProcess::NormalExit && child.exitCode() == EXIT_SUCCESS,
+                        ("project height restart " + phase + " width=" + QString::number(width) + " font=" + QString::number(points))
+                            .toStdString()
+                            .c_str());
+                    std::cout << child.readAllStandardOutput().toStdString();
+                    std::cerr << child.readAllStandardError().toStdString();
+                }
+            }
             return passed;
         }
 
@@ -4216,57 +4348,61 @@ int main(int argc, char** argv) {
     }
     QTemporaryDir settings;
     QSettings::setDefaultFormat(QSettings::IniFormat);
-    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
-    if (argc >= 3) {
+    const bool heightRestart = argc == 4 && std::string_view(argv[1]) == "--project-height";
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, heightRestart ? QString::fromLocal8Bit(argv[3]) : settings.path());
+    bool passed = true;
+    if (heightRestart) {
+        passed = codexui::codex::projectHeightRestartPhase(QString::fromLocal8Bit(argv[2]));
+    } else if (argc >= 3) {
         const std::size_t count = std::max<std::size_t>(1, std::strtoull(argv[1], nullptr, 10));
         const qreal expectedDpr = std::max(0.1, std::strtod(argv[2], nullptr));
         const bool enforceGates = argc < 4 || std::string_view(argv[3]) != "baseline";
-        return codexui::codex::threadPerformanceProfile(
-                   count, expectedDpr, enforceGates, argc >= 5 && std::string_view(argv[4]) == "grouped")
-                   ? EXIT_SUCCESS
-                   : EXIT_FAILURE;
+        passed =
+            codexui::codex::threadPerformanceProfile(count, expectedDpr, enforceGates, argc >= 5 && std::string_view(argv[4]) == "grouped");
+    } else {
+        const QString expectedDprValue = qEnvironmentVariable("CODEXUI_EXPECTED_DPR");
+        if (!expectedDprValue.isEmpty()) {
+            bool validDpr = false;
+            const qreal expectedDpr = expectedDprValue.toDouble(&validDpr);
+            QWidget probe;
+            probe.show();
+            QApplication::processEvents();
+            passed &= codexui::codex::require(validDpr && std::abs(probe.devicePixelRatioF() - expectedDpr) < 0.02,
+                                              "ThreadPane visual test did not run at its requested DPR");
+        }
+        passed &= codexui::codex::forkNamesPreserveTheirLineage();
+        passed &= codexui::codex::groupLabelsIdentifyDestinationsWithoutRoutineIds();
+        passed &= codexui::codex::localDraftsUseOneGroupingProjection();
+        passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
+        passed &= codexui::codex::forkHierarchyIgnoresRootReadOrder();
+        passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
+        passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();
+        passed &= codexui::codex::presentationLifetimeFollowsExactThreadIncarnation();
+        passed &= codexui::codex::sortingAndPromptAnimationAreFixed();
+        passed &= codexui::codex::reducedMotionStopsThreadFeedbackAtTheStyleBoundary();
+        passed &= codexui::codex::projectBodiesCapVisibleRows();
+        passed &= codexui::codex::projectGapsResizeOnlyTheUpperCard();
+        passed &= codexui::codex::projectHeightsSurviveRestart();
+        passed &= codexui::codex::projectResizingRefreshesVisibleFeedback();
+        passed &= codexui::codex::projectDisclosureRestoresCollapsedGeometry();
+        passed &= codexui::codex::groupsReportDescendantThreadStatus();
+        passed &= codexui::codex::selectedThreadUsesSemanticSurface();
+        passed &= codexui::codex::threadDisclosureIsReadyOnFirstPresentation();
+        passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
+        passed &= codexui::codex::threadIndicatorsDistinguishDirectAndIndirectActivity();
+        passed &= codexui::codex::uninspectedResultsFollowCompletionAndSelection();
+        passed &= codexui::codex::inspectionAttentionFollowsThePresentedHierarchy();
+        passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
+        passed &= codexui::codex::optimisticDiscardRetiresAuthorityBeforeSelectionReentry();
+        passed &= codexui::codex::pagingFollowsTheVisibleListEnd();
+        passed &= codexui::codex::structuralInsertionPreservesTheViewportAnchor();
+        passed &= codexui::codex::authoritativeSelectionWinsOverThePriorViewportAnchor();
+        passed &= codexui::codex::retainedSelectionRemainsVisibleAfterReparenting();
+        passed &= codexui::codex::incrementalRootSortPreservesTheViewportAnchor();
+        passed &= codexui::codex::newestThreadPromotionRevealsOnce();
+        if (passed) {
+            std::cout << "NodeGraph ThreadPane UI tests passed\n";
+        }
     }
-    bool passed = true;
-    const QString expectedDprValue = qEnvironmentVariable("CODEXUI_EXPECTED_DPR");
-    if (!expectedDprValue.isEmpty()) {
-        bool validDpr = false;
-        const qreal expectedDpr = expectedDprValue.toDouble(&validDpr);
-        QWidget probe;
-        probe.show();
-        QApplication::processEvents();
-        passed &= codexui::codex::require(validDpr && std::abs(probe.devicePixelRatioF() - expectedDpr) < 0.02,
-                                          "ThreadPane visual test did not run at its requested DPR");
-    }
-    passed &= codexui::codex::forkNamesPreserveTheirLineage();
-    passed &= codexui::codex::groupLabelsIdentifyDestinationsWithoutRoutineIds();
-    passed &= codexui::codex::localDraftsUseOneGroupingProjection();
-    passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
-    passed &= codexui::codex::forkHierarchyIgnoresRootReadOrder();
-    passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
-    passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();
-    passed &= codexui::codex::presentationLifetimeFollowsExactThreadIncarnation();
-    passed &= codexui::codex::sortingAndPromptAnimationAreFixed();
-    passed &= codexui::codex::reducedMotionStopsThreadFeedbackAtTheStyleBoundary();
-    passed &= codexui::codex::projectBodiesCapVisibleRows();
-    passed &= codexui::codex::projectGapsResizeOnlyTheUpperCard();
-    passed &= codexui::codex::projectResizingRefreshesVisibleFeedback();
-    passed &= codexui::codex::projectDisclosureRestoresCollapsedGeometry();
-    passed &= codexui::codex::groupsReportDescendantThreadStatus();
-    passed &= codexui::codex::selectedThreadUsesSemanticSurface();
-    passed &= codexui::codex::threadDisclosureIsReadyOnFirstPresentation();
-    passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
-    passed &= codexui::codex::threadIndicatorsDistinguishDirectAndIndirectActivity();
-    passed &= codexui::codex::uninspectedResultsFollowCompletionAndSelection();
-    passed &= codexui::codex::inspectionAttentionFollowsThePresentedHierarchy();
-    passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
-    passed &= codexui::codex::optimisticDiscardRetiresAuthorityBeforeSelectionReentry();
-    passed &= codexui::codex::pagingFollowsTheVisibleListEnd();
-    passed &= codexui::codex::structuralInsertionPreservesTheViewportAnchor();
-    passed &= codexui::codex::authoritativeSelectionWinsOverThePriorViewportAnchor();
-    passed &= codexui::codex::retainedSelectionRemainsVisibleAfterReparenting();
-    passed &= codexui::codex::incrementalRootSortPreservesTheViewportAnchor();
-    passed &= codexui::codex::newestThreadPromotionRevealsOnce();
-    if (passed)
-        std::cout << "NodeGraph ThreadPane UI tests passed\n";
     return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -129,7 +129,7 @@ Apply these conditions across the sections below:
 - Verify descriptions are not presented or submitted as model instructions.
 - Assign, reassign and remove a thread’s project membership.
 - Reorder projects before another project and to the end.
-- Drag the gap below an expanded project upward and downward; resize only that project while every following card moves by the same delta and retains its size. Exercise Alt+Up/Down and accessible increase/decrease on its heading, one-row and loaded-content limits, refresh, folding, scrolling, font changes, interrupted drags and removal during a drag.
+- Drag the gap below an expanded project upward and downward; resize only that project while every following card moves by the same delta and retains its size. Exercise Alt+Up/Down and accessible increase/decrease on its heading, one-row and loaded-content limits, refresh, folding, scrolling, font changes, interrupted drags and removal during a drag. Restart with both expanded and collapsed resized projects; restore each saved height by project and server identity, including after renaming or reordering, and clamp to the currently loaded content without losing the saved limit.
 - Create a thread from an empty or populated project; verify its project and workspace context.
 - Delete a project with confirmation; retain its threads.
 - Exercise failed creation, editing, assignment, ordering and deletion without inventing successful state.
