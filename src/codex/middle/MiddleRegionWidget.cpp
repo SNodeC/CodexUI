@@ -433,8 +433,8 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   threadHeading->addSpacing(4);
   threadHeading->addWidget(workspaceCopy);
   connect(conversationWorkspace, &QPushButton::clicked, this, [this] {
-      if (workspaceAction) {
-          workspaceAction();
+      if (const auto action = workspaceAction) {
+          action();
       }
   });
   connect(workspaceCopy, &QToolButton::clicked, this, [this] {
