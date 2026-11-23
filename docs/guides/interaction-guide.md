@@ -79,7 +79,7 @@ composer scroll surfaces, preserves that owner across pointer crossing and
 boundaries until ScrollEnd, and separately records whether the conversation
 follows the bottom or is manually paused.
 
-Expanded native project cards start with up to eight content rows and scroll independently. Drag the small horizontal grip in the gap below a project to resize its body: upward shrinks that project and shifts all following cards upward; downward grows it and shifts following cards downward. Their heights stay unchanged. The range runs from one complete content row to the loaded expanded content. With the project heading focused, Alt+Up/Down adjusts its height by one row; accessibility exposes the same increase/decrease actions. The chosen height survives refresh, collapse/expand and scrolling while that project row remains in the list.
+Expanded native project cards start with up to eight content rows and scroll independently. Drag the small horizontal grip in the gap below a project to resize its body: upward shrinks that project and shifts all following cards upward; downward grows it and shifts following cards downward. Their heights stay unchanged. The range runs from one complete content row to the loaded expanded content. With the project heading focused, Alt+Up/Down adjusts its height by one row; accessibility exposes the same increase/decrease actions. The chosen height is saved per project and server alongside expansion state and survives refresh, collapse/expand, scrolling and application restart. Smaller loaded content temporarily reduces the displayed height; loading more content restores the saved limit.
 
 ## Thread identity and prompt routing
 
