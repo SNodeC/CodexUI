@@ -3333,8 +3333,8 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
         editor->setPlainText(QStringLiteral("unsent composer draft"));
     }
     bool dialogTargetCorrect = false;
-    const auto scheduleDialog = [&](QString target, QString proposed, bool cancel) {
-        QTimer::singleShot(0, &shell, [&, target, proposed, cancel] {
+    const auto scheduleDialog = [&](QString target, QString proposed, bool cancel, bool refresh = false) {
+        QTimer::singleShot(0, &shell, [&, target, proposed, cancel, refresh] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             auto* input = dialog ? dialog->findChild<QLineEdit*>(QStringLiteral("codexWorkspaceDirectory")) : nullptr;
             for (const auto& message : takeQtMessages(channels)) {
@@ -3361,6 +3361,17 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
                     }
                 }
                 input->setText(proposed);
+            }
+            if (refresh) {
+                static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                                "thread/name/updated",
+                                                std::nullopt,
+                                                {{"threadId", "workspace-a"}, {"threadName", "Refreshed workspace thread"}}}));
+                auto* title = shell.findChild<QLabel*>(QStringLiteral("conversationTitle"));
+                require(spinUntil([&] {
+                            return title && title->toolTip() == "Refreshed workspace thread";
+                        }),
+                        "the selected thread heading refreshes while its workspace dialog is open");
             }
             if (dialog) {
                 if (cancel) {
@@ -3402,6 +3413,26 @@ void workspaceActionsRetainPresentedAndTargetThreadOwnership(Configuration& conf
                                      return action && action->kind == NodeActionKind::ChangeWorkspace;
                                  }),
             "accepting an unchanged workspace emits no action");
+    if (heading && heading->isEnabled()) {
+        scheduleDialog("Selected workspace thread", "/remote/header-selected", false, true);
+        heading->click();
+    }
+    messages = takeQtMessages(channels);
+    require(dialogTargetCorrect && std::ranges::count_if(messages,
+                                                         [](const auto& message) {
+                                                             const auto* action = std::get_if<NodeAction>(&message);
+                                                             return action && action->kind == NodeActionKind::ChangeWorkspace;
+                                                         }) == 1,
+            "accepting a changed workspace from the refreshed heading emits exactly one action");
+    for (const auto& message : messages) {
+        if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::ChangeWorkspace) {
+            require(action->target && action->target->id().canonical == "workspace-a" &&
+                        exactStringFromValue(valueMember(action->payload, "cwd")) == "/remote/header-selected",
+                    "the heading action retains its original thread and authored workspace across a header refresh");
+        }
+    }
+    require(heading->accessibleName() == "Thread workspace: /tmp" && editor && editor->toPlainText() == "unsent composer draft",
+            "the header action preserves confirmed workspace and unsent input until backend confirmation");
     list->expandAll();
     list->scrollToItem(threadItem(list, "workspace-b"));
     spin(20);
@@ -7293,90 +7324,91 @@ int main(int argc, char **argv) {
   codexui::codex::require(preferences.isValid(), "shell test preferences have an isolated writable directory");
   QSettings::setDefaultFormat(QSettings::IniFormat);
   QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferences.path());
-  auto *configuration =
-      utils::Config::configRoot.newSubCommand<codexui::codex::Configuration>();
+  auto* configuration = utils::Config::configRoot.newSubCommand<codexui::codex::Configuration>();
   QApplication application(argc, argv);
   core::SNodeC::init(argc, argv);
 
   using namespace codexui::codex;
-  turnRemovalConfirmationTargetsTheCapturedTurn(*configuration);
-  tokenUsageUpdatesBothShellSurfaces(*configuration);
   workspaceActionsRetainPresentedAndTargetThreadOwnership(*configuration);
-  timestampDetailsUseExistingShell(*configuration);
-  graphNotificationsPrecedeRetirementRelease(*configuration);
-  massRetirementIsSliced(*configuration);
-  selectedRemovalUnbindsBeforeWorkerRetirement(*configuration);
-  settingsDraftsRetireWithProviderAndThreadIncarnations(*configuration);
-  delayedRetirementCannotEraseRecreatedThread(*configuration);
-  slicedProviderRetirementPreservesFreshSelection(*configuration);
-  applicationFontChangeRegeneratesUiGeometry(*configuration);
-  splitterHandleDrivesInteractiveConversationResize(*configuration);
-  removedAffectedOptimisticRetryDoesNotReadReleasedNode(*configuration);
-  typedActionsAreExactOnceAndBounded(*configuration);
-  qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
-  conversationPresentationBurstIsFrameBounded(*configuration);
-  threadPresentationBurstYieldsBetweenRows(*configuration);
-  graphBackedShellPreservesDraftsAndPrompts(*configuration);
-  conversationProjectionRetriesWithoutAnotherGraphNotification(*configuration);
-  initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
-  completedLiveAgentAppearsWithoutThreadReselection(*configuration);
-  threadSwitchStagesTheCompleteReplacement(*configuration);
-  cachedThreadSwitchCompletesWithoutProviderTraffic(*configuration);
-  cachedSelectionSurvivesAQueuedProjectionRetry(*configuration);
-  threadSwitchPreservesNestedInspectorPaging(*configuration);
-  inactiveThreadNeverReactivatesAStaleTurn(*configuration);
-  reloadAndReconnectHydrationStayExplicit(*configuration);
-  connectionCapabilitiesRefreshOpenThreadActions(*configuration);
-  forkActionsExposeLineageAndAdvancedOptions(*configuration);
-  subscriptionActionsKeepTheConversationVisible(*configuration);
-  backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
-  groupedStatusNotificationsRefreshAncestors(*configuration);
-  inspectionAcknowledgementsTrackTheBoundConversation(*configuration);
-  saturatedInspectionKeepsOnlyTheLatestBinding(*configuration);
-  optimisticDraftUsesOneTypedCreateAction(*configuration);
-  optimisticDraftUsesOneTypedCreateAction(*configuration, true);
-  optimisticDraftUsesOneTypedCreateAction(*configuration, true, true);
-  emptyOptimisticDraftIsAbandonedOnThreadSelection(*configuration);
-  contendedUserSelectionKeepsTheLatestVisibleRow(*configuration);
-  secondNewThreadIsGuardedWhileCreationIsInFlight(*configuration);
-  providerResetKeepsInFlightCreationGuard(*configuration);
-  optimisticCreationDoesNotOverrideLaterNavigation(*configuration);
-  for (const bool navigateAway : {false, true}) {
-      for (const bool notificationFirst : {false, true}) {
-          for (const bool contended : {false, true}) {
-              createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, contended);
+  if (!qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY")) {
+      turnRemovalConfirmationTargetsTheCapturedTurn(*configuration);
+      tokenUsageUpdatesBothShellSurfaces(*configuration);
+      timestampDetailsUseExistingShell(*configuration);
+      graphNotificationsPrecedeRetirementRelease(*configuration);
+      massRetirementIsSliced(*configuration);
+      selectedRemovalUnbindsBeforeWorkerRetirement(*configuration);
+      settingsDraftsRetireWithProviderAndThreadIncarnations(*configuration);
+      delayedRetirementCannotEraseRecreatedThread(*configuration);
+      slicedProviderRetirementPreservesFreshSelection(*configuration);
+      applicationFontChangeRegeneratesUiGeometry(*configuration);
+      splitterHandleDrivesInteractiveConversationResize(*configuration);
+      removedAffectedOptimisticRetryDoesNotReadReleasedNode(*configuration);
+      typedActionsAreExactOnceAndBounded(*configuration);
+      qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
+      conversationPresentationBurstIsFrameBounded(*configuration);
+      threadPresentationBurstYieldsBetweenRows(*configuration);
+      graphBackedShellPreservesDraftsAndPrompts(*configuration);
+      conversationProjectionRetriesWithoutAnotherGraphNotification(*configuration);
+      initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
+      completedLiveAgentAppearsWithoutThreadReselection(*configuration);
+      threadSwitchStagesTheCompleteReplacement(*configuration);
+      cachedThreadSwitchCompletesWithoutProviderTraffic(*configuration);
+      cachedSelectionSurvivesAQueuedProjectionRetry(*configuration);
+      threadSwitchPreservesNestedInspectorPaging(*configuration);
+      inactiveThreadNeverReactivatesAStaleTurn(*configuration);
+      reloadAndReconnectHydrationStayExplicit(*configuration);
+      connectionCapabilitiesRefreshOpenThreadActions(*configuration);
+      forkActionsExposeLineageAndAdvancedOptions(*configuration);
+      subscriptionActionsKeepTheConversationVisible(*configuration);
+      backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
+      groupedStatusNotificationsRefreshAncestors(*configuration);
+      inspectionAcknowledgementsTrackTheBoundConversation(*configuration);
+      saturatedInspectionKeepsOnlyTheLatestBinding(*configuration);
+      optimisticDraftUsesOneTypedCreateAction(*configuration);
+      optimisticDraftUsesOneTypedCreateAction(*configuration, true);
+      optimisticDraftUsesOneTypedCreateAction(*configuration, true, true);
+      emptyOptimisticDraftIsAbandonedOnThreadSelection(*configuration);
+      contendedUserSelectionKeepsTheLatestVisibleRow(*configuration);
+      secondNewThreadIsGuardedWhileCreationIsInFlight(*configuration);
+      providerResetKeepsInFlightCreationGuard(*configuration);
+      optimisticCreationDoesNotOverrideLaterNavigation(*configuration);
+      for (const bool navigateAway : {false, true}) {
+          for (const bool notificationFirst : {false, true}) {
+              for (const bool contended : {false, true}) {
+                  createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, contended);
+              }
+              createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, false, true);
           }
-          createdThreadSelectionSurvivesRescan(*configuration, navigateAway, notificationFirst, false, true);
       }
+      optimisticCreationIgnoresAnotherCreationCorrelation(*configuration);
+      promptDraftsFollowVisibleThreadSelection(*configuration);
+      saturatedShellKeepsTheEditorDraft(*configuration);
+      saturatedRenameRetainsAuthoredName(*configuration);
+      modalThreadActionCannotOutliveItsExactTarget(*configuration);
+      saturatedWorkerEffectsKeepNewestUiState(*configuration);
+      saturatedInteractionRetainsAuthoredInput(*configuration);
+      recoveryOnlyPromptRestoresToComposer(*configuration);
+      providerNoticesReachTheTransientSurface(*configuration);
+      failedHydrationKeepsTheEditorDraft(*configuration);
+      hiddenInspectorRequestsRetireWithTheirExactInteraction(*configuration);
+      requestAncestorMoveRetainsVisibleInteractionIdentity(*configuration);
+      reverseInteractionCarriesOnlyAuthoredResponse(*configuration);
+      openRequestTracksAuthorityAndRetirement(*configuration);
+      compactAttentionKeepsExactVisibleTarget(*configuration);
+      pendingRequestTextBoundaries();
+      mcpApprovalMetadataKeepsAuthoredChoices();
+      pendingRequestValidationRetainsInput();
+      dialogControlsHaveSemanticLabels();
+      structuredRequestCaretRemainsInsideTheForm();
+      dialogEditorCaretFollowsGeometryOnlyWhileEditing();
+      instructionCaretRemainsVisibleInShortDialogs();
+      permissionRequestDisclosure();
   }
-  optimisticCreationIgnoresAnotherCreationCorrelation(*configuration);
-  promptDraftsFollowVisibleThreadSelection(*configuration);
-  saturatedShellKeepsTheEditorDraft(*configuration);
-  saturatedRenameRetainsAuthoredName(*configuration);
-  modalThreadActionCannotOutliveItsExactTarget(*configuration);
-  saturatedWorkerEffectsKeepNewestUiState(*configuration);
-  saturatedInteractionRetainsAuthoredInput(*configuration);
-  recoveryOnlyPromptRestoresToComposer(*configuration);
-  providerNoticesReachTheTransientSurface(*configuration);
-  failedHydrationKeepsTheEditorDraft(*configuration);
-  hiddenInspectorRequestsRetireWithTheirExactInteraction(*configuration);
-  requestAncestorMoveRetainsVisibleInteractionIdentity(*configuration);
-  reverseInteractionCarriesOnlyAuthoredResponse(*configuration);
-  openRequestTracksAuthorityAndRetirement(*configuration);
-  compactAttentionKeepsExactVisibleTarget(*configuration);
-  pendingRequestTextBoundaries();
-  mcpApprovalMetadataKeepsAuthoredChoices();
-  pendingRequestValidationRetainsInput();
-  dialogControlsHaveSemanticLabels();
-  structuredRequestCaretRemainsInsideTheForm();
-  dialogEditorCaretFollowsGeometryOnlyWhileEditing();
-  instructionCaretRemainsVisibleInShortDialogs();
-  permissionRequestDisclosure();
 
   if (failures != 0) {
-    std::cerr << failures << " shell integration assertion(s) failed\n";
-    return EXIT_FAILURE;
+      std::cerr << failures << " shell integration assertion(s) failed\n";
+  } else {
+      std::cout << "Shell typed nodegraph integration test passed\n";
   }
-  std::cout << "Shell typed nodegraph integration test passed\n";
-  return EXIT_SUCCESS;
+  return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
