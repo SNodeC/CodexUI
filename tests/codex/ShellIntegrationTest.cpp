@@ -4606,6 +4606,105 @@ void groupedStatusNotificationsRefreshAncestors(Configuration& configuration) {
     }
 }
 
+void projectGapResizingUsesTheRealShell(Configuration& configuration) {
+    const auto originalFont = QApplication::font();
+    const auto originalStyle = qApp->styleSheet();
+    for (const int points : {10, 16}) {
+        for (const int width : {1500, 1800}) {
+            FrontendSession session(configuration);
+            auto& channels = FrontendSessionTestPeer::channels(session);
+            auto& graph = FrontendSessionTestPeer::graph(session);
+            WorkerLogic worker(graph, channels);
+            ShellWidget shell(session);
+            auto font = shell.font();
+            font.setPointSize(points);
+            qApp->setFont(font);
+            shell.setFont(font);
+            shell.setStyleSheet(UiStyle::applicationStyleSheet());
+            shell.resize(width, 1000);
+            shell.show();
+            makeReady(worker);
+            GraphChange initial;
+            NodeRef changingThread;
+            {
+                auto write = graph.write();
+                const auto entity = [&](NodeKind kind, const std::string& id, Value::Object fields) {
+                    NodeState state;
+                    state.fields = std::move(fields);
+                    return write.upsert({kind, id}, std::move(state));
+                };
+                for (int group = 0; group < 2; ++group) {
+                    const auto id = "resize-shell-project-" + std::to_string(group);
+                    const auto project = entity(NodeKind::Project, id, {{"name", "Project " + std::to_string(group)}});
+                    for (int row = 0; row < 14; ++row) {
+                        const auto thread =
+                            entity(NodeKind::Thread, id + "-" + std::to_string(row), {{"name", "Thread " + std::to_string(row)}});
+                        write.relate(thread, RelationKind::ProjectMembership, project);
+                        changingThread = thread;
+                    }
+                }
+                for (const auto* method : {"project/list", "threadSection/list"}) {
+                    static_cast<void>(entity(
+                        NodeKind::Catalog, threadBrowserKey(method, nlohmann::json::object()), {{"loaded", true}, {"hasMore", false}}));
+                }
+                initial = write.finish();
+            }
+            require(messageAdmitted(channels.sendGraphChanged(std::move(initial))), "resize fixture reaches the actual shell");
+            require(selectProjectGrouping(shell), "resize shell uses project grouping");
+            auto* tree = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
+            const bool ready = spinUntil([&] {
+                return threadItem(tree, "resize-shell-project-0") && threadItem(tree, "resize-shell-project-1");
+            });
+            require(ready, "both resize projects are rendered through graph projection");
+            if (ready) {
+                tree->expandAll();
+                spin();
+                auto* upper = threadItem(tree, "resize-shell-project-0");
+                auto* below = threadItem(tree, "resize-shell-project-1");
+                const QRect original = tree->visualItemRect(upper);
+                const QRect following = tree->visualItemRect(below);
+                const QPoint origin = tree->viewport()->mapToGlobal(QPoint(tree->viewport()->width() / 2, original.bottom()));
+                const auto pointer = [&](QEvent::Type type, int delta, Qt::MouseButton button, Qt::MouseButtons buttons) {
+                    const QPoint global = origin + QPoint(0, delta);
+                    const QPoint local = tree->viewport()->mapFromGlobal(global);
+                    QMouseEvent event(type, QPointF(local), QPointF(local), QPointF(global), button, buttons, Qt::NoModifier);
+                    QApplication::sendEvent(tree->viewport(), &event);
+                    spin();
+                };
+                const auto capture = [&](const QString& state) {
+                    const auto path = qEnvironmentVariable("CODEXUI_RESIZE_SCREENSHOT_DIR");
+                    if (!path.isEmpty()) {
+                        require(shell.grab().save(path + "/shell-resize-" + QString::number(width) + "-font-" + QString::number(points) +
+                                                  "-dpr-" + QString::number(shell.devicePixelRatioF()) + "-" + state + ".png"),
+                                "full-shell resize evidence saved");
+                    }
+                };
+                capture("before");
+                pointer(QEvent::MouseButtonPress, 0, Qt::LeftButton, Qt::LeftButton);
+                pointer(QEvent::MouseMove, -37, Qt::NoButton, Qt::LeftButton);
+                capture("during");
+                GraphChange update;
+                {
+                    auto write = graph.write();
+                    write.setField(changingThread, "name", "Updated during resize");
+                    update = write.finish();
+                }
+                require(messageAdmitted(channels.sendGraphChanged(std::move(update))),
+                        "incoming thread update is delivered during the drag");
+                spin();
+                pointer(QEvent::MouseMove, 28, Qt::NoButton, Qt::LeftButton);
+                pointer(QEvent::MouseButtonRelease, 28, Qt::LeftButton, Qt::NoButton);
+                require(tree->visualItemRect(upper) == QRect(original.topLeft(), original.size() + QSize(0, 28)) &&
+                            tree->visualItemRect(below) == following.translated(0, 28),
+                        "real-shell graph updates preserve the drag's upper-only geometry transaction");
+                capture("after");
+            }
+        }
+    }
+    qApp->setFont(originalFont);
+    qApp->setStyleSheet(originalStyle);
+}
+
 void inspectionAcknowledgementsTrackTheBoundConversation(Configuration& configuration) {
     FrontendSession session(configuration);
     auto& channels = FrontendSessionTestPeer::channels(session);
@@ -7331,6 +7430,9 @@ int main(int argc, char **argv) {
   using namespace codexui::codex;
   workspaceActionsRetainPresentedAndTargetThreadOwnership(*configuration);
   if (!qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY")) {
+      projectGapResizingUsesTheRealShell(*configuration);
+  }
+  if (!qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY") && !qEnvironmentVariableIsSet("CODEXUI_TEST_PROJECT_RESIZE_ONLY")) {
       turnRemovalConfirmationTargetsTheCapturedTurn(*configuration);
       tokenUsageUpdatesBothShellSurfaces(*configuration);
       timestampDetailsUseExistingShell(*configuration);
