@@ -1345,13 +1345,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   registerServerRequest.template operator()<ExecCommandApproval>();
 
 #define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)                                                                    \
-sdk.on##OperationName([&hydrateHistoricalChildren,                                                                                         \
-                       &refreshRevertedHistory,                                                                                            \
-                       &resumeAfterClose,                                                                                                  \
-                       &pendingServerRequests,                                                                                             \
-                       &requestAccountUsage,                                                                                               \
-                       &refreshThreadGroups,                                                                                               \
-                       &workerLogic](codex::generated::server_notifications::OperationName::Params& notification) {                        \
+sdk.on##OperationName([&](codex::generated::server_notifications::OperationName::Params& notification) {                                   \
     nodegraph::NodeRef expected;                                                                                                           \
     const bool resolved = std::string_view(codex::generated::server_notifications::OperationName::method) == "serverRequest/resolved";     \
     if (resolved) {                                                                                                                        \
@@ -3429,7 +3423,7 @@ sdk.on##OperationName([&hydrateHistoricalChildren,                              
             }
         };
         dispatchRequest<Operation>(
-            sdk, std::move(parameters), workerLogic, {}, [&, project, assignId, assignTarget, completed](RequestOutcome outcome) {
+            sdk, std::move(parameters), workerLogic, {}, [&, assignId, assignTarget, completed](RequestOutcome outcome) {
                 completed(outcome);
                 if (outcome.ok && !outcome.stale && !assignId.empty()) {
                     const auto& id = outcome.groupId;

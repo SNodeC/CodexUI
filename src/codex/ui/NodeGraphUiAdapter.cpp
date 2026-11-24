@@ -119,12 +119,35 @@ namespace codexui::codex::ui {
         using TokenCounts = std::array<std::optional<std::int64_t>, TokenFields.size()>;
 
         TokenCounts tokenCounts(const nodegraph::Value* value) {
+            // Compile-time lookup order preserves the existing display order.
+            constexpr auto order = [] {
+                std::array<std::size_t, TokenFields.size()> indices{};
+                for (std::size_t i = 0; i < indices.size(); ++i) {
+                    indices[i] = i;
+                }
+                std::ranges::sort(indices, {}, [](std::size_t i) {
+                    return TokenFields[i];
+                });
+                return indices;
+            }();
             TokenCounts counts;
-            const auto* object = value ? value->asObject() : nullptr;
-            for (std::size_t i = 0; i < counts.size(); ++i) {
-                counts[i] = object ? signedIntegerFromValue(valueMember(*object, TokenFields[i])) : std::nullopt;
-                if (counts[i] && *counts[i] < 0)
-                    counts[i].reset();
+            if (const auto* object = value ? value->asObject() : nullptr) {
+                auto field = object->begin();
+                for (const std::size_t i : order) {
+                    int comparison = field == object->end() ? 1 : std::string_view(field->first).compare(TokenFields[i]);
+                    if (comparison < 0) {
+                        // Seek over extension fields rather than scanning them.
+                        field = object->lower_bound(TokenFields[i]);
+                        comparison = field == object->end() ? 1 : std::string_view(field->first).compare(TokenFields[i]);
+                    }
+                    if (comparison == 0) {
+                        counts[i] = signedIntegerFromValue(&field->second);
+                        if (counts[i] && *counts[i] < 0) {
+                            counts[i].reset();
+                        }
+                        ++field;
+                    }
+                }
             }
             return counts;
         }

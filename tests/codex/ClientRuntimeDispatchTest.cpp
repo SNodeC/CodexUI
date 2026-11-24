@@ -1616,7 +1616,11 @@ namespace codexui::codex {
                     expect(methods["thread/name/set"] == !ephemeral, name + ": ephemeral fork avoids rename");
                     const auto forkNode = findNode(runtime.graph(), {NodeKind::Thread, forkId});
                     ui::NodeGraphUiAdapter adapter(runtime.graph());
-                    const auto before = adapter.threadRow(forkNode);
+                    std::optional<ui::ThreadListRow> before;
+                    static_cast<void>(waitUntil([&] {
+                        before = adapter.threadRow(forkNode);
+                        return before.has_value();
+                    }));
                     expect(before && before->projectId == originalProject && before->sectionId == originalSection,
                            name + ": unacknowledged membership is not projected optimistically");
                     NodeAction prompt{forkNode, NodeActionKind::SubmitPrompt};

@@ -1076,8 +1076,10 @@ try {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         const contract = JSON.parse(await readFile(resolve(toolDirectory, "../../tests/fixtures/frontend-presentation.json"), "utf8"));
-        const fixture = contract.pendingRequestCases.find(entry => entry.id === "mcp-browser-upload-extension-metadata");
-        console.log(JSON.stringify({mcpApprovals: await qualifyMcpApprovals(devTools, fixture), browser: browserVersion.product}));
+        for (const fixture of contract.pendingRequestCases.filter(entry => entry.id === "mcp-browser-upload-extension-metadata"
+            || entry.id.startsWith("mcp-required-"))) {
+            console.log(JSON.stringify({fixture: fixture.id, mcpApprovals: await qualifyMcpApprovals(devTools, fixture), browser: browserVersion.product}));
+        }
     } else if (process.env.CODEXUI_BROWSER_CONTEXT_MENUS_ONLY || process.env.CODEXUI_BROWSER_UI_INVENTORY_ONLY || process.env.CODEXUI_BROWSER_LARGE_LISTS_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);

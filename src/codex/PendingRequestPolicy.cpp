@@ -556,12 +556,25 @@ bool mcpMessageOnly(const nlohmann::json &request) {
   if (!schema->is_object() || stringValue(*schema, "type") != "object")
     return false;
   const auto properties = schema->find("properties");
-  return properties != schema->end() && properties->is_object() &&
-         properties->empty();
+  const auto required = schema->find("required");
+  return properties != schema->end() && properties->is_object() && properties->empty() &&
+         (required == schema->end() || (required->is_array() && required->empty()));
 }
 
 bool privilegedMcpApproval(const nlohmann::json &request) {
   return stringValue(request, "mode") == "form" && mcpMessageOnly(request);
+}
+
+bool validMcpContent(const nlohmann::json& request, const nlohmann::json& content) {
+    const auto schema = request.find("requestedSchema");
+    bool valid = content.is_object() && schema != request.end() && schema->is_object();
+    if (valid) {
+        const auto required = schema->find("required");
+        valid = required == schema->end() || (required->is_array() && std::ranges::all_of(*required, [&](const nlohmann::json& key) {
+                                                  return key.is_string() && content.contains(key.get_ref<const std::string&>());
+                                              }));
+    }
+    return valid;
 }
 
 bool mcpPersistence(const nlohmann::json &request, std::string_view mode) {
@@ -1260,16 +1273,12 @@ PendingRequestPolicy::responseForSubmission(
                privilegedMcpApproval(request)) {
       response = nlohmann::json{
           {"action", "accept"}, {"content", nullptr}, {"_meta", nullptr}};
-    } else if (!mcpMessageOnly(request) &&
-               stringValue(request, "mode") != "openai/form" &&
-               !submission.input.is_object()) {
-      return std::nullopt;
+    } else if (!mcpMessageOnly(request) && stringValue(request, "mode") != "openai/form" && !validMcpContent(request, submission.input)) {
+        return std::nullopt;
     } else {
-      response = nlohmann::json{{"action", "accept"},
-                                {"content", mcpMessageOnly(request)
-                                                ? nlohmann::json(nullptr)
-                                                : std::move(submission.input)},
-                                {"_meta", std::move(submission.metadata)}};
+        response = nlohmann::json{{"action", "accept"},
+                                  {"content", mcpMessageOnly(request) ? nlohmann::json(nullptr) : std::move(submission.input)},
+                                  {"_meta", std::move(submission.metadata)}};
     }
   } else if (kind == PendingRequestKind::PermissionsApproval) {
     if (submission.choice == "decline") {

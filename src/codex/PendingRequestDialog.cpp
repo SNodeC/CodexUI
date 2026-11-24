@@ -132,6 +132,7 @@ void showValidationWarning(QWidget *parent, QString title, QString message) {
   // reentrancy when the warning is dismissed from the nested modal loop.
   warning.setOption(QMessageBox::Option::DontUseNativeDialog, true);
   warning.exec();
+  parent->activateWindow();
 }
 
 struct QuestionEditor {
@@ -366,10 +367,14 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
         } else if (request.kind == PendingRequestKind::McpElicitation && structuredContent &&
                    decision->currentData().toString() == QStringLiteral("accept")) {
             nlohmann::json content = nlohmann::json::parse(structuredContent->toPlainText().toStdString(), nullptr, false);
-            if (content.is_discarded()) {
+            PendingRequestSubmission candidate = authoredSubmission();
+            candidate.input = content;
+            if (content.is_discarded() || !PendingRequestPolicy::responseForSubmission(request.kind, raw, std::move(candidate))) {
                 scroll->ensureWidgetVisible(structuredContent);
                 structuredContent->setFocus();
-                showValidationWarning(&dialog, QStringLiteral("Invalid response"), QStringLiteral("The MCP response must be valid JSON."));
+                showValidationWarning(&dialog,
+                                      QStringLiteral("Invalid response"),
+                                      QStringLiteral("The MCP response must be valid JSON and include every required field."));
                 structuredContent->setFocus();
                 return;
             }

@@ -626,8 +626,59 @@
       ],
       "submissions": [
         {"id": "accept", "choice": "accept", "input": {"accepted": true}, "metadata": {"authored": true}, "expected": {"result": {"action": "accept", "content": {"accepted": true}, "_meta": {"authored": true}}}},
+        {"id": "optional-fields-omitted", "choice": "accept", "input": {}, "expected": {"result": {"action": "accept", "content": {}, "_meta": null}}},
         {"id": "invalid-array", "choice": "accept", "input": [], "expected": null},
         {"id": "cancel", "choice": "cancel", "expected": {"result": {"action": "cancel", "content": null, "_meta": null}}}
+      ]
+    },
+    {
+      "id": "mcp-required-fields",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Choose a review label", "mode": "form", "requestedSchema": {"type": "object", "properties": {"label": {"type": "string", "maxLength": 128}, "accepted": {"type": "boolean"}}, "required": ["label", "accepted"]}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": true},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "empty-object", "choice": "accept", "input": {}, "expected": null},
+        {"id": "missing-label", "choice": "accept", "input": {"accepted": true}, "expected": null},
+        {"id": "missing-second-field", "choice": "accept", "input": {"label": "review"}, "expected": null},
+        {"id": "complete", "choice": "accept", "input": {"label": "review", "accepted": true}, "expected": {"result": {"action": "accept", "content": {"label": "review", "accepted": true}, "_meta": null}}},
+        {"id": "empty-string-and-false-are-present", "choice": "accept", "input": {"label": "", "accepted": false}, "expected": {"result": {"action": "accept", "content": {"label": "", "accepted": false}, "_meta": null}}},
+        {"id": "decline-without-fields", "choice": "decline", "input": {}, "expected": {"result": {"action": "decline", "content": null, "_meta": null}}},
+        {"id": "cancel-without-fields", "choice": "cancel", "input": {}, "expected": {"result": {"action": "cancel", "content": null, "_meta": null}}}
+      ]
+    },
+    {
+      "id": "mcp-required-undeclared-field",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Choose a review label", "mode": "form", "requestedSchema": {"type": "object", "properties": {}, "required": ["label"]}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": true},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "empty-object", "choice": "accept", "input": {}, "expected": null},
+        {"id": "complete", "choice": "accept", "input": {"label": "review"}, "expected": {"result": {"action": "accept", "content": {"label": "review"}, "_meta": null}}}
+      ]
+    },
+    {
+      "id": "mcp-required-own-properties",
+      "method": "mcpServer/elicitation/request",
+      "raw": {"serverName": "server", "threadId": "thread", "message": "Choose a review label", "mode": "form", "requestedSchema": {"type": "object", "properties": {"toString": {"type": "string"}, "__proto__": {"type": "string"}}, "required": ["toString", "__proto__"]}},
+      "expectedKind": "mcp-elicitation",
+      "expectedActions": [
+        {"value": "accept", "label": "Accept", "tone": "approve", "requiresInput": true},
+        {"value": "decline", "label": "Decline", "tone": "danger", "requiresInput": false},
+        {"value": "cancel", "label": "Cancel", "tone": "neutral", "requiresInput": false}
+      ],
+      "submissions": [
+        {"id": "empty-object", "choice": "accept", "input": {}, "expected": null},
+        {"id": "complete", "choice": "accept", "input": {"toString": "review", "__proto__": "value"}, "expected": {"result": {"action": "accept", "content": {"toString": "review", "__proto__": "value"}, "_meta": null}}}
       ]
     },
     {

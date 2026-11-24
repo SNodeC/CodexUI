@@ -371,11 +371,18 @@ function mcpMessageOnly(raw: unknown): boolean {
     if (raw.mode === "openai/form") return false;
     const schema = raw.requestedSchema;
     return schema === null || (isObject(schema) && schema.type === "object"
-        && isObject(schema.properties) && boundedKeys(schema.properties, 0) !== undefined);
+        && isObject(schema.properties) && boundedKeys(schema.properties, 0) !== undefined
+        && (schema.required === undefined || (Array.isArray(schema.required) && schema.required.length === 0)));
 }
 
 function privilegedMcpApproval(raw: unknown): boolean {
     return isObject(raw) && raw.mode === "form" && mcpMessageOnly(raw);
+}
+
+function validMcpContent(raw: Record<string, unknown>, content: unknown): boolean {
+    const schema = raw.requestedSchema;
+    return isObject(content) && isObject(schema) && (schema.required === undefined
+        || (Array.isArray(schema.required) && schema.required.every(key => typeof key === "string" && Object.hasOwn(content, key))));
 }
 
 function mcpPersistence(raw: unknown, mode: "session" | "always"): boolean {
@@ -638,7 +645,7 @@ export function pendingResponse(request: PendingRequestPresentation,
         if (approvalKind === "mcp_tool_call" && privilegedMcpApproval(request.raw))
             return {result: {action: "accept", content: null, _meta: null}};
         if (!mcpMessageOnly(request.raw) && request.raw && isObject(request.raw)
-            && request.raw.mode !== "openai/form" && !isObject(submission.input)) return undefined;
+            && request.raw.mode !== "openai/form" && !validMcpContent(request.raw, submission.input)) return undefined;
         return {result: {action: "accept", content: mcpMessageOnly(request.raw) ? null : submission.input ?? null,
             _meta: submission.metadata ?? null}};
     }
