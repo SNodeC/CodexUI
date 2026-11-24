@@ -224,8 +224,8 @@ FrontendSession::sendRuntimeAction(nodegraph::RuntimeAction &action) {
   return status;
 }
 
-void FrontendSession::acknowledgeInspection(const nodegraph::NodeRef& thread) {
-    queueNodeAcknowledgement({thread, nodegraph::NodeActionKind::InspectThread, {}, {}, {}, {}});
+void FrontendSession::acknowledgeInspection(const nodegraph::NodeRef& completedTurn) {
+    queueNodeAcknowledgement({completedTurn, nodegraph::NodeActionKind::InspectThread, {}, {}, {}, {}});
     flushNodeAcknowledgements();
     if (!pendingNodeAcknowledgements.empty()) {
         scheduleWorkerMessageDrain();
@@ -433,9 +433,9 @@ void FrontendSession::queueRetirementAcknowledgements(
 
 void FrontendSession::queueNodeAcknowledgement(nodegraph::NodeAction action) {
     const bool inspection = action.kind == nodegraph::NodeActionKind::InspectThread;
-    if (action.target || inspection) {
+    if (action.target) {
         const std::uint8_t kind = inspection ? 4 : action.kind == nodegraph::NodeActionKind::UiDetached ? 2 : 1;
-        const auto [position, inserted] = pendingNodeAcknowledgementKinds.try_emplace(inspection ? nullptr : action.target.get(), 0);
+        const auto [position, inserted] = pendingNodeAcknowledgementKinds.try_emplace(action.target.get(), 0);
         const std::uint8_t previous = position->second;
         if ((previous & kind) == 0) {
             position->second |= kind;
@@ -449,9 +449,6 @@ void FrontendSession::queueNodeAcknowledgement(nodegraph::NodeAction action) {
                 }
                 throw;
             }
-        } else if (inspection) {
-            *std::ranges::find(pendingNodeAcknowledgements, nodegraph::NodeActionKind::InspectThread, &nodegraph::NodeAction::kind) =
-                std::move(action);
         }
     }
 }
@@ -463,7 +460,7 @@ void FrontendSession::flushNodeAcknowledgements() {
          processed < MaximumAcknowledgementsPerPass) {
     nodegraph::NodeAction &action = pendingNodeAcknowledgements.back();
     const bool inspection = action.kind == nodegraph::NodeActionKind::InspectThread;
-    nodegraph::Node* const target = inspection ? nullptr : action.target.get();
+    nodegraph::Node* const target = action.target.get();
     const std::uint8_t kind = inspection ? 4 : action.kind == nodegraph::NodeActionKind::UiDetached ? 2 : 1;
     const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
     if (!nodegraph::deliveryGuaranteed(status))

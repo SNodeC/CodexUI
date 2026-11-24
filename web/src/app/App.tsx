@@ -1299,6 +1299,23 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}));
     const navigationSections = navigationEnabled && navigation.anchor ? loadedSections() : [];
     const atBottom = navigation.following || (navigation.anchor?.pixelOffset ?? 0) > 1 && Boolean(scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight <= 1);
+    const acknowledgeVisibleResult = () => {
+        const result = thread?.uninspectedResult;
+        const container = scroll.current;
+        if (result && container && !threadTransitionActive) {
+            const answer = visibleSections.find(section => section.turnId === result)?.cards.slice().reverse().find(card =>
+                card.kind === "agentMessage" && (card.payload as AgentMessageData).phase === "final_answer"
+                && !(card.payload as AgentMessageData).questionRequest);
+            const content = answer ? cardForKey(container, stableKey(answer.key))?.querySelector<HTMLElement>(":scope > .safe-markdown") : undefined;
+            const bounds = content?.getBoundingClientRect();
+            const viewport = container.getBoundingClientRect();
+            const bottom = Math.min(viewport.bottom, composerDock.current?.getBoundingClientRect().top ?? viewport.bottom);
+            if (bounds && bounds.height > 0 && bounds.width > 0 && bounds.bottom > viewport.top && bounds.top < bottom
+                && bounds.right > viewport.left && bounds.left < viewport.right) {
+                session.acknowledgeInspection(projectionId, result, presentationKey);
+            }
+        }
+    };
     const loadEarlier = () => {
         if (!historyPagePending) {
             viewport.loadMore(projectionId, presentationKey);
@@ -1405,6 +1422,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)}</p>}</div></div>
         </div>
         <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
+            onPointerDownCapture={acknowledgeVisibleResult} onKeyDownCapture={acknowledgeVisibleResult} onWheelCapture={acknowledgeVisibleResult}
             aria-busy={threadTransitionActive || undefined} onScroll={event => {
             const element = event.currentTarget;
             const previous = viewport.scroll(projectionId, presentationKey);
@@ -1432,7 +1450,8 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                         </section>;
                     })}</>}
         </div>
-        <div ref={composerDock} className="composer-dock">
+        <div ref={composerDock} className="composer-dock"
+            onPointerDownCapture={acknowledgeVisibleResult} onKeyDownCapture={acknowledgeVisibleResult} onWheelCapture={acknowledgeVisibleResult}>
             {attention && <div className="attention-strip" role="status"><span>A Codex request needs attention · {humanize(attention.kind)}</span>
                 <button onClick={() => onInspect("requests")}>Review {session.model.pendingRequestPresentations().size} request(s)</button>
                 {pendingDecisionOptions(attention).filter(decision => !decision.requiresInput && decision.value !== "submit").slice(0, 2).map(decision => <button key={decision.value} disabled={!session.canResolvePending(attention)} onClick={() => session.resolvePending(attention, {choice: decision.value})}>{decision.label}</button>)}

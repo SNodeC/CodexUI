@@ -3231,7 +3231,7 @@ namespace codexui::codex {
             return matched;
         }
 
-        bool uninspectedResultsFollowCompletionAndSelection() {
+        bool uninspectedResultsFollowCompletionAndInspection() {
             using namespace nodegraph;
             std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/thread-inspection.json");
             const auto fixture = nlohmann::json::parse(input);
@@ -3271,7 +3271,15 @@ namespace codexui::codex {
                         auto read = graph.tryRead();
                         selected = read->find({NodeKind::Thread, step.at("select").get<std::string>()});
                     }
-                    static_cast<void>(logic.inspectThread(selected));
+                } else if (step.contains("inspect")) {
+                    NodeRef completedTurn;
+                    {
+                        auto read = graph.tryRead();
+                        const auto thread = read->find({NodeKind::Thread, step.at("inspect").get<std::string>()});
+                        completedTurn =
+                            read->find({NodeKind::Turn, exactStringFromValue(valueMember(*read->state(thread), "uninspectedResult"))});
+                    }
+                    static_cast<void>(logic.inspectThread(completedTurn));
                 } else if (step.contains("method")) {
                     static_cast<void>(logic.apply({DecodedMessageKind::ServerNotification,
                                                    step.at("method").get<std::string>(),
@@ -3374,7 +3382,13 @@ namespace codexui::codex {
                                      {},
                                      {{"threadId", id}, {"turn", Value::Object{{"id", "finished"}, {"status", "completed"}}}}}));
                 }
-                static_cast<void>(logic.inspectThread(parent));
+                NodeRef parentResult, childResult;
+                {
+                    auto read = graph.tryRead();
+                    parentResult = read->find(scopedTurnNodeId("ready-parent", "finished"));
+                    childResult = read->find(scopedTurnNodeId("ready-child", "finished"));
+                }
+                static_cast<void>(logic.inspectThread(parentResult));
                 middle::ThreadPane pane;
                 pane.resize(480, 780);
                 pane.show();
@@ -3431,10 +3445,8 @@ namespace codexui::codex {
                 }
                 {
                     auto read = graph.tryRead();
-                    check(!boolFromValue(valueMember(*read->state(parent), "uninspectedResult")),
-                          "selection clears only the parent's own result");
-                    check(boolFromValue(valueMember(*read->state(child), "uninspectedResult")),
-                          "filtering preserves the child's unread state");
+                    check(!valueMember(*read->state(parent), "uninspectedResult"), "inspection clears only the parent's own result");
+                    check(valueMember(*read->state(child), "uninspectedResult") != nullptr, "filtering preserves the child's unread state");
                 }
                 if (const auto path = qEnvironmentVariable("CODEXUI_INSPECTION_SCREENSHOT_DIR"); !path.isEmpty()) {
                     check(pane.grab().save(path + "/" + QString::fromStdString(label) + "-dpr-" +
@@ -3446,7 +3458,7 @@ namespace codexui::codex {
                 tree->expandAll();
                 QApplication::processEvents();
                 check(threadItem(tree, "ready-child"), "changing filters reveals the unread child");
-                static_cast<void>(logic.inspectThread(child));
+                static_cast<void>(logic.inspectThread(childResult));
                 pane.refresh(*adapter.threads(parent, nullptr, &pane.browserOptions()));
                 check(!threadItem(tree, "ready-parent")->toolTip(0).contains("not yet inspected"),
                       "inspecting the responsible child clears its displayed ancestors");
@@ -4390,7 +4402,7 @@ int main(int argc, char** argv) {
         passed &= codexui::codex::threadDisclosureIsReadyOnFirstPresentation();
         passed &= codexui::codex::threadRowsConsumeCanonicalStatusTone();
         passed &= codexui::codex::threadIndicatorsDistinguishDirectAndIndirectActivity();
-        passed &= codexui::codex::uninspectedResultsFollowCompletionAndSelection();
+        passed &= codexui::codex::uninspectedResultsFollowCompletionAndInspection();
         passed &= codexui::codex::inspectionAttentionFollowsThePresentedHierarchy();
         passed &= codexui::codex::optimisticCreationHandsOneRowToGraphAuthority();
         passed &= codexui::codex::optimisticDiscardRetiresAuthorityBeforeSelectionReentry();

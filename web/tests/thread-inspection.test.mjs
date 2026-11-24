@@ -12,7 +12,7 @@ const fixture = JSON.parse(readFileSync(new URL("../../tests/fixtures/thread-ins
 
 test("shared completion/inspection contract reaches thread, section and project presentation", () => {
     const session = new BrowserFrontendSession();
-    const normalizer = new ProtocolNormalizer(frame => session.model.applyEvent(frame, session.getSnapshot().selectedThreadId));
+    const normalizer = new ProtocolNormalizer(frame => session.model.applyEvent(frame));
     try {
         normalizer.transportEvent("connected");
         normalizer.operationResult("projects.list", "projects", {}, {result: {data: [fixture.project]}});
@@ -21,6 +21,8 @@ test("shared completion/inspection contract reaches thread, section and project 
         for (const step of fixture.steps) {
             if (step.select) {
                 session.selectThread(step.select);
+            } else if (step.inspect) {
+                session.acknowledgeInspection(step.inspect, session.model.thread(step.inspect).uninspectedResult, session.threadVisualKey(step.inspect));
             } else if (step.method) {
                 normalizer.serverNotification(step.method, step.params);
             } else if (step.history) {
@@ -49,7 +51,7 @@ test("shared completion/inspection contract reaches thread, section and project 
     } finally { session.dispose(); }
 });
 
-test("the live browser session passes current selection to completion handling", async () => {
+test("live completion requires inspection of the exact result after selection", async () => {
     const socket = new FakeSocket(), session = new BrowserFrontendSession("ws://inspection.test", () => socket);
     try {
         session.connect(); socket.open(); await readyProvider(socket, "inspection");
@@ -62,11 +64,23 @@ test("the live browser session passes current selection to completion handling",
         finish("ready-child", "background");
         assert.equal(session.model.threadIndicatorTones().get("ready-child"), "uninspected");
         session.selectThread("ready-child");
-        finish("ready-child", "foreground");
+        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "uninspected", "selection does not acknowledge");
+        const key = session.threadVisualKey("ready-child");
+        session.acknowledgeInspection("ready-child", "background", key);
         assert.equal(session.model.threadIndicatorTones().get("ready-child"), "success");
+        finish("ready-child", "foreground");
+        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "uninspected");
+        session.acknowledgeInspection("ready-child", "background", key);
+        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "uninspected", "a stale acknowledgment cannot clear a newer result");
+        session.acknowledgeInspection("ready-child", "foreground", key + "stale");
+        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "uninspected", "a stale presentation cannot acknowledge");
         session.selectThread("ready-other");
+        session.acknowledgeInspection("ready-child", "foreground", key);
+        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "uninspected", "input from another thread cannot acknowledge");
+        session.selectThread("ready-child");
+        session.acknowledgeInspection("ready-child", "foreground", key);
         finish("ready-child", "foreground");
-        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "success");
+        assert.equal(session.model.threadIndicatorTones().get("ready-child"), "success", "duplicates do not rearm an acknowledged result");
     } finally { session.dispose(); }
 });
 
@@ -106,6 +120,7 @@ for (const scenario of visibilityCases) {
                     params: {threadId, turn: {id: "finished", status: "completed"}}}));
             }
             session.selectThread("ready-parent");
+            session.acknowledgeInspection("ready-parent", "finished", session.threadVisualKey("ready-parent"));
             session.changeBrowser({grouping: scenario.grouping, archive: scenario.archive, search: scenario.title});
             await replyToLists();
             const markup = renderToStaticMarkup(createElement(App, {session}));
@@ -123,12 +138,13 @@ for (const scenario of visibilityCases) {
                     assert.equal(header.includes("status-dot uninspected"), scenario.expected[key]);
                 }
             }
-            assert.equal(session.model.thread("ready-parent").uninspectedResult, false);
-            assert.equal(session.model.thread("ready-child").uninspectedResult, true, "filtering does not acknowledge the child");
+            assert.equal(session.model.thread("ready-parent").uninspectedResult, undefined);
+            assert.equal(session.model.thread("ready-child").uninspectedResult, "finished", "filtering does not acknowledge the child");
             session.changeBrowser({archive: "all", search: ""});
             await replyToLists();
             assert.ok(threadButton(renderToStaticMarkup(createElement(App, {session})), "ready-child"), "removing filters reveals the unread child");
             session.selectThread("ready-child");
+            session.acknowledgeInspection("ready-child", "finished", session.threadVisualKey("ready-child"));
             session.selectThread("ready-parent");
             assert.equal(threadButton(renderToStaticMarkup(createElement(App, {session})), "ready-parent").includes("status-dot uninspected"), false);
         } finally {

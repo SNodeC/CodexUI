@@ -483,6 +483,7 @@ namespace codexui::codex {
 
         void buildUi();
         void connectUi();
+        void acknowledgeConversationInput(QObject* watched);
         void scheduleGraphBinding(bool immediate = true);
         void runGraphBinding();
         void bindGraphPanes(nodegraph::NodeRef selectedThread);
@@ -745,6 +746,35 @@ namespace codexui::codex {
         globalStatusLabel = makeStatusLabel(QStringLiteral("Offline"), QStringLiteral("globalStatusLabel"), 160, "settingLabel");
         statusLayout->addWidget(globalStatusLabel);
         root->addWidget(statusBar);
+    }
+
+    void ShellWidget::Impl::acknowledgeConversationInput(QObject* watched) {
+        auto* target = qobject_cast<QWidget*>(watched);
+        auto& view = middleRegion->conversation();
+        auto& composer = middleRegion->composer();
+        nodegraph::NodeRef completedTurn, answer;
+        if (boundGraphThread && target &&
+            (target == &view || view.isAncestorOf(target) || target == &composer || composer.isAncestorOf(target))) {
+            auto read = session.nodeGraph().tryRead();
+            if (read && read->live(boundGraphThread) && view.presentedThreadId() == boundGraphThread->id().canonical) {
+                completedTurn = read->find(
+                    {nodegraph::NodeKind::Turn, exactStringFromValue(valueMember(*read->state(boundGraphThread), "uninspectedResult"))});
+                if (completedTurn && read->parent(completedTurn) == boundGraphThread) {
+                    for (std::size_t index = read->childCount(completedTurn); index > 0 && !answer; --index) {
+                        const auto item = read->childAt(completedTurn, index - 1);
+                        const auto state = read->state(item);
+                        if (exactStringFromValue(valueMember(*state, "type")) == "agentMessage" &&
+                            exactStringFromValue(valueMember(*state, "phase")) == "final_answer" &&
+                            (exactStringFromValue(valueMember(*state, "delivery")) != "async" || !valueMember(*state, "questions"))) {
+                            answer = item;
+                        }
+                    }
+                }
+            }
+        }
+        if (answer && view.isCardContentVisible(answer)) {
+            session.acknowledgeInspection(completedTurn);
+        }
     }
 
     void ShellWidget::Impl::connectUi() {
@@ -1065,9 +1095,6 @@ namespace codexui::codex {
             middleRegion->conversation().beginThreadSelection(selectedThread->id().canonical, selectedThread->incarnation());
         pendingConversationAuthorityReplacement = false;
         pendingStructuralConversationDelta.reset();
-        if (boundGraphThread != selectedThread) {
-            session.acknowledgeInspection(selectedThread);
-        }
         boundGraphThread = std::move(selectedThread);
         middleRegion->inspector().clearTimingTarget();
         routedThreadRevision = 0;
@@ -2805,12 +2832,16 @@ namespace codexui::codex {
     bool ShellWidget::eventFilter(QObject* watched, QEvent* event) {
         if (watched == qApp && event && event->type() == QEvent::ApplicationFontChange) {
             const QString styleSheet = UiStyle::applicationStyleSheet();
-            if (qApp->styleSheet() != styleSheet)
+            if (qApp->styleSheet() != styleSheet) {
                 qApp->setStyleSheet(styleSheet);
+            }
         }
-        if (impl && impl->middleRegion->routeScrollEvent(watched, event))
-            return true;
-        return QWidget::eventFilter(watched, event);
+        if (impl && event &&
+            (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::KeyPress || event->type() == QEvent::Wheel)) {
+            impl->acknowledgeConversationInput(watched);
+        }
+        const bool routed = impl && impl->middleRegion->routeScrollEvent(watched, event);
+        return routed || QWidget::eventFilter(watched, event);
     }
 
 } // namespace codexui::codex

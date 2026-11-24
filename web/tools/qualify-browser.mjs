@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {qualifyInspection} from "./qualify-inspection.mjs";
 import {qualifyContextMenus} from "./qualify-context-menus.mjs";
 import {qualifyListWindowing} from "./qualify-list-windowing.mjs";
 import {qualifyUiInventory} from "./qualify-ui-inventory.mjs";
@@ -1052,7 +1053,11 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
-    if (process.env.CODEXUI_BROWSER_CHECKPOINTS_ONLY) {
+    if (process.env.CODEXUI_BROWSER_INSPECTION_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        console.log(JSON.stringify({inspection: await qualifyInspection(devTools), browser: browserVersion.product}));
+    } else if (process.env.CODEXUI_BROWSER_CHECKPOINTS_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         const checkpoints = await devTools.evaluate(checkpointCheck);

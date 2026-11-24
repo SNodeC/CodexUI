@@ -3447,6 +3447,14 @@ void ConversationView::revealRow(const QModelIndex &index, ScrollHint hint,
   }
 }
 
+bool ConversationView::isCardContentVisible(const nodegraph::NodeRef& target) const {
+    const auto index = model_->indexForTarget(target);
+    const auto* card = index.isValid() ? cardForStableKey(model_->row(index.row())->stableKey) : nullptr;
+    const auto* content = card ? card->findChild<QWidget*>(QStringLiteral("conversationCardContent")) : nullptr;
+    return !structuralStagingActive() && content && content->isVisible() &&
+           QRect(content->mapTo(viewport(), QPoint{}), content->size()).intersects(viewport()->rect());
+}
+
 QModelIndex ConversationView::indexAt(const QPoint &point) const {
   if (!viewport()->rect().contains(point) || heights_.empty())
     return {};

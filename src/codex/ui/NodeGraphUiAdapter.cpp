@@ -1326,7 +1326,7 @@ namespace codexui::codex::ui {
             row.subscriptionUnavailable = nodegraph::threadContextChangeUnavailable(read, thread, nodegraph::NodeActionKind::Unsubscribe);
             row.subscriptionPhase = exactStringFromValue(valueMember(*state, "subscriptionPhase"));
             row.status = statusFromState(*state);
-            row.uninspectedResult = boolFromValue(valueMember(*state, "uninspectedResult"));
+            row.uninspectedResult = !exactStringFromValue(valueMember(*state, "uninspectedResult")).empty();
             row.createdAt = timestamp("createdAt");
             row.updatedAt = timestamp("updatedAt");
             row.recencyAt = timestamp("recencyAt");

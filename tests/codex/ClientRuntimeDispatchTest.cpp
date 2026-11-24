@@ -66,8 +66,8 @@ namespace codexui::codex {
         class UnixBridge final {
         public:
             explicit UnixBridge(std::string_view suffix = {}) {
-                path_ =
-                    "/tmp/codexui-runtime-dispatch-" + std::to_string(static_cast<long long>(::getpid())) + std::string(suffix) + ".sock";
+                path_ = std::filesystem::temp_directory_path().string() + "/bridge-" + std::to_string(static_cast<long long>(::getpid())) +
+                        std::string(suffix) + ".sock";
                 static_cast<void>(::unlink(path_.c_str()));
                 listener_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
                 if (listener_ < 0)
@@ -3177,24 +3177,38 @@ namespace codexui::codex {
 
         void inspectionIsLocalToTheActualConversation(UnixBridge& bridge, RunningRuntime& runtime) {
             const NodeRef thread = findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
-            expect(static_cast<bool>(thread), "inspection targets the retained thread");
-            expect(sendAction(runtime.channels(), NodeAction{thread, NodeActionKind::InspectThread}),
+            const auto complete = [&](const std::string& id) {
+                expect(bridge.appServerNotification("turn/completed",
+                                                    {{"threadId", "runtime-thread"}, {"turn", {{"id", id}, {"status", "completed"}}}}),
+                       "a new completed result reaches runtime");
+                expect(waitUntil([&] {
+                           auto read = runtime.graph().tryRead();
+                           return read && exactStringFromValue(valueMember(*read->state(thread), "uninspectedResult")) ==
+                                              scopedTurnNodeId("runtime-thread", id).canonical;
+                       }),
+                       "runtime records the exact uninspected result");
+                replyAccountUsage(bridge);
+                return findNode(runtime.graph(), scopedTurnNodeId("runtime-thread", id));
+            };
+            const NodeRef first = complete("inspection-first");
+            expect(sendAction(runtime.channels(), NodeAction{first, NodeActionKind::InspectThread}),
                    "inspection enters the existing worker mailbox");
             expect(waitUntil([&] {
                        auto read = runtime.graph().tryRead();
-                       const auto owner = read ? read->find({NodeKind::Runtime, "runtime"}) : NodeRef{};
-                       return owner && read->related(owner, RelationKind::UiInspectionTarget) == std::vector<NodeRef>{thread};
+                       return read && !valueMember(*read->state(thread), "uninspectedResult");
                    }),
-                   "runtime dispatch records the actual inspected conversation");
-            expect(!bridge.receiveAppServer(100ms), "inspection sends no app-server request");
-            expect(sendAction(runtime.channels(), NodeAction{{}, NodeActionKind::InspectThread}),
-                   "new draft clears inspection through the same mailbox");
+                   "runtime dispatch acknowledges the exact result");
+            const NodeRef second = complete("inspection-second");
+            expect(sendAction(runtime.channels(), NodeAction{first, NodeActionKind::InspectThread}),
+                   "a delayed old inspection reaches runtime");
+            expect(sendAction(runtime.channels(), NodeAction{second, NodeActionKind::InspectThread}),
+                   "the current result can be inspected independently");
             expect(waitUntil([&] {
                        auto read = runtime.graph().tryRead();
-                       const auto owner = read ? read->find({NodeKind::Runtime, "runtime"}) : NodeRef{};
-                       return owner && read->related(owner, RelationKind::UiInspectionTarget).empty();
+                       return read && !valueMember(*read->state(thread), "uninspectedResult");
                    }),
-                   "runtime dispatch clears the inspected conversation for a draft");
+                   "the newer result is acknowledged through the same mailbox");
+            expect(!bridge.receiveAppServer(100ms), "inspection sends no app-server request");
             runtime.drainNotifications();
         }
 
