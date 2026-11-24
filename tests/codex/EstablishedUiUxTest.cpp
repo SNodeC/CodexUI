@@ -2828,7 +2828,7 @@ bool checkpointNavigationUsesCardIdentity() {
         settleNavigation();
         for (int row = 0; row < list->topLevelItemCount(); ++row) {
             const auto* item = list->topLevelItem(row);
-            result &= expect(item->font(1).bold() && !item->font(2).bold() &&
+            result &= expect(item->font(0).bold() == (item->text(1) == "Opening") && item->font(1).bold() && !item->font(2).bold() &&
                                  list->columnWidth(1) >= QFontMetrics(item->font(1)).horizontalAdvance(item->text(1)) &&
                                  item->toolTip(2).startsWith(item->text(0) + " " + item->text(1) + " ") &&
                                  (item->textAlignment(2) & Qt::AlignRight) == 0,

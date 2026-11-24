@@ -773,6 +773,7 @@ const checkpointCheck = `(async()=>{
         const cells=entry.querySelectorAll(':scope > :is(span, strong)'),expected=contract.expected.all[index];
         const action=contract.actions[expected];
         return cells.length===3&&cells[1].textContent===action&&Number(getComputedStyle(cells[1]).fontWeight)>=700
+            &&(Number(getComputedStyle(cells[0]).fontWeight)>=700)===(action==='Opening')
             &&cells[0].textContent===String(contract.turns.findIndex(turn=>turn.id===expected.split('/')[0])+1).padStart(2,'0')+' |'
             &&getComputedStyle(cells[2]).textAlign==='left'&&entry.getAttribute('aria-label')===entry.title
             &&cells[2].getBoundingClientRect().width>=entry.getBoundingClientRect().width/2;

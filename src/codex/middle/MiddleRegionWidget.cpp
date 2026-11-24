@@ -299,11 +299,11 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       for (const auto& destination : destinations) {
           const auto number = QStringLiteral("%1 |").arg(destination.turn, 2, 10, QLatin1Char('0'));
           auto* item = new QTreeWidgetItem(list, {number, destination.action, destination.prompt});
-          item->setFont(1, actionFont);
           item->setSizeHint(0, QSize(0, rowHeight));
           const auto label = QStringLiteral("%1 %2 %3").arg(number, destination.action, destination.prompt);
           for (int column = 0; column < 3; ++column) {
               item->setToolTip(column, label);
+              item->setFont(column, column == 1 || (column == 0 && destination.action == "Opening") ? actionFont : list->font());
           }
           item->setTextAlignment(0, Qt::AlignRight | Qt::AlignVCenter);
           item->setData(0, Qt::UserRole, QString::fromStdString(destination.key));
