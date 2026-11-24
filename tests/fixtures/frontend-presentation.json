@@ -1,5 +1,43 @@
 {
   "schemaVersion": 6,
+  "userPromptCases": [
+    {
+      "id": "opening",
+      "text": "Start the work",
+      "nested": false,
+      "label": ""
+    },
+    {
+      "id": "steering",
+      "text": "Please check another case",
+      "nested": true,
+      "label": "steering"
+    },
+    {
+      "id": "answer",
+      "text": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}]\n</send_user_message_question_reply>",
+      "nested": true,
+      "label": "Answer"
+    },
+    {
+      "id": "opening-answer",
+      "text": "<send_user_message_question_reply>\n[{\"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"question\\\",0]\",\"question\":\"Approve the follow-up PR?\",\"answer\":\"Hold\"}]\n</send_user_message_question_reply>",
+      "nested": false,
+      "label": "Answer"
+    },
+    {
+      "id": "malformed-reply",
+      "text": "<send_user_message_question_reply>invalid JSON</send_user_message_question_reply>",
+      "nested": true,
+      "label": "steering"
+    },
+    {
+      "id": "ordinary-answer-text",
+      "text": "Answer: please continue",
+      "nested": true,
+      "label": "steering"
+    }
+  ],
   "labelCases": [
     {"input": "", "expected": ""},
     {"input": " _./- ", "expected": ""},

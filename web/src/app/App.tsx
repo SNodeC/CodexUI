@@ -768,6 +768,10 @@ const SafeMarkdown = memo(function SafeMarkdown({text}: {text: string}) {
     }}>{text}</Markdown></div>;
 });
 
+function userPromptPhase(source: string, nested: boolean): string {
+    return questionReplies(source).length > 0 ? "Answer" : nested ? "steering" : "";
+}
+
 export function userMessageMarkdownText(text: string): string {
     const replies = questionReplies(text);
     if (replies.length) { text = questionReplyText(replies, true); }
@@ -934,10 +938,10 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     let phaseClass = presentsStatus ? `status ${statusTone(card.status)}` : "";
     let phaseLabel = presentsStatus ? displayStatus(card.status) : "";
     if (card.kind === "userMessage") {
-        const data = card.payload as UserMessageData; title = "You"; phaseLabel = nestedCard ? "steering" : "";
+        const data = card.payload as UserMessageData; title = "You"; phaseLabel = userPromptPhase(data.text, nestedCard);
         body = <><SafeMarkdown text={userMessageMarkdownText(data.text)} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
-        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
+        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = data.state !== "failed" ? userPromptPhase(data.prompt, nestedCard) : "";
         body = <><SafeMarkdown text={userMessageMarkdownText(data.prompt)} /><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}{data.requiresExplicitRecovery && onRestore && <button onClick={onRestore}>Restore to composer</button>}</>;
     } else if (card.kind === "agentMessage") {
         const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.questionRequest ? "question" : data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = cardVariant === "question" ? "Question" + (data.questionStatus ? ` · ${data.questionStatus}` : "") : data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";

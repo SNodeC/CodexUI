@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {readFileSync} from "node:fs";
 
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
@@ -271,3 +272,22 @@ test("Inspector agent cards start collapsed with canonical heading actions", () 
     assert.match(markup, /aria-label="Expand agent"/u);
     assert.doesNotMatch(markup, /retained result/u);
 });
+
+const userPromptContract = JSON.parse(readFileSync(new URL("../../tests/fixtures/frontend-presentation.json", import.meta.url), "utf8"));
+for (const entry of userPromptContract.userPromptCases) {
+    test(`user prompt label: ${entry.id}`, () => {
+        for (const kind of ["userMessage", "localPrompt"]) {
+            for (const state of kind === "localPrompt" ? ["queued", "inFlight", "accepted"] : [undefined]) {
+                for (const collapsed of [false, true]) {
+                    const card = itemCard(kind, entry.id, kind === "userMessage" ? {text: entry.text, imagePaths: []}
+                        : {submissionId: 903, prompt: entry.text, state, error: "", imagePaths: [], showPendingAnimation: false});
+                    const markup = renderToStaticMarkup(createElement(Card, {card, active: true, collapsed, nestedCard: entry.nested, onToggle() {}}));
+                    const label = markup.match(/class="card-phase steering"[^>]*>([^<]*)</u)?.[1] ?? "";
+                    assert.equal(label, entry.label);
+                    assert.equal(/class="conversation-card[^"]* steering/u.test(markup), entry.nested,
+                        "the existing positional styling class stays intact");
+                }
+            }
+        }
+    });
+}

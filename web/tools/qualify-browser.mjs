@@ -1057,7 +1057,19 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
-    if (process.env.CODEXUI_BROWSER_SUBMIT_SCROLL_ONLY) {
+    if (process.env.CODEXUI_BROWSER_ASYNC_QUESTIONS_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        console.log(JSON.stringify({asyncQuestions: await qualifyAsyncQuestions(devTools), browser: browserVersion.product}));
+        if (process.env.CODEXUI_TEST_EVIDENCE_DIR) {
+            await mkdir(process.env.CODEXUI_TEST_EVIDENCE_DIR, {recursive: true});
+            for (const width of [1280, 380]) {
+                await setWidth(devTools, width);
+                const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+                await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, `browser-answer-${width}.png`), Buffer.from(screenshot.data, "base64"));
+            }
+        }
+    } else if (process.env.CODEXUI_BROWSER_SUBMIT_SCROLL_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         console.log(JSON.stringify({submissionScroll: await qualifySubmitScroll(devTools), browser: browserVersion.product}));
