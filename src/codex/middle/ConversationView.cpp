@@ -995,14 +995,21 @@ void ConversationView::navigateToFirstTurn() {
 }
 
 void ConversationView::followLatest() {
-    if (!threadId_.empty() && !applying_ && !structuralStagingActive() && loadingThreadId_.empty()) {
-        stopFollowingAnimation();
-        pausedByCommandOutput_ = false;
-        mode_ = Mode::Following;
-        threadPresentations_[threadId_].scroll.anchor = {};
-        setScrollValue(verticalScrollBar()->maximum());
-        updateMaterialization();
-        setFocus(Qt::OtherFocusReason);
+    const auto& targetThread = loadingThreadId_.empty() ? threadId_ : loadingThreadId_;
+    if (!targetThread.empty() && !applying_) {
+        threadPresentations_[targetThread].scroll = {};
+        if (targetThread == threadId_) {
+            stopFollowingAnimation();
+            pausedByCommandOutput_ = false;
+            mode_ = Mode::Following;
+            setScrollValue(verticalScrollBar()->maximum());
+            updateMaterialization();
+        }
+        if (pendingStructuralSnapshot_) {
+            clearStagedCards();
+            choosePendingStageRows();
+            scheduleCardAdmissionPass();
+        }
     }
 }
 

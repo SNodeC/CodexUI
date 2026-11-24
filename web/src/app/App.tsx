@@ -1550,6 +1550,7 @@ function Composer({session, presentationKey, active, options, prompt, onChange: 
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (active && !browsing && (prompt.trim() !== "" || attachments.length > 0) && session.canSubmit(presentationKey)) {
+            session.viewportState.updateScroll(session.getSnapshot().selectedThreadId, presentationKey, 0, true);
             void session.submitPrompt(prompt, attachments, options.turn, options.thread, presentationKey);
             localFiles.current.clear(); setAttachments([]); setPrompt("");
         }

@@ -264,6 +264,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   });
   connect(latest, &QToolButton::clicked, this, [this] {
       conversationView->followLatest();
+      conversationView->setFocus(Qt::OtherFocusReason);
   });
   const auto activate = [this, list, outline] {
       const auto* item = list->currentItem();

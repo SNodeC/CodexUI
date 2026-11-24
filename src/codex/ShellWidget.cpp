@@ -931,7 +931,11 @@ namespace codexui::codex {
             return row ? text(row->cwd) : newThreadDraft ? newThreadDraft->workspace : QString{};
         };
         composerActions.submit = [this](QString prompt, std::vector<AttachmentDraft> attachments) {
-            return submitPrompt(std::move(prompt), std::move(attachments));
+            const bool admitted = submitPrompt(std::move(prompt), std::move(attachments));
+            if (admitted) {
+                middleRegion->conversation().followLatest();
+            }
+            return admitted;
         };
         composerActions.stop = [this] {
             nodegraph::NodeRef turn = activeTurn();

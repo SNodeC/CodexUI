@@ -4707,6 +4707,103 @@ void projectGapResizingUsesTheRealShell(Configuration& configuration) {
     qApp->setStyleSheet(originalStyle);
 }
 
+void promptSubmissionResumesFollowing(Configuration& configuration) {
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        FrontendSession session(configuration);
+        auto& channels = FrontendSessionTestPeer::channels(session);
+        WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+        ShellWidget shell(session);
+        shell.resize(1100, 720);
+        shell.show();
+        makeReady(worker);
+        applyThread(worker, "submit-scroll");
+        applyScrollableThreadContent(worker, "submit-scroll", "history");
+        markThreadReady(session, worker, "submit-scroll");
+        if (scenario > 0) {
+            static_cast<void>(
+                worker.apply({DecodedMessageKind::ServerNotification,
+                              "turn/started",
+                              {},
+                              {{"threadId", "submit-scroll"}, {"turn", Value::Object{{"id", "active"}, {"status", "inProgress"}}}}}));
+        }
+        auto* list = shell.findChild<QTreeWidget*>("threadList");
+        auto* view = shell.findChild<middle::ConversationView*>("conversationScroll");
+        auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>("upcomingPromptEditor");
+        auto* send = shell.findChild<QPushButton*>("composerSendButton");
+        require(spinUntil([&] {
+                    return threadItem(list, "submit-scroll") != nullptr;
+                }) &&
+                    selectThread(list, "submit-scroll") && spinUntil([&] {
+                        return view && view->presentedThreadId() == "submit-scroll" && !view->structuralStagingActive() &&
+                               view->verticalScrollBar()->maximum() > 100;
+                    }),
+                "submission scrolling starts from a real populated shell");
+        if (view && editor && send) {
+            view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+            editor->setPlainText(scenario == 0 ? "New task" : "Steering instruction");
+            editor->setFocus();
+            require(spinUntil([&] {
+                        return view->mode() == middle::ConversationView::Mode::Paused && send->isEnabled();
+                    }),
+                    "reading earlier content pauses following before submission");
+            if (scenario == 2) {
+                view->beginThreadSelection("submit-scroll");
+            }
+            static_cast<void>(takeQtMessages(channels));
+            if (scenario == 1) {
+                send->click();
+            } else {
+                QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QApplication::sendEvent(editor, &enter);
+            }
+            require(editor->toPlainText().isEmpty() && editor->hasFocus() && view->isAtBottom() &&
+                        view->mode() == middle::ConversationView::Mode::Following,
+                    "Send and Steer resume the bottom without taking composer focus, including during loading");
+            auto actions = takeQtMessages(channels);
+            auto action = std::ranges::find_if(actions, [](const auto& message) {
+                const auto* node = std::get_if<NodeAction>(&message);
+                return node && node->kind == NodeActionKind::SubmitPrompt;
+            });
+            require(action != actions.end(), "the real submit control admits its prompt");
+            if (action != actions.end()) {
+                auto transition = worker.admitPrompt(std::move(std::get<NodeAction>(*action)));
+                require(transition.command &&
+                            transition.command->kind == (scenario == 0 ? PromptCommandKind::StartTurn : PromptCommandKind::SteerTurn),
+                        "scrolling preserves the authoritative new-turn versus steering decision");
+            }
+            if (scenario == 2) {
+                ui::NodeGraphUiAdapter adapter(FrontendSessionTestPeer::graph(session));
+                NodeRef thread;
+                {
+                    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+                    thread = read ? read->find({NodeKind::Thread, "submit-scroll"}) : NodeRef{};
+                }
+                if (auto snapshot = adapter.conversation(thread)) {
+                    static_cast<void>(view->reconcileStaged(std::move(*snapshot)));
+                }
+            }
+            require(spinUntil([&] {
+                        return !view->structuralStagingActive() &&
+                               localPromptCard(shell, scenario == 0 ? "New task" : "Steering instruction") && view->isAtBottom();
+                    }),
+                    "optimistic prompt insertion and deferred layout keep the submitted message at the bottom");
+            view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+            const auto previous = view->verticalScrollBar()->value();
+            editor->setPlainText("Cannot send as observer");
+            static_cast<void>(worker.bridgeState("test-controller", "observer", "other", 1, "ready"));
+            require(spinUntil([&] {
+                        return !send->isEnabled();
+                    }),
+                    "observer submission is disabled");
+            QKeyEvent rejected(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(editor, &rejected);
+            require(editor->toPlainText() == "Cannot send as observer" && view->verticalScrollBar()->value() == previous &&
+                        view->mode() == middle::ConversationView::Mode::Paused,
+                    "rejected submission preserves the draft and reading position");
+        }
+    }
+}
+
 void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configuration) {
     const QString originalStyle = qApp->styleSheet();
     qApp->setStyleSheet(UiStyle::applicationStyleSheet());
@@ -7621,8 +7718,11 @@ int main(int argc, char **argv) {
   core::SNodeC::init(argc, argv);
 
   using namespace codexui::codex;
-  const bool inspectionOnly = qEnvironmentVariableIsSet("CODEXUI_TEST_INSPECTION_ONLY");
-  if (inspectionOnly) {
+  const bool scrollOnly = qEnvironmentVariableIsSet("CODEXUI_TEST_SUBMIT_SCROLL_ONLY");
+  const bool inspectionOnly = scrollOnly || qEnvironmentVariableIsSet("CODEXUI_TEST_INSPECTION_ONLY");
+  if (scrollOnly) {
+      promptSubmissionResumesFollowing(*configuration);
+  } else if (inspectionOnly) {
       inspectionAcknowledgementsRequireVisibleResultInput(*configuration);
       saturatedInspectionPreservesIndependentResults(*configuration);
   } else {
@@ -7649,6 +7749,7 @@ int main(int argc, char **argv) {
       qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
       conversationPresentationBurstIsFrameBounded(*configuration);
       threadPresentationBurstYieldsBetweenRows(*configuration);
+      promptSubmissionResumesFollowing(*configuration);
       graphBackedShellPreservesDraftsAndPrompts(*configuration);
       conversationProjectionRetriesWithoutAnotherGraphNotification(*configuration);
       initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);

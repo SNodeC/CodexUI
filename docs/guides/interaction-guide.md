@@ -69,9 +69,7 @@ The complete prompt content, including attachments, adds the canonical 8 px
 structural section gap before its first nested turn card. This spacing is
 layout geometry and never becomes part of authored Markdown.
 
-Local prompt admission resumes bottom following when the only pause was caused
-by composer overlay growth, so the complete pending prompt becomes visible.
-It never overrides a pause created by user scrolling.
+Sending a new-turn or steering prompt resumes bottom following so the submitted prompt becomes visible, including after reading earlier messages. Rejected submission preserves the draft and reading position. Composer focus remains in place.
 
 Mouse-wheel and touchpad gestures retain Qt's native platform/device data.
 `MiddleRegionWidget` selects one phased owner across nested conversation and
