@@ -42,11 +42,13 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QProcess>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QStyleFactory>
 #include <QTemporaryDir>
 #include <QTextCursor>
@@ -1622,6 +1624,112 @@ bool composerDraftsFollowThreadIdentity() {
     return passed;
 }
 
+bool composerDraftsSurviveRestart() {
+    const auto arguments = QCoreApplication::arguments();
+    const QString mode = arguments.size() == 3 ? arguments.at(1) : QString{};
+    const QString first = QStringLiteral("  first draft α\n\nlast line\n");
+    const QString second = QStringLiteral("second draft β\n");
+    TurnSettingsContext a;
+    a.identity = "restart-a";
+    a.serverIdentity = "server-a";
+    a.providerAuthorityRevision = 1;
+    a.threadIncarnation = 101;
+    auto b = a;
+    b.identity = "restart-b/α%";
+    b.threadIncarnation = 102;
+    auto other = a;
+    other.serverIdentity = "server-b";
+    bool passed = true;
+    if (mode == "--draft-restart-write") {
+        ComposerPane composer;
+        composer.setTurnSettingsContext(a);
+        composer.promptEditor()->setPlainText(first);
+        composer.setTurnSettingsContext(other);
+        passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "another server cannot inherit a matching thread's text");
+        composer.promptEditor()->setPlainText("other server draft");
+        composer.setTurnSettingsContext(b);
+        composer.promptEditor()->setPlainText(second);
+        auto creation = a;
+        creation.identity = "creation:unsubmitted";
+        composer.setTurnSettingsContext(creation);
+        composer.promptEditor()->setPlainText("no persistent thread yet");
+        composer.setTurnSettingsContext(b);
+        composer.promptEditor()->insertPlainText("active at shutdown");
+    } else if (mode == "--draft-restart-read") {
+        ComposerPane composer;
+        auto startup = a;
+        startup.identity.clear();
+        startup.providerAuthorityRevision = 0;
+        composer.setTurnSettingsContext(startup);
+        startup.providerAuthorityRevision = 2;
+        composer.setTurnSettingsContext(startup);
+        startup.providerAuthorityRevision = 3;
+        composer.setTurnSettingsContext(startup);
+        a.providerAuthorityRevision = b.providerAuthorityRevision = other.providerAuthorityRevision = 3;
+        a.threadIncarnation = 201;
+        b.threadIncarnation = 202;
+        composer.setTurnSettingsContext(a);
+        passed &=
+            expect(composer.promptEditor()->toPlainText() == first, "restart restores exact whitespace, Unicode and trailing newlines");
+        passed &= expect(composer.hasUnsentDraft(b.identity), "unvisited restored threads expose their draft indicator");
+        composer.setCanSubmit(true);
+        ComposerPane::Actions actions;
+        actions.submit = [](QString, std::vector<AttachmentDraft>) {
+            return false;
+        };
+        composer.setActions(actions);
+        auto* send = composer.findChild<QPushButton*>("composerSendButton");
+        send->click();
+        passed &= expect(composer.promptEditor()->toPlainText() == first, "rejected restored submission preserves its draft");
+        actions.submit = [](QString, std::vector<AttachmentDraft>) {
+            return true;
+        };
+        composer.setActions(std::move(actions));
+        send->click();
+        passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "admitted restored submission clears its draft");
+        composer.setTurnSettingsContext(b);
+        passed &= expect(composer.promptEditor()->toPlainText() == "active at shutdown" + second,
+                         "restart restores the active draft without a final thread switch");
+        composer.forgetThreadDraft(b.identity, 1);
+        passed &= expect(composer.hasUnsentDraft(b.identity), "stale retirement cannot delete the current draft incarnation");
+        composer.forgetThreadDraft(b.identity, b.threadIncarnation);
+        composer.setTurnSettingsContext(other);
+        passed &=
+            expect(composer.promptEditor()->toPlainText() == "other server draft", "matching thread ids retain independent server drafts");
+        auto creation = a;
+        creation.identity = "creation:unsubmitted";
+        composer.setTurnSettingsContext(creation);
+        passed &=
+            expect(composer.promptEditor()->toPlainText().isEmpty(), "uncreated local threads are not restored into unrelated drafts");
+    } else if (mode == "--draft-restart-clean") {
+        ComposerPane composer;
+        composer.setTurnSettingsContext(a);
+        passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "another restart cannot resurrect an admitted prompt");
+        composer.setTurnSettingsContext(b);
+        passed &= expect(composer.promptEditor()->toPlainText().isEmpty() && !composer.hasUnsentDraft(b.identity),
+                         "another restart cannot resurrect a deleted thread's draft");
+        composer.setTurnSettingsContext(other);
+        passed &= expect(composer.promptEditor()->toPlainText() == "other server draft", "cleanup leaves other servers intact");
+        ++other.providerAuthorityRevision;
+        composer.setTurnSettingsContext(other);
+        passed &= expect(composer.promptEditor()->toPlainText().isEmpty(), "provider replacement still retires its drafts");
+    } else {
+        QTemporaryDir preferences(QDir::tempPath() + "/composer-restart-XXXXXX");
+        passed &= expect(preferences.isValid(), "restart fixtures have isolated preferences");
+        for (const auto* step : {"--draft-restart-write", "--draft-restart-read", "--draft-restart-clean"}) {
+            QProcess child;
+            child.start(QCoreApplication::applicationFilePath(), {QString::fromLatin1(step), preferences.path()});
+            const bool finished = child.waitForFinished(15000);
+            const bool succeeded = finished && child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0;
+            passed &= expect(succeeded, step);
+            if (!succeeded) {
+                std::cerr << child.readAllStandardError().toStdString();
+            }
+        }
+    }
+    return passed;
+}
+
 bool attachmentLayoutFollowsFontAndWidth() {
   const QFont original = qApp->font();
   ComposerPane composer;
@@ -3171,58 +3279,59 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
 } // namespace codexui::codex::middle
 
 int main(int argc, char **argv) {
-  QApplication application(argc, argv);
-  using namespace codexui::codex::middle;
-  if (argc == 2 && std::string(argv[1]) == "--wheel-routing-performance")
-    return nestedWheelGestureHasOneRoutingOwner(true) ? 0 : 1;
-  bool passed = true;
-  const bool navigationOnly = argc == 2 && std::string(argv[1]) == "--checkpoint-navigation";
-  const auto run = [&passed, navigationOnly](const char* name, bool (*test)()) {
-      if (!navigationOnly || std::string(name) == "checkpointNavigationUsesCardIdentity" ||
-          std::string(name) == "turnNavigationUsesTheExistingHeader") {
-          const bool casePassed = test();
-          if (!casePassed) {
-              std::cerr << "CASE FAILED: " << name << '\n';
-          }
-          passed &= casePassed;
-      }
-  };
-  run("promptKeyboardAndFocusContract", promptKeyboardAndFocusContract);
-  run("promptDropCursorContract", promptDropCursorContract);
-  run("promptAttachmentAdmission", promptAttachmentAdmission);
-  run("promptClipboardAndDropContract", promptClipboardAndDropContract);
-  run("promptFileDialogContract", promptFileDialogContract);
-  run("workspaceAndSocketSelectionContract", workspaceAndSocketSelectionContract);
-  run("desktopFileBrowserContract", desktopFileBrowserContract);
-  run("selectionSourcesShareOneView", selectionSourcesShareOneView);
-  run("sharedFileSelectionContract", sharedFileSelectionContract);
-  run("manualWorkspaceDoesNotWaitForBrowsing", manualWorkspaceDoesNotWaitForBrowsing);
-  run("failedUploadBatchIsAtomic", failedUploadBatchIsAtomic);
-  run("uploadCompletionPreservesInputOrder", uploadCompletionPreservesInputOrder);
-  if (argc == 2 && std::string(argv[1]) == "--attachment-input")
+    QTemporaryDir preferences(QDir::tempPath() + "/composer-preferences-XXXXXX");
+    const bool draftRestartOnly = argc == 3 && std::string(argv[1]).starts_with("--draft-restart-");
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, draftRestartOnly ? QString::fromLocal8Bit(argv[2]) : preferences.path());
+    QApplication application(argc, argv);
+    using namespace codexui::codex::middle;
+    if (argc == 2 && std::string(argv[1]) == "--wheel-routing-performance")
+        return nestedWheelGestureHasOneRoutingOwner(true) ? 0 : 1;
+    bool passed = true;
+    const bool navigationOnly = argc == 2 && std::string(argv[1]) == "--checkpoint-navigation";
+    const auto run = [&passed, navigationOnly, draftRestartOnly](const char* name, bool (*test)()) {
+        if ((!draftRestartOnly || std::string(name) == "composerDraftsSurviveRestart") &&
+            (!navigationOnly || std::string(name) == "checkpointNavigationUsesCardIdentity" ||
+             std::string(name) == "turnNavigationUsesTheExistingHeader")) {
+            const bool casePassed = test();
+            if (!casePassed) {
+                std::cerr << "CASE FAILED: " << name << '\n';
+            }
+            passed &= casePassed;
+        }
+    };
+    run("promptKeyboardAndFocusContract", promptKeyboardAndFocusContract);
+    run("promptDropCursorContract", promptDropCursorContract);
+    run("promptAttachmentAdmission", promptAttachmentAdmission);
+    run("promptClipboardAndDropContract", promptClipboardAndDropContract);
+    run("promptFileDialogContract", promptFileDialogContract);
+    run("workspaceAndSocketSelectionContract", workspaceAndSocketSelectionContract);
+    run("desktopFileBrowserContract", desktopFileBrowserContract);
+    run("selectionSourcesShareOneView", selectionSourcesShareOneView);
+    run("sharedFileSelectionContract", sharedFileSelectionContract);
+    run("manualWorkspaceDoesNotWaitForBrowsing", manualWorkspaceDoesNotWaitForBrowsing);
+    run("failedUploadBatchIsAtomic", failedUploadBatchIsAtomic);
+    run("uploadCompletionPreservesInputOrder", uploadCompletionPreservesInputOrder);
+    if (argc == 2 && std::string(argv[1]) == "--attachment-input")
+        return passed ? 0 : 1;
+    run("turnSettingsAreStableAccessibleProjections", turnSettingsAreStableAccessibleProjections);
+    run("inheritedDefaultsRemainPresentationOnly", inheritedDefaultsRemainPresentationOnly);
+    run("turnSettingsCatalogProjectionScalesLinearly", turnSettingsCatalogProjectionScalesLinearly);
+    run("controlsRetainUsableGeometryAndAuthority", controlsRetainUsableGeometryAndAuthority);
+    run("unsentDraftRingUsesTheExistingOwner", unsentDraftRingUsesTheExistingOwner);
+    run("composerDraftsFollowThreadIdentity", composerDraftsFollowThreadIdentity);
+    run("composerDraftsSurviveRestart", composerDraftsSurviveRestart);
+    run("attachmentLayoutFollowsFontAndWidth", attachmentLayoutFollowsFontAndWidth);
+    run("threadPaneSnapshotAndActionContract", threadPaneSnapshotAndActionContract);
+    run("conversationOwnershipAndAtomicReconcileContract", conversationOwnershipAndAtomicReconcileContract);
+    run("nestedWheelGestureHasOneRoutingOwner", [] {
+        return nestedWheelGestureHasOneRoutingOwner(false);
+    });
+    run("tokenDetailsRemainVisible", tokenDetailsRemainVisible);
+    run("checkpointNavigationUsesCardIdentity", checkpointNavigationUsesCardIdentity);
+    run("turnNavigationUsesTheExistingHeader", turnNavigationUsesTheExistingHeader);
+    run("completeMiddleSurfaceRetainsPaneAndHeadingBehavior", completeMiddleSurfaceRetainsPaneAndHeadingBehavior);
+    if (passed)
+        std::cout << "Established UI/UX compatibility tests passed\n";
     return passed ? 0 : 1;
-  run("turnSettingsAreStableAccessibleProjections",
-      turnSettingsAreStableAccessibleProjections);
-  run("inheritedDefaultsRemainPresentationOnly", inheritedDefaultsRemainPresentationOnly);
-  run("turnSettingsCatalogProjectionScalesLinearly",
-      turnSettingsCatalogProjectionScalesLinearly);
-  run("controlsRetainUsableGeometryAndAuthority",
-      controlsRetainUsableGeometryAndAuthority);
-  run("unsentDraftRingUsesTheExistingOwner", unsentDraftRingUsesTheExistingOwner);
-  run("composerDraftsFollowThreadIdentity", composerDraftsFollowThreadIdentity);
-  run("attachmentLayoutFollowsFontAndWidth", attachmentLayoutFollowsFontAndWidth);
-  run("threadPaneSnapshotAndActionContract",
-      threadPaneSnapshotAndActionContract);
-  run("conversationOwnershipAndAtomicReconcileContract",
-      conversationOwnershipAndAtomicReconcileContract);
-  run("nestedWheelGestureHasOneRoutingOwner",
-      [] { return nestedWheelGestureHasOneRoutingOwner(false); });
-  run("tokenDetailsRemainVisible", tokenDetailsRemainVisible);
-  run("checkpointNavigationUsesCardIdentity", checkpointNavigationUsesCardIdentity);
-  run("turnNavigationUsesTheExistingHeader", turnNavigationUsesTheExistingHeader);
-  run("completeMiddleSurfaceRetainsPaneAndHeadingBehavior",
-      completeMiddleSurfaceRetainsPaneAndHeadingBehavior);
-  if (passed)
-    std::cout << "Established UI/UX compatibility tests passed\n";
-  return passed ? 0 : 1;
 }

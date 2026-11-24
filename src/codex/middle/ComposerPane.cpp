@@ -8,6 +8,7 @@
 #include "codex/ui/ExpandingPromptEditor.h"
 #include "codex/ui/UiStyle.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QEvent>
 #include <QFileInfo>
@@ -22,6 +23,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSettings>
 #include <QStyle>
 #include <QToolButton>
 #include <QUrl>
@@ -269,6 +271,7 @@ ComposerPane::ComposerPane(QWidget *parent) : QWidget(parent) {
 ComposerPane::~ComposerPane() {
   // Workers may post to this receiver, but must finish before QObject teardown.
   attachmentPool_.waitForDone();
+  saveDraft();
   delete turnSettings_;
 }
 
@@ -506,8 +509,21 @@ bool ComposerPane::hasUnsentDraft(const std::string& identity) const {
         present = !promptEditor_->document()->isEmpty() || !attachments_.empty();
     } else if (const auto found = drafts_.find(identity); found != drafts_.end()) {
         present = !found->second.text.isEmpty() || !found->second.attachments.empty();
+    } else if (const auto key = draftSettingsKey(identity); !key.isEmpty()) {
+        present = !QSettings().value(key).toString().isEmpty();
     }
     return present;
+}
+
+QString ComposerPane::draftSettingsKey(std::string_view identity) const {
+    const auto& server = turnSettingsPolicy_.context().serverIdentity;
+    QString key;
+    if (!server.empty() && !identity.empty() && !identity.starts_with("creation:")) {
+        key = QStringLiteral("composerDrafts/") +
+              QString::fromLatin1(QCryptographicHash::hash(QByteArray::fromStdString(server), QCryptographicHash::Sha256).toHex()) + '/' +
+              QString::fromLatin1(QUrl::toPercentEncoding(text(identity)));
+    }
+    return key;
 }
 
 void ComposerPane::saveDraft() {
@@ -515,6 +531,14 @@ void ComposerPane::saveDraft() {
     if (found != drafts_.end()) {
         found->second.text = promptEditor_->toPlainText();
         found->second.attachments = attachments_;
+        if (const auto key = draftSettingsKey(found->first); !key.isEmpty()) {
+            QSettings settings;
+            if (found->second.text.isEmpty()) {
+                settings.remove(key);
+            } else {
+                settings.setValue(key, found->second.text);
+            }
+        }
     }
 }
 
@@ -522,9 +546,20 @@ void ComposerPane::setTurnSettingsContext(TurnSettingsContext context) {
     const auto& previous = turnSettingsPolicy_.context();
     if (context.providerAuthorityRevision >= previous.providerAuthorityRevision) {
         const bool authorityChanged = context.providerAuthorityRevision > previous.providerAuthorityRevision;
-        const bool switched = authorityChanged || context.identity != previous.identity ||
+        const bool serverChanged = context.serverIdentity != previous.serverIdentity;
+        const bool switched = authorityChanged || serverChanged || context.identity != previous.identity ||
                               context.threadIncarnation != previous.threadIncarnation || !drafts_.contains(context.identity);
-        if (authorityChanged) {
+        if (serverChanged) {
+            saveDraft();
+        }
+        if (authorityChanged || serverChanged) {
+            if (authorityChanged && !serverChanged) {
+                for (const auto& [identity, draft] : drafts_) {
+                    if (const auto key = draftSettingsKey(identity); !key.isEmpty()) {
+                        QSettings().remove(key);
+                    }
+                }
+            }
             drafts_.clear();
         } else if (switched) {
             saveDraft();
@@ -534,9 +569,17 @@ void ComposerPane::setTurnSettingsContext(TurnSettingsContext context) {
             clearDraft();
             const auto& current = turnSettingsPolicy_.context();
             if (!current.identity.empty()) {
-                auto& draft = drafts_[current.identity];
+                auto [entry, inserted] = drafts_.try_emplace(current.identity);
+                auto& draft = entry->second;
+                const auto key = draftSettingsKey(current.identity);
+                if (inserted && !key.isEmpty()) {
+                    draft.text = QSettings().value(key).toString();
+                }
                 if (draft.incarnation != 0 && current.threadIncarnation != 0 && draft.incarnation != current.threadIncarnation) {
                     draft = {};
+                    if (!key.isEmpty()) {
+                        QSettings().remove(key);
+                    }
                 }
                 draft.incarnation = current.threadIncarnation;
                 promptEditor_->setPlainText(draft.text);
@@ -561,14 +604,20 @@ void ComposerPane::promoteThreadDraft(std::string_view source, std::string_view 
 }
 
 void ComposerPane::forgetThreadDraft(std::string_view identity) {
+    if (const auto key = draftSettingsKey(identity); !key.isEmpty()) {
+        QSettings().remove(key);
+    }
     drafts_.erase(std::string(identity));
     turnSettingsPolicy_.forget(identity);
 }
 
 void ComposerPane::forgetThreadDraft(std::string_view identity, std::uint64_t incarnation) {
     const auto found = drafts_.find(std::string(identity));
-    if (found != drafts_.end() && found->second.incarnation == incarnation) {
-        drafts_.erase(found);
+    if (found == drafts_.end() || found->second.incarnation == incarnation) {
+        if (const auto key = draftSettingsKey(identity); !key.isEmpty()) {
+            QSettings().remove(key);
+        }
+        drafts_.erase(std::string(identity));
     }
     turnSettingsPolicy_.forget(identity, incarnation);
 }
@@ -583,12 +632,13 @@ void ComposerPane::clearDraft() {
 
 void ComposerPane::submitDraft() {
   const QString prompt = promptEditor_->toPlainText();
-  if ((prompt.trimmed().isEmpty() && attachments_.empty()) ||
-      !sendButton_->isEnabled() || !actions_.submit)
-    return;
-  std::vector<AttachmentDraft> attachments = attachments_;
-  if (actions_.submit(prompt, std::move(attachments)))
-    clearDraft();
+  if ((!prompt.trimmed().isEmpty() || !attachments_.empty()) && sendButton_->isEnabled() && actions_.submit) {
+      std::vector<AttachmentDraft> attachments = attachments_;
+      if (actions_.submit(prompt, std::move(attachments))) {
+          clearDraft();
+          saveDraft();
+      }
+  }
 }
 
 void ComposerPane::refreshAttachments() {
