@@ -217,7 +217,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   list->setColumnCount(3);
   list->setHeaderHidden(true);
   list->setRootIsDecorated(false);
-  list->header()->setStretchLastSection(true);
+  list->header()->setResizeContentsPrecision(-1);
   auto* popupLayout = new QVBoxLayout(outline);
   popupLayout->setContentsMargins(6, 6, 6, 6);
   popupLayout->setSpacing(4);
@@ -293,12 +293,14 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       load->setVisible(hasMore);
       load->setEnabled(!conversationView->historyRequestPending());
       const auto current = conversationView->navigationTarget(0, selected);
-      const auto metrics = list->fontMetrics();
-      list->setColumnWidth(0, metrics.horizontalAdvance(QString::number(destinations.empty() ? 1 : destinations.back().turn) + " |") + 12);
-      list->setColumnWidth(1, metrics.horizontalAdvance(QStringLiteral("final answer")) + 12);
+      auto actionFont = list->font();
+      actionFont.setBold(true);
+      const int rowHeight = std::max(30, list->fontMetrics().height() + 12);
       for (const auto& destination : destinations) {
-          const auto number = QString::number(destination.turn) + QStringLiteral(" |");
+          const auto number = QStringLiteral("%1 |").arg(destination.turn, 2, 10, QLatin1Char('0'));
           auto* item = new QTreeWidgetItem(list, {number, destination.action, destination.prompt});
+          item->setFont(1, actionFont);
+          item->setSizeHint(0, QSize(0, rowHeight));
           const auto label = QStringLiteral("%1 %2 %3").arg(number, destination.action, destination.prompt);
           for (int column = 0; column < 3; ++column) {
               item->setToolTip(column, label);
@@ -312,10 +314,8 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       }
       const auto available = turns->screen()->availableGeometry();
       const int maximum = available.height() * 3 / 5;
-      const int rowHeight = std::max(30, list->fontMetrics().height() + 12);
-      for (int row = 0; row < list->topLevelItemCount(); ++row) {
-          list->topLevelItem(row)->setSizeHint(0, QSize(0, rowHeight));
-      }
+      list->resizeColumnToContents(0);
+      list->resizeColumnToContents(1);
       outline->ensurePolished();
       const auto margins = outline->contentsMargins() + popupLayout->contentsMargins();
       const int chrome = margins.top() + margins.bottom() + scope->sizeHint().height() + count->sizeHint().height() +

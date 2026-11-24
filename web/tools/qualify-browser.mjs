@@ -770,9 +770,11 @@ const checkpointCheck = `(async()=>{
     await setScope('all');
     const columnDetails=entries().map(entry=>({cells:[...entry.children].map(cell=>({text:cell.textContent,width:cell.getBoundingClientRect().width})),width:entry.getBoundingClientRect().width}));
     const columns=entries().every((entry,index)=>{
-        const cells=entry.querySelectorAll(':scope > span'),expected=contract.expected.all[index];
+        const cells=entry.querySelectorAll(':scope > :is(span, strong)'),expected=contract.expected.all[index];
         const action=contract.actions[expected];
-        return cells.length===3&&cells[1].textContent===action&&entry.getAttribute('aria-label')===entry.title
+        return cells.length===3&&cells[1].textContent===action&&Number(getComputedStyle(cells[1]).fontWeight)>=700
+            &&cells[0].textContent===String(contract.turns.findIndex(turn=>turn.id===expected.split('/')[0])+1).padStart(2,'0')+' |'
+            &&getComputedStyle(cells[2]).textAlign==='left'&&entry.getAttribute('aria-label')===entry.title
             &&cells[2].getBoundingClientRect().width>=entry.getBoundingClientRect().width/2;
     });
     const aligned=entries().every(entry=>Math.abs(entry.children[2].getBoundingClientRect().left-entries()[0].children[2].getBoundingClientRect().left)<=1);
