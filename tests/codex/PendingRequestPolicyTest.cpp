@@ -3,10 +3,13 @@
 #include "codex/PendingRequestPolicy.h"
 
 #include <array>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -276,6 +279,30 @@ bool verifyAttentionPolicy() {
   return passed;
 }
 
+bool verifyRequiredMcpFields() {
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/frontend-presentation.json");
+    const auto contract = nlohmann::json::parse(input, nullptr, false);
+    bool passed = expect(contract.is_object(), "required-field contract is readable");
+    if (passed) {
+        for (const auto& entry : contract.at("pendingRequestCases")) {
+            if (entry.at("id").get<std::string>().starts_with("mcp-required-")) {
+                for (const auto& attempt : entry.at("submissions")) {
+                    PendingRequestSubmission submission{attempt.at("choice").get<std::string>()};
+                    submission.input = attempt.value("input", nlohmann::json());
+                    submission.metadata = attempt.value("metadata", nlohmann::json());
+                    const auto response = PendingRequestPolicy::responseForSubmission(
+                        PendingRequestKind::McpElicitation, entry.at("raw"), std::move(submission));
+                    const nlohmann::json actual = response && std::holds_alternative<nlohmann::json>(*response)
+                                                      ? nlohmann::json{{"result", std::get<nlohmann::json>(*response)}}
+                                                      : nlohmann::json();
+                    passed &= expect(actual == attempt.at("expected"), "required MCP fields: " + attempt.at("id").get<std::string>());
+                }
+            }
+        }
+    }
+    return passed;
+}
+
 } // namespace
 
 int main() {
@@ -283,5 +310,6 @@ int main() {
   passed &= verifyKindsAndPresentation();
   passed &= verifyNativeControlsAndRecovery();
   passed &= verifyAttentionPolicy();
+  passed &= verifyRequiredMcpFields();
   return passed ? 0 : 1;
 }

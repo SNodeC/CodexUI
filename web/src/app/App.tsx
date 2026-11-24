@@ -8,7 +8,7 @@ import {
     AuthoritativeHistoryPageSize, UnknownStatus, anchoredScrollTop, changeSettingDraft, displayStatus,
     configuredDefaults, inheritedSettingChoices, fixedSettingChoices, humanizeProtocolLabel as humanize, isObject, member,
     foldedCardScrollTop, nestedScrollConsumes,
-    pendingDecisionOptions, pendingRequestDetails, stableKey, stringMember,
+    pendingDecisionOptions, pendingRequestDetails, pendingResponse, stableKey, stringMember,
     isEmptyStatus, isWorkingStatus, projectTurnPlan, settingDraftFor, settingPresentation, settingPromptOptions, statusTone,
     statusToken, trimTrailingEmptyLines, turnSettingCatalog, turnOpenings, CheckpointScopes, checkpointDestinations, checkpointNavigationTarget,
 } from "../index.js";
@@ -1694,7 +1694,10 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
     let structuredInput: unknown = raw.requestedSchema === undefined ? null : {};
     let structuredValid = true;
     if (request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined) {
-        try { structuredInput = JSON.parse(structured); }
+        try {
+            structuredInput = JSON.parse(structured);
+            structuredValid = pendingResponse(request, {choice: "accept", input: structuredInput}) !== undefined;
+        }
         catch { structuredValid = false; }
     }
     const submission = (decision: string) => {
@@ -1735,7 +1738,7 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
             </fieldset>;
         })}
         {request.kind === "mcp-elicitation" && decisions.some(decision => decision.value === "accept" && decision.requiresInput) && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
-        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter valid JSON.</p>}
+        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter valid JSON containing every required field.</p>}
         <div className="request-actions">{resolving ? <span>Resolving…</span> : decisions.map(decision => {
             const inputValid = !decision.requiresInput || ((request.kind !== "user-input" || userInputValid)
                 && (request.kind !== "mcp-elicitation" || structuredValid));

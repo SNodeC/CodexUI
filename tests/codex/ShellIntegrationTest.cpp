@@ -6952,6 +6952,8 @@ void pendingRequestValidationRetainsInput() {
 
   bool invalidJsonWarning = false;
   bool mcpDialogRetained = false;
+  bool requiredFieldsRetained = true;
+  bool requiredWarning = false;
   QTimer::singleShot(0, [&] {
     auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
     if (!dialog)
@@ -6962,6 +6964,10 @@ void pendingRequestValidationRetainsInput() {
         buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
     if (!editor || !submitButton)
       return;
+    dialog->activateWindow();
+    editor->setFocus();
+    spin();
+    require(editor->hasFocus(), "MCP input is focused before validation");
     editor->setPlainText(QStringLiteral("["));
     QTimer::singleShot(0, [&] {
       auto *warning =
@@ -6974,7 +6980,24 @@ void pendingRequestValidationRetainsInput() {
     submitButton->click();
     mcpDialogRetained =
         dialog->isVisible() && editor->toPlainText() == QStringLiteral("[");
-    editor->setPlainText(QStringLiteral("{\"accepted\":true}"));
+    for (const QString& incomplete : {QStringLiteral("{}"), QStringLiteral("{\"accepted\":true}")}) {
+        editor->setPlainText(incomplete);
+        requiredWarning = false;
+        QTimer::singleShot(0, dialog, [&] {
+            auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            requiredWarning = warning && warning->text().contains(QStringLiteral("required"));
+            if (warning) {
+                warning->done(QMessageBox::Ok);
+            }
+        });
+        submitButton->click();
+        spin();
+        require(requiredWarning, "missing MCP fields show a required-field validation warning");
+        require(dialog->isVisible() && editor->toPlainText() == incomplete, "missing MCP fields preserve the dialog and authored JSON");
+        require(editor->hasFocus(), "invalid MCP content retains editor focus after the warning closes");
+        requiredFieldsRetained &= requiredWarning && dialog->isVisible() && editor->toPlainText() == incomplete && editor->hasFocus();
+    }
+    editor->setPlainText(QStringLiteral("{\"label\":\"review\",\"accepted\":true}"));
     submitButton->click();
   });
   const PendingRequestDescriptor elicitation =
@@ -6983,17 +7006,18 @@ void pendingRequestValidationRetainsInput() {
                      {"threadId", "thread-a"},
                      {"message", "Structured response"},
                      {"mode", "form"},
-                     {"requestedSchema", {{"type", "object"}}}});
+                     {"requestedSchema",
+                      {{"type", "object"},
+                       {"properties", {{"label", {{"type", "string"}}}, {"accepted", {{"type", "boolean"}}}}},
+                       {"required", nlohmann::json::array({"label", "accepted"})}}}});
   const auto mcpResponse = PendingRequestDialog::present(elicitation, nullptr);
   const bool validJsonReturned =
-      mcpResponse && mcpResponse->choice == "accept" &&
-      mcpResponse->input == nlohmann::json({{"accepted", true}});
+      mcpResponse && mcpResponse->choice == "accept" && mcpResponse->input == nlohmann::json({{"label", "review"}, {"accepted", true}});
 
   require(incompleteWarning && questionDialogRetained && answersPreserved,
           "incomplete questions retain the modal and prior authored answers");
-  require(
-      invalidJsonWarning && mcpDialogRetained && validJsonReturned,
-      "invalid MCP JSON remains editable until valid authored input exists");
+  require(invalidJsonWarning && mcpDialogRetained && requiredFieldsRetained && validJsonReturned,
+          "invalid MCP JSON remains editable until valid authored input exists");
 }
 
 void dialogControlsHaveSemanticLabels() {
