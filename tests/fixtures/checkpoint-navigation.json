@@ -345,19 +345,19 @@
     ]
   },
   "actions": {
-    "one/opening": "opening",
-    "one/update": "update",
-    "one/final": "final answer",
-    "one/steer": "steering",
-    "one/question": "question",
-    "two/opening": "opening",
-    "two/update": "update",
-    "two/partial": "answer",
-    "two/steer": "steering",
-    "two/question": "answer",
-    "two/reply": "answer",
-    "auto/update": "update",
-    "auto/final": "final answer",
-    "reply-turn/opening": "answer"
+    "one/opening": "Opening",
+    "one/update": "Update",
+    "one/final": "Final answer",
+    "one/steer": "Steering",
+    "one/question": "Question",
+    "two/opening": "Opening",
+    "two/update": "Update",
+    "two/partial": "Answer",
+    "two/steer": "Steering",
+    "two/question": "Answer",
+    "two/reply": "Answer",
+    "auto/update": "Update",
+    "auto/final": "Final answer",
+    "reply-turn/opening": "Answer"
   }
 }

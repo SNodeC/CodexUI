@@ -768,6 +768,10 @@ const SafeMarkdown = memo(function SafeMarkdown({text}: {text: string}) {
     }}>{text}</Markdown></div>;
 });
 
+function userPromptPhase(source: string, nested: boolean): string {
+    return questionReplies(source).length > 0 ? "Answer" : nested ? "steering" : "";
+}
+
 export function userMessageMarkdownText(text: string): string {
     const replies = questionReplies(text);
     if (replies.length) { text = questionReplyText(replies, true); }
@@ -934,10 +938,10 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     let phaseClass = presentsStatus ? `status ${statusTone(card.status)}` : "";
     let phaseLabel = presentsStatus ? displayStatus(card.status) : "";
     if (card.kind === "userMessage") {
-        const data = card.payload as UserMessageData; title = "You"; phaseLabel = nestedCard ? "steering" : "";
+        const data = card.payload as UserMessageData; title = "You"; phaseLabel = userPromptPhase(data.text, nestedCard);
         body = <><SafeMarkdown text={userMessageMarkdownText(data.text)} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
-        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
+        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = data.state !== "failed" ? userPromptPhase(data.prompt, nestedCard) : "";
         body = <><SafeMarkdown text={userMessageMarkdownText(data.prompt)} /><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}{data.requiresExplicitRecovery && onRestore && <button onClick={onRestore}>Restore to composer</button>}</>;
     } else if (card.kind === "agentMessage") {
         const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.questionRequest ? "question" : data.phase === "final_answer" ? "final" : "update"; phaseClass = cardVariant; phaseLabel = cardVariant === "question" ? "Question" + (data.questionStatus ? ` · ${data.questionStatus}` : "") : data.phase === "final_answer" ? "final answer" : data.phase === "partial_answer" ? "partial answer" : "update";
@@ -1299,6 +1303,23 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}));
     const navigationSections = navigationEnabled && navigation.anchor ? loadedSections() : [];
     const atBottom = navigation.following || (navigation.anchor?.pixelOffset ?? 0) > 1 && Boolean(scroll.current && scroll.current.scrollHeight - scroll.current.scrollTop - scroll.current.clientHeight <= 1);
+    const acknowledgeVisibleResult = () => {
+        const result = thread?.uninspectedResult;
+        const container = scroll.current;
+        if (result && container && !threadTransitionActive) {
+            const answer = visibleSections.find(section => section.turnId === result)?.cards.slice().reverse().find(card =>
+                card.kind === "agentMessage" && (card.payload as AgentMessageData).phase === "final_answer"
+                && !(card.payload as AgentMessageData).questionRequest);
+            const content = answer ? cardForKey(container, stableKey(answer.key))?.querySelector<HTMLElement>(":scope > .safe-markdown") : undefined;
+            const bounds = content?.getBoundingClientRect();
+            const viewport = container.getBoundingClientRect();
+            const bottom = Math.min(viewport.bottom, composerDock.current?.getBoundingClientRect().top ?? viewport.bottom);
+            if (bounds && bounds.height > 0 && bounds.width > 0 && bounds.bottom > viewport.top && bounds.top < bottom
+                && bounds.right > viewport.left && bounds.left < viewport.right) {
+                session.acknowledgeInspection(projectionId, result, presentationKey);
+            }
+        }
+    };
     const loadEarlier = () => {
         if (!historyPagePending) {
             viewport.loadMore(projectionId, presentationKey);
@@ -1386,7 +1407,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                             <div className="turn-outline-count">{destinations.length} loaded{thread?.historyHasMore ? " · earlier available" : ""}</div>
                             {conversation.hasMore && <button disabled={historyPagePending} onClick={loadEarlier}>{historyPagePending ? "Loading earlier history…" : "Load earlier history"}</button>}
                             {destinations.map(({card, turn, action, preview, label}) => <button className="checkpoint-entry" aria-label={label} key={stableKey(card.key)} aria-current={stableKey(card.key) === selectedKey ? "true" : undefined}
-                                autoFocus={stableKey(card.key) === selectedKey} onClick={() => navigateTo(card)} title={label}><span>{turn} |</span><span>{action}</span><span>{preview}</span></button>)}</>;
+                                autoFocus={stableKey(card.key) === selectedKey} onClick={() => navigateTo(card)} title={label}><span style={{fontWeight: action === "Opening" ? "bold" : undefined}}>{String(turn).padStart(2, "0")} |</span><strong>{action}</strong><span>{preview}</span></button>)}</>;
                     }}</Menu>
                     <button aria-label="Next checkpoint" data-tooltip="Next checkpoint" disabled={!navigationEnabled || Boolean(navigation.anchor && !checkpointNavigationTarget(navigationSections, checkpointScope, navigation.anchor, 1, atBottom))} onClick={() => navigateAdjacent(1)}>↓</button>
                     <button aria-label="First turn; load earlier history if needed" data-tooltip={historyPagePending ? "Loading earlier history…" : "First turn"} disabled={!navigationEnabled || historyLoading || (!conversation.hasMore && (openingCards.length === 0 || atFirstOpening))} onClick={() => navigateTo(turnOpenings(loadedSections())[0], true)}>↥</button>
@@ -1405,6 +1426,7 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                 {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)}</p>}</div></div>
         </div>
         <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
+            onPointerDownCapture={acknowledgeVisibleResult} onKeyDownCapture={acknowledgeVisibleResult} onWheelCapture={acknowledgeVisibleResult}
             aria-busy={threadTransitionActive || undefined} onScroll={event => {
             const element = event.currentTarget;
             const previous = viewport.scroll(projectionId, presentationKey);
@@ -1432,7 +1454,8 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
                         </section>;
                     })}</>}
         </div>
-        <div ref={composerDock} className="composer-dock">
+        <div ref={composerDock} className="composer-dock"
+            onPointerDownCapture={acknowledgeVisibleResult} onKeyDownCapture={acknowledgeVisibleResult} onWheelCapture={acknowledgeVisibleResult}>
             {attention && <div className="attention-strip" role="status"><span>A Codex request needs attention · {humanize(attention.kind)}</span>
                 <button onClick={() => onInspect("requests")}>Review {session.model.pendingRequestPresentations().size} request(s)</button>
                 {pendingDecisionOptions(attention).filter(decision => !decision.requiresInput && decision.value !== "submit").slice(0, 2).map(decision => <button key={decision.value} disabled={!session.canResolvePending(attention)} onClick={() => session.resolvePending(attention, {choice: decision.value})}>{decision.label}</button>)}
@@ -1531,6 +1554,7 @@ function Composer({session, presentationKey, active, options, prompt, onChange: 
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (active && !browsing && (prompt.trim() !== "" || attachments.length > 0) && session.canSubmit(presentationKey)) {
+            session.viewportState.updateScroll(session.getSnapshot().selectedThreadId, presentationKey, 0, true);
             void session.submitPrompt(prompt, attachments, options.turn, options.thread, presentationKey);
             localFiles.current.clear(); setAttachments([]); setPrompt("");
         }

@@ -912,13 +912,13 @@ std::vector<ConversationView::CheckpointDestination> ConversationView::checkpoin
                 const bool answered = message && std::ranges::any_of(message->answers, [](const auto& answer) {
                                           return !answer.empty();
                                       });
-                const QString type = *kind == NavigationScope::Updates ? QStringLiteral("update")
+                const QString type = *kind == NavigationScope::Updates ? QStringLiteral("Update")
                                      : *kind == NavigationScope::Questions
-                                         ? (answered ? QStringLiteral("answer") : QStringLiteral("question"))
-                                     : *kind == NavigationScope::Answers      ? QStringLiteral("answer")
-                                     : *kind == NavigationScope::FinalAnswers ? QStringLiteral("final answer")
-                                     : *kind == NavigationScope::Steering     ? QStringLiteral("steering")
-                                                                              : QStringLiteral("opening");
+                                         ? (answered ? QStringLiteral("Answer") : QStringLiteral("Question"))
+                                     : *kind == NavigationScope::Answers      ? QStringLiteral("Answer")
+                                     : *kind == NavigationScope::FinalAnswers ? QStringLiteral("Final answer")
+                                     : *kind == NavigationScope::Steering     ? QStringLiteral("Steering")
+                                                                              : QStringLiteral("Opening");
                 const QString text =
                     prompt  ? QString::fromStdString(prompt->text)
                     : local ? QString::fromStdString(local->prompt)
@@ -995,14 +995,21 @@ void ConversationView::navigateToFirstTurn() {
 }
 
 void ConversationView::followLatest() {
-    if (!threadId_.empty() && !applying_ && !structuralStagingActive() && loadingThreadId_.empty()) {
-        stopFollowingAnimation();
-        pausedByCommandOutput_ = false;
-        mode_ = Mode::Following;
-        threadPresentations_[threadId_].scroll.anchor = {};
-        setScrollValue(verticalScrollBar()->maximum());
-        updateMaterialization();
-        setFocus(Qt::OtherFocusReason);
+    const auto& targetThread = loadingThreadId_.empty() ? threadId_ : loadingThreadId_;
+    if (!targetThread.empty() && !applying_) {
+        threadPresentations_[targetThread].scroll = {};
+        if (targetThread == threadId_) {
+            stopFollowingAnimation();
+            pausedByCommandOutput_ = false;
+            mode_ = Mode::Following;
+            setScrollValue(verticalScrollBar()->maximum());
+            updateMaterialization();
+        }
+        if (pendingStructuralSnapshot_) {
+            clearStagedCards();
+            choosePendingStageRows();
+            scheduleCardAdmissionPass();
+        }
     }
 }
 
@@ -3445,6 +3452,14 @@ void ConversationView::revealRow(const QModelIndex &index, ScrollHint hint,
       setScrollValue(target);
       updateMaterialization();
   }
+}
+
+bool ConversationView::isCardContentVisible(const nodegraph::NodeRef& target) const {
+    const auto index = model_->indexForTarget(target);
+    const auto* card = index.isValid() ? cardForStableKey(model_->row(index.row())->stableKey) : nullptr;
+    const auto* content = card ? card->findChild<QWidget*>(QStringLiteral("conversationCardContent")) : nullptr;
+    return !structuralStagingActive() && content && content->isVisible() &&
+           QRect(content->mapTo(viewport(), QPoint{}), content->size()).intersects(viewport()->rect());
 }
 
 QModelIndex ConversationView::indexAt(const QPoint &point) const {

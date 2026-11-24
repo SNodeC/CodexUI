@@ -2711,6 +2711,7 @@ bool checkpointNavigationUsesCardIdentity() {
         snapshot.sections.push_back(section);
     }
     MiddleRegionWidget region;
+    region.setStyleSheet(UiStyle::applicationStyleSheet());
     region.resize(1100, 720);
     region.show();
     region.showSidebar(false);
@@ -2754,7 +2755,7 @@ bool checkpointNavigationUsesCardIdentity() {
                                  "native ordered checkpoint identities and context match the shared corpus");
                 result &= expect(
                     destinations[index].action.toStdString() ==
-                        (name == "turns" ? "opening" : contract.at("actions").at(expected[index].get<std::string>()).get<std::string>()),
+                        (name == "turns" ? "Opening" : contract.at("actions").at(expected[index].get<std::string>()).get<std::string>()),
                     "checkpoint actions distinguish opening, update, steering, question, answer, and final answer");
             }
             for (const auto& query : contract.at("queries")) {
@@ -2820,11 +2821,19 @@ bool checkpointNavigationUsesCardIdentity() {
                              list->topLevelItem(1)->text(2).contains("Which edge cases need checking?"),
                          "pending and answered questions have identifiable entries in the same outline");
         result &=
-            expect(list->columnCount() == 3 && list->topLevelItem(0)->text(0) == "1 |" && list->topLevelItem(0)->text(1) == "question" &&
-                       list->topLevelItem(1)->text(1) == "answer" && list->columnWidth(2) >= list->viewport()->width() / 2,
+            expect(list->columnCount() == 3 && list->topLevelItem(0)->text(0) == "01 |" && list->topLevelItem(0)->text(1) == "Question" &&
+                       list->topLevelItem(1)->text(1) == "Answer" && list->columnWidth(2) >= list->viewport()->width() / 2,
                    "compact number and action columns leave most popup width for message previews");
         scope->setCurrentIndex(0);
         settleNavigation();
+        for (int row = 0; row < list->topLevelItemCount(); ++row) {
+            const auto* item = list->topLevelItem(row);
+            result &= expect(item->font(0).bold() == (item->text(1) == "Opening") && item->font(1).bold() && !item->font(2).bold() &&
+                                 list->columnWidth(1) >= QFontMetrics(item->font(1)).horizontalAdvance(item->text(1)) &&
+                                 item->toolTip(2).startsWith(item->text(0) + " " + item->text(1) + " ") &&
+                                 (item->textAlignment(2) & Qt::AlignRight) == 0,
+                             "bold status labels fit their column while descriptions retain left alignment and matching tooltips");
+        }
         if (!qEnvironmentVariableIsEmpty("CODEXUI_TEST_EVIDENCE_DIR")) {
             region.findChild<QFrame*>("conversationTurnMenu")
                 ->grab()
@@ -2850,6 +2859,38 @@ bool checkpointNavigationUsesCardIdentity() {
         settleNavigation();
         result &= expect(reveal && reveal->isVisible() && list->topLevelItemCount() == 0,
                          "empty hidden-only history retains the explicit reveal action");
+        region.findChild<QFrame*>("conversationTurnMenu")->close();
+        snapshot.sections.clear();
+        for (int number = 1; number <= 1200; ++number) {
+            TurnSection section;
+            section.key = section.turnId = "numbered-" + std::to_string(number);
+            auto prompt = card(CardKind::UserMessage, "opening", UserMessageData{"Numbered turn description"});
+            prompt.threadId = snapshot.threadId;
+            prompt.turnId = section.turnId;
+            prompt.key = AuthoritativeItemKey{prompt.threadId, prompt.turnId, prompt.itemId};
+            section.rootCardKey = prompt.key;
+            section.cards.push_back(std::move(prompt));
+            snapshot.sections.push_back(std::move(section));
+        }
+        auto answer = card(CardKind::AgentMessage, "final", AgentMessageData{"Last final answer", "final_answer"});
+        answer.threadId = snapshot.threadId;
+        answer.turnId = snapshot.sections.back().turnId;
+        answer.key = AuthoritativeItemKey{answer.threadId, answer.turnId, answer.itemId};
+        snapshot.sections.back().cards.push_back(std::move(answer));
+        static_cast<void>(view.reconcileStaged(snapshot));
+        settleNavigation();
+        trigger->click();
+        settleNavigation();
+        for (const auto& [row, expected] : std::array{std::pair{0, "01 |"}, std::pair{22, "23 |"}, std::pair{99, "100 |"}}) {
+            const auto* item = list->topLevelItem(row);
+            result &= expect(item && item->text(0) == expected && item->text(1) == "Opening" && item->font(1).bold() &&
+                                 item->text(2) == "Numbered turn description",
+                             "native checkpoint rows pad single digits while preserving larger turn numbers and descriptions");
+        }
+        const auto* last = list->topLevelItem(list->topLevelItemCount() - 1);
+        result &= expect(list->topLevelItemCount() == 1201 && last->text(0) == "1200 |" && last->text(1) == "Final answer" &&
+                             list->columnWidth(1) >= QFontMetrics(last->font(1)).horizontalAdvance(last->text(1)),
+                         "a final-answer label beyond Qt's default measurement sample still fits its status column");
         region.findChild<QFrame*>("conversationTurnMenu")->close();
     }
     return result;

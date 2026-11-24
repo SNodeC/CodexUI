@@ -147,6 +147,7 @@ public:
     return static_cast<int>(materializedCards_.size());
   }
 
+  [[nodiscard]] bool isCardContentVisible(const nodegraph::NodeRef& target) const;
   [[nodiscard]] QRect visualRect(const QModelIndex &index) const override;
   void scrollTo(const QModelIndex &index,
                 ScrollHint hint = EnsureVisible) override;

@@ -169,7 +169,6 @@ enum class RelationKind : std::uint8_t {
     ReviewTarget,
     ActiveTurn,
     UiSelectionTarget,
-    UiInspectionTarget,
 };
 
 class Node final : public std::enable_shared_from_this<Node> {

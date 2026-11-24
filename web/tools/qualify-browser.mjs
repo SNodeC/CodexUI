@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import {qualifySubmitScroll} from "./qualify-submit-scroll.mjs";
+import {qualifyInspection} from "./qualify-inspection.mjs";
 import {qualifyContextMenus} from "./qualify-context-menus.mjs";
 import {qualifyListWindowing} from "./qualify-list-windowing.mjs";
 import {qualifyUiInventory} from "./qualify-ui-inventory.mjs";
@@ -769,9 +771,12 @@ const checkpointCheck = `(async()=>{
     await setScope('all');
     const columnDetails=entries().map(entry=>({cells:[...entry.children].map(cell=>({text:cell.textContent,width:cell.getBoundingClientRect().width})),width:entry.getBoundingClientRect().width}));
     const columns=entries().every((entry,index)=>{
-        const cells=entry.querySelectorAll(':scope > span'),expected=contract.expected.all[index];
+        const cells=entry.querySelectorAll(':scope > :is(span, strong)'),expected=contract.expected.all[index];
         const action=contract.actions[expected];
-        return cells.length===3&&cells[1].textContent===action&&entry.getAttribute('aria-label')===entry.title
+        return cells.length===3&&cells[1].textContent===action&&Number(getComputedStyle(cells[1]).fontWeight)>=700
+            &&(Number(getComputedStyle(cells[0]).fontWeight)>=700)===(action==='Opening')
+            &&cells[0].textContent===String(contract.turns.findIndex(turn=>turn.id===expected.split('/')[0])+1).padStart(2,'0')+' |'
+            &&getComputedStyle(cells[2]).textAlign==='left'&&entry.getAttribute('aria-label')===entry.title
             &&cells[2].getBoundingClientRect().width>=entry.getBoundingClientRect().width/2;
     });
     const aligned=entries().every(entry=>Math.abs(entry.children[2].getBoundingClientRect().left-entries()[0].children[2].getBoundingClientRect().left)<=1);
@@ -1052,7 +1057,27 @@ try {
     const browserVersion = await devTools.call("Browser.getVersion");
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
-    if (process.env.CODEXUI_BROWSER_CHECKPOINTS_ONLY) {
+    if (process.env.CODEXUI_BROWSER_ASYNC_QUESTIONS_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        console.log(JSON.stringify({asyncQuestions: await qualifyAsyncQuestions(devTools), browser: browserVersion.product}));
+        if (process.env.CODEXUI_TEST_EVIDENCE_DIR) {
+            await mkdir(process.env.CODEXUI_TEST_EVIDENCE_DIR, {recursive: true});
+            for (const width of [1280, 380]) {
+                await setWidth(devTools, width);
+                const screenshot = await devTools.call("Page.captureScreenshot", {format: "png"});
+                await writeFile(join(process.env.CODEXUI_TEST_EVIDENCE_DIR, `browser-answer-${width}.png`), Buffer.from(screenshot.data, "base64"));
+            }
+        }
+    } else if (process.env.CODEXUI_BROWSER_SUBMIT_SCROLL_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        console.log(JSON.stringify({submissionScroll: await qualifySubmitScroll(devTools), browser: browserVersion.product}));
+    } else if (process.env.CODEXUI_BROWSER_INSPECTION_ONLY) {
+        await setWidth(devTools, 1280);
+        await devTools.evaluate(applicationProfileSetup);
+        console.log(JSON.stringify({inspection: await qualifyInspection(devTools), browser: browserVersion.product}));
+    } else if (process.env.CODEXUI_BROWSER_CHECKPOINTS_ONLY) {
         await setWidth(devTools, 1280);
         await devTools.evaluate(applicationProfileSetup);
         const checkpoints = await devTools.evaluate(checkpointCheck);

@@ -96,7 +96,7 @@ h1, h2, h3, p { margin: 0; }
 .turn-outline .menu-popover:popover-open { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); column-gap: 8px; }
 .turn-outline .menu-popover > * { grid-column: 1 / -1; }
 .turn-outline .menu-popover .checkpoint-entry { display: grid; grid-template-columns: subgrid; }
-.turn-outline .checkpoint-entry > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-outline .checkpoint-entry > :is(span, strong) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .turn-outline .checkpoint-entry > span:first-child { text-align: right; font-variant-numeric: tabular-nums; }
 .turn-outline .menu-popover button:hover { background: var(--menu-item-hover-surface); }
 .turn-outline .menu-popover button[aria-current] { background: var(--presentation-selected-surface); color: var(--text-strong); }

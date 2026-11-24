@@ -26,6 +26,7 @@ export async function qualifyAsyncQuestions(devTools) {
         const prompt=document.querySelector('.composer textarea'),setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;
         setter.call(prompt,'Preserve my draft');prompt.dispatchEvent(new Event('input',{bubbles:true}));
         notify('turn/started',{threadId:metadata.id,turn:{id:'question-turn',status:'inProgress'}});
+        notify('item/completed',{threadId:metadata.id,turnId:'question-turn',item:{id:'opening',type:'userMessage',content:[{type:'text',text:'Investigate the follow-up'}]}});
         const item={id:'question',type:'agentMessage',delivery:'async',phase:'commentary',text:'Approve the follow-up?',
             questions:[{title:'Approve the follow-up?',options:['Approve','Hold']}]};
         const updates=()=>document.querySelector('button[aria-label$="Codex update cards"]');
@@ -75,6 +76,9 @@ export async function qualifyAsyncQuestions(devTools) {
         const chosen=sent?.method==='turn/steer'&&sent.params.expectedTurnId==='question-turn'
             &&sent.params.threadId===metadata.id&&JSON.parse(sent.params.input[0].text.slice(34,-35))[0].answer==='Hold';
         const draftRetained=prompt.value==='Preserve my draft';
+        const pendingReply=[...document.querySelectorAll('.conversation-card.localPrompt')].find(card=>card.textContent.includes('Approve the follow-up?'));
+        const pendingAnswerLabel=pendingReply?.querySelector('.card-phase')?.textContent==='Answer';
+        const answerSurface=!!pendingReply&&matches(getComputedStyle(pendingReply).backgroundColor,'--steering-message-surface');
         answer().focus();answer().click();await waitFor(()=>dialog()?.open);
         const other=dialog().querySelector('input[placeholder="Other answer"]');
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(other,'My own answer');other.dispatchEvent(new Event('input',{bubbles:true}));await frame();
@@ -88,6 +92,10 @@ export async function qualifyAsyncQuestions(devTools) {
         const finalRestored=card.querySelector('.card-phase')?.textContent==='final answer'&&!answer()
             &&matches(getComputedStyle(card).backgroundColor,'--final-answer-surface');
         socket.receive({kind:'appserver',payload:{id:sent.id,result:{turnId:'question-turn'}}});await frame();
+        notify('item/completed',{threadId:metadata.id,turnId:'question-turn',item:{id:'confirmed-reply',type:'userMessage',clientId:sent.params.clientUserMessageId,content:sent.params.input}});await frame();
+        const confirmedAnswerLabel=pendingReply?.isConnected&&pendingReply.classList.contains('userMessage')
+            &&pendingReply.querySelector('.card-phase')?.textContent==='Answer'
+            &&matches(getComputedStyle(pendingReply).backgroundColor,'--steering-message-surface');
         const entry=${JSON.stringify(fixture.cases.find(entry=>entry.id==='two-independent-choices'))};
         const two={id:'two-question',type:'agentMessage',delivery:'async',phase:'commentary',
             text:entry.questions.map(q=>q.title+'\\n'+q.options.map(option=>'- '+option).join('\\n')).join('\\n\\n'),questions:entry.questions};
@@ -120,7 +128,7 @@ export async function qualifyAsyncQuestions(devTools) {
         });
         if(oldStyle===null){twoCard().removeAttribute('style');}else{twoCard().setAttribute('style',oldStyle);}
         socket.send=original;
-        return {...visibilityChecks,questionStyle,finalRestored,modal,defaultChoice,cancelled,focusReturned,exclusive,chosen,draftRetained,freeTextClearsChoice,staleRetained,independentChoices,twoQuestionsPreserved,sendingHeader,acknowledgedHeader,boldAnswers,answerAgain,narrowStatus};
+        return {...visibilityChecks,questionStyle,finalRestored,modal,defaultChoice,cancelled,focusReturned,exclusive,chosen,draftRetained,pendingAnswerLabel,answerSurface,confirmedAnswerLabel,freeTextClearsChoice,staleRetained,independentChoices,twoQuestionsPreserved,sendingHeader,acknowledgedHeader,boldAnswers,answerAgain,narrowStatus};
     })()`);
     console.log(JSON.stringify({asyncQuestionChecks: result}));
     for (const [name, passed] of Object.entries(result)) {

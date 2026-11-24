@@ -39,23 +39,23 @@ function checkpointKind(section: TurnSection, card: VisibleCardData, opening: Vi
     let kind: string | undefined;
     if (section.turnId !== "") {
         if (card === opening && ((scope === "all" && !message && !reply) || scope === "turns")) {
-            kind = "opening";
+            kind = "Opening";
         } else if (message?.questionRequest && (scope === "all" || scope === "questions" || scope === "answers" && message.answers?.some(Boolean))) {
-            kind = message.answers?.some(Boolean) ? "answer" : "question";
+            kind = message.answers?.some(Boolean) ? "Answer" : "Question";
         } else if (message && !message.questionRequest && message.phase === "final_answer" && (scope === "all" || scope === "finalAnswers")) {
-            kind = "final answer";
+            kind = "Final answer";
         } else if (message && !message.questionRequest && message.phase === "partial_answer" && (scope === "all" || scope === "answers")) {
-            kind = "answer";
+            kind = "Answer";
         } else if (message && !message.questionRequest && !["final_answer", "partial_answer"].includes(message.phase)
             && (scope === "all" || scope === "updates")) {
-            kind = "update";
+            kind = "Update";
         } else if (reply
             && !(card.kind === "localPrompt" && (card.payload as LocalPromptData).state === "failed") && (scope === "all" || scope === "answers")) {
-            kind = "answer";
+            kind = "Answer";
         } else if (section.rootCardKey && card !== opening && !reply && (card.kind === "userMessage"
             || card.kind === "localPrompt" && (card.payload as LocalPromptData).state !== "failed")
             && (scope === "all" || scope === "steering")) {
-            kind = "steering";
+            kind = "Steering";
         }
     }
     return kind;
@@ -74,7 +74,7 @@ export function checkpointDestinations(sections: readonly TurnSection[], scope: 
                         || (card.payload as AgentMessageData).text : "Turn without an opening prompt";
                 const replies = questionReplies(text);
                 const preview = (replies.length ? questionReplyText(replies, true) : text).trim().replace(/\s+/gu, " ") || "Attachment prompt";
-                result.push({card, turn: index + 1, action: kind, preview, label: `${index + 1} | ${kind} ${preview}`});
+                result.push({card, turn: index + 1, action: kind, preview, label: `${String(index + 1).padStart(2, "0")} | ${kind} ${preview}`});
             }
         }
     }

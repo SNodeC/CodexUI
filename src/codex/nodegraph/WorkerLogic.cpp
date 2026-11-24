@@ -636,14 +636,13 @@ void WorkerLogic::selectThread(NodeGraph::WriteAccess& write, const NodeRef& thr
     }
 }
 
-ChannelSendStatus WorkerLogic::inspectThread(const NodeRef& thread) {
+ChannelSendStatus WorkerLogic::inspectThread(const NodeRef& completedTurn) {
     GraphChange change;
     {
         auto write = graph_.write();
-        if (!thread || (thread->id().kind == NodeKind::Thread && write.find(thread->id()) == thread)) {
-            const auto runtime = write.upsert({NodeKind::Runtime, "runtime"});
-            write.replaceRelated(runtime, RelationKind::UiInspectionTarget, std::span<const NodeRef>(&thread, thread ? 1 : 0));
-            if (thread) {
+        if (completedTurn && completedTurn->id().kind == NodeKind::Turn && write.find(completedTurn->id()) == completedTurn) {
+            const auto thread = write.parent(completedTurn);
+            if (thread && exactStringFromValue(valueMember(*write.state(thread), "uninspectedResult")) == completedTurn->id().canonical) {
                 write.eraseField(thread, "uninspectedResult");
             }
         }

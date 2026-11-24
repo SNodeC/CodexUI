@@ -103,8 +103,8 @@ for (const [scope, expected] of Object.entries(checkpointContract.expected)) {
         const destinations = checkpointDestinations(checkpointSections(), scope);
         assert.deepEqual(destinations.map(({card}) => checkpointId(card)), expected);
         assert.equal(new Set(destinations.map(({card}) => stableKey(card.key))).size, destinations.length);
-        assert(destinations.every(({card, action}) => action === (scope === "turns" ? "opening" : checkpointContract.actions[checkpointId(card)])));
-        assert(destinations.every(({card, action, preview, label}) => label === `${checkpointContract.turns.findIndex(turn => turn.id === card.turnId) + 1} | ${action} ${preview}`));
+        assert(destinations.every(({card, action}) => action === (scope === "turns" ? "Opening" : checkpointContract.actions[checkpointId(card)])));
+        assert(destinations.every(({card, action, preview, label}) => label === `${String(checkpointContract.turns.findIndex(turn => turn.id === card.turnId) + 1).padStart(2, "0")} | ${action} ${preview}`));
         assert(destinations.every(({card, label}) => !card.payload.questionRequest
             || label.includes(card.payload.questionRequest.questions[0].question)), "question text identifies pending and answered checkpoints");
     });
@@ -144,5 +144,16 @@ for (const [scope, expected] of Object.entries(checkpointContract.hiddenUpdates)
 test("unassigned prompts do not shift checkpoint turn context", () => {
     const sections = checkpointSections();
     sections.unshift({key: "unassigned", turnId: "", cards: [{...sections[0].cards[0], turnId: ""}]});
-    assert(checkpointDestinations(sections)[0].label.startsWith("1 | opening "));
+    assert(checkpointDestinations(sections)[0].label.startsWith("01 | Opening "));
+});
+
+
+test("checkpoint numbering pads single digits and preserves larger turn numbers", () => {
+    const opening = checkpointSections()[0].cards[0];
+    const sections = Array.from({length: 100}, (_, index) => ({key: `turn-${index}`, turnId: `turn-${index}`,
+        cards: [{...opening, turnId: `turn-${index}`, key: {...opening.key, turnId: `turn-${index}`}}]}));
+    const destinations = checkpointDestinations(sections);
+    for (const [position, prefix] of [[0, "01 | Opening "], [22, "23 | Opening "], [99, "100 | Opening "]]) {
+        assert(destinations[position].label.startsWith(prefix));
+    }
 });

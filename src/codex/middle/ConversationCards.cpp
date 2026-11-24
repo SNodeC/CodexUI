@@ -3,6 +3,7 @@
 #include "codex/middle/ConversationCards.h"
 
 #include "codex/middle/ConversationPresentation.h"
+#include "codex/nodegraph/PromptText.h"
 
 #include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
@@ -564,12 +565,14 @@ QString fileChangesMetadata(const FileChangesData &data,
   return values.join(QStringLiteral("  |  "));
 }
 
-QString localPromptPhase(const LocalPromptData &prompt, bool nested) {
-  const bool waiting = prompt.awaitingConversation();
-  if (waiting)
-    return nested ? QStringLiteral("steering · pending")
-                  : QStringLiteral("pending");
-  return nested ? QStringLiteral("steering") : QString{};
+QString userPromptPhase(std::string_view prompt, bool nested, bool pending = false) {
+    QString result = !nodegraph::questionReplies(prompt).empty() ? QStringLiteral("Answer")
+                     : nested                                    ? QStringLiteral("steering")
+                                                                 : QString{};
+    if (pending) {
+        result += result.isEmpty() ? QStringLiteral("pending") : QStringLiteral(" · pending");
+    }
+    return result;
 }
 
 QString localPromptStatus(const LocalPromptData &prompt) {
@@ -598,8 +601,9 @@ std::optional<QString> selectionSource(const VisibleCardData &card, bool nested,
         if constexpr (std::is_same_v<Payload, UserMessageData>) {
           if (role == SelectionRole::Title)
             return QStringLiteral("You");
-          if (role == SelectionRole::Phase && nested)
-            return QStringLiteral("steering");
+          if (role == SelectionRole::Phase) {
+              return userPromptPhase(payload.text, nested);
+          }
           if (role == SelectionRole::MarkdownBody)
             return presentation::userMessageMarkdown(text(payload.text));
         } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
@@ -663,8 +667,9 @@ std::optional<QString> selectionSource(const VisibleCardData &card, bool nested,
         } else if constexpr (std::is_same_v<Payload, LocalPromptData>) {
           if (role == SelectionRole::Title)
             return QStringLiteral("You");
-          if (role == SelectionRole::Phase)
-            return localPromptPhase(payload, nested);
+          if (role == SelectionRole::Phase) {
+              return userPromptPhase(payload.prompt, nested, payload.awaitingConversation());
+          }
           if (role == SelectionRole::MarkdownBody)
             return presentation::userMessageMarkdown(text(payload.prompt));
           if (role == SelectionRole::Metadata)
@@ -1669,15 +1674,6 @@ public:
       metadata->clear();
       metadata->hide();
     }
-    if (phase) {
-      if (nestedConversationCard) {
-        showPhase(QStringLiteral("steering"),
-                  QStringLiteral("steeringMessagePhase"));
-        presentation::setLabelTone(*phase, "steering");
-      } else {
-        phase->hide();
-      }
-    }
     if (recovery)
       recovery->hide();
   }
@@ -1725,19 +1721,14 @@ public:
       return false;
     nestedConversationCard = nested;
     owner->setProperty("nestedConversationCard", nested);
-    if (current.kind == CardKind::UserMessage ||
-        current.kind == CardKind::LocalPrompt) {
-      title->setText(QStringLiteral("You"));
-      if (nested) {
-        showPhase(QStringLiteral("steering"),
-                  QStringLiteral("steeringMessagePhase"));
-        presentation::setLabelTone(*phase, "steering");
-      } else if (phase) {
-        phase->hide();
-      }
+    if (current.kind == CardKind::UserMessage || current.kind == CardKind::LocalPrompt) {
+        title->setText(QStringLiteral("You"));
+        if (current.kind == CardKind::LocalPrompt) {
+            refreshPendingPresentation();
+        } else {
+            refreshPromptPhase();
+        }
     }
-    if (current.kind == CardKind::LocalPrompt)
-      refreshPendingPresentation();
     repolishIfPolished();
     owner->update();
     return true;
@@ -1919,15 +1910,16 @@ public:
   }
 
   void updateComposition(const UserMessageData &message) {
-    if (collapsed) {
-      markdownBody->setVisible(!message.text.empty());
-      images->setVisible(!message.imagePaths.empty());
-      markBodyProjectionDeferred();
-      return;
-    }
-    setVisibleMarkdown(markdownBody, text(message.text));
-    setImages(textList(message.imagePaths));
-    markBodyProjectionReady();
+      refreshPromptPhase();
+      if (collapsed) {
+          markdownBody->setVisible(!message.text.empty());
+          images->setVisible(!message.imagePaths.empty());
+          markBodyProjectionDeferred();
+      } else {
+          setVisibleMarkdown(markdownBody, text(message.text));
+          setImages(textList(message.imagePaths));
+          markBodyProjectionReady();
+      }
   }
 
   void createComposition(const AgentMessageData &message) {
@@ -2233,6 +2225,16 @@ public:
     refreshPendingPresentation();
   }
 
+  void refreshPromptPhase() {
+      const QString label = selectionSource(current, nestedConversationCard, SelectionRole::Phase).value_or(QString{});
+      if (!label.isEmpty()) {
+          showPhase(label, nestedConversationCard ? QStringLiteral("steeringMessagePhase") : QStringLiteral("pendingPromptStatus"));
+          presentation::setLabelTone(*phase, nestedConversationCard ? "steering" : "active");
+      } else if (phase) {
+          phase->hide();
+      }
+  }
+
   void refreshPendingPresentation() {
     const auto *prompt = std::get_if<LocalPromptData>(&current.payload);
     if (!prompt)
@@ -2246,14 +2248,7 @@ public:
          : failed ? QString::fromLatin1(UiStyle::failedPromptText)
                  : QString::fromLatin1(UiStyle::primary);
     const QString style = QStringLiteral("color:%1;").arg(foreground);
-    const QString lifecycle = localPromptPhase(*prompt, steering);
-    if (!lifecycle.isEmpty()) {
-      showPhase(lifecycle, steering ? QStringLiteral("steeringMessagePhase")
-                                    : QStringLiteral("pendingPromptStatus"));
-      presentation::setLabelTone(*phase, steering ? "steering" : "active");
-    } else if (phase) {
-      phase->hide();
-    }
+    refreshPromptPhase();
     for (QLabel *label : {title, body, metadata}) {
       if (!label)
         continue;

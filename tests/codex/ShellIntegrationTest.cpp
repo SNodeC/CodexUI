@@ -62,6 +62,7 @@
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
+#include <QWheelEvent>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -4706,7 +4707,106 @@ void projectGapResizingUsesTheRealShell(Configuration& configuration) {
     qApp->setStyleSheet(originalStyle);
 }
 
-void inspectionAcknowledgementsTrackTheBoundConversation(Configuration& configuration) {
+void promptSubmissionResumesFollowing(Configuration& configuration) {
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        FrontendSession session(configuration);
+        auto& channels = FrontendSessionTestPeer::channels(session);
+        WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+        ShellWidget shell(session);
+        shell.resize(1100, 720);
+        shell.show();
+        makeReady(worker);
+        applyThread(worker, "submit-scroll");
+        applyScrollableThreadContent(worker, "submit-scroll", "history");
+        markThreadReady(session, worker, "submit-scroll");
+        if (scenario > 0) {
+            static_cast<void>(
+                worker.apply({DecodedMessageKind::ServerNotification,
+                              "turn/started",
+                              {},
+                              {{"threadId", "submit-scroll"}, {"turn", Value::Object{{"id", "active"}, {"status", "inProgress"}}}}}));
+        }
+        auto* list = shell.findChild<QTreeWidget*>("threadList");
+        auto* view = shell.findChild<middle::ConversationView*>("conversationScroll");
+        auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>("upcomingPromptEditor");
+        auto* send = shell.findChild<QPushButton*>("composerSendButton");
+        require(spinUntil([&] {
+                    return threadItem(list, "submit-scroll") != nullptr;
+                }) &&
+                    selectThread(list, "submit-scroll") && spinUntil([&] {
+                        return view && view->presentedThreadId() == "submit-scroll" && !view->structuralStagingActive() &&
+                               view->verticalScrollBar()->maximum() > 100;
+                    }),
+                "submission scrolling starts from a real populated shell");
+        if (view && editor && send) {
+            view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+            editor->setPlainText(scenario == 0 ? "New task" : "Steering instruction");
+            editor->setFocus();
+            require(spinUntil([&] {
+                        return view->mode() == middle::ConversationView::Mode::Paused && send->isEnabled();
+                    }),
+                    "reading earlier content pauses following before submission");
+            if (scenario == 2) {
+                view->beginThreadSelection("submit-scroll");
+            }
+            static_cast<void>(takeQtMessages(channels));
+            if (scenario == 1) {
+                send->click();
+            } else {
+                QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QApplication::sendEvent(editor, &enter);
+            }
+            require(editor->toPlainText().isEmpty() && editor->hasFocus() && view->isAtBottom() &&
+                        view->mode() == middle::ConversationView::Mode::Following,
+                    "Send and Steer resume the bottom without taking composer focus, including during loading");
+            auto actions = takeQtMessages(channels);
+            auto action = std::ranges::find_if(actions, [](const auto& message) {
+                const auto* node = std::get_if<NodeAction>(&message);
+                return node && node->kind == NodeActionKind::SubmitPrompt;
+            });
+            require(action != actions.end(), "the real submit control admits its prompt");
+            if (action != actions.end()) {
+                auto transition = worker.admitPrompt(std::move(std::get<NodeAction>(*action)));
+                require(transition.command &&
+                            transition.command->kind == (scenario == 0 ? PromptCommandKind::StartTurn : PromptCommandKind::SteerTurn),
+                        "scrolling preserves the authoritative new-turn versus steering decision");
+            }
+            if (scenario == 2) {
+                ui::NodeGraphUiAdapter adapter(FrontendSessionTestPeer::graph(session));
+                NodeRef thread;
+                {
+                    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+                    thread = read ? read->find({NodeKind::Thread, "submit-scroll"}) : NodeRef{};
+                }
+                if (auto snapshot = adapter.conversation(thread)) {
+                    static_cast<void>(view->reconcileStaged(std::move(*snapshot)));
+                }
+            }
+            require(spinUntil([&] {
+                        return !view->structuralStagingActive() &&
+                               localPromptCard(shell, scenario == 0 ? "New task" : "Steering instruction") && view->isAtBottom();
+                    }),
+                    "optimistic prompt insertion and deferred layout keep the submitted message at the bottom");
+            view->verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+            const auto previous = view->verticalScrollBar()->value();
+            editor->setPlainText("Cannot send as observer");
+            static_cast<void>(worker.bridgeState("test-controller", "observer", "other", 1, "ready"));
+            require(spinUntil([&] {
+                        return !send->isEnabled();
+                    }),
+                    "observer submission is disabled");
+            QKeyEvent rejected(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(editor, &rejected);
+            require(editor->toPlainText() == "Cannot send as observer" && view->verticalScrollBar()->value() == previous &&
+                        view->mode() == middle::ConversationView::Mode::Paused,
+                    "rejected submission preserves the draft and reading position");
+        }
+    }
+}
+
+void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configuration) {
+    const QString originalStyle = qApp->styleSheet();
+    qApp->setStyleSheet(UiStyle::applicationStyleSheet());
     FrontendSession session(configuration);
     auto& channels = FrontendSessionTestPeer::channels(session);
     auto& graph = FrontendSessionTestPeer::graph(session);
@@ -4717,11 +4817,15 @@ void inspectionAcknowledgementsTrackTheBoundConversation(Configuration& configur
     makeReady(worker);
     applyThread(worker, "inspection-a");
     applyThread(worker, "inspection-b");
+    markThreadReady(session, worker, "inspection-a");
+    markThreadReady(session, worker, "inspection-b");
     auto* tree = shell.findChild<QTreeWidget*>(QStringLiteral("threadList"));
     require(spinUntil([&] {
                 return threadItem(tree, "inspection-a") && threadItem(tree, "inspection-b");
             }),
             "inspection threads reach the actual shell");
+    auto* view = shell.findChild<middle::ConversationView*>(QStringLiteral("conversationScroll"));
+    auto* editor = shell.findChild<codexui::ExpandingPromptEditor*>(QStringLiteral("upcomingPromptEditor"));
     const auto acknowledge = [&] {
         for (const auto& message : takeQtMessages(channels)) {
             if (const auto* action = std::get_if<NodeAction>(&message); action && action->kind == NodeActionKind::InspectThread) {
@@ -4730,84 +4834,245 @@ void inspectionAcknowledgementsTrackTheBoundConversation(Configuration& configur
         }
         spin();
     };
-    require(selectThread(tree, "inspection-a"), "the UI binds the first inspected conversation");
-    acknowledge();
-    const auto complete = [&](const std::string& thread, const std::string& turn) {
+    const auto pending = [&] {
+        return threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected");
+    };
+    const auto capture = [&](const char* state) {
+        const auto directory = qEnvironmentVariable("CODEXUI_INSPECTION_SCREENSHOT_DIR");
+        if (!directory.isEmpty()) {
+            require(shell.grab().save(directory + "/shell-" + state + "-dpr-" + QString::number(shell.devicePixelRatioF()) + ".png"),
+                    "inspection transition evidence saved");
+        }
+    };
+    const auto finish = [&](const std::string& turnId) {
+        static_cast<void>(
+            worker.apply({DecodedMessageKind::ServerNotification,
+                          "turn/started",
+                          {},
+                          {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", turnId}, {"status", "inProgress"}}}}}));
+        static_cast<void>(worker.apply(
+            {DecodedMessageKind::ServerNotification,
+             "item/completed",
+             {},
+             {{"threadId", "inspection-b"},
+              {"turnId", turnId},
+              {"item",
+               Value::Object{{"id", "prompt"},
+                             {"type", "userMessage"},
+                             {"content", Value::Array{Value::Object{{"type", "text"}, {"text", std::string(12000, 'W')}}}}}}}}));
+        static_cast<void>(worker.apply(
+            {DecodedMessageKind::ServerNotification,
+             "item/completed",
+             {},
+             {{"threadId", "inspection-b"},
+              {"turnId", turnId},
+              {"item",
+               Value::Object{
+                   {"id", "answer"}, {"type", "agentMessage"}, {"phase", "final_answer"}, {"text", "Final result " + turnId}}}}}));
         static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
                                         "turn/completed",
                                         {},
-                                        {{"threadId", thread}, {"turn", Value::Object{{"id", turn}, {"status", "completed"}}}}}));
+                                        {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", turnId}, {"status", "completed"}}}}}));
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "thread/status/changed",
+                                        {},
+                                        {{"threadId", "inspection-b"}, {"status", Value::Object{{"type", "idle"}}}}}));
+        NodeRef answer;
+        {
+            auto read = graph.tryRead();
+            answer = read->find(scopedItemNodeId(scopedTurnNodeId("inspection-b", turnId), "answer"));
+        }
+        return answer;
     };
-    complete("inspection-b", "background");
-    require(spinUntil([&] {
-                return threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected");
-            }),
-            "background completion routes its inspection marker through the real shell");
-    require(selectThread(tree, "inspection-b"), "the UI selects the result awaiting inspection");
+    const auto click = [&](QWidget* target, const QPoint& position) {
+        const QPoint global = target->mapToGlobal(position);
+        QMouseEvent press(QEvent::MouseButtonPress,
+                          QPointF(position),
+                          QPointF(position),
+                          QPointF(global),
+                          Qt::LeftButton,
+                          Qt::LeftButton,
+                          Qt::NoModifier);
+        QApplication::sendEvent(target, &press);
+        QMouseEvent release(QEvent::MouseButtonRelease,
+                            QPointF(position),
+                            QPointF(position),
+                            QPointF(global),
+                            Qt::LeftButton,
+                            Qt::NoButton,
+                            Qt::NoModifier);
+        QApplication::sendEvent(target, &release);
+        acknowledge();
+    };
+    require(selectThread(tree, "inspection-a"), "the first conversation is selected");
+    auto answer = finish("background");
+    require(spinUntil(pending), "background completion raises attention");
+    require(selectThread(tree, "inspection-b"), "the result thread can be selected");
     acknowledge();
     require(spinUntil([&] {
-                return !threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected");
-            }),
-            "the binding acknowledgement clears the visible result marker");
-    complete("inspection-b", "foreground");
-    spin();
-    require(!threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected"),
-            "completion in the bound conversation stays inspected");
-    require(selectThread(tree, "inspection-a"), "the UI leaves the inspected result");
+                return view->isCardContentVisible(answer);
+            }) &&
+                pending(),
+            "selection and visible rendering alone preserve pink");
+    QEvent activation(QEvent::WindowActivate);
+    QApplication::sendEvent(&shell, &activation);
+    view->setFocus();
+    const QPoint position = view->viewport()->rect().center();
+    QMouseEvent move(QEvent::MouseMove,
+                     QPointF(position),
+                     QPointF(position),
+                     QPointF(view->viewport()->mapToGlobal(position)),
+                     Qt::NoButton,
+                     Qt::NoButton,
+                     Qt::NoModifier);
+    QApplication::sendEvent(view->viewport(), &move);
     acknowledge();
-    complete("inspection-b", "foreground");
+    require(pending(), "window activation, focus and pointer movement do not acknowledge");
+    click(tree->viewport(), tree->visualItemRect(threadItem(tree, "inspection-b")).center());
+    require(pending(), "the thread-selection click cannot acknowledge its answer");
+    capture("pink");
+    click(view->viewport(), position);
+    require(spinUntil([&] {
+                return !pending();
+            }),
+            "a conversation click with visible final content clears pink");
+    capture("green");
+    answer = finish("foreground");
+    require(spinUntil([&] {
+                return pending() && view->isCardContentVisible(answer);
+            }),
+            "a new foreground completion raises pink again");
+    view->verticalScrollBar()->setValue(0);
     spin();
-    require(!threadItem(tree, "inspection-b")->toolTip(0).contains("not yet inspected"),
-            "duplicate completion after navigation cannot recreate attention");
+    require(!view->isCardContentVisible(answer) && pending(), "programmatic scrolling does not acknowledge the result");
+    QKeyEvent key(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier, "x");
+    QApplication::sendEvent(editor, &key);
+    acknowledge();
+    require(pending() && editor->toPlainText() == "x", "typing while the final answer is offscreen preserves pink and input");
+    capture("offscreen");
+    const auto wheel = [&] {
+        QWheelEvent event(QPointF(position),
+                          QPointF(view->viewport()->mapToGlobal(position)),
+                          {},
+                          QPoint(0, -120000),
+                          Qt::NoButton,
+                          Qt::NoModifier,
+                          Qt::NoScrollPhase,
+                          false);
+        QApplication::sendEvent(view->viewport(), &event);
+        acknowledge();
+    };
+    view->followLatest();
+    require(spinUntil([&] {
+                return view->isCardContentVisible(answer);
+            }) &&
+                pending(),
+            "revealing the final answer programmatically preserves pink");
+    wheel();
+    require(spinUntil([&] {
+                return !pending();
+            }),
+            "wheel input while final content is visible clears pink");
+    view->followLatest();
+    answer = finish("collapsed");
+    require(spinUntil([&] {
+                return pending() && view->isCardContentVisible(answer);
+            }),
+            "the next result is presented");
+    auto* card = agentMessageCard(shell, "Final result collapsed");
+    require(card != nullptr, "the final answer uses the actual card renderer");
+    if (card) {
+        card->setCollapsed(true);
+        spin();
+        QApplication::sendEvent(editor, &key);
+        acknowledge();
+        require(pending() && !view->isCardContentVisible(answer), "a collapsed answer is not acknowledged by composer input");
+        card->setCollapsed(false);
+        view->followLatest();
+        require(spinUntil([&] {
+                    return view->isCardContentVisible(answer);
+                }),
+                "expanded final content becomes visible again");
+        const QFont original = qApp->font();
+        QFont enlarged = original;
+        enlarged.setPointSizeF(original.pointSizeF() * 1.5);
+        qApp->setFont(enlarged);
+        shell.resize(1000, 700);
+        view->followLatest();
+        spin();
+        require(spinUntil([&] {
+                    return view->isCardContentVisible(answer);
+                }),
+                "narrow final content settles before input");
+        capture("narrow-pink");
+        QApplication::sendEvent(editor, &key);
+        acknowledge();
+        require(spinUntil([&] {
+                    return !pending();
+                }),
+                "typing with visible final content clears pink at narrow width and enlarged font");
+        capture("narrow-green");
+        qApp->setFont(original);
+    }
+    require(selectThread(tree, "inspection-a"), "the UI can leave the inspected result");
+    static_cast<void>(
+        worker.apply({DecodedMessageKind::ServerNotification,
+                      "turn/completed",
+                      {},
+                      {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", "collapsed"}, {"status", "completed"}}}}}));
+    spin();
+    require(!pending(), "duplicate completion after navigation does not recreate attention");
+    qApp->setStyleSheet(originalStyle);
 }
 
-void saturatedInspectionKeepsOnlyTheLatestBinding(Configuration& configuration) {
+void saturatedInspectionPreservesIndependentResults(Configuration& configuration) {
     FrontendSession session(configuration);
     auto& channels = FrontendSessionTestPeer::channels(session);
     auto& graph = FrontendSessionTestPeer::graph(session);
     WorkerLogic worker(graph, channels);
-    applyThread(worker, "inspection-queue-a");
-    applyThread(worker, "inspection-queue-b");
-    NodeRef first, last;
-    {
+    const auto finish = [&](const std::string& threadId, const std::string& turnId) {
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "turn/completed",
+                                        {},
+                                        {{"threadId", threadId}, {"turn", Value::Object{{"id", turnId}, {"status", "completed"}}}}}));
         auto read = graph.tryRead();
-        first = read->find({NodeKind::Thread, "inspection-queue-a"});
-        last = read->find({NodeKind::Thread, "inspection-queue-b"});
-    }
+        return read->find(scopedTurnNodeId(threadId, turnId));
+    };
+    const NodeRef first = finish("inspection-queue-a", "first");
+    const NodeRef second = finish("inspection-queue-b", "second");
     for (std::size_t index = 0; index < ThreadChannels::QtToWorkerCapacity - 1; ++index) {
         NodeAction fill{first, NodeActionKind::Hydrate};
         require(deliveryGuaranteed(channels.sendNodeAction(fill)), "inspection fixture fills the ordinary mailbox capacity");
     }
     session.acknowledgeInspection(first);
-    session.acknowledgeInspection(last);
-    session.acknowledgeInspection({});
-    session.acknowledgeInspection(last);
+    session.acknowledgeInspection(second);
+    session.acknowledgeInspection(first);
     static_cast<void>(takeQtMessages(channels));
     FrontendSessionTestPeer::drainWorkerMessages(session);
     const auto messages = takeQtMessages(channels);
-    require(messages.size() == 1, "mailbox saturation coalesces inspection into one latest acknowledgement");
-    const auto* action = messages.size() == 1 ? std::get_if<NodeAction>(&messages.front()) : nullptr;
-    require(action && action->kind == NodeActionKind::InspectThread && action->target == last,
-            "the latest exact bound identity survives saturation");
-    if (action) {
-        static_cast<void>(worker.inspectThread(action->target));
+    require(messages.size() == 2, "saturation retains each independently inspected result and deduplicates the same result");
+    const NodeRef newer = finish("inspection-queue-a", "newer");
+    for (const auto& message : messages) {
+        const auto* action = std::get_if<NodeAction>(&message);
+        require(action && action->kind == NodeActionKind::InspectThread && (action->target == first || action->target == second),
+                "inspection retains exact completed-turn identity");
+        if (action) {
+            static_cast<void>(worker.inspectThread(action->target));
+        }
     }
     {
         auto read = graph.tryRead();
-        const auto runtime = read->find({NodeKind::Runtime, "runtime"});
-        require(runtime && read->related(runtime, RelationKind::UiInspectionTarget) == std::vector<NodeRef>{last},
-                "only the actual latest binding is marked inspected");
+        const auto firstThread = read->find({NodeKind::Thread, "inspection-queue-a"});
+        const auto secondThread = read->find({NodeKind::Thread, "inspection-queue-b"});
+        require(exactStringFromValue(valueMember(*read->state(firstThread), "uninspectedResult")) == newer->id().canonical &&
+                    !valueMember(*read->state(secondThread), "uninspectedResult"),
+                "delayed old inspection preserves a newer result while acknowledging the independent thread");
     }
-    session.acknowledgeInspection({});
-    const auto cleared = takeQtMessages(channels);
-    const auto* clear = cleared.size() == 1 ? std::get_if<NodeAction>(&cleared.front()) : nullptr;
-    require(clear && clear->kind == NodeActionKind::InspectThread && !clear->target, "a new draft can clear the inspected conversation");
-    if (clear) {
-        static_cast<void>(worker.inspectThread(clear->target));
+    static_cast<void>(worker.inspectThread(newer));
+    {
         auto read = graph.tryRead();
-        const auto runtime = read->find({NodeKind::Runtime, "runtime"});
-        require(runtime && read->related(runtime, RelationKind::UiInspectionTarget).empty(),
-                "a draft leaves no conversation marked inspected");
+        const auto thread = read->find({NodeKind::Thread, "inspection-queue-a"});
+        require(!valueMember(*read->state(thread), "uninspectedResult"), "the exact newer result can be acknowledged");
     }
 }
 
@@ -7453,11 +7718,21 @@ int main(int argc, char **argv) {
   core::SNodeC::init(argc, argv);
 
   using namespace codexui::codex;
-  workspaceActionsRetainPresentedAndTargetThreadOwnership(*configuration);
-  if (!qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY")) {
+  const bool scrollOnly = qEnvironmentVariableIsSet("CODEXUI_TEST_SUBMIT_SCROLL_ONLY");
+  const bool inspectionOnly = scrollOnly || qEnvironmentVariableIsSet("CODEXUI_TEST_INSPECTION_ONLY");
+  if (scrollOnly) {
+      promptSubmissionResumesFollowing(*configuration);
+  } else if (inspectionOnly) {
+      inspectionAcknowledgementsRequireVisibleResultInput(*configuration);
+      saturatedInspectionPreservesIndependentResults(*configuration);
+  } else {
+      workspaceActionsRetainPresentedAndTargetThreadOwnership(*configuration);
+  }
+  if (!inspectionOnly && !qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY")) {
       projectGapResizingUsesTheRealShell(*configuration);
   }
-  if (!qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY") && !qEnvironmentVariableIsSet("CODEXUI_TEST_PROJECT_RESIZE_ONLY")) {
+  if (!inspectionOnly && !qEnvironmentVariableIsSet("CODEXUI_TEST_WORKSPACE_ONLY") &&
+      !qEnvironmentVariableIsSet("CODEXUI_TEST_PROJECT_RESIZE_ONLY")) {
       turnRemovalConfirmationTargetsTheCapturedTurn(*configuration);
       tokenUsageUpdatesBothShellSurfaces(*configuration);
       timestampDetailsUseExistingShell(*configuration);
@@ -7474,6 +7749,7 @@ int main(int argc, char **argv) {
       qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
       conversationPresentationBurstIsFrameBounded(*configuration);
       threadPresentationBurstYieldsBetweenRows(*configuration);
+      promptSubmissionResumesFollowing(*configuration);
       graphBackedShellPreservesDraftsAndPrompts(*configuration);
       conversationProjectionRetriesWithoutAnotherGraphNotification(*configuration);
       initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
@@ -7489,8 +7765,8 @@ int main(int argc, char **argv) {
       subscriptionActionsKeepTheConversationVisible(*configuration);
       backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
       groupedStatusNotificationsRefreshAncestors(*configuration);
-      inspectionAcknowledgementsTrackTheBoundConversation(*configuration);
-      saturatedInspectionKeepsOnlyTheLatestBinding(*configuration);
+      inspectionAcknowledgementsRequireVisibleResultInput(*configuration);
+      saturatedInspectionPreservesIndependentResults(*configuration);
       optimisticDraftUsesOneTypedCreateAction(*configuration);
       optimisticDraftUsesOneTypedCreateAction(*configuration, true);
       optimisticDraftUsesOneTypedCreateAction(*configuration, true, true);

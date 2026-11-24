@@ -74,7 +74,7 @@ export interface ThreadPresentation {
     projectId: string; sectionId: string;
     membershipSequence: Map<string, number>;
     activeTurnId?: string;
-    uninspectedResult?: boolean;
+    uninspectedResult?: string;
     title: string;
     preview: string;
     cwd: string;
@@ -389,10 +389,10 @@ export class PresentationModel {
     private lastSequence = 0;
     private settingsAcknowledgement = 0;
 
-    applyEvent(event: unknown, inspectedThreadId = ""): PresentationApplyResult {
+    applyEvent(event: unknown): PresentationApplyResult {
         try {
             const previousGeneration = this.connectionState.generation;
-            const result = this.applyValidatedEvent(event, inspectedThreadId);
+            const result = this.applyValidatedEvent(event);
             if (previousGeneration !== 0 && this.connectionState.generation > previousGeneration)
                 return "provider-reset";
             if (result === false) return "settings-unchanged";
@@ -425,11 +425,13 @@ export class PresentationModel {
         return tones;
     }
 
-    inspectThread(threadId: string): void {
+    inspectThread(threadId: string, completedTurnId: string): boolean {
         const thread = this.threads.get(threadId);
-        if (thread) {
-            thread.uninspectedResult = false;
+        const inspected = !!thread && thread.uninspectedResult === completedTurnId;
+        if (inspected) {
+            delete thread.uninspectedResult;
         }
+        return inspected;
     }
     thread(threadId: string): ThreadPresentation | undefined { return this.threads.get(threadId); }
     setThreadTitleLocally(threadId: string, title: string): void {
@@ -494,7 +496,7 @@ export class PresentationModel {
         return this.pendingRequests;
     }
 
-    private applyValidatedEvent(candidate: unknown, inspectedThreadId: string): boolean | "requests-reset" | "provider-reset" | "rejected" | undefined {
+    private applyValidatedEvent(candidate: unknown): boolean | "requests-reset" | "provider-reset" | "rejected" | undefined {
         if (!isPresentationFrame(candidate)) return "rejected";
         const event = candidate as PresentationFrame;
         const generation = unsignedValue(event.generation);
@@ -722,7 +724,7 @@ export class PresentationModel {
             thread.membershipSequence.set("status", sequence);
             if (lifecycle === "completed" && updated.id !== "" && !updated.completionReported) {
                 updated.completionReported = true;
-                thread.uninspectedResult ||= thread.id !== inspectedThreadId;
+                thread.uninspectedResult = updated.id;
             }
             if (lifecycle === "started") { updated.itemsComplete = true; }
             if (isActiveStatus(updated.status)) thread.activeTurnId = updated.id;

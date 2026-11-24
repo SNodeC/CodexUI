@@ -5148,6 +5148,97 @@ std::optional<VisibleCardData> projectedGenericCard(const nlohmann::json &raw) {
   return card;
 }
 
+bool testUserPromptLabels() {
+    std::ifstream input(CODEXUI_PRESENTATION_CONTRACT_PATH);
+    const auto contract = nlohmann::json::parse(input, nullptr, false);
+    bool result = expect(contract.contains("userPromptCases"), "shared user-prompt label fixture opens");
+    if (contract.contains("userPromptCases")) {
+        for (const auto& entry : contract.at("userPromptCases")) {
+            const std::string source = entry.at("text");
+            const bool nested = entry.at("nested");
+            const QString expected = QString::fromStdString(entry.at("label").get<std::string>());
+            AnimationDurationStyle calm(0);
+            VisibleCardData pending{LocalPromptKey{903},
+                                    CardKind::LocalPrompt,
+                                    "reply-labels",
+                                    "turn",
+                                    {},
+                                    LocalPromptData{903, source, PromptState::Queued, {}, {}}};
+            ConversationCard card(pending, false);
+            card.setStyle(&calm);
+            card.setNestedPresentation(nested);
+            card.resize(520, card.sizeHint().height());
+            card.show();
+            const auto phase = [&] {
+                return card.findChild<QLabel*>(nested ? "steeringMessagePhase" : "pendingPromptStatus");
+            };
+            for (const auto state : {PromptState::Queued, PromptState::InFlight, PromptState::Accepted}) {
+                std::get<LocalPromptData>(pending.payload).state = state;
+                static_cast<void>(card.applyPresentation(pending));
+                const QString waiting = expected.isEmpty() ? QStringLiteral("pending") : expected + QStringLiteral(" · pending");
+                result &= expect(phase() && phase()->text() == waiting && phase()->toolTip() == waiting,
+                                 "queued, in-flight and accepted prompts retain the shared label and pending lifecycle");
+            }
+            auto authoritative = pending;
+            authoritative.kind = CardKind::UserMessage;
+            authoritative.itemId = "reply";
+            authoritative.payload = UserMessageData{source, {}};
+            result &= expect(card.applyPresentation(authoritative) != PresentationImpact::None,
+                             "authoritative reply promotes the existing pending card");
+            const auto matches = [&] {
+                const auto* label = phase();
+                return expected.isEmpty() ? !label || label->isHidden() : label && label->isVisible() && label->text() == expected;
+            };
+            result &= expect(matches(), "authoritative user cards retain Answer or steering according to the shared contract");
+            if (phase() && !expected.isEmpty()) {
+                phase()->setSelection(0, expected.size());
+                const auto retained = card.state();
+                card.restoreState(retained);
+                result &= expect(phase()->selectedText() == expected, "phase text selection uses the same source as the visible label");
+                phase()->setSelection(0, 0);
+            }
+            if (expected == QStringLiteral("Answer")) {
+                auto ordinary = authoritative;
+                std::get<UserMessageData>(ordinary.payload).text = "Freely composed direction";
+                static_cast<void>(card.applyPresentation(ordinary));
+                result &= expect(nested ? phase() && phase()->text() == QStringLiteral("steering") : !phase() || phase()->isHidden(),
+                                 "in-place content changes update the card's semantic label");
+                static_cast<void>(card.applyPresentation(authoritative));
+                result &= expect(matches(), "restoring a structured reply restores Answer on the same card");
+            }
+            for (const int width : {300, 520, 900}) {
+                card.resize(width, card.settleHeightForWidth(width));
+                card.setCollapsed(true);
+                auto updated = authoritative;
+                std::get<UserMessageData>(updated.payload).imagePaths = {"/missing/reply-label.png"};
+                static_cast<void>(card.applyPresentation(updated));
+                result &= expect(matches(), "collapsed payload updates preserve the user-message label");
+                static_cast<void>(card.applyPresentation(authoritative));
+                card.setCollapsed(false);
+                spin();
+                result &= expect(matches(), "expanding and resizing preserve the user-message label");
+                if (nested) {
+                    const auto image = card.grab().toImage();
+                    result &= expect(image.pixelColor(image.width() - 10, image.height() - 10) ==
+                                         QColor(QString::fromLatin1(UiStyle::steeringMessageSurface)),
+                                     "Answer and steering cards retain the same established background");
+                }
+                if (width == 520 && !qEnvironmentVariableIsEmpty("CODEXUI_TEST_EVIDENCE_DIR")) {
+                    result &= expect(card.grab().save(qEnvironmentVariable("CODEXUI_TEST_EVIDENCE_DIR") + "/native-" +
+                                                      QString::fromStdString(entry.at("id")) + ".png"),
+                                     "user-card label evidence saves");
+                }
+            }
+            ConversationCard reconstructed(authoritative, true);
+            reconstructed.setNestedPresentation(nested);
+            const auto* label = reconstructed.findChild<QLabel*>(nested ? "steeringMessagePhase" : "pendingPromptStatus");
+            result &= expect(expected.isEmpty() ? !label || label->isHidden() : label && label->text() == expected,
+                             "a reconstructed folded card derives the same label without retained widget state");
+        }
+    }
+    return result;
+}
+
 bool testSharedPresentationContract() {
   std::ifstream input(CODEXUI_PRESENTATION_CONTRACT_PATH);
   const auto contract = nlohmann::json::parse(input, nullptr, false);
@@ -5606,6 +5697,9 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   using namespace codexui::codex::middle;
+  if (qEnvironmentVariableIsSet("CODEXUI_USER_PROMPT_LABEL_TESTS")) {
+      return testUserPromptLabels() ? 0 : 1;
+  }
   if (qEnvironmentVariableIsSet("CODEXUI_PRESENTATION_CONTRACT_TESTS")) {
     bool focused = testSharedPresentationContract();
     focused &= testSharedTurnRemovalContract();
@@ -5645,7 +5739,8 @@ int main(int argc, char **argv) {
     focused &= testMutableCardsAndCommandOutput();
     return focused ? 0 : 1;
   }
-  bool result = testSharedPresentationContract();
+  bool result = testUserPromptLabels();
+  result &= testSharedPresentationContract();
   result &= testTurnMenuGeometryAndIdentity();
   result &= testTurnRemovalAnchors();
   result &= testSharedTurnRemovalContract();
