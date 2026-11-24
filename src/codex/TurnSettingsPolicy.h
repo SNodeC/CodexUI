@@ -81,6 +81,7 @@ struct TurnSettingModel final {
 // coalesced updates clear exactly the authored values they acknowledge.
 struct TurnSettingsContext final {
   std::string identity;
+  std::string serverIdentity;
   std::uint64_t providerAuthorityRevision = 0;
   std::uint64_t threadIncarnation = 0;
   TurnSettingValues canonical;

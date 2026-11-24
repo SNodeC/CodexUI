@@ -2804,6 +2804,7 @@ bool settingsDraftLifetimeFollowsSemanticIncarnations() {
     authorityRevision = write.revision() + 1;
     write.setField(connection, "providerAuthorityRevision",
                    authorityRevision);
+    write.setField(connection, "settings", nodegraph::Value::Object{{"socketPath", "/tmp/draft-server.sock"}});
     NodeState localState;
     localState.fields = {{"local", true}, {"creationCorrelation", "draft-a"}};
     local = write.upsert({NodeKind::Thread, "local-a"}, std::move(localState));
@@ -2829,14 +2830,13 @@ bool settingsDraftLifetimeFollowsSemanticIncarnations() {
                     "ordinary settings use canonical thread identity");
   passed &= require(
       localContext && promotedContext && ordinaryContext && draftContext &&
-          localContext->providerAuthorityRevision == authorityRevision &&
-          promotedContext->providerAuthorityRevision == authorityRevision &&
-          ordinaryContext->providerAuthorityRevision == authorityRevision &&
-          draftContext->providerAuthorityRevision == authorityRevision &&
-          localContext->threadIncarnation == local->incarnation() &&
-          promotedContext->threadIncarnation == promoted->incarnation() &&
-          ordinaryContext->threadIncarnation == ordinary->incarnation() &&
-          draftContext->threadIncarnation == 0,
+          localContext->serverIdentity == R"({"socketPath":"/tmp/draft-server.sock"})" &&
+          promotedContext->serverIdentity == localContext->serverIdentity &&
+          ordinaryContext->serverIdentity == localContext->serverIdentity && draftContext->serverIdentity == localContext->serverIdentity &&
+          localContext->providerAuthorityRevision == authorityRevision && promotedContext->providerAuthorityRevision == authorityRevision &&
+          ordinaryContext->providerAuthorityRevision == authorityRevision && draftContext->providerAuthorityRevision == authorityRevision &&
+          localContext->threadIncarnation == local->incarnation() && promotedContext->threadIncarnation == promoted->incarnation() &&
+          ordinaryContext->threadIncarnation == ordinary->incarnation() && draftContext->threadIncarnation == 0,
       "settings project provider authority and exact graph incarnations");
 
   TurnSettingsPolicy policy;

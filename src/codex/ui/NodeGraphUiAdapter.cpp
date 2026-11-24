@@ -2052,9 +2052,14 @@ namespace codexui::codex::ui {
         TurnSettingsContext result;
         result.models = settingModels(*read);
         result.permissionProfiles = settingPermissionProfiles(*read);
-        if (const nodegraph::NodeRef connection = read->find({nodegraph::NodeKind::Connection, "connection"}))
+        if (const nodegraph::NodeRef connection = read->find({nodegraph::NodeKind::Connection, "connection"})) {
+            const auto state = read->state(connection);
             result.providerAuthorityRevision =
-                nodegraph::unsignedIntegerFromValue(valueMember(*read->state(connection), "providerAuthorityRevision")).value_or(0);
+                nodegraph::unsignedIntegerFromValue(valueMember(*state, "providerAuthorityRevision")).value_or(0);
+            if (const auto* settings = valueMember(*state, "settings")) {
+                result.serverIdentity = jsonFromValue(*settings).dump();
+            }
+        }
         if (!thread) {
             const auto configuration = read->find({nodegraph::NodeKind::Configuration, "config/read:workspace"});
             const auto state = configuration ? read->state(configuration) : nullptr;

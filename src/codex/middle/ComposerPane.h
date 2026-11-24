@@ -77,6 +77,7 @@ public:
   }
 
 private:
+    [[nodiscard]] QString draftSettingsKey(std::string_view identity) const;
     void saveDraft();
     void submitDraft();
     void refreshAttachments();
