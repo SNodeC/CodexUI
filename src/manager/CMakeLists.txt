@@ -51,8 +51,8 @@ target_link_libraries(
 )
 
 find_package(
-    snodec 2.0 CONFIG REQUIRED COMPONENTS http-server-express-legacy-in
-                                          http-server-express-tls-in
+    snodec 3.0.0 CONFIG REQUIRED COMPONENTS http-server-express-legacy-in
+                                            http-server-express-tls-in
 )
 set_property(
     DIRECTORY

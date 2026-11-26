@@ -96,4 +96,4 @@ For native execution, return to [First run](../../README.md#first-run); qualific
 
 ### Dependency version scope
 
-The documented development build uses dependency default-branch source and records the resolved revisions. `find_package(snodec 2.0)` is a CMake version floor, not a claim that every released 2.0 binary exposes all APIs required by the current AISuite/CodexUI source. Use the source-build route for this guide; compatibility with a particular signed release requires qualification of that exact dependency/application pair.
+The documented development build uses dependency default-branch source and records the resolved revisions. `find_package(snodec 3.0.0)` requires a compatible 3.x CMake package; SNode.C uses same-major version compatibility, so a 2.x request rejects 3.x. This requirement does not claim that every released 3.x binary exposes all APIs required by the current AISuite/CodexUI source. Use the source-build route for this guide; compatibility with a particular signed release requires qualification of that exact dependency/application pair.

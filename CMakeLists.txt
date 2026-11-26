@@ -33,14 +33,14 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(AISuite CONFIG REQUIRED)
 find_package(
-    snodec 2.0 CONFIG REQUIRED
+    snodec 3.0.0 CONFIG REQUIRED
     COMPONENTS net-un-stream-legacy net-in-stream-legacy net-in6-stream-legacy
 )
 find_package(
-    snodec 2.0 CONFIG QUIET COMPONENTS net-in-stream-tls net-in6-stream-tls
+    snodec 3.0.0 CONFIG QUIET COMPONENTS net-in-stream-tls net-in6-stream-tls
 )
 find_package(
-    snodec 2.0 CONFIG QUIET COMPONENTS net-rc-stream-legacy net-rc-stream-tls
+    snodec 3.0.0 CONFIG QUIET COMPONENTS net-rc-stream-legacy net-rc-stream-tls
 )
 find_package(Qt6 6.6 REQUIRED COMPONENTS Widgets Network)
 find_package(KF6Sonnet 6.13 REQUIRED)
