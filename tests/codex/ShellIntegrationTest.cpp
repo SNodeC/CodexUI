@@ -7025,8 +7025,8 @@ void openRequestTracksAuthorityAndRetirement(Configuration &configuration) {
                 answer->text() == QStringLiteral("Preserve α🙂"),
             "restored authority preserves the exact editor and authored answer");
     static_cast<void>(worker.resolveInteraction(request.primary));
-    require(spinUntil([&] { return !submit->isEnabled() && submit->text() == "Resolved"; }),
-            "retired request stops appearing actionable without a click");
+    require(spinUntil([&] { return !dialog->isVisible() && !submit->isEnabled(); }),
+            "retired request closes its review without a click");
     submit->click();
     const auto actions = takeQtMessages(channels);
     require(std::ranges::none_of(actions, [](const auto &message) {
@@ -7180,6 +7180,158 @@ void pendingRequestTextBoundaries() {
           "server-provided request text is rendered literally");
   require(plainUrl,
           "the bounded MCP URL is literal text rather than active markup");
+}
+
+void inspectorCatalogRefreshUsesTheExistingWorker(Configuration& configuration) {
+    FrontendSession session(configuration);
+    auto& channels = FrontendSessionTestPeer::channels(session);
+    WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+    ShellWidget shell(session);
+    shell.resize(1500, 850);
+    shell.show();
+    makeReady(worker);
+    auto* inspector = dynamic_cast<middle::InspectorPane*>(shell.findChild<QFrame*>("inspector"));
+    auto* refresh = shell.findChild<QPushButton*>("inspectorRefreshCatalogs");
+    require(inspector && refresh, "Inspector exposes a catalog refresh command");
+    if (inspector && refresh) {
+        inspector->tabs()->setCurrentIndex(4);
+        require(spinUntil([&] { return refresh->isVisible(); }), "catalog refresh has visible native hit geometry");
+        static_cast<void>(takeQtMessages(channels));
+        refresh->click();
+        const auto messages = takeQtMessages(channels);
+        require(std::ranges::count_if(messages, [](const auto& message) {
+            const auto* action = std::get_if<RuntimeAction>(&message);
+            return action && action->kind == RuntimeActionKind::RefreshCatalogs && action->payload.empty();
+        }) == 1, "one native click sends one catalog refresh through the existing runtime action");
+    }
+}
+
+void mcpDismissalDoesNotAuthorCancellation() {
+    const auto request = dialogRequest(PendingRequestKind::McpElicitation,
+                                       {{"mode", "form"},
+                                        {"requestedSchema", {{"type", "object"}, {"properties", nlohmann::json::object()}}}});
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        require(dialog, "MCP review opens for dismissal");
+        if (dialog) {
+            dialog->close();
+        }
+    });
+    require(!PendingRequestDialog::present(request, nullptr), "window dismissal authors no MCP action");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        require(dialog, "MCP review opens for Escape");
+        if (dialog) {
+            QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QApplication::sendEvent(dialog, &escape);
+        }
+    });
+    require(!PendingRequestDialog::present(request, nullptr), "Escape dismisses without a protocol cancellation");
+}
+
+void mcpReviewClosesWithItsAuthoritativeRequest(Configuration& configuration) {
+    for (const std::string event : {"resolved", "disconnected", "validation"}) {
+        const bool disconnect = event == "disconnected";
+        const bool validating = event == "validation";
+        FrontendSession session(configuration);
+        auto& channels = FrontendSessionTestPeer::channels(session);
+        WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+        ShellWidget shell(session);
+        shell.resize(1500, 850);
+        shell.show();
+        makeReady(worker);
+        applyThread(worker, "mcp-owner", "MCP owner");
+        const auto envelope = Value::Object{{"threadId", "mcp-owner"},
+                                            {"serverName", "showcase-stdio"},
+                                            {"mode", "form"},
+                                            {"message", "Choose a label"},
+                                            {"requestedSchema",
+                                             Value::Object{{"type", "object"},
+                                                           {"properties", Value::Object{{"label", Value::Object{{"type", "string"}, {"maxLength", 1}}}}},
+                                                           {"required", Value::Array{"label"}}}}};
+        const auto first = worker.applyDetailed(
+            {DecodedMessageKind::ServerRequest, "mcpServer/elicitation/request", ProtocolRequestId("first"), envelope});
+        const auto second = worker.applyDetailed(
+            {DecodedMessageKind::ServerRequest, "mcpServer/elicitation/request", ProtocolRequestId("second"), envelope});
+        auto* review = shell.findChild<QPushButton*>("pendingRequestReviewButton");
+        require(first.primary && second.primary && spinUntil([&] {
+                    return review && review->isVisible() && review->isEnabled();
+                }),
+                "independent MCP requests reach the native Review action");
+        static_cast<void>(takeQtMessages(channels));
+        bool opened = false;
+        bool warningShown = false;
+        bool forcedClose = false;
+        QTimer watchdog;
+        watchdog.setSingleShot(true);
+        QObject::connect(&watchdog, &QTimer::timeout, [&] {
+            forcedClose = true;
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (dialog) {
+                dialog->reject();
+            }
+        });
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            opened = dialog && dialog->findChild<QLineEdit*>("mcpField:label");
+            if (disconnect) {
+                static_cast<void>(worker.transportEvent("disconnected", "connection closed"));
+            } else if (validating && opened) {
+                auto* editor = dialog->findChild<QLineEdit*>("mcpField:label");
+                editor->setText("too long");
+                QTimer::singleShot(0, [&] {
+                    auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                    warningShown = warning && warning->windowTitle() == "Invalid response";
+                    static_cast<void>(worker.resolveInteraction(first.primary));
+                });
+                dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            } else {
+                static_cast<void>(worker.resolveInteraction(first.primary));
+            }
+        });
+        watchdog.start(1500);
+        if (review && first.primary && second.primary) {
+            review->click();
+        }
+        watchdog.stop();
+        require(opened && !forcedClose && !QApplication::activeModalWidget() && (!validating || warningShown),
+                validating ? "request resolution closes its validation warning and review without a response"
+                : disconnect ? "connection closure dismisses the exact MCP review"
+                             : "server resolution dismisses the exact MCP review");
+        auto responses = takeQtMessages(channels);
+        require(std::ranges::none_of(responses,
+                                     [](const auto& message) {
+                                         const auto* action = std::get_if<NodeAction>(&message);
+                                         return action && action->kind == NodeActionKind::ResolveInteraction;
+                                     }),
+                "terminal request cleanup never authors a Cancel response");
+        if (!disconnect) {
+            require(spinUntil([&] {
+                        return review && review->isVisible() && review->isEnabled();
+                    }),
+                    "resolving one parallel request leaves the other actionable");
+            QTimer::singleShot(0, [] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                auto* buttons = dialog ? dialog->findChild<QDialogButtonBox*>() : nullptr;
+                require(buttons, "the other parallel request opens independently");
+                if (buttons) {
+                    buttons->button(QDialogButtonBox::Cancel)->click();
+                }
+            });
+            if (review) {
+                review->click();
+            }
+            responses = takeQtMessages(channels);
+            require(std::ranges::count_if(responses,
+                                          [&](const auto& message) {
+                                              const auto* action = std::get_if<NodeAction>(&message);
+                                              return action && action->kind == NodeActionKind::ResolveInteraction &&
+                                                     action->target == second.primary &&
+                                                     exactStringFromValue(valueMember(action->payload, "choice")) == "cancel";
+                                          }) == 1,
+                    "explicit Cancel targets the remaining parallel request exactly once");
+        }
+    }
 }
 
 void mcpReviewLabelFormPreservesProtocolActions() {
@@ -7549,8 +7701,7 @@ void structuredRequestCaretRemainsInsideTheForm() {
         dialog->reject();
     });
     const auto response = PendingRequestDialog::present(request, nullptr);
-    require(response && response->choice == "cancel" && inspected,
-            "cancelling the exercised MCP request returns the protocol cancel action");
+    require(!response && inspected, "dismissing the exercised MCP request authors no protocol response");
 }
 
 void dialogEditorCaretFollowsGeometryOnlyWhileEditing() {
@@ -7893,6 +8044,10 @@ int main(int argc, char **argv) {
   const bool inspectionOnly =
       scrollOnly || qEnvironmentVariableIsSet("CODEXUI_TEST_INSPECTION_ONLY") || qEnvironmentVariableIsSet("CODEXUI_TEST_MCP_FORMS_ONLY");
   if (qEnvironmentVariableIsSet("CODEXUI_TEST_MCP_FORMS_ONLY")) {
+      inspectorCatalogRefreshUsesTheExistingWorker(*configuration);
+      mcpDismissalDoesNotAuthorCancellation();
+      mcpReviewClosesWithItsAuthoritativeRequest(*configuration);
+      openRequestTracksAuthorityAndRetirement(*configuration);
       mcpReviewLabelFormPreservesProtocolActions();
       mcpPrimitiveFormCollectsTypedValues();
       pendingRequestValidationRetainsInput();
@@ -7976,6 +8131,9 @@ int main(int argc, char **argv) {
       compactAttentionKeepsExactVisibleTarget(*configuration);
       pendingRequestTextBoundaries();
       mcpApprovalMetadataKeepsAuthoredChoices();
+      inspectorCatalogRefreshUsesTheExistingWorker(*configuration);
+      mcpDismissalDoesNotAuthorCancellation();
+      mcpReviewClosesWithItsAuthoritativeRequest(*configuration);
       mcpReviewLabelFormPreservesProtocolActions();
       mcpPrimitiveFormCollectsTypedValues();
       pendingRequestValidationRetainsInput();
