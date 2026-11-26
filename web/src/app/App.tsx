@@ -1712,6 +1712,14 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
     const [answers, setAnswers] = useState<Record<string, string[]>>(() => onSubmit
         ? Object.fromEntries(questions.map(question => [String(question.id), Array.isArray(question.options) && question.options.length ? [String(question.options[0].label)] : []])) : {});
     const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({});
+    const acceptsMcpInput = request.kind === "mcp-elicitation" && decisions.some(decision => decision.value === "accept" && decision.requiresInput);
+    const form = acceptsMcpInput && raw.mode === "form" && isObject(raw.requestedSchema) ? raw.requestedSchema : undefined;
+    const required = form && Array.isArray(form.required) ? form.required : [];
+    const properties = form ? Object.entries({...Object.fromEntries(required.filter((key): key is string => typeof key === "string").map(key => [key, {}])),
+        ...(isObject(form.properties) ? form.properties : {})}).map(([name, schema]): [string, Record<string, unknown>] => [name, isObject(schema) ? schema : {}]) : [];
+    const [formValues, setFormValues] = useState<Record<string, unknown>>(() => Object.fromEntries(properties.flatMap(([name, schema]) =>
+        schema.default !== undefined && schema.default !== null ? [[name, schema.default]] : required.includes(name)
+            ? [[name, schema.type === "boolean" ? false : schema.type === "array" ? [] : ""]] : [])));
     const [structured, setStructured] = useState("{}");
     const details = pendingRequestDetails(request);
     const [submitting, setSubmitting] = useState(false);
@@ -1725,7 +1733,7 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
     let structuredValid = true;
     if (request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined) {
         try {
-            structuredInput = JSON.parse(structured);
+            structuredInput = form ? formValues : JSON.parse(structured);
             structuredValid = pendingResponse(request, {choice: "accept", input: structuredInput}) !== undefined;
         }
         catch { structuredValid = false; }
@@ -1747,7 +1755,7 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
     }));
     return <div className="request-card" aria-busy={resolving || undefined}>
         {!onSubmit && <strong>{humanize(request.kind)}</strong>}
-        {!onSubmit && details.entries.length > 0 && <dl className="request-details">{details.entries.map((detail, index) => <div key={`${detail.path}-${index}`}>
+        {!onSubmit && details.entries.length > 0 && <dl className="request-details">{details.entries.filter(detail => !form || !detail.path.startsWith("requestedSchema")).map((detail, index) => <div key={`${detail.path}-${index}`}>
             <dt>{detail.path.split(" / ").map(humanize).join(" / ")}</dt><dd>{detail.value}</dd></div>)}
             {details.truncated && <div><dt>Additional detail</dt><dd>Too large to display safely</dd></div>}</dl>}
         {request.kind === "user-input" && questions.map((question, questionIndex) => {
@@ -1767,8 +1775,43 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
                     onChange={event => { setOtherAnswers(current => ({...current, [id]: event.target.value})); if (onSubmit) { setAnswers(current => ({...current, [id]: []})); } }} />}
             </fieldset>;
         })}
-        {request.kind === "mcp-elicitation" && decisions.some(decision => decision.value === "accept" && decision.requiresInput) && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
-        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter valid JSON containing every required field.</p>}
+        {form && properties.map(([name, schema]) => {
+            const mandatory = required.includes(name);
+            const included = Object.hasOwn(formValues, name);
+            const optionsSchema = schema.type === "array" && isObject(schema.items) ? schema.items : schema;
+            const options = [optionsSchema.enum, optionsSchema.oneOf, optionsSchema.anyOf].find(Array.isArray) ?? [];
+            const choices = options.map((entry: unknown, index: number) => typeof entry === "string" ? {value: entry, title: Array.isArray(optionsSchema.enumNames) ? String(optionsSchema.enumNames[index] ?? entry) : entry}
+                : isObject(entry) ? {value: String(entry.const), title: String(entry.title ?? entry.const)} : {value: "", title: ""});
+            const title = typeof schema.title === "string" ? schema.title : name;
+            const fieldId = `mcp-field-${encodeURIComponent(request.presentationKey)}-${encodeURIComponent(name)}`;
+            const limits = [schema.type === "integer" ? "Whole number" : "", ...["minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"]
+                .filter(key => typeof schema[key] === "number").map(key => humanize(key) + ": " + schema[key])].filter(Boolean).join(" · ");
+            const update = (value: unknown) => setFormValues(current => ({...current, [name]: value}));
+            const toggle = (checked: boolean) => setFormValues(current => {
+                const next = checked ? {...current, [name]: schema.default ?? (schema.type === "boolean" ? false : schema.type === "array" ? [] : "")} : {...current};
+                if (!checked) { delete next[name]; }
+                return next;
+            });
+            return <div className="request-question" key={name}>
+                <label htmlFor={fieldId}>{title}{mandatory ? " *" : ""}</label>
+                {typeof schema.description === "string" && <p>{schema.description}</p>}
+                {limits && <p className="muted-copy">{limits}</p>}
+                {!mandatory && <label><input type="checkbox" checked={included} onChange={event => toggle(event.target.checked)} />Include {title}</label>}
+                {choices.length > 0 ? <select id={fieldId} name={name} aria-label={title} disabled={!included}
+                    multiple={schema.type === "array"} value={schema.type === "array" ? formValues[name] as string[] ?? [] : String(formValues[name] ?? "")}
+                    onChange={event => update(schema.type === "array" ? [...event.target.selectedOptions].map(option => option.value) : event.target.value)}>
+                    {schema.type !== "array" && <option value="" disabled>Choose a value</option>}
+                    {choices.map(choice => <option key={choice.value} value={choice.value}>{choice.title}</option>)}
+                </select> : schema.type === "boolean" ? <input id={fieldId} name={name} aria-label={title} type="checkbox"
+                    disabled={!included} checked={formValues[name] === true} onChange={event => update(event.target.checked)} />
+                    : <input id={fieldId} name={name} aria-label={title} type={schema.type === "number" || schema.type === "integer" ? "number" : "text"}
+                        disabled={!included} step={schema.type === "integer" ? "1" : "any"}
+                        value={formValues[name] === undefined ? "" : String(formValues[name])}
+                        onChange={event => update(schema.type === "number" || schema.type === "integer" ? event.target.value === "" ? "" : Number(event.target.value) : event.target.value)} />}
+            </div>;
+        })}
+        {acceptsMcpInput && !form && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
+        {acceptsMcpInput && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter values satisfying the requested schema, including required fields, types and limits.</p>}
         <div className="request-actions">{resolving ? <span>Resolving…</span> : decisions.map(decision => {
             const inputValid = !decision.requiresInput || ((request.kind !== "user-input" || userInputValid)
                 && (request.kind !== "mcp-elicitation" || structuredValid));

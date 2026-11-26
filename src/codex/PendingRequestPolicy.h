@@ -127,9 +127,10 @@ public:
 
   // Absence is a locally invalid authored submission and must never reach the
   // wire. An engaged error is an intentional JSON-RPC response.
-  [[nodiscard]] static std::optional<PendingRequestResponse>
-  responseForSubmission(PendingRequestKind kind, const nlohmann::json &request,
-                        PendingRequestSubmission submission);
+  [[nodiscard]] static std::optional<PendingRequestResponse> responseForSubmission(PendingRequestKind kind,
+                                                                                   const nlohmann::json& request,
+                                                                                   PendingRequestSubmission submission,
+                                                                                   std::string* validationError = nullptr);
 };
 
 } // namespace codexui::codex

@@ -7182,6 +7182,118 @@ void pendingRequestTextBoundaries() {
           "the bounded MCP URL is literal text rather than active markup");
 }
 
+void mcpReviewLabelFormPreservesProtocolActions() {
+    const QString originalStyle = qApp->styleSheet();
+    qApp->setStyleSheet(UiStyle::applicationStyleSheet());
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/frontend-presentation.json");
+    const auto fixture = nlohmann::json::parse(input);
+    const auto entry = std::ranges::find_if(fixture.at("pendingRequestCases"), [](const auto& value) {
+        return value.at("id") == "mcp-required-review-label-live-envelope";
+    });
+    require(entry != fixture.at("pendingRequestCases").end(), "review-label contract exists");
+    if (entry != fixture.at("pendingRequestCases").end()) {
+        auto raw = entry->at("raw");
+        const auto live = qEnvironmentVariable("CODEXUI_MCP_LIVE_REQUEST");
+        if (!live.isEmpty()) {
+            std::ifstream liveInput(live.toStdString());
+            const auto request = nlohmann::json::parse(liveInput);
+            raw.update(request);
+        }
+        for (const std::string choice : {"accept", "decline", "cancel"}) {
+            const auto request = dialogRequest(PendingRequestKind::McpElicitation, raw);
+            QTimer::singleShot(0, [&] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                require(dialog, "review.label opens CodexUI's actual MCP dialog");
+                if (dialog) {
+                    auto* editor = dialog->findChild<QLineEdit*>("mcpField:label");
+                    auto* decision = dialog->findChild<QComboBox*>();
+                    auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                    require(editor && decision && buttons && decision->findData("accept") >= 0,
+                            "supported form exposes Accept and a named editable label control");
+                    if (editor && decision && buttons) {
+                        editor->setFocus();
+                        editor->clear();
+                        for (const auto character : QStringLiteral("test")) {
+                            QKeyEvent key(QEvent::KeyPress, character.toUpper().unicode(), Qt::NoModifier, QString(character));
+                            QApplication::sendEvent(editor, &key);
+                        }
+                        decision->setCurrentIndex(decision->findData(QString::fromStdString(choice)));
+                        const auto directory = qEnvironmentVariable("CODEXUI_MCP_FORM_EVIDENCE");
+                        if (!directory.isEmpty()) {
+                            require(dialog->grab().save(directory + "/" + QString::fromStdString(choice) + "-dpr-" +
+                                                        QString::number(dialog->devicePixelRatioF()) + ".png"),
+                                    "actual form dialog evidence saved");
+                        }
+                        buttons->button(choice == "cancel" ? QDialogButtonBox::Cancel : QDialogButtonBox::Ok)->click();
+                    } else {
+                        dialog->reject();
+                    }
+                }
+            });
+            const auto authored = PendingRequestDialog::present(request, nullptr);
+            require(authored && authored->choice == choice, "the real dialog preserves accept, decline and cancel distinctly");
+            if (authored) {
+                const auto response = PendingRequestPolicy::responseForSubmission(request.kind, raw, *authored);
+                require(response && std::holds_alternative<nlohmann::json>(*response),
+                        "the existing response policy encodes the authored action");
+                if (response && std::holds_alternative<nlohmann::json>(*response)) {
+                    const auto& result = std::get<nlohmann::json>(*response);
+                    require(result.at("action") == choice && (choice == "accept" ? result.at("content") == nlohmann::json{{"label", "test"}}
+                                                                                 : result.at("content").is_null()),
+                            "elicitation wire result contains exactly the accepted label or a non-accept action");
+                    const auto directory = qEnvironmentVariable("CODEXUI_MCP_FORM_RESPONSES");
+                    if (!directory.isEmpty()) {
+                        std::ofstream output(directory.toStdString() + "/" + choice + ".json");
+                        output << result.dump(2);
+                    }
+                }
+            }
+        }
+    }
+    qApp->setStyleSheet(originalStyle);
+}
+
+void mcpPrimitiveFormCollectsTypedValues() {
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/frontend-presentation.json");
+    const auto fixture = nlohmann::json::parse(input);
+    const auto entry = std::ranges::find_if(fixture.at("pendingRequestCases"), [](const auto& value) {
+        return value.at("id") == "mcp-required-primitive-values";
+    });
+    require(entry != fixture.at("pendingRequestCases").end(), "primitive form contract exists");
+    if (entry != fixture.at("pendingRequestCases").end()) {
+        const auto request = dialogRequest(PendingRequestKind::McpElicitation, entry->at("raw"));
+        const auto expected = entry->at("submissions")[0].at("input");
+        const PendingRequestSubmission retained{"accept", expected, nullptr};
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            require(dialog, "primitive form opens the real dialog");
+            if (dialog) {
+                auto* active = dialog->findChild<QCheckBox*>("mcpField:active");
+                auto* count = dialog->findChild<QLineEdit*>("mcpField:count");
+                auto* ratio = dialog->findChild<QLineEdit*>("mcpField:ratio");
+                auto* priority = dialog->findChild<QComboBox*>("mcpField:priority");
+                auto* tags = dialog->findChild<QListWidget*>("mcpField:tags");
+                auto* comment = dialog->findChild<QLineEdit*>("mcpField:comment");
+                auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                require(active && count && ratio && priority && tags && comment && buttons,
+                        "each primitive uses a labelled editable control");
+                if (active && count && ratio && priority && tags && comment && buttons) {
+                    require(!active->isChecked() && count->text() == "3" && ratio->text() == "0.5" &&
+                                priority->currentData().toString() == "normal" && priority->currentText() == "Normal" &&
+                                tags->item(1)->checkState() == Qt::Checked && !comment->isEnabled(),
+                            "retained typed input and omitted optional values restore faithfully");
+                    buttons->button(QDialogButtonBox::Ok)->click();
+                } else {
+                    dialog->reject();
+                }
+            }
+        });
+        const auto response = PendingRequestDialog::present(request, nullptr, &retained);
+        require(response && response->choice == "accept" && response->input == expected,
+                "booleans, integers, fractional numbers, selections and arrays preserve their wire types");
+    }
+}
+
 void mcpApprovalMetadataKeepsAuthoredChoices() {
     std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/frontend-presentation.json");
     const auto fixture = nlohmann::json::parse(input);
@@ -7293,74 +7405,55 @@ void pendingRequestValidationRetainsInput() {
       questionResponse->input["second"]["answers"] ==
           nlohmann::json::array({"Second answer"});
 
-  bool invalidJsonWarning = false;
+  bool invalidSchemaWarning = false;
   bool mcpDialogRetained = false;
-  bool requiredFieldsRetained = true;
-  bool requiredWarning = false;
   QTimer::singleShot(0, [&] {
-    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
-    if (!dialog)
-      return;
-    auto *editor = dialog->findChild<QPlainTextEdit *>();
-    auto *buttons = dialog->findChild<QDialogButtonBox *>();
-    auto *submitButton =
-        buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
-    if (!editor || !submitButton)
-      return;
-    dialog->activateWindow();
-    editor->setFocus();
-    spin();
-    require(editor->hasFocus(), "MCP input is focused before validation");
-    editor->setPlainText(QStringLiteral("["));
-    QTimer::singleShot(0, [&] {
-      auto *warning =
-          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
-      invalidJsonWarning = warning && warning->windowTitle() ==
-                                          QStringLiteral("Invalid response");
-      if (warning)
-        warning->done(QMessageBox::Ok);
-    });
-    submitButton->click();
-    mcpDialogRetained =
-        dialog->isVisible() && editor->toPlainText() == QStringLiteral("[");
-    for (const QString& incomplete : {QStringLiteral("{}"), QStringLiteral("{\"accepted\":true}")}) {
-        editor->setPlainText(incomplete);
-        requiredWarning = false;
-        QTimer::singleShot(0, dialog, [&] {
-            auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
-            requiredWarning = warning && warning->text().contains(QStringLiteral("required"));
-            if (warning) {
-                warning->done(QMessageBox::Ok);
-            }
-        });
-        submitButton->click();
-        spin();
-        require(requiredWarning, "missing MCP fields show a required-field validation warning");
-        require(dialog->isVisible() && editor->toPlainText() == incomplete, "missing MCP fields preserve the dialog and authored JSON");
-        require(editor->hasFocus(), "invalid MCP content retains editor focus after the warning closes");
-        requiredFieldsRetained &= requiredWarning && dialog->isVisible() && editor->toPlainText() == incomplete && editor->hasFocus();
-    }
-    editor->setPlainText(QStringLiteral("{\"label\":\"review\",\"accepted\":true}"));
-    submitButton->click();
+      auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      require(dialog, "MCP form opens the actual request dialog");
+      if (dialog) {
+          auto* editor = dialog->findChild<QLineEdit*>("mcpField:label");
+          auto* accepted = dialog->findChild<QCheckBox*>("mcpField:accepted");
+          auto* buttons = dialog->findChild<QDialogButtonBox*>();
+          require(editor && accepted && buttons, "MCP schema produces editable string and boolean controls");
+          if (editor && accepted && buttons) {
+              dialog->activateWindow();
+              editor->setFocus();
+              editor->setText(QString(129, 'x'));
+              QTimer::singleShot(0, [&] {
+                  auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                  invalidSchemaWarning = warning && warning->windowTitle() == "Invalid response";
+                  if (warning) {
+                      warning->done(QMessageBox::Ok);
+                  }
+              });
+              buttons->button(QDialogButtonBox::Ok)->click();
+              spin();
+              mcpDialogRetained = dialog->isVisible() && editor->text() == QString(129, 'x') && editor->hasFocus();
+              editor->setText("review");
+              accepted->setChecked(true);
+              buttons->button(QDialogButtonBox::Ok)->click();
+          } else {
+              dialog->reject();
+          }
+      }
   });
   const PendingRequestDescriptor elicitation =
       dialogRequest(PendingRequestKind::McpElicitation,
                     {{"serverName", "test-server"},
                      {"threadId", "thread-a"},
+                     {"environmentId", nullptr},
                      {"message", "Structured response"},
                      {"mode", "form"},
                      {"requestedSchema",
                       {{"type", "object"},
-                       {"properties", {{"label", {{"type", "string"}}}, {"accepted", {{"type", "boolean"}}}}},
+                       {"properties", {{"label", {{"type", "string"}, {"maxLength", 128}}}, {"accepted", {{"type", "boolean"}}}}},
                        {"required", nlohmann::json::array({"label", "accepted"})}}}});
   const auto mcpResponse = PendingRequestDialog::present(elicitation, nullptr);
-  const bool validJsonReturned =
-      mcpResponse && mcpResponse->choice == "accept" && mcpResponse->input == nlohmann::json({{"label", "review"}, {"accepted", true}});
-
   require(incompleteWarning && questionDialogRetained && answersPreserved,
           "incomplete questions retain the modal and prior authored answers");
-  require(invalidJsonWarning && mcpDialogRetained && requiredFieldsRetained && validJsonReturned,
-          "invalid MCP JSON remains editable until valid authored input exists");
+  require(invalidSchemaWarning && mcpDialogRetained && mcpResponse && mcpResponse->choice == "accept" &&
+              mcpResponse->input == nlohmann::json({{"label", "review"}, {"accepted", true}}),
+          "invalid MCP values remain editable until schema-valid authored input exists");
 }
 
 void dialogControlsHaveSemanticLabels() {
@@ -7397,67 +7490,67 @@ void dialogControlsHaveSemanticLabels() {
 }
 
 void structuredRequestCaretRemainsInsideTheForm() {
-  const auto request = dialogRequest(PendingRequestKind::McpElicitation,
-      {{"serverName", "test-server"}, {"threadId", "thread-a"},
-       {"mode", "form"}, {"message", "Enter structured data"},
-       {"requestedSchema", {{"type", "object"}}}});
-  bool inspected = false;
-  QTimer::singleShot(0, [&] {
-    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
-    if (!dialog)
-      return;
-    auto *editor = dialog->findChild<QPlainTextEdit *>();
-    auto *scroll = dialog->findChild<QScrollArea *>();
-    require(editor && scroll, "structured request exposes its editor and outer form");
-    if (!editor || !scroll) {
-      dialog->reject();
-      return;
-    }
-    inspected = true;
-    editor->setFocus();
-    spin();
-    const QString content = QStringLiteral("Authored α🙂 line\n").repeated(80);
-    editor->setPlainText(content);
-    editor->moveCursor(QTextCursor::End);
-    editor->moveCursor(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
-    const auto cursor = editor->textCursor();
-    auto *document = editor->document();
-    for (int pointSize : {20, 12, 16}) {
-      auto font = dialog->font();
-      font.setPointSize(pointSize);
-      dialog->setFont(font);
-      spin();
-      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
-              "font-only request reflow keeps the caret inside both viewports");
-      dialog->resize(pointSize == 20 ? 520 : 620, pointSize == 20 ? 380 : 560);
-      spin();
-      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
-              "request resizing preserves focused caret visibility");
-      require(editor->document() == document && editor->toPlainText() == content &&
-                  editor->textCursor().position() == cursor.position() &&
-                  editor->textCursor().anchor() == cursor.anchor(),
-              "outer form reflow does not replace content, document or selection");
-      scroll->verticalScrollBar()->setValue(0);
-      spin();
-      require(scroll->verticalScrollBar()->value() == 0,
-              "request form manual scrolling is not pulled back while idle");
-      auto *buttons = dialog->findChild<QDialogButtonBox *>();
-      buttons->button(QDialogButtonBox::Ok)->setFocus();
-      QKeyEvent backtab(QEvent::KeyPress, Qt::Key_Backtab, Qt::ShiftModifier);
-      QApplication::sendEvent(dialog->focusWidget(), &backtab);
-      require(editor->hasFocus() &&
-                  editor->viewport()->visibleRegion().contains(editor->cursorRect()),
-              "backward traversal from the footer reveals the focused form field");
-      editor->moveCursor(QTextCursor::Start);
-      spin();
-      require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
-              "request cursor navigation reveals the focused field again");
-      editor->setTextCursor(cursor);
-    }
-    dialog->reject();
-  });
-  require(!PendingRequestDialog::present(request, nullptr) && inspected,
-          "cancelling the exercised request submits no response");
+    const auto request = dialogRequest(PendingRequestKind::McpElicitation,
+                                       {{"serverName", "test-server"},
+                                        {"threadId", "thread-a"},
+                                        {"mode", "openai/form"},
+                                        {"message", "Enter structured data"},
+                                        {"requestedSchema", {{"type", "object"}}}});
+    bool inspected = false;
+    QTimer::singleShot(0, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog)
+            return;
+        auto* editor = dialog->findChild<QPlainTextEdit*>();
+        auto* scroll = dialog->findChild<QScrollArea*>();
+        require(editor && scroll, "structured request exposes its editor and outer form");
+        if (!editor || !scroll) {
+            dialog->reject();
+            return;
+        }
+        inspected = true;
+        editor->setFocus();
+        spin();
+        const QString content = QStringLiteral("Authored α🙂 line\n").repeated(80);
+        editor->setPlainText(content);
+        editor->moveCursor(QTextCursor::End);
+        editor->moveCursor(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+        const auto cursor = editor->textCursor();
+        auto* document = editor->document();
+        for (int pointSize : {20, 12, 16}) {
+            auto font = dialog->font();
+            font.setPointSize(pointSize);
+            dialog->setFont(font);
+            spin();
+            require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+                    "font-only request reflow keeps the caret inside both viewports");
+            dialog->resize(pointSize == 20 ? 520 : 620, pointSize == 20 ? 380 : 560);
+            spin();
+            require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+                    "request resizing preserves focused caret visibility");
+            require(editor->document() == document && editor->toPlainText() == content &&
+                        editor->textCursor().position() == cursor.position() && editor->textCursor().anchor() == cursor.anchor(),
+                    "outer form reflow does not replace content, document or selection");
+            scroll->verticalScrollBar()->setValue(0);
+            spin();
+            require(scroll->verticalScrollBar()->value() == 0, "request form manual scrolling is not pulled back while idle");
+            auto* buttons = dialog->findChild<QDialogButtonBox*>();
+            buttons->button(QDialogButtonBox::Ok)->setFocus();
+            QKeyEvent backtab(QEvent::KeyPress, Qt::Key_Backtab, Qt::ShiftModifier);
+            QApplication::sendEvent(dialog->focusWidget(), &backtab);
+            require(editor->hasFocus() && editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+                    "backward traversal from the footer reveals the focused form field");
+            editor->moveCursor(QTextCursor::Start);
+            spin();
+            require(editor->viewport()->visibleRegion().contains(editor->cursorRect()),
+                    "request cursor navigation reveals the focused field again");
+            editor->setTextCursor(cursor);
+        }
+        dialog->reject();
+    });
+    const auto response = PendingRequestDialog::present(request, nullptr);
+    require(response && response->choice == "cancel" && inspected,
+            "cancelling the exercised MCP request returns the protocol cancel action");
 }
 
 void dialogEditorCaretFollowsGeometryOnlyWhileEditing() {
@@ -7797,8 +7890,13 @@ int main(int argc, char **argv) {
 
   using namespace codexui::codex;
   const bool scrollOnly = qEnvironmentVariableIsSet("CODEXUI_TEST_SUBMIT_SCROLL_ONLY");
-  const bool inspectionOnly = scrollOnly || qEnvironmentVariableIsSet("CODEXUI_TEST_INSPECTION_ONLY");
-  if (scrollOnly) {
+  const bool inspectionOnly =
+      scrollOnly || qEnvironmentVariableIsSet("CODEXUI_TEST_INSPECTION_ONLY") || qEnvironmentVariableIsSet("CODEXUI_TEST_MCP_FORMS_ONLY");
+  if (qEnvironmentVariableIsSet("CODEXUI_TEST_MCP_FORMS_ONLY")) {
+      mcpReviewLabelFormPreservesProtocolActions();
+      mcpPrimitiveFormCollectsTypedValues();
+      pendingRequestValidationRetainsInput();
+  } else if (scrollOnly) {
       promptSubmissionResumesFollowing(*configuration);
   } else if (inspectionOnly) {
       inspectionAcknowledgementsRequireVisibleResultInput(*configuration);
@@ -7878,6 +7976,8 @@ int main(int argc, char **argv) {
       compactAttentionKeepsExactVisibleTarget(*configuration);
       pendingRequestTextBoundaries();
       mcpApprovalMetadataKeepsAuthoredChoices();
+      mcpReviewLabelFormPreservesProtocolActions();
+      mcpPrimitiveFormCollectsTypedValues();
       pendingRequestValidationRetainsInput();
       dialogControlsHaveSemanticLabels();
       structuredRequestCaretRemainsInsideTheForm();

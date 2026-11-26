@@ -18,7 +18,7 @@ Start with the [native or browser first run](../../README.md#first-run). This pa
 
 ## Known limitations
 
-- Approval dialogs check bounded transport shape and reject unsafe context, but do not provide full standard-MCP schema/content validation or file-change stale-revision gating. Agent approval/sandbox policy remains separate. Review untrusted tool requests and edits accordingly; see the [approval boundary record](../architecture/remediation/findings-ledger/findings-and-crosswalk.md#unresolved-evidence-questions-and-approval-gates).
+- Approval dialogs check bounded transport shape and reject unsafe context. Standard MCP form responses are validated against their requested schemas; unconstrained `openai/form` requests retain their JSON editor, and file-change stale-revision gating remains outside this dialog. Agent approval/sandbox policy remains separate; see the [approval boundary record](../architecture/remediation/findings-ledger/findings-and-crosswalk.md#unresolved-evidence-questions-and-approval-gates).
 - Native interactive qualification remains incomplete, not an approval of every UI path. The [qualification record](../qualification/native-results-2026-09-27.md#banner) records its environment and outstanding work.
 - Dense emoji-heavy diffs were slow with the recorded stock Qt 6.10.2 build. An isolated patched-Qt experiment is not an installed fix or a promise for other Qt versions; the [performance record](../qualification/native-results-2026-09-27.md#banner) owns those measurements.
 - Browser scope differs from native scope. Consult the [native-only 1.0 features](../web/contract-1.0.md#native-only-in-10) rather than assuming parity.
@@ -387,13 +387,9 @@ title remains at the left; no separator glyph is rendered.
 
 Async question messages expose **Answer…**, which opens the shared question form with one suggested choice selected and an editable **Other answer** field. Submit sends the selected answers with their question text to the original thread: it steers an active turn or starts a new turn when idle. Agent work can continue while the form is open. Cancel sends nothing, and existing composer text stays intact. A changed question, changed thread, lost controller access or rejected local admission keeps the form open with its authored answers. The lime question header shows **Sending…** while the reply is pending and **✓ Answer sent** after acceptance. Submitted answers appear in bold beneath their questions and in the reply card; **Answer again…** permits a correction. Structured reply cards are labelled **Answer** through pending and confirmed states and retain the existing user-card background; freely composed follow-up instructions remain **steering**. Answer status is restored from linked replies in history after reload, including replies sent by another compatible client. Older plain-text replies remain unlinked; the UI does not infer that unrelated later messages answered a question.
 
-Pending-request dialogs validate required answers and structured MCP content
-before accepting the modal. Invalid input keeps the dialog and all entered
-content open for correction.
-If controller or provider state changes after a response enters the typed
-mailbox but before the worker can send it, no automatic retry occurs. The
-interaction node retains the authored response and its error so reopening
-Review restores the entered decision, answers, or structured content.
+Pending-request dialogs validate required answers before accepting the modal. MCP `form` requests display named string, number, boolean, and selection fields from the requested schema. Accept returns the entered content through the existing request response; Decline and Cancel remain distinct protocol actions. The native MCP dialog’s Cancel button also returns `cancel`. Schema-invalid input, including type or length violations, keeps the dialog and all entered values open for correction and focuses the invalid field. A required string may be empty unless its schema sets a positive `minLength`.
+
+If controller or provider state changes after a response enters the typed mailbox but before the worker can send it, no automatic retry occurs. The interaction node retains the authored response and its error so reopening Review restores the entered decision, answers, or structured content.
 
 The native Conversation header exposes persistent icon-only controls for
 Reasoning visibility, interim Codex-update visibility, and the initial folding
