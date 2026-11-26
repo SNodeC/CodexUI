@@ -21,5 +21,5 @@ set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
 set(CPACK_SOURCE_IGNORE_FILES
     "/build[^/]*/;/checkouts/;/.git/;/.qtcreator/;/.local-credentials/;/secrets/;/web/(node_modules|dist|app-dist)/;~$"
 )
-set(CPACK_PROJECT_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/PackageConfig.cmake")
+set(CPACK_PROJECT_CONFIG_FILE "${PROJECT_SOURCE_DIR}/ci/package/config.cmake")
 include(CPack)

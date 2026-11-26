@@ -1,9 +1,16 @@
 {
-  "schema": 1,
+  "schema": 2,
   "package": "codexui",
   "title": "CodexUI",
   "depends_on": [
-    "aisuite"
+    {
+      "package": "aisuite",
+      "version": ">=0.0.0"
+    },
+    {
+      "package": "snodec",
+      "version": ">=3.0.0,<4"
+    }
   ],
   "build": {
     "deb": "ci/package/native.sh",

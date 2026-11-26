@@ -13,4 +13,5 @@ case "$family" in
     rpm) set -- -G RPM -D "CPACK_PACKAGE_VERSION=$PACKAGE_VERSION" \
                 -D "CPACK_RPM_PACKAGE_RELEASE=$PACKAGE_RELEASE" ;;
 esac
-cpack --config "$build/CPackConfig.cmake" -B "$build" -D "CPACK_OUTPUT_FILE_PREFIX=$OUTPUT_DIR" "$@"
+cpack --config "$build/CPackConfig.cmake" -B "$build" -D "CPACK_OUTPUT_FILE_PREFIX=$OUTPUT_DIR" \
+    -D "CPACK_PROJECT_CONFIG_FILE=$CI_DIR/package/config.cmake" "$@"
