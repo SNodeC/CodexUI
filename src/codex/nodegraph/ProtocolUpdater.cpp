@@ -3185,8 +3185,14 @@ void ProtocolUpdater::applyGraphUpdate(
     return;
 
   NodeRef addressed = item ? item : (turn ? turn : thread);
-  if (addressed)
-    mergeObject(write, addressed, message.payload);
+  if (item && method == "item/mcpToolCall/progress") {
+      const auto* progress = arrayMember(write.state(item)->fields, "progress");
+      if (!progress || progress->size() < MaximumIndexedTextParts) {
+          appendArrayValue(write, item, "progress", Value(exactStringFromValue(valueMember(message.payload, "message"))));
+      }
+  } else if (addressed) {
+      mergeObject(write, addressed, message.payload);
+  }
 }
 
 void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
