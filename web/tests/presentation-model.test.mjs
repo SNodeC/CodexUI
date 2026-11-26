@@ -22,6 +22,31 @@ function pipeline() {
     return {model, normalizer};
 }
 
+const progressCorpus = JSON.parse(readFileSync(new URL("../../tests/fixtures/mcp-progress.json", import.meta.url), "utf8"));
+for (const scenario of progressCorpus.cases) {
+    test(`MCP progress: ${scenario.name}`, () => {
+        const {model, normalizer} = pipeline();
+        for (const threadId of ["first-thread", "other-thread"]) {
+            normalizer.serverNotification("item/started", {threadId, turnId: "turn",
+                item: {id: "call", type: "mcpToolCall", status: "inProgress"}});
+        }
+        for (let i = 0; i < scenario.count; ++i) {
+            normalizer.serverNotification("item/mcpToolCall/progress", {threadId: "first-thread", turnId: "turn", itemId: "call",
+                message: scenario.messages[i % scenario.messages.length]});
+        }
+        normalizer.serverNotification("item/mcpToolCall/progress", {threadId: "other-thread", turnId: "turn", itemId: "call", message: "independent"});
+        const expected = scenario.expected ?? Array(scenario.expectedCount).fill(scenario.messages[0]);
+        const inspect = () => {
+            assert.deepEqual(model.thread("first-thread").turns.get("turn").items.get("call").raw.progress, expected);
+            assert.deepEqual(model.thread("other-thread").turns.get("turn").items.get("call").raw.progress, ["independent"]);
+        };
+        inspect();
+        normalizer.serverNotification("item/completed", {threadId: "first-thread", turnId: "turn",
+            item: {id: "call", type: "mcpToolCall", status: "completed", result: {content: []}}});
+        inspect();
+    });
+}
+
 test("presentation pipeline state and replacement invariants", () => {
     const {model, normalizer} = pipeline();
     normalizer.transportEvent("connected");
