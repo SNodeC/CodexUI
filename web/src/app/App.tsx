@@ -329,8 +329,9 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         if (unsent) {
             hoverDetails.push("Unsent draft");
         }
-        if (indicatorTones.get(id) === "uninspected") {
-            hoverDetails.push("Finished result not yet inspected in this thread or a descendant");
+        if (["uninspected", "failed"].includes(indicatorTones.get(id) ?? "")) {
+            hoverDetails.push(indicatorTones.get(id) === "failed" ? "Failed result not yet inspected in this thread or a descendant"
+                : "Finished result not yet inspected in this thread or a descendant");
         }
         const accessibleDetails = hoverDetails.join(", ");
         const contextOpen = Boolean(contextMenu && "threadId" in contextMenu && contextMenu.threadId === id && contextMenu.presentationKey === presentationKey);
@@ -374,9 +375,10 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
         const members = session.model.threadIds().filter(id => membership(id, `${kind}Id`) === group.id
             && (!nested || membership(id, "projectId") === projectId));
         const tone = members.some(id => ["active", "indirect"].includes(indicatorTones.get(id) ?? "")) ? "indirect"
+            : members.some(id => eligibleThreads.has(id) && indicatorTones.get(id) === "failed") ? "failed"
             : members.some(id => eligibleThreads.has(id) && indicatorTones.get(id) === "uninspected") ? "uninspected"
             : members.some(id => statusTone(session.model.thread(id)!.status) !== "") ? "success" : "muted";
-        const statusDescription = tone === "uninspected" ? "Finished result not yet inspected in a descendant" : tone === "indirect" ? "Indirect activity: running descendant" : tone === "success" ? "Threads: loaded" : "Threads: not loaded";
+        const statusDescription = tone === "failed" ? "Failed result not yet inspected in a descendant" : tone === "uninspected" ? "Finished result not yet inspected in a descendant" : tone === "indirect" ? "Indirect activity: running descendant" : tone === "success" ? "Threads: loaded" : "Threads: not loaded";
         return <section key={`${projectId}:${kind}:${group.id}`} className={`browser-group ${kind}-group ${nested ? "nested-section" : ""}${active ? " active-group" : ""}`} role="treeitem" aria-level={nested ? 2 : 1} aria-label={`${groupLabel(kind, group)}, ${statusDescription}`} aria-expanded={expanded}>
             <header onContextMenu={event => { event.preventDefault(); setContextMenu({kind, group, projectId, x: event.clientX, y: event.clientY, trigger: event.currentTarget.querySelector<HTMLElement>(".group-disclosure") ?? event.currentTarget}); }}><button className="group-disclosure" title={groupLabel(kind, group)} onClick={() => session.toggleGroup(kind, group.id)} aria-expanded={expanded}><span className="group-arrow"><FoldIcon collapsed={!expanded} leading /></span><StatusDot tone={tone} /><span>{kind === "section" && !nested ? "Section · " : ""}{groupLabel(kind, group)}</span></button>
                 <button className="thread-menu-trigger group-menu-trigger" aria-label={`Actions for ${groupLabel(kind, group)}`} aria-haspopup="menu"
@@ -1307,15 +1309,19 @@ function Conversation({session, paneControls, onInspect, usage, onRequestWorkspa
         const result = thread?.uninspectedResult;
         const container = scroll.current;
         if (result && container && !threadTransitionActive) {
+            const failed = thread.turns.get(result)?.status.semantic === "failed";
             const answer = visibleSections.find(section => section.turnId === result)?.cards.slice().reverse().find(card =>
-                card.kind === "agentMessage" && (card.payload as AgentMessageData).phase === "final_answer"
-                && !(card.payload as AgentMessageData).questionRequest);
-            const content = answer ? cardForKey(container, stableKey(answer.key))?.querySelector<HTMLElement>(":scope > .safe-markdown") : undefined;
-            const bounds = content?.getBoundingClientRect();
+                card.itemId !== "" && (failed || (card.kind === "agentMessage" && (card.payload as AgentMessageData).phase === "final_answer"
+                && !(card.payload as AgentMessageData).questionRequest)));
+            const contents = answer ? cardForKey(container, stableKey(answer.key))?.querySelectorAll<HTMLElement>(
+                failed ? ":scope > :not(header):not(.turn-nested)" : ":scope > .safe-markdown") : undefined;
             const viewport = container.getBoundingClientRect();
             const bottom = Math.min(viewport.bottom, composerDock.current?.getBoundingClientRect().top ?? viewport.bottom);
-            if (bounds && bounds.height > 0 && bounds.width > 0 && bounds.bottom > viewport.top && bounds.top < bottom
-                && bounds.right > viewport.left && bounds.left < viewport.right) {
+            if (Array.from(contents ?? []).some(content => {
+                const bounds = content.getBoundingClientRect();
+                return bounds.height > 0 && bounds.width > 0 && bounds.bottom > viewport.top && bounds.top < bottom
+                    && bounds.right > viewport.left && bounds.left < viewport.right;
+            })) {
                 session.acknowledgeInspection(projectionId, result, presentationKey);
             }
         }

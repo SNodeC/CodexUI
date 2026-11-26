@@ -409,15 +409,18 @@ export class PresentationModel {
     threadIndicatorTones(attentionFamily: (parent: string, child: string) => boolean = () => true): Map<string, string> {
         const tones = new Map<string, string>(), pending: string[] = [];
         for (const thread of this.threads.values()) {
-            tones.set(thread.id, isActiveStatus(thread.status) ? "active" : thread.uninspectedResult ? "uninspected" : statusTone(thread.status));
-            if (isActiveStatus(thread.status) || thread.uninspectedResult) { pending.push(thread.id); }
+            const result = thread.uninspectedResult ? thread.turns.get(thread.uninspectedResult) : undefined;
+            const attention = result?.status.semantic === "failed" ? "failed" : "uninspected";
+            const loaded = thread.status.semantic === "failed" ? "success" : statusTone(thread.status);
+            tones.set(thread.id, isActiveStatus(thread.status) ? "active" : result ? attention : loaded);
+            if (isActiveStatus(thread.status) || result) { pending.push(thread.id); }
         }
         while (pending.length > 0) {
             const child = pending.pop()!;
             const parent = this.childOwnerships.get(child)?.parentThreadId;
-            const tone = ["active", "indirect"].includes(tones.get(child) ?? "") ? "indirect" : "uninspected";
+            const tone = ["active", "indirect"].includes(tones.get(child) ?? "") ? "indirect" : tones.get(child)!;
             if (parent && tones.get(parent) !== "active" && tones.get(parent) !== "indirect" && tones.get(parent) !== tone
-                && (tone !== "uninspected" || attentionFamily(parent, child))) {
+                && (tone === "indirect" || (attentionFamily(parent, child) && (tone === "failed" || tones.get(parent) !== "failed")))) {
                 tones.set(parent, tone);
                 pending.push(parent);
             }

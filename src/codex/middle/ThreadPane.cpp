@@ -100,7 +100,7 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
              : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
-QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool indirectActive, bool uninspectedResult) {
+QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool indirectActive, ui::ResultAttention resultAttention) {
     const std::string_view tone = statusTone(status);
     const char* role = UiStyle::threadInactive;
     if (draft || pending != 0) {
@@ -109,9 +109,11 @@ QColor statusColor(const UiStatus& status, std::size_t pending, bool draft, bool
         role = UiStyle::statusIndirect;
     } else if (tone == "active") {
         role = UiStyle::statusActive;
-    } else if (uninspectedResult) {
+    } else if (resultAttention == ui::ResultAttention::Failed) {
+        role = UiStyle::statusDanger;
+    } else if (resultAttention == ui::ResultAttention::FinalAnswer) {
         role = UiStyle::statusUninspected;
-    } else if (tone == "success") {
+    } else if (tone == "success" || status.semantic == nodegraph::NodeStatus::Failed) {
         role = UiStyle::statusSuccess;
     } else if (tone == "warning") {
         role = UiStyle::statusWarning;
@@ -148,7 +150,7 @@ public:
   std::string subscriptionPhase;
   UiStatus status;
   bool indirectActive = false;
-  bool uninspectedResult = false;
+  ui::ResultAttention resultAttention = ui::ResultAttention::None;
   std::optional<std::int64_t> createdAt;
   ProtocolTimes timing;
   std::optional<std::int64_t> recencyAt;
@@ -771,8 +773,10 @@ QString itemDescription(const ThreadTreeItem& item) {
     if (item.indirectActive) {
         details.push_back(QStringLiteral("Indirect activity: running descendant"));
     }
-    if (item.uninspectedResult) {
-        details.push_back(QStringLiteral("Finished result not yet inspected in this thread or a descendant"));
+    if (item.resultAttention != ui::ResultAttention::None) {
+        details.push_back(item.resultAttention == ui::ResultAttention::Failed
+                              ? QStringLiteral("Failed result not yet inspected in this thread or a descendant")
+                              : QStringLiteral("Finished result not yet inspected in this thread or a descendant"));
     }
     return details.join(QLatin1Char('\n'));
 }
@@ -930,7 +934,7 @@ public:
     const QPointF dotCenter(contentLeft + StatusCenterOffset,
                             QRectF(contentRow).center().y());
     painter->setPen(Qt::NoPen);
-    painter->setBrush(statusColor(item->status, item->pending, item->draft, item->indirectActive, item->uninspectedResult));
+    painter->setBrush(statusColor(item->status, item->pending, item->draft, item->indirectActive, item->resultAttention));
     if (item->kind != ui::ThreadRowKind::Page) {
         painter->drawEllipse(dotCenter, StatusRadius, StatusRadius);
     }
@@ -2176,7 +2180,7 @@ bool ThreadPane::applyItemPresentation(
   assign(item->subscriptionPhase, row.subscriptionPhase);
   assign(item->status, row.status);
   assign(item->indirectActive, row.indirectActive);
-  assign(item->uninspectedResult, row.uninspectedResult);
+  assign(item->resultAttention, row.resultAttention);
   assign(item->createdAt, row.createdAt);
   assign(item->timing, row.timing);
   assign(item->recencyAt, row.recencyAt);

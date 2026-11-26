@@ -28,17 +28,18 @@ export async function qualifyInspection(devTools) {
         notify("thread/started", {thread: metadata});
         const row = () => [...document.querySelectorAll(".thread-row")].find(element => element.textContent.includes(metadata.name));
         const pink = () => !!row()?.querySelector(".status-dot.uninspected");
-        const addAnswer = id => {
-            const turn = {id, status: "completed", items: [
+        const addAnswer = (id, failed = false, command = false) => {
+            const turn = {id, status: failed ? "failed" : "completed", items: [
                 {id: "prompt", type: "userMessage", content: [{type: "text", text: "Earlier conversation paragraph.\\n\\n".repeat(100)}]},
-                {id: "answer", type: "agentMessage", phase: "final_answer", text: "Final result " + id},
+                command ? {id: "answer", type: "commandExecution", command: "printf failed", aggregatedOutput: "Failed command result " + id, status: "failed"}
+                    : {id: "answer", type: "agentMessage", phase: failed ? "commentary" : "final_answer", text: "Final result " + id},
             ]};
             turns.push(turn);
             notify("turn/started", {threadId: metadata.id, turn: {id, status: "inProgress"}});
             for (const item of turn.items) { notify("item/completed", {threadId: metadata.id, turnId: id, item}); }
         };
-        const complete = id => {
-            notify("turn/completed", {threadId: metadata.id, turn: {id, status: "completed"}});
+        const complete = (id, status = "completed") => {
+            notify("turn/completed", {threadId: metadata.id, turn: {id, status}});
             notify("thread/status/changed", {threadId: metadata.id, status: {type: "idle"}});
         };
         const answer = id => [...document.querySelectorAll(".conversation-card.final")].find(element => element.textContent.includes("Final result " + id));
@@ -85,7 +86,7 @@ export async function qualifyInspection(devTools) {
         collapsedAnswer.querySelector(".card-fold-button").click(); await frame();
         scroll().scrollTop = scroll().scrollHeight; await frame();
         results.expansionPreservesPink = pink() && visible("collapsed");
-        globalThis.codexuiInspectionResults = {results, pink};
+        globalThis.codexuiInspectionResults = {results, pink, addAnswer, complete, row, frame, waitFor, scroll, editor, key};
         editor().focus();
         return results;
     })()`);
@@ -103,5 +104,58 @@ export async function qualifyInspection(devTools) {
     const typingClearsPink = await devTools.evaluate(`new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(!globalThis.codexuiInspectionResults.pink()))))`);
     assert.equal(typingClearsPink, true, "real keyboard input with visible final content clears pink");
     await capture("green");
-    return {...results, typingClearsPink};
+    const failures = await devTools.evaluate(`(async () => {
+        const {addAnswer, complete, row, frame, waitFor, scroll, editor, key} = globalThis.codexuiInspectionResults;
+        const red = () => !!row()?.querySelector(".status-dot.failed");
+        const card = id => [...document.querySelectorAll(".conversation-card")].find(element =>
+            element.querySelector(":scope > .safe-markdown, :scope > .command-output")?.textContent.includes(id));
+        const visible = id => {
+            const bounds = card(id)?.querySelector(":scope > .safe-markdown, :scope > .command-output")?.getBoundingClientRect();
+            const viewport = scroll().getBoundingClientRect();
+            const bottom = Math.min(viewport.bottom, document.querySelector(".composer-dock").getBoundingClientRect().top);
+            return !!bounds && bounds.height > 0 && bounds.bottom > viewport.top && bounds.top < bottom;
+        };
+        const results = {};
+        for (const command of [false, true]) {
+            const id = command ? "failed-command" : "failed-without-final";
+            addAnswer(id, true, command); complete(id, "failed"); await frame();
+            scroll().scrollTop = scroll().scrollHeight; await frame();
+            await waitFor(() => red() && visible(id), "failed result was not presented");
+            results[id + "RedWithoutFinal"] = red() && !card(id).classList.contains("final");
+            editor().focus(); window.dispatchEvent(new Event("focus"));
+            scroll().dispatchEvent(new MouseEvent("mousemove", {bubbles: true}));
+            scroll().dispatchEvent(new Event("scroll", {bubbles: true}));
+            row().click(); await frame();
+            results[id + "PassiveEventsPreserveRed"] = red();
+            scroll().scrollTop = 0; await frame(); key(); await frame();
+            results[id + "OffscreenPreservesRed"] = red() && !visible(id);
+            scroll().scrollTop = scroll().scrollHeight; await frame();
+            results[id + "ProgrammaticScrollPreservesRed"] = red();
+            const failedCard = card(id);
+            failedCard.querySelector(".card-fold-button").click(); await frame(); key(); await frame();
+            results[id + "CollapsedPreservesRed"] = red() && !visible(id);
+            failedCard.querySelector(".card-fold-button").click(); await frame();
+            scroll().scrollTop = scroll().scrollHeight; await frame();
+            results[id + "ExpansionPreservesRed"] = red() && visible(id);
+            scroll().dispatchEvent(command ? new WheelEvent("wheel", {deltaY: 100, bubbles: true})
+                : new PointerEvent("pointerdown", {bubbles: true}));
+            await frame(); results[id + "DeliberateInputClearsRed"] = !red();
+            complete(id, "failed"); await frame();
+            results[id + "DuplicateDoesNotRearm"] = !red();
+        }
+        addAnswer("failed-typing", true); complete("failed-typing", "failed"); await frame();
+        scroll().scrollTop = scroll().scrollHeight; await frame();
+        results.failedTypingStartsRed = red() && visible("failed-typing");
+        globalThis.codexuiInspectionResults.red = red;
+        editor().focus();
+        return results;
+    })()`);
+    for (const [name, passed] of Object.entries(failures)) { assert.equal(passed, true, name); }
+    await capture("red");
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyDown", key: "x", code: "KeyX", text: "x"});
+    await devTools.call("Input.dispatchKeyEvent", {type: "keyUp", key: "x", code: "KeyX"});
+    const typingClearsRed = await devTools.evaluate(`new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(!globalThis.codexuiInspectionResults.red()))))`);
+    assert.equal(typingClearsRed, true, "real keyboard input with visible failed content clears red");
+    await capture("red-cleared");
+    return {...results, typingClearsPink, ...failures, typingClearsRed};
 }

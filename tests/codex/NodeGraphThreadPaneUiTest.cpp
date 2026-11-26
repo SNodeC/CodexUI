@@ -3139,7 +3139,7 @@ namespace codexui::codex {
                                    std::pair{nodegraph::NodeStatus::Completed, UiStyle::statusSuccess},
                                    std::pair{nodegraph::NodeStatus::Connected, UiStyle::statusSuccess},
                                    std::pair{nodegraph::NodeStatus::Interrupted, UiStyle::statusWarning},
-                                   std::pair{nodegraph::NodeStatus::Failed, UiStyle::statusDanger},
+                                   std::pair{nodegraph::NodeStatus::Failed, UiStyle::statusSuccess},
                                    std::pair{nodegraph::NodeStatus::Disconnected, UiStyle::statusDanger}};
             bool passed = true;
             for (const auto& [status, color] : cases) {
@@ -3159,7 +3159,7 @@ namespace codexui::codex {
                                            ? logicalPixel(tree->viewport()->grab().toImage(), QPoint(rect.left() - 1, rect.center().y()))
                                            : QColor{};
                 passed &= require(item && colorDistance(actual, QColor(QString::fromLatin1(color))) <= 6,
-                                  "thread delegate bypassed the canonical status tone");
+                                  "thread indicator must show live activity or unacknowledged outcomes; loaded failure history stays calm");
                 passed &= require(item && colorDistance(chevron, QColor(QString::fromLatin1(UiStyle::secondary))) <= 30,
                                   "thread disclosure drifted from the status indicator");
             }
@@ -3306,7 +3306,8 @@ namespace codexui::codex {
                         const auto tone = value.get<std::string>();
                         const QColor expected(tone == "active"        ? UiStyle::statusActive
                                               : tone == "indirect"    ? UiStyle::statusIndirect
-                                              : tone == "uninspected" ? "#ec4899"
+                                              : tone == "uninspected" ? UiStyle::statusUninspected
+                                              : tone == "failed"      ? UiStyle::statusDanger
                                                                       : UiStyle::statusSuccess);
                         auto* item = threadItem(tree, id);
                         const bool correct = item && rowDotUsesColor(tree, item, expected);
@@ -3314,7 +3315,7 @@ namespace codexui::codex {
                             std::cerr << "Inspection fixture: " << step.at("label") << " row " << id << " expected " << tone << '\n';
                         }
                         passed &= require(correct, "native indicator violates the shared inspection contract");
-                        if (tone == "uninspected") {
+                        if (tone == "uninspected" || tone == "failed") {
                             passed &= require(item && item->toolTip(0).contains("not yet inspected"),
                                               "uninspected results have a readable accessible description");
                         }
@@ -3324,7 +3325,8 @@ namespace codexui::codex {
                     QApplication::processEvents();
                     const auto tone = step.at("expected").at("ready-project").get<std::string>();
                     const QColor expected(tone == "indirect"      ? UiStyle::statusIndirect
-                                          : tone == "uninspected" ? "#ec4899"
+                                          : tone == "uninspected" ? UiStyle::statusUninspected
+                                          : tone == "failed"      ? UiStyle::statusDanger
                                                                   : UiStyle::statusSuccess);
                     passed &= require(rowDotUsesColor(tree, project, expected), "collapsed projects preserve descendant result attention");
                 }
@@ -3380,7 +3382,8 @@ namespace codexui::codex {
                         logic.apply({DecodedMessageKind::ServerNotification,
                                      "turn/completed",
                                      {},
-                                     {{"threadId", id}, {"turn", Value::Object{{"id", "finished"}, {"status", "completed"}}}}}));
+                                     {{"threadId", id},
+                                      {"turn", Value::Object{{"id", "finished"}, {"status", scenario.value("outcome", "completed")}}}}}));
                 }
                 NodeRef parentResult, childResult;
                 {
@@ -3431,7 +3434,12 @@ namespace codexui::codex {
                     auto* item = threadItem(tree, id);
                     if (item) {
                         const bool attention = expected.at(key).get<bool>();
-                        check(rowDotUsesColor(tree, item, QColor(attention ? UiStyle::statusUninspected : UiStyle::statusSuccess)),
+                        check(rowDotUsesColor(tree,
+                                              item,
+                                              QColor(attention
+                                                         ? (scenario.value("outcome", "completed") == "failed" ? UiStyle::statusDanger
+                                                                                                               : UiStyle::statusUninspected)
+                                                         : UiStyle::statusSuccess)),
                               "painted attention follows only the displayed descendants");
                         check(item->toolTip(0).contains("not yet inspected") == attention,
                               "accessible attention matches the painted indicator");

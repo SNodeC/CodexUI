@@ -192,6 +192,13 @@ namespace codexui::codex {
                     }
                     continue;
                 }
+                if (node->id().kind == nodegraph::NodeKind::Turn && read->statusChangedRevision(node) == change.revision) {
+                    const auto owner = read->parent(node);
+                    if (owner && exactStringFromValue(valueMember(*read->state(owner), "uninspectedResult")) == node->id().canonical) {
+                        route.affected = true;
+                        route.structural = true;
+                    }
+                }
                 if (node->id().kind != nodegraph::NodeKind::Thread)
                     continue;
                 const bool presentationChanged =
@@ -222,14 +229,15 @@ namespace codexui::codex {
                     route.rows.push_back(node);
             }
             // Family activity requires a complete presentation refresh, not action rejection.
-            route.structural = std::ranges::any_of(route.rows, [&](const auto& node) {
-                return std::ranges::any_of(std::array{nodegraph::RelationKind::StructuralChildThread,
-                                                      nodegraph::RelationKind::AgentChildThread,
-                                                      nodegraph::RelationKind::ForkChildThread},
-                                           [&](auto kind) {
-                                               return read->relatedCount(node, kind) != 0 || read->hasIncomingRelation(node, kind);
-                                           });
-            });
+            route.structural =
+                route.structural || std::ranges::any_of(route.rows, [&](const auto& node) {
+                    return std::ranges::any_of(std::array{nodegraph::RelationKind::StructuralChildThread,
+                                                          nodegraph::RelationKind::AgentChildThread,
+                                                          nodegraph::RelationKind::ForkChildThread},
+                                               [&](auto kind) {
+                                                   return read->relatedCount(node, kind) != 0 || read->hasIncomingRelation(node, kind);
+                                               });
+                });
             return route;
         }
 
@@ -763,9 +771,11 @@ namespace codexui::codex {
                     for (std::size_t index = read->childCount(completedTurn); index > 0 && !answer; --index) {
                         const auto item = read->childAt(completedTurn, index - 1);
                         const auto state = read->state(item);
-                        if (exactStringFromValue(valueMember(*state, "type")) == "agentMessage" &&
-                            exactStringFromValue(valueMember(*state, "phase")) == "final_answer" &&
-                            (exactStringFromValue(valueMember(*state, "delivery")) != "async" || !valueMember(*state, "questions"))) {
+                        if (exactStringFromValue(valueMember(*state, "type")) != "localPrompt" &&
+                            (read->state(completedTurn)->status == nodegraph::NodeStatus::Failed ||
+                             (exactStringFromValue(valueMember(*state, "type")) == "agentMessage" &&
+                              exactStringFromValue(valueMember(*state, "phase")) == "final_answer" &&
+                              (exactStringFromValue(valueMember(*state, "delivery")) != "async" || !valueMember(*state, "questions"))))) {
                             answer = item;
                         }
                     }
