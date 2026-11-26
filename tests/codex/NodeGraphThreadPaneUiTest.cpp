@@ -550,6 +550,90 @@ namespace codexui::codex {
             return passed;
         }
 
+        bool manualProjectsFollowCatalogOrder() {
+            using namespace nodegraph;
+            std::ifstream input(std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures/project-order.json");
+            const auto fixture = nlohmann::json::parse(input);
+            NodeGraph graph;
+            ThreadChannels channels;
+            WorkerLogic logic(graph, channels);
+            ui::NodeGraphUiAdapter adapter(graph);
+            middle::ThreadPane pane;
+            pane.resize(480, 760);
+            pane.show();
+            static_cast<void>(logic.threadBrowserState(threadBrowserKey("threadSection/list", nlohmann::json::object()),
+                                                       {{"method", "threadSection/list"}, {"loaded", true}}));
+            middle::ThreadPane::Actions actions;
+            actions.browserChanged = [&] {
+                pane.refresh(*adapter.threads({}, nullptr, &pane.browserOptions()));
+            };
+            pane.setActions(std::move(actions));
+            std::vector<std::string> ids;
+            std::unordered_map<std::string, QTreeWidgetItem*> stable;
+            bool passed = true;
+            int serial = 0;
+            for (const auto& step : fixture.at("steps")) {
+                if (!step.value("append", false)) {
+                    ids.clear();
+                }
+                nlohmann::json data = nlohmann::json::array();
+                for (const auto& id : step.at("ids")) {
+                    ids.push_back(id.get<std::string>());
+                    const auto found = std::ranges::find(fixture.at("projects"), id, [](const auto& project) {
+                        return project.at("id");
+                    });
+                    data.push_back(*found);
+                }
+                const ProtocolRequestId requestId("project-order-" + std::to_string(++serial));
+                const auto admitted = logic.applyDetailed({DecodedMessageKind::ClientRequest, "project/list", requestId, {}});
+                static_cast<void>(logic.applyDetailed(
+                    {DecodedMessageKind::ClientResult, "project/list", requestId, {{"data", valueFromJson(data)}}, admitted.primary}));
+                static_cast<void>(logic.threadBrowserState(
+                    threadBrowserKey("project/list", nlohmann::json::object()),
+                    {{"method", "project/list"}, {"loaded", true}, {"ids", valueFromJson(ids)}, {"hasMore", step.contains("cursor")}}));
+                pane.refresh(*adapter.threads({}, nullptr, &pane.browserOptions()));
+                auto* button = pane.findChild<QToolButton*>("threadGroupingButton");
+                for (auto* action : button->menu()->actions()) {
+                    if (action->text() == "Manual project order") {
+                        action->setChecked(true);
+                    }
+                }
+                QApplication::processEvents();
+                auto snapshot = adapter.threads({}, nullptr, &pane.browserOptions());
+                auto* tree = threadTree(pane);
+                passed &= require(snapshot && snapshot->projects.size() == ids.size(), "all listed projects remain present");
+                for (std::size_t index = 0; index < ids.size(); ++index) {
+                    auto* item = threadItem(tree, ids[index]);
+                    passed &=
+                        require(item && tree->topLevelItem(static_cast<int>(index)) == item && snapshot->projects[index].id == ids[index],
+                                "project menu catalog and visible panel must follow the server sequence without position");
+                    const auto [entry, inserted] = stable.emplace(ids[index], item);
+                    passed &= require(inserted || entry->second == item, "project reordering preserves existing row identity");
+                }
+                auto* contextItem = threadItem(tree, ids.front());
+                QMetaObject::invokeMethod(
+                    tree, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, tree->visualItemRect(contextItem).center()));
+                QApplication::processEvents();
+                auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+                passed &= require(menu, "project move menu opens");
+                if (menu) {
+                    for (auto* action : menu->actions()) {
+                        if (action->text() == "Move project before") {
+                            const auto entries = action->menu()->actions();
+                            passed &=
+                                require(entries.size() == static_cast<qsizetype>(ids.size() - 1), "move menu has each destination once");
+                            for (qsizetype index = 0; index < entries.size(); ++index) {
+                                passed &= require(entries[index]->text() == QString::fromStdString(snapshot->projects[index + 1].label),
+                                                  "move menu and visible panel retain the same order after refresh and pagination");
+                            }
+                        }
+                    }
+                    menu->close();
+                }
+            }
+            return passed;
+        }
+
         bool groupedThreadsPreserveIdentityAndInteractions() {
             using namespace nodegraph;
             NodeGraph graph;
@@ -4394,6 +4478,7 @@ int main(int argc, char** argv) {
         passed &= codexui::codex::groupLabelsIdentifyDestinationsWithoutRoutineIds();
         passed &= codexui::codex::localDraftsUseOneGroupingProjection();
         passed &= codexui::codex::groupedThreadsPreserveIdentityAndInteractions();
+        passed &= codexui::codex::manualProjectsFollowCatalogOrder();
         passed &= codexui::codex::forkHierarchyIgnoresRootReadOrder();
         passed &= codexui::codex::selectedChildRetainsRootAndCanonicalIdentity();
         passed &= codexui::codex::accessibilityFollowsTheNativeHierarchy();

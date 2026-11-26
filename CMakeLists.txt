@@ -34,7 +34,8 @@ set(CMAKE_AUTOMOC ON)
 find_package(AISuite CONFIG REQUIRED)
 find_package(
     snodec 3.0.0 CONFIG REQUIRED
-    COMPONENTS net-un-stream-legacy net-in-stream-legacy net-in6-stream-legacy
+    COMPONENTS mcp net-un-stream-legacy net-in-stream-legacy
+               net-in6-stream-legacy
 )
 find_package(
     snodec 3.0.0 CONFIG QUIET COMPONENTS net-in-stream-tls net-in6-stream-tls
@@ -138,7 +139,9 @@ add_library(
 )
 target_compile_features(codexui-pending-request-policy PUBLIC cxx_std_20)
 target_include_directories(codexui-pending-request-policy PUBLIC src)
-target_link_libraries(codexui-pending-request-policy PUBLIC codexui-nodegraph)
+target_link_libraries(
+    codexui-pending-request-policy PUBLIC codexui-nodegraph snodec::mcp
+)
 
 add_library(
     codexui-turn-settings-policy STATIC src/codex/TurnSettingsPolicy.cpp

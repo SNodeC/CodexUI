@@ -3,6 +3,7 @@
 #include "codex/PendingRequestPolicy.h"
 
 #include "codex/nodegraph/PromptText.h"
+#include "mcp/Schema.h"
 
 #include <algorithm>
 #include <array>
@@ -565,14 +566,13 @@ bool privilegedMcpApproval(const nlohmann::json &request) {
   return stringValue(request, "mode") == "form" && mcpMessageOnly(request);
 }
 
-bool validMcpContent(const nlohmann::json& request, const nlohmann::json& content) {
+bool validMcpContent(const nlohmann::json& request, const nlohmann::json& content, std::string* validationError) {
     const auto schema = request.find("requestedSchema");
-    bool valid = content.is_object() && schema != request.end() && schema->is_object();
-    if (valid) {
-        const auto required = schema->find("required");
-        valid = required == schema->end() || (required->is_array() && std::ranges::all_of(*required, [&](const nlohmann::json& key) {
-                                                  return key.is_string() && content.contains(key.get_ref<const std::string&>());
-                                              }));
+    std::string error;
+    const bool valid =
+        content.is_object() && schema != request.end() && schema->is_object() && mcp::Schema::validate(*schema, content, error);
+    if (validationError) {
+        *validationError = error;
     }
     return valid;
 }
@@ -728,37 +728,37 @@ disclosedMembers(const nlohmann::json &raw,
 
 nlohmann::json mcpDisclosure(const nlohmann::json &raw,
                              ReviewContext &context) {
-  nlohmann::json result =
-      disclosedMembers(raw,
-                       {"serverName", "threadId", "turnId", "message", "mode",
-                        "requestedSchema", "elicitationId", "url"},
-                       {"_meta", "meta"}, context);
-  const std::string approvalKind = mcpApprovalKind(raw);
-  if (mcpMessageOnly(raw) && (!approvalKind.empty() || mcpPersistence(raw, "session") || mcpPersistence(raw, "always"))) {
-      const auto metadata = raw.find("_meta");
-      nlohmann::json approval = nlohmann::json::object();
-      bool truncated = false;
-      for (const auto* field : {"connector_description",
-                                "connector_name",
-                                "install_url",
-                                "persist",
-                                "source",
-                                "suggest_reason",
-                                "suggest_type",
-                                "tool_description",
-                                "tool_name",
-                                "tool_params_display",
-                                "tool_title",
-                                "tool_type"}) {
-          if (const auto found = metadata->find(field); found != metadata->end()) {
-              approval[field] = boundedDisclosureValue(*found, 0, context.remaining, truncated);
-          }
-      }
-      context.complete &= !truncated;
-      if (!approval.empty()) {
-          result["approval"] = std::move(approval);
-      }
-  }
+    nlohmann::json result = disclosedMembers(
+        raw,
+        {"serverName", "threadId", "turnId", "environmentId", "message", "mode", "requestedSchema", "elicitationId", "url"},
+        {"_meta", "meta"},
+        context);
+    const std::string approvalKind = mcpApprovalKind(raw);
+    if (mcpMessageOnly(raw) && (!approvalKind.empty() || mcpPersistence(raw, "session") || mcpPersistence(raw, "always"))) {
+        const auto metadata = raw.find("_meta");
+        nlohmann::json approval = nlohmann::json::object();
+        bool truncated = false;
+        for (const auto* field : {"connector_description",
+                                  "connector_name",
+                                  "install_url",
+                                  "persist",
+                                  "source",
+                                  "suggest_reason",
+                                  "suggest_type",
+                                  "tool_description",
+                                  "tool_name",
+                                  "tool_params_display",
+                                  "tool_title",
+                                  "tool_type"}) {
+            if (const auto found = metadata->find(field); found != metadata->end()) {
+                approval[field] = boundedDisclosureValue(*found, 0, context.remaining, truncated);
+            }
+        }
+        context.complete &= !truncated;
+        if (!approval.empty()) {
+            result["approval"] = std::move(approval);
+        }
+    }
   return result;
 }
 
@@ -868,17 +868,18 @@ bool approvalContextComplete(PendingRequestKind kind,
   case PendingRequestKind::UserInput:
     return true;
   case PendingRequestKind::McpElicitation: {
-    if (!nonEmptyString(raw, "serverName") ||
-        !nonEmptyString(raw, "threadId") || !nonEmptyString(raw, "message") ||
-        !validMcpApprovalMetadata(raw))
-      return false;
-    const std::string mode = stringValue(raw, "mode");
-    if (mode == "url")
-      return nonEmptyString(raw, "elicitationId") && nonEmptyString(raw, "url");
-    const auto schema = raw.find("requestedSchema");
-    if (mode == "openai/form")
-      return schema != raw.end();
-    return mode == "form" && schema != raw.end() && schema->is_object();
+      const auto environment = raw.find("environmentId");
+      if (!nonEmptyString(raw, "serverName") || !nonEmptyString(raw, "threadId") || !nonEmptyString(raw, "message") ||
+          !validMcpApprovalMetadata(raw) || (environment != raw.end() && !environment->is_null() && !environment->is_string()))
+          return false;
+      const std::string mode = stringValue(raw, "mode");
+      if (mode == "url")
+          return nonEmptyString(raw, "elicitationId") && nonEmptyString(raw, "url");
+      const auto schema = raw.find("requestedSchema");
+      if (mode == "openai/form")
+          return schema != raw.end();
+      std::string error;
+      return mode == "form" && schema != raw.end() && schema->is_object() && mcp::Schema::check(*schema, error);
   }
   case PendingRequestKind::PermissionsApproval: {
     const auto permissions = raw.find("permissions");
@@ -1214,100 +1215,85 @@ int PendingRequestPolicy::attentionRank(PendingRequestAvailability availability,
   return rank + !selectedThread;
 }
 
-std::optional<PendingRequestResponse>
-PendingRequestPolicy::responseForSubmission(
-    PendingRequestKind kind, const nlohmann::json &request,
-    PendingRequestSubmission submission) {
-  std::optional<CommandEvaluation> command;
-  if (kind == PendingRequestKind::CommandApproval) {
-    command = evaluateCommand(request);
-    if (!decisionAllowed(command->actions, submission.choice))
-      return std::nullopt;
-  } else {
-    PendingRequestDescriptor descriptor;
-    descriptor.kind = kind;
-    descriptor.raw = request;
-    if (!decisionAllowed(actions(descriptor), submission.choice))
-      return std::nullopt;
-  }
-  if (kind == PendingRequestKind::UserInput && submission.choice == "submit" &&
-      !validAnswers(request, submission.input))
-    return std::nullopt;
-  PendingRequestResponse response{nlohmann::json::object()};
-  if (submission.choice == "unsupported") {
-    response = jsonRpcError(
-        kind == PendingRequestKind::AuthenticationRefresh
-            ? "CodexUI does not support authentication token refresh"
-        : kind == PendingRequestKind::Attestation
-            ? "CodexUI does not support attestation generation"
-            : "CodexUI does not support this server request");
-  } else if (kind == PendingRequestKind::CommandApproval) {
-    const auto found = std::ranges::find(
-        *command->decisions, submission.choice,
-        [](const CommandDecisionOption &entry) { return entry.action.value; });
-    if (found == command->decisions->end())
-      return std::nullopt;
-    response = nlohmann::json{{"decision", found->wireDecision}};
-  } else if (kind == PendingRequestKind::FileChangeApproval) {
-    response = nlohmann::json{{"decision", std::move(submission.choice)}};
-  } else if (kind == PendingRequestKind::UserInput) {
-    if (submission.choice == "decline")
-      response = jsonRpcError("Request declined by user");
-    else
-      response = nlohmann::json{{"answers", std::move(submission.input)}};
-  } else if (kind == PendingRequestKind::McpElicitation) {
-    const std::string approvalKind = mcpApprovalKind(request);
-    if (submission.choice == "acceptForSession" ||
-        submission.choice == "acceptAlways") {
-      response = nlohmann::json{
-          {"action", "accept"},
-          {"content", nullptr},
-          {"_meta",
-           {{"persist",
-             submission.choice == "acceptForSession" ? "session" : "always"}}}};
-    } else if (submission.choice != "accept") {
-      response = nlohmann::json{{"action", std::move(submission.choice)},
-                                {"content", nullptr},
-                                {"_meta", nullptr}};
-    } else if (approvalKind == "mcp_tool_call" &&
-               privilegedMcpApproval(request)) {
-      response = nlohmann::json{
-          {"action", "accept"}, {"content", nullptr}, {"_meta", nullptr}};
-    } else if (!mcpMessageOnly(request) && stringValue(request, "mode") != "openai/form" && !validMcpContent(request, submission.input)) {
+std::optional<PendingRequestResponse> PendingRequestPolicy::responseForSubmission(PendingRequestKind kind,
+                                                                                  const nlohmann::json& request,
+                                                                                  PendingRequestSubmission submission,
+                                                                                  std::string* validationError) {
+    if (validationError) {
+        validationError->clear();
+    }
+    std::optional<CommandEvaluation> command;
+    if (kind == PendingRequestKind::CommandApproval) {
+        command = evaluateCommand(request);
+        if (!decisionAllowed(command->actions, submission.choice))
+            return std::nullopt;
+    } else {
+        PendingRequestDescriptor descriptor;
+        descriptor.kind = kind;
+        descriptor.raw = request;
+        if (!decisionAllowed(actions(descriptor), submission.choice))
+            return std::nullopt;
+    }
+    if (kind == PendingRequestKind::UserInput && submission.choice == "submit" && !validAnswers(request, submission.input))
         return std::nullopt;
+    PendingRequestResponse response{nlohmann::json::object()};
+    if (submission.choice == "unsupported") {
+        response = jsonRpcError(kind == PendingRequestKind::AuthenticationRefresh ? "CodexUI does not support authentication token refresh"
+                                : kind == PendingRequestKind::Attestation         ? "CodexUI does not support attestation generation"
+                                                                                  : "CodexUI does not support this server request");
+    } else if (kind == PendingRequestKind::CommandApproval) {
+        const auto found = std::ranges::find(*command->decisions, submission.choice, [](const CommandDecisionOption& entry) {
+            return entry.action.value;
+        });
+        if (found == command->decisions->end())
+            return std::nullopt;
+        response = nlohmann::json{{"decision", found->wireDecision}};
+    } else if (kind == PendingRequestKind::FileChangeApproval) {
+        response = nlohmann::json{{"decision", std::move(submission.choice)}};
+    } else if (kind == PendingRequestKind::UserInput) {
+        if (submission.choice == "decline")
+            response = jsonRpcError("Request declined by user");
+        else
+            response = nlohmann::json{{"answers", std::move(submission.input)}};
+    } else if (kind == PendingRequestKind::McpElicitation) {
+        const std::string approvalKind = mcpApprovalKind(request);
+        if (submission.choice == "acceptForSession" || submission.choice == "acceptAlways") {
+            response = nlohmann::json{{"action", "accept"},
+                                      {"content", nullptr},
+                                      {"_meta", {{"persist", submission.choice == "acceptForSession" ? "session" : "always"}}}};
+        } else if (submission.choice != "accept") {
+            response = nlohmann::json{{"action", std::move(submission.choice)}, {"content", nullptr}, {"_meta", nullptr}};
+        } else if (approvalKind == "mcp_tool_call" && privilegedMcpApproval(request)) {
+            response = nlohmann::json{{"action", "accept"}, {"content", nullptr}, {"_meta", nullptr}};
+        } else if (!mcpMessageOnly(request) && stringValue(request, "mode") != "openai/form" &&
+                   !validMcpContent(request, submission.input, validationError)) {
+            return std::nullopt;
+        } else {
+            response = nlohmann::json{{"action", "accept"},
+                                      {"content", mcpMessageOnly(request) ? nlohmann::json(nullptr) : std::move(submission.input)},
+                                      {"_meta", std::move(submission.metadata)}};
+        }
+    } else if (kind == PendingRequestKind::PermissionsApproval) {
+        if (submission.choice == "decline") {
+            response = jsonRpcError("Permission request declined by user");
+        } else {
+            response = nlohmann::json{{"permissions", request.at("permissions")}, {"scope", std::move(submission.choice)}};
+        }
+    } else if (kind == PendingRequestKind::LegacyPatchApproval || kind == PendingRequestKind::LegacyCommandApproval) {
+        if (submission.choice == "approved" || submission.choice == "approved_for_session")
+            response = nlohmann::json{{"decision", std::move(submission.choice)}};
+        else if (submission.choice == "denied")
+            response = nlohmann::json{{"decision", {{"denied", {{"rejection", "Denied by user"}}}}}};
+        else
+            response = nlohmann::json{{"decision", "abort"}};
+    } else if (kind == PendingRequestKind::DynamicToolCall) {
+        response = nlohmann::json{
+            {"contentItems", nlohmann::json::array({{{"type", "inputText"}, {"text", "CodexUI does not provide this dynamic tool"}}})},
+            {"success", false}};
     } else {
-        response = nlohmann::json{{"action", "accept"},
-                                  {"content", mcpMessageOnly(request) ? nlohmann::json(nullptr) : std::move(submission.input)},
-                                  {"_meta", std::move(submission.metadata)}};
+        response = jsonRpcError("CodexUI does not support this server request");
     }
-  } else if (kind == PendingRequestKind::PermissionsApproval) {
-    if (submission.choice == "decline") {
-      response = jsonRpcError("Permission request declined by user");
-    } else {
-      response = nlohmann::json{{"permissions", request.at("permissions")},
-                                {"scope", std::move(submission.choice)}};
-    }
-  } else if (kind == PendingRequestKind::LegacyPatchApproval ||
-             kind == PendingRequestKind::LegacyCommandApproval) {
-    if (submission.choice == "approved" ||
-        submission.choice == "approved_for_session")
-      response = nlohmann::json{{"decision", std::move(submission.choice)}};
-    else if (submission.choice == "denied")
-      response = nlohmann::json{
-          {"decision", {{"denied", {{"rejection", "Denied by user"}}}}}};
-    else
-      response = nlohmann::json{{"decision", "abort"}};
-  } else if (kind == PendingRequestKind::DynamicToolCall) {
-    response = nlohmann::json{
-        {"contentItems",
-         nlohmann::json::array(
-             {{{"type", "inputText"},
-               {"text", "CodexUI does not provide this dynamic tool"}}})},
-        {"success", false}};
-  } else {
-    response = jsonRpcError("CodexUI does not support this server request");
-  }
-  return response;
+    return response;
 }
 
 } // namespace codexui::codex
