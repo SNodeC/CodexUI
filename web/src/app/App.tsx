@@ -391,8 +391,7 @@ function ThreadPane({session, onRequestNewThread, onRequestGroup, onRequestForkW
     const renderProjectMembers = (ids: string[], projectId: string): ReactNode => <>{session.groups("section").filter(section => ids.some(id => membership(id, "sectionId") === section.id))
         .map(section => renderGroup("section", section, ids.filter(id => membership(id, "sectionId") === section.id), true, projectId))}
         {renderRows(ids.filter(id => !session.model.sections.has(membership(id, "sectionId"))), 1)}</>;
-    const projects = session.groups("project").sort((a, b) => Number(b.raw.recencyAt ?? 0) - Number(a.raw.recencyAt ?? 0));
-    if (session.browser.manualProjects) projects.sort((a, b) => Number(a.raw.position ?? 0) - Number(b.raw.position ?? 0));
+    const projects = session.groups("project");
     const grouped = session.groupingAvailable() && session.browser.grouping !== "ungrouped";
     const projectRoots = grouped && session.browser.grouping === "projects" ? projects : [];
     const standalone = roots.filter(id => !projectRoots.some(group => membership(id, "projectId") === group.id));
