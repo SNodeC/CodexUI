@@ -125,13 +125,14 @@ QComboBox* addDecisionEditor(QVBoxLayout* layout, const std::vector<PendingReque
     return decision;
 }
 
-void showValidationWarning(QWidget *parent, QString title, QString message) {
+void showValidationWarning(QDialog *parent, QString title, QString message) {
   QMessageBox warning(QMessageBox::Warning, std::move(title),
                       std::move(message), QMessageBox::Ok, parent);
   // Validation keeps the parent request dialog and its authored controls
   // alive. An explicit Qt-owned dialog also avoids platform-native teardown
   // reentrancy when the warning is dismissed from the nested modal loop.
   warning.setOption(QMessageBox::Option::DontUseNativeDialog, true);
+  QObject::connect(parent, &QDialog::finished, &warning, &QDialog::reject);
   warning.exec();
   parent->activateWindow();
 }
@@ -556,15 +557,18 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                                   QStringLiteral("Check connection, controller access and the original question, then try again."));
         }
     });
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, [&] {
+        if (request.kind == PendingRequestKind::McpElicitation && request.availability == PendingRequestAvailability::Actionable &&
+            std::ranges::any_of(requestActions, [](const auto& action) {
+                return action.value == "cancel";
+            })) {
+            submission = PendingRequestSubmission{"cancel"};
+        }
+        dialog.reject();
+    });
     root->addWidget(buttons);
     if (dialog.exec() == QDialog::Accepted) {
         submission = authoredSubmission();
-    } else if (request.kind == PendingRequestKind::McpElicitation && request.availability == PendingRequestAvailability::Actionable &&
-               std::ranges::any_of(requestActions, [](const auto& action) {
-                   return action.value == "cancel";
-               })) {
-        submission = PendingRequestSubmission{"cancel"};
     }
     return submission;
 }

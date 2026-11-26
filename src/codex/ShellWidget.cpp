@@ -25,6 +25,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QDateTime>
+#include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEvent>
@@ -1019,6 +1020,10 @@ namespace codexui::codex {
             [this](const nodegraph::NodeRef& target) {
                 rejectPending(target);
             });
+        middleRegion->inspector().setCatalogRefreshAction([this] {
+            static_cast<void>(sendRuntimeAction({nodegraph::RuntimeActionKind::RefreshCatalogs, {}, {}, {}, {}},
+                                                QStringLiteral("Catalog refresh was not admitted; try again.")));
+        });
         middleRegion->inspector().setRefreshRequestedAction([this] {
             pendingInspector = true;
             schedulePaneCommit();
@@ -2094,7 +2099,11 @@ namespace codexui::codex {
             const bool live = request != projectedRequests->candidates.end();
             reviewSubmit->setEnabled(live && request->availability == PendingRequestAvailability::Actionable);
             reviewSubmit->setToolTip(live ? text(PendingRequestPolicy::status(*request)) : QStringLiteral("This request has ended."));
-            reviewSubmit->setText(live ? QStringLiteral("Submit") : QStringLiteral("Resolved"));
+            if (!live || request->availability == PendingRequestAvailability::RecoveryOnly) {
+                if (auto* dialog = qobject_cast<QDialog*>(reviewSubmit->window())) {
+                    dialog->reject();
+                }
+            }
         }
         const std::optional<std::size_t> attention = PendingRequestPolicy::attentionIndex(
             projectedRequests->candidates, boundGraphThread ? std::string_view(boundGraphThread->id().canonical) : std::string_view{});
