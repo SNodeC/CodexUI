@@ -9,7 +9,7 @@
     },
     {
       "package": "snodec",
-      "version": ">=3.0.0,<4"
+      "version": ">=2.0,<3"
     }
   ],
   "build": {
