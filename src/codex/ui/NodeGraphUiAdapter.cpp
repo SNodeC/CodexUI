@@ -1326,7 +1326,11 @@ namespace codexui::codex::ui {
             row.subscriptionUnavailable = nodegraph::threadContextChangeUnavailable(read, thread, nodegraph::NodeActionKind::Unsubscribe);
             row.subscriptionPhase = exactStringFromValue(valueMember(*state, "subscriptionPhase"));
             row.status = statusFromState(*state);
-            row.uninspectedResult = !exactStringFromValue(valueMember(*state, "uninspectedResult")).empty();
+            const auto result = read.find({nodegraph::NodeKind::Turn, exactStringFromValue(valueMember(*state, "uninspectedResult"))});
+            if (result && read.parent(result) == thread) {
+                row.resultAttention =
+                    read.state(result)->status == nodegraph::NodeStatus::Failed ? ResultAttention::Failed : ResultAttention::FinalAnswer;
+            }
             row.createdAt = timestamp("createdAt");
             row.updatedAt = timestamp("updatedAt");
             row.recencyAt = timestamp("recencyAt");
@@ -1658,7 +1662,9 @@ namespace codexui::codex::ui {
                         continue;
                     ThreadListRow projected = self(self, child);
                     if (!projected.id.empty()) {
-                        row.uninspectedResult |= !browser && projected.uninspectedResult;
+                        if (!browser) {
+                            row.resultAttention = std::max(row.resultAttention, projected.resultAttention);
+                        }
                         row.children.push_back(std::move(projected));
                     }
                 }
@@ -1915,7 +1921,9 @@ namespace codexui::codex::ui {
                 UiStatus aggregate{nodegraph::NodeStatus::NotLoaded};
                 for (auto& row : rows) {
                     const UiStatus descendants = self(self, row.children);
-                    row.uninspectedResult |= std::ranges::any_of(row.children, &ThreadListRow::uninspectedResult);
+                    for (const auto& child : row.children) {
+                        row.resultAttention = std::max(row.resultAttention, child.resultAttention);
+                    }
                     if (row.kind == ThreadRowKind::Project || row.kind == ThreadRowKind::Section) {
                         row.status = descendants;
                         row.indirectActive = isActiveStatus(descendants);

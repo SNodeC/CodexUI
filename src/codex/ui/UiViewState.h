@@ -60,6 +60,7 @@ inline std::string threadPresentationKey(std::string_view threadId,
 // and optimistic rows deliberately remain local to that renderer.
 enum class ThreadGrouping { Projects, Sections, Ungrouped };
 enum class ThreadRowKind { Project, Section, Thread, Page };
+enum class ResultAttention { None, FinalAnswer, Failed };
 struct ThreadBrowserOptions {
   ThreadGrouping grouping = ThreadGrouping::Projects;
   std::string title;
@@ -88,7 +89,7 @@ struct ThreadListRow {
   std::string subscriptionPhase;
   UiStatus status;
   bool indirectActive = false;
-  bool uninspectedResult = false;
+  ResultAttention resultAttention = ResultAttention::None;
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;

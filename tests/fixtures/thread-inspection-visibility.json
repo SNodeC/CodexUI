@@ -128,5 +128,143 @@
       "project": false,
       "section": false
     }
+  },
+  {
+    "label": "visible-child-failed",
+    "child": {},
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "archived-child-hidden-failed",
+    "child": {
+      "archived": true
+    },
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": false,
+      "childVisible": false,
+      "childNested": false,
+      "project": false,
+      "section": false
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "archived-child-revealed-failed",
+    "child": {
+      "archived": true
+    },
+    "grouping": "projects",
+    "archive": "all",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "child-in-other-section-failed",
+    "child": {
+      "section": {
+        "id": "other-section"
+      }
+    },
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": false,
+      "childVisible": true,
+      "childNested": false,
+      "project": true,
+      "section": false
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "child-in-other-project-failed",
+    "child": {
+      "projectId": "other-project",
+      "section": {
+        "id": "other-section"
+      }
+    },
+    "grouping": "projects",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": false,
+      "childVisible": true,
+      "childNested": false,
+      "project": false,
+      "section": false
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "ungrouped-child-across-groups-failed",
+    "child": {
+      "projectId": "other-project",
+      "section": {
+        "id": "other-section"
+      }
+    },
+    "grouping": "ungrouped",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "section-grouped-child-failed",
+    "child": {},
+    "grouping": "sections",
+    "archive": "active",
+    "title": "",
+    "expected": {
+      "parent": true,
+      "childVisible": true,
+      "childNested": true,
+      "project": true,
+      "section": true
+    },
+    "outcome": "failed"
+  },
+  {
+    "label": "title-filter-hides-child-failed",
+    "child": {},
+    "grouping": "projects",
+    "archive": "active",
+    "title": "ready-parent",
+    "expected": {
+      "parent": false,
+      "childVisible": false,
+      "childNested": false,
+      "project": false,
+      "section": false
+    },
+    "outcome": "failed"
   }
 ]

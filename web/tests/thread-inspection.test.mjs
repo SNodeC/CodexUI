@@ -39,7 +39,7 @@ test("shared completion/inspection contract reaches thread, section and project 
                     assert.ok(start >= 0, `${step.label}: ${group.name} is visible`);
                     const header = markup.slice(start, markup.indexOf("</header>", start));
                     assert.ok(header.includes(`status-dot ${step.expected[group.id]}`), `${step.label}: ${group.name} indicator`);
-                    if (step.expected[group.id] === "uninspected") { assert.match(header, /not yet inspected/u); }
+                    if (["uninspected", "failed"].includes(step.expected[group.id])) { assert.match(header, /not yet inspected/u); }
                 }
                 session.toggleGroup("project", fixture.project.id);
                 const collapsed = renderToStaticMarkup(createElement(App, {session}));
@@ -117,7 +117,7 @@ for (const scenario of visibilityCases) {
             await replyToLists();
             for (const threadId of ["ready-parent", "ready-child"]) {
                 socket.receive(appserver({jsonrpc: "2.0", method: "turn/completed",
-                    params: {threadId, turn: {id: "finished", status: "completed"}}}));
+                    params: {threadId, turn: {id: "finished", status: scenario.outcome ?? "completed"}}}));
             }
             session.selectThread("ready-parent");
             session.acknowledgeInspection("ready-parent", "finished", session.threadVisualKey("ready-parent"));
@@ -126,7 +126,7 @@ for (const scenario of visibilityCases) {
             const markup = renderToStaticMarkup(createElement(App, {session}));
             const parent = threadButton(markup, "ready-parent");
             assert.ok(parent.includes('aria-current="true"'), "the inspected parent remains selected");
-            assert.equal(parent.includes("status-dot uninspected"), scenario.expected.parent);
+            assert.equal(parent.includes(`status-dot ${scenario.outcome === "failed" ? "failed" : "uninspected"}`), scenario.expected.parent);
             assert.equal(Boolean(threadButton(markup, "ready-child")), scenario.expected.childVisible);
             const level = id => Number(markup.match(new RegExp(`<div role="treeitem" aria-level="(\\d+)"[^>]*aria-label="${id},`))?.[1]);
             assert.equal(scenario.expected.childVisible && level("ready-child") === level("ready-parent") + 1,
@@ -135,7 +135,7 @@ for (const scenario of visibilityCases) {
                 const start = markup.indexOf(`aria-label="${group.name},`);
                 if (start >= 0) {
                     const header = markup.slice(start, markup.indexOf("</header>", start));
-                    assert.equal(header.includes("status-dot uninspected"), scenario.expected[key]);
+                    assert.equal(header.includes(`status-dot ${scenario.outcome === "failed" ? "failed" : "uninspected"}`), scenario.expected[key]);
                 }
             }
             assert.equal(session.model.thread("ready-parent").uninspectedResult, undefined);
@@ -146,7 +146,7 @@ for (const scenario of visibilityCases) {
             session.selectThread("ready-child");
             session.acknowledgeInspection("ready-child", "finished", session.threadVisualKey("ready-child"));
             session.selectThread("ready-parent");
-            assert.equal(threadButton(renderToStaticMarkup(createElement(App, {session})), "ready-parent").includes("status-dot uninspected"), false);
+            assert.equal(threadButton(renderToStaticMarkup(createElement(App, {session})), "ready-parent").includes(`status-dot ${scenario.outcome === "failed" ? "failed" : "uninspected"}`), false);
         } finally {
             session.dispose();
         }

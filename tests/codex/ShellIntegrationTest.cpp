@@ -4844,46 +4844,53 @@ void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configur
                     "inspection transition evidence saved");
         }
     };
-    const auto finish = [&](const std::string& turnId) {
-        static_cast<void>(
-            worker.apply({DecodedMessageKind::ServerNotification,
-                          "turn/started",
-                          {},
-                          {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", turnId}, {"status", "inProgress"}}}}}));
-        static_cast<void>(worker.apply(
-            {DecodedMessageKind::ServerNotification,
-             "item/completed",
-             {},
-             {{"threadId", "inspection-b"},
-              {"turnId", turnId},
-              {"item",
-               Value::Object{{"id", "prompt"},
-                             {"type", "userMessage"},
-                             {"content", Value::Array{Value::Object{{"type", "text"}, {"text", std::string(12000, 'W')}}}}}}}}));
-        static_cast<void>(worker.apply(
-            {DecodedMessageKind::ServerNotification,
-             "item/completed",
-             {},
-             {{"threadId", "inspection-b"},
-              {"turnId", turnId},
-              {"item",
-               Value::Object{
-                   {"id", "answer"}, {"type", "agentMessage"}, {"phase", "final_answer"}, {"text", "Final result " + turnId}}}}}));
-        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
-                                        "turn/completed",
-                                        {},
-                                        {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", turnId}, {"status", "completed"}}}}}));
-        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
-                                        "thread/status/changed",
-                                        {},
-                                        {{"threadId", "inspection-b"}, {"status", Value::Object{{"type", "idle"}}}}}));
-        NodeRef answer;
-        {
-            auto read = graph.tryRead();
-            answer = read->find(scopedItemNodeId(scopedTurnNodeId("inspection-b", turnId), "answer"));
-        }
-        return answer;
-    };
+    const auto finish =
+        [&](const std::string& turnId, const std::string& outcome = "completed", bool finalAnswer = true, bool command = false) {
+            static_cast<void>(
+                worker.apply({DecodedMessageKind::ServerNotification,
+                              "turn/started",
+                              {},
+                              {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", turnId}, {"status", "inProgress"}}}}}));
+            static_cast<void>(worker.apply(
+                {DecodedMessageKind::ServerNotification,
+                 "item/completed",
+                 {},
+                 {{"threadId", "inspection-b"},
+                  {"turnId", turnId},
+                  {"item",
+                   Value::Object{{"id", "prompt"},
+                                 {"type", "userMessage"},
+                                 {"content", Value::Array{Value::Object{{"type", "text"}, {"text", std::string(12000, 'W')}}}}}}}}));
+            static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                            "item/completed",
+                                            {},
+                                            {{"threadId", "inspection-b"},
+                                             {"turnId", turnId},
+                                             {"item",
+                                              command ? Value::Object{{"id", "answer"},
+                                                                      {"type", "commandExecution"},
+                                                                      {"command", "printf failed"},
+                                                                      {"aggregatedOutput", "Failed command result " + turnId},
+                                                                      {"status", "failed"}}
+                                                      : Value::Object{{"id", "answer"},
+                                                                      {"type", "agentMessage"},
+                                                                      {"phase", finalAnswer ? "final_answer" : "commentary"},
+                                                                      {"text", "Final result " + turnId}}}}}));
+            static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                            "turn/completed",
+                                            {},
+                                            {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", turnId}, {"status", outcome}}}}}));
+            static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                            "thread/status/changed",
+                                            {},
+                                            {{"threadId", "inspection-b"}, {"status", Value::Object{{"type", "idle"}}}}}));
+            NodeRef answer;
+            {
+                auto read = graph.tryRead();
+                answer = read->find(scopedItemNodeId(scopedTurnNodeId("inspection-b", turnId), "answer"));
+            }
+            return answer;
+        };
     const auto click = [&](QWidget* target, const QPoint& position) {
         const QPoint global = target->mapToGlobal(position);
         QMouseEvent press(QEvent::MouseButtonPress,
@@ -5022,6 +5029,77 @@ void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configur
                       {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", "collapsed"}, {"status", "completed"}}}}}));
     spin();
     require(!pending(), "duplicate completion after navigation does not recreate attention");
+    require(selectThread(tree, "inspection-b"), "failure acknowledgment uses the selected conversation");
+    for (const bool command : {false, true}) {
+        const std::string id = command ? "failed-command" : "failed-without-final";
+        answer = finish(id, "failed", false, command);
+        view->followLatest();
+        require(spinUntil([&] {
+                    return pending() && view->isCardContentVisible(answer);
+                }),
+                "failure content without a final answer is presented and awaiting inspection");
+        QApplication::sendEvent(&shell, &activation);
+        view->setFocus();
+        QApplication::sendEvent(view->viewport(), &move);
+        acknowledge();
+        click(tree->viewport(), tree->visualItemRect(threadItem(tree, "inspection-b")).center());
+        require(pending(), "focus, pointer movement and selection preserve failed-result attention");
+        view->verticalScrollBar()->setValue(0);
+        spin();
+        QApplication::sendEvent(editor, &key);
+        acknowledge();
+        require(pending() && !view->isCardContentVisible(answer), "offscreen failed content cannot be acknowledged");
+        view->followLatest();
+        require(spinUntil([&] {
+                    return view->isCardContentVisible(answer);
+                }) &&
+                    pending(),
+                "revealing failed content programmatically does not acknowledge it");
+        capture(command ? "failed-command-red" : "failure-red");
+        if (command) {
+            wheel();
+        } else {
+            auto* failedCard = agentMessageCard(shell, "Final result " + id);
+            require(failedCard, "failed update uses the ordinary card renderer");
+            if (failedCard) {
+                failedCard->setCollapsed(true);
+                spin();
+                QApplication::sendEvent(editor, &key);
+                acknowledge();
+                require(pending() && !view->isCardContentVisible(answer), "collapsed failed content cannot be acknowledged");
+                failedCard->setCollapsed(false);
+                view->followLatest();
+                require(spinUntil([&] {
+                            return view->isCardContentVisible(answer);
+                        }),
+                        "failed content can be revealed again");
+            }
+            click(view->viewport(), position);
+        }
+        require(spinUntil([&] {
+                    return !pending();
+                }),
+                "deliberate input acknowledges failure without a final answer");
+        capture(command ? "failed-command-green" : "failure-green");
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "turn/completed",
+                                        {},
+                                        {{"threadId", "inspection-b"}, {"turn", Value::Object{{"id", id}, {"status", "failed"}}}}}));
+        spin();
+        require(!pending(), "duplicate failed completion does not recreate attention");
+    }
+    answer = finish("failed-with-final", "failed");
+    view->followLatest();
+    require(spinUntil([&] {
+                return pending() && view->isCardContentVisible(answer);
+            }),
+            "failure can also contain a final answer");
+    QApplication::sendEvent(editor, &key);
+    acknowledge();
+    require(spinUntil([&] {
+                return !pending();
+            }),
+            "composer typing acknowledges visible failed final content");
     qApp->setStyleSheet(originalStyle);
 }
 
