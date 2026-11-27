@@ -1723,6 +1723,22 @@ namespace codexui::codex::ui {
                     destination.push_back(
                         {node->id().canonical, name.empty() ? "Unnamed" : name, node, jsonFromValue(nodegraph::Value(state->fields))});
                 }
+                if (kind == nodegraph::NodeKind::Project && projects) {
+                    const auto* ids = valueMember(*projects, "ids");
+                    if (ids && ids->asArray()) {
+                        std::unordered_map<std::string, std::size_t> order;
+                        for (const auto& id : *ids->asArray()) {
+                            order.emplace(exactStringFromValue(&id), order.size());
+                        }
+                        const auto rank = [&](const ThreadGroup& group) {
+                            const auto found = order.find(group.id);
+                            return found == order.end() ? order.size() : found->second;
+                        };
+                        std::ranges::stable_sort(destination, [&](const auto& left, const auto& right) {
+                            return rank(left) < rank(right);
+                        });
+                    }
+                }
                 labelThreadGroups(destination);
             };
             groups(nodegraph::NodeKind::Project, result.projects);
@@ -1843,7 +1859,7 @@ namespace codexui::codex::ui {
                         const auto& fields = found->fields;
                         if (fields.contains("recencyAt") && fields["recencyAt"].is_number_integer())
                             row.recencyAt = fields["recencyAt"].get<std::int64_t>();
-                        row.order = fields.value("position", std::int64_t{0});
+                        row.order = std::distance(source.begin(), found);
                         for (const auto& root : fields.value("roots", nlohmann::json::array())) {
                             if (!row.details.empty())
                                 row.details += '\n';

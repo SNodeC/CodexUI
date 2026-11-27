@@ -1296,7 +1296,12 @@ export class BrowserFrontendSession {
             const page = this.page(action, parameters); if (!page.pending) { page.seen.clear(); this.readPage(page); }
         }
     }
-    groups(kind: "project" | "section") { return [...(kind === "project" ? this.model.projects : this.model.sections).values()]; }
+    groups(kind: "project" | "section") {
+        const groups = [...(kind === "project" ? this.model.projects : this.model.sections).values()];
+        const ids = kind === "project" ? this.catalogPages().find(page => page.action === "projects.list")?.ids ?? [] : [];
+        const order = new Map(ids.map((id, index) => [id, index]));
+        return groups.sort((left, right) => (order.get(left.id) ?? order.size) - (order.get(right.id) ?? order.size));
+    }
     catalogPages(): readonly BrowserPage[] { return [...this.pages.values()].filter(page => page.action !== "threads.list"); }
     refreshBrowser(): void {
         if (!this.providerReady()) return;

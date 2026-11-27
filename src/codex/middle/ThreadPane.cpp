@@ -522,9 +522,8 @@ public:
           } else if (event->type() == QEvent::MouseButtonRelease && mouse->button() == Qt::LeftButton && resizingProject_.has_value()) {
               resizingProject_.reset();
               handled = true;
-          } else if (event->type() == QEvent::MouseButtonDblClick && boundary.isValid()) {
-              handled = true;
           }
+          handled = handled || (event->type() == QEvent::MouseButtonDblClick && boundary.isValid());
           viewport()->setCursor(boundary.isValid() || resizingProject_.has_value() ? Qt::SizeVerCursor : Qt::ArrowCursor);
       } else if (event->type() == QEvent::ToolTip) {
           auto* help = static_cast<QHelpEvent*>(event);
@@ -1396,6 +1395,7 @@ void ThreadTreeWidget::positionProjectViews() {
             ProjectThreadView* body = found == projectViews_.end() ? nullptr : *found;
             if (!body) {
                 body = new ProjectThreadView(viewport());
+                body->setCursor(Qt::ArrowCursor);
                 const QSignalBlocker blocked(body);
                 body->setObjectName(QStringLiteral("projectThreadBody"));
                 body->setModel(model());

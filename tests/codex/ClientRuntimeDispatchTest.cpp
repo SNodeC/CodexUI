@@ -479,7 +479,7 @@ namespace codexui::codex {
                 return false;
 
             std::unordered_map<std::string, std::size_t> methods;
-            for (int count = 0; count != 9; ++count) {
+            for (int count = 0; count != 10; ++count) {
                 std::optional<nlohmann::json> request = bridge.receiveAppServer();
                 if (!request || !request->contains("id"))
                     return false;
@@ -522,6 +522,7 @@ namespace codexui::codex {
                                                                            {"threadSection/list", 1},
                                                                            {"model/list", 1},
                                                                            {"permissionProfile/list", 1},
+                                                                           {"mcpServerStatus/list", 1},
                                                                            {"account/usage/read", 1},
                                                                            {"config/read", 1}} &&
                    static_cast<bool>(findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
@@ -2019,19 +2020,131 @@ namespace codexui::codex {
             catalogs.payload = {{"cwd", Value("/tmp/runtime-dispatch")}};
             expect(sendAction(runtime.channels(), std::move(catalogs)), "catalog refresh enters the worker mailbox");
             std::unordered_map<std::string, std::size_t> methods;
-            for (int count = 0; count != 2; ++count) {
+            for (int count = 0; count != 3; ++count) {
                 request = bridge.receiveAppServer();
                 if (!request)
                     break;
                 ++methods[request->value("method", std::string{})];
-                expect(request->at("params").value("cwd", std::string{}) == "/tmp/runtime-dispatch",
-                       "catalog refresh preserves the newly authored payload");
+                if (request->value("method", "") == "mcpServerStatus/list") {
+                    expect(request->at("params") == nlohmann::json{{"detail", "full"}, {"limit", 100}},
+                           "MCP refresh uses its own protocol parameters");
+                } else {
+                    expect(request->at("params").value("cwd", std::string{}) == "/tmp/runtime-dispatch",
+                           "catalog refresh preserves the newly authored payload");
+                }
                 expect(bridge.reply(*request, {{"data", nlohmann::json::array()}}), "catalog response is delivered");
             }
-            expect(methods == std::unordered_map<std::string, std::size_t>{{"model/list", 1}, {"permissionProfile/list", 1}},
+            expect(methods == std::unordered_map<std::string, std::size_t>{{"model/list", 1}, {"permissionProfile/list", 1},
+                                                                         {"mcpServerStatus/list", 1}},
                    "catalog refresh emits one request for each concrete catalog");
             expect(!bridge.receiveAppServer(100ms), "catalog operations are not duplicated");
             runtime.drainNotifications();
+        }
+
+        void mcpCatalogUsesPaginatedAuthoritativeSnapshots(UnixBridge& bridge, RunningRuntime& runtime) {
+            const auto refresh = [&] {
+                expect(sendAction(runtime.channels(), RuntimeAction{RuntimeActionKind::RefreshCatalogs}),
+                       "MCP catalog refresh enters the existing worker");
+                std::optional<nlohmann::json> mcp;
+                for (int index = 0; index < 3; ++index) {
+                    const auto request = bridge.receiveAppServer();
+                    expect(request.has_value(), "catalog refresh is delivered");
+                    if (request) {
+                        if (request->value("method", "") == "mcpServerStatus/list") {
+                            mcp = request;
+                        } else {
+                            expect(bridge.reply(*request, {{"data", nlohmann::json::array()}}), "independent catalog completes");
+                        }
+                    }
+                }
+                return mcp;
+            };
+            const nlohmann::json first{{"name", "showcase-stdio"},
+                                       {"runtimeStatus", "connected"},
+                                       {"serverInfo", {{"name", "showcase"}, {"version", "test-version"}}},
+                                       {"serverCapabilities", {{"resources", {{"subscribe", true}}}}},
+                                       {"toolListMeta", {{"revision", 1}}},
+                                       {"tools", {{"dynamic.tool", {{"inputSchema", {{"type", "object"}}}}}}},
+                                       {"resources", nlohmann::json::array({{{"uri", "showcase://counter"}}})}};
+            auto request = refresh();
+            if (request) {
+                expect(bridge.reply(*request, {{"data", nlohmann::json::array({first})}, {"nextCursor", "mcp-page-2"}}),
+                       "first MCP inventory page arrives");
+            }
+            auto secondPage = bridge.receiveAppServer();
+            expect(secondPage && secondPage->value("method", "") == "mcpServerStatus/list" &&
+                       secondPage->at("params").value("cursor", "") == "mcp-page-2" &&
+                       secondPage->at("params").value("detail", "") == "full",
+                   "MCP inventory follows the server cursor without losing full detail");
+            if (secondPage) {
+                expect(bridge.reply(*secondPage,
+                                    {{"data", nlohmann::json::array({{{"name", "showcase-stdio"}, {"environmentId", "remote"}}})},
+                                     {"nextCursor", nullptr}}),
+                       "second MCP page completes");
+            }
+            NodeRef retained;
+            expect(waitUntil([&] {
+                       auto read = runtime.graph().tryRead();
+                       const auto catalog = read ? read->find({NodeKind::Catalog, "mcpServer"}) : NodeRef{};
+                       const bool complete = catalog && read->childCount(catalog) == 2;
+                       if (complete) {
+                           retained = read->childAt(catalog, 0);
+                       }
+                       return complete && read->state(retained)->status == NodeStatus::Connected;
+                   }),
+                   "servers with the same name in different environments retain distinct catalog identities");
+            ui::NodeGraphUiAdapter adapter(runtime.graph());
+            std::optional<ui::InspectorSnapshot> inspector;
+            expect(waitUntil([&] {
+                       inspector = adapter.inspector({}, ui::InspectorProjection::State);
+                       return inspector.has_value();
+                   }),
+                   "MCP inventory reaches the existing Inspector projection");
+            const auto state = inspector ? inspector->state.state.dump() : std::string{};
+            expect(state.find("test-version") != std::string::npos && state.find("subscribe") != std::string::npos &&
+                       state.find("dynamic.tool") != std::string::npos,
+                   "Inspector exposes received server identity, capabilities and live definitions");
+            request = refresh();
+            if (request) {
+                expect(bridge.reply(*request, {{"data", nlohmann::json::array({first})}, {"nextCursor", "old-page"}}),
+                       "refresh starts a new paginated inventory");
+            }
+            secondPage = bridge.receiveAppServer();
+            expect(secondPage && secondPage->at("params").value("cursor", "") == "old-page", "old continuation remains in flight");
+            expect(sendAction(runtime.channels(), RuntimeAction{RuntimeActionKind::RefreshCatalogs}),
+                   "new refresh supersedes the in-flight page");
+            for (int index = 0; index < 2; ++index) {
+                const auto independent = bridge.receiveAppServer();
+                expect(independent && independent->value("method", "") != "mcpServerStatus/list", "independent catalogs are not blocked");
+                if (independent) {
+                    expect(bridge.reply(*independent, {{"data", nlohmann::json::array()}}), "independent refresh completes");
+                }
+            }
+            if (secondPage) {
+                expect(bridge.reply(*secondPage, {{"data", nlohmann::json::array({{{"name", "obsolete-server"}}})}}),
+                       "obsolete page arrives after refresh invalidation");
+            }
+            request = bridge.receiveAppServer();
+            expect(request && request->value("method", "") == "mcpServerStatus/list" && !request->at("params").contains("cursor"),
+                   "superseding refresh starts at the first MCP page");
+            auto replacement = first;
+            replacement["tools"] = nlohmann::json::object();
+            replacement["runtimeStatus"] = "disconnected";
+            replacement["toolListMeta"]["revision"] = 2;
+            if (request) {
+                expect(bridge.reply(*request, {{"data", nlohmann::json::array({replacement})}, {"nextCursor", nullptr}}),
+                       "latest MCP snapshot removes the tool and other servers");
+            }
+            expect(waitUntil([&] {
+                       auto read = runtime.graph().tryRead();
+                       const auto catalog = read ? read->find({NodeKind::Catalog, "mcpServer"}) : NodeRef{};
+                       const auto server = retained && read ? read->state(retained) : nullptr;
+                       const auto* tools = server ? valueMember(server->fields, "tools") : nullptr;
+                       return catalog && read->childCount(catalog) == 1 && read->childAt(catalog, 0) == retained && server &&
+                              server->status == NodeStatus::Disconnected && tools &&
+                              tools->asObject() && tools->asObject()->empty();
+                   }),
+                   "latest inventory removes omitted definitions and preserves the surviving server identity");
         }
 
         void startupListsResolveLineageBeforePublishing(UnixBridge& bridge, RunningRuntime& runtime) {
@@ -2075,9 +2188,9 @@ namespace codexui::codex {
             }
             expect(waitUntil([&] {
                        auto read = runtime.graph().tryRead();
-                       const auto root = read->find({NodeKind::Thread, ids[0]});
-                       const auto child = read->find({NodeKind::Thread, ids[1]});
-                       const auto nested = read->find({NodeKind::Thread, ids[2]});
+                       const auto root = read ? read->find({NodeKind::Thread, ids[0]}) : NodeRef{};
+                       const auto child = read ? read->find({NodeKind::Thread, ids[1]}) : NodeRef{};
+                       const auto nested = read ? read->find({NodeKind::Thread, ids[2]}) : NodeRef{};
                        return root && child && nested &&
                               read->related(root, RelationKind::ForkChildThread) == std::vector<NodeRef>{child} &&
                               read->related(child, RelationKind::ForkChildThread) == std::vector<NodeRef>{nested};
@@ -2090,7 +2203,7 @@ namespace codexui::codex {
             expect(!bridge.receiveAppServer(80ms), "resolved lineage is reused instead of read again on refresh");
             {
                 auto read = runtime.graph().tryRead();
-                const auto root = read->find({NodeKind::Thread, ids[0]});
+                const auto root = read ? read->find({NodeKind::Thread, ids[0]}) : NodeRef{};
                 expect(root && read->relatedCount(root, RelationKind::ForkChildThread) == 1,
                        "a later null listing cannot flatten the known fork family");
             }
@@ -2120,7 +2233,8 @@ namespace codexui::codex {
             retryPage = bridge.receiveAppServer();
             {
                 auto read = runtime.graph().tryRead();
-                expect(!read->find({NodeKind::Thread, "startup-retry"}), "failed and superseded metadata cannot publish a temporary row");
+                expect(read && !read->find({NodeKind::Thread, "startup-retry"}),
+                       "failed and superseded metadata cannot publish a temporary row");
             }
             expect(retryPage && bridge.reply(*retryPage, {{"data", nlohmann::json::array({retryThread})}}),
                    "replacement list has its own discovery operation");
@@ -2128,7 +2242,7 @@ namespace codexui::codex {
             expect(freshRead && bridge.reply(*freshRead, {{"thread", retryThread}}), "replacement metadata completes successfully");
             expect(waitUntil([&] {
                        auto read = runtime.graph().tryRead();
-                       return static_cast<bool>(read->find({NodeKind::Thread, "startup-retry"}));
+                       return read && static_cast<bool>(read->find({NodeKind::Thread, "startup-retry"}));
                    }),
                    "successful retry publishes the thread");
         }
@@ -2711,7 +2825,7 @@ namespace codexui::codex {
                 findNode(runtime.graph(), {NodeKind::Interaction, ProtocolRequestId("generation-input").canonical()});
             expect(bridge.setProviderGeneration(2), "a new provider generation reaches the runtime");
             std::size_t refreshes = 0;
-            while (refreshes != 8) {
+            while (refreshes != 9) {
                 const std::optional<nlohmann::json> refresh = bridge.receiveAppServer();
                 if (!refresh)
                     break;
@@ -2728,7 +2842,7 @@ namespace codexui::codex {
                 if (bridge.reply(*refresh, std::move(result)))
                     ++refreshes;
             }
-            expect(refreshes == 8 && generationInput && waitUntil([&] {
+            expect(refreshes == 9 && generationInput && waitUntil([&] {
                        std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
                        if (!read)
                            return false;
@@ -3420,6 +3534,7 @@ int main(int argc, char** argv) {
         codexui::codex::invalidAuthoredReverseResponseNeverReachesWire(bridge, runtime);
         codexui::codex::remainingReverseRequestFamiliesRoundTripExactlyOnce(bridge, runtime);
         codexui::codex::unknownInboundIsRetainedWithoutCorruptingKnownState(bridge, runtime);
+        codexui::codex::mcpCatalogUsesPaginatedAuthoritativeSnapshots(bridge, runtime);
         codexui::codex::startupListsResolveLineageBeforePublishing(bridge, runtime);
         codexui::codex::threadOrganisationUsesBoundedAuthoritativeRequests(bridge, runtime);
         codexui::codex::workerRevalidatesCurrentAuthorityAndRetainsResponses(bridge, runtime);

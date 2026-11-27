@@ -11,6 +11,7 @@
 #include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -124,16 +125,49 @@ QComboBox* addDecisionEditor(QVBoxLayout* layout, const std::vector<PendingReque
     return decision;
 }
 
-void showValidationWarning(QWidget *parent, QString title, QString message) {
+void showValidationWarning(QDialog *parent, QString title, QString message) {
   QMessageBox warning(QMessageBox::Warning, std::move(title),
                       std::move(message), QMessageBox::Ok, parent);
   // Validation keeps the parent request dialog and its authored controls
   // alive. An explicit Qt-owned dialog also avoids platform-native teardown
   // reentrancy when the warning is dismissed from the nested modal loop.
   warning.setOption(QMessageBox::Option::DontUseNativeDialog, true);
+  QObject::connect(parent, &QDialog::finished, &warning, &QDialog::reject);
   warning.exec();
   parent->activateWindow();
 }
+
+struct McpFieldEditor {
+    std::string name;
+    bool numeric = false;
+    QCheckBox* included = nullptr;
+    QLineEdit* text = nullptr;
+    QCheckBox* boolean = nullptr;
+    QComboBox* choice = nullptr;
+    QListWidget* multiple = nullptr;
+    QWidget* control = nullptr;
+
+    nlohmann::json value() const {
+        nlohmann::json result;
+        if (text) {
+            result =
+                numeric ? nlohmann::json::parse(text->text().toStdString(), nullptr, false) : nlohmann::json(text->text().toStdString());
+        } else if (boolean) {
+            result = boolean->isChecked();
+        } else if (choice) {
+            result = choice->currentData().toString().toStdString();
+        } else if (multiple) {
+            result = nlohmann::json::array();
+            for (int index = 0; index < multiple->count(); ++index) {
+                const auto* item = multiple->item(index);
+                if (item->checkState() == Qt::Checked) {
+                    result.push_back(item->data(Qt::UserRole).toString().toStdString());
+                }
+            }
+        }
+        return result;
+    }
+};
 
 struct QuestionEditor {
   std::string id;
@@ -171,12 +205,22 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
     QComboBox* decision = nullptr;
     QPlainTextEdit* structuredContent = nullptr;
     std::vector<QuestionEditor> questions;
+    std::vector<McpFieldEditor> mcpFields;
     const nlohmann::json& raw = request.raw;
     const std::vector<PendingRequestAction> requestActions = PendingRequestPolicy::actions(request);
+    const bool acceptsMcpInput =
+        request.kind == PendingRequestKind::McpElicitation && std::ranges::any_of(requestActions, [](const auto& action) {
+            return action.value == "accept" && action.requiresInput;
+        });
+    const bool mcpForm = acceptsMcpInput && raw.value("mode", "") == "form";
     const nlohmann::json& initialInput = initialSubmission ? initialSubmission->input : nlohmann::json::object();
     if (request.method != "agentMessage") {
         contentLayout->addWidget(wrapped(QStringLiteral("Request details"), "title"));
-        addRequestDisclosure(contentLayout, PendingRequestPolicy::disclosure(request));
+        auto disclosure = PendingRequestPolicy::disclosure(request);
+        if (mcpForm) {
+            disclosure.erase("requestedSchema");
+        }
+        addRequestDisclosure(contentLayout, disclosure);
     }
 
     if (request.kind == PendingRequestKind::CommandApproval) {
@@ -272,10 +316,110 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
         }
     } else if (request.kind == PendingRequestKind::McpElicitation) {
         decision = addDecisionEditor(contentLayout, requestActions);
-        const bool acceptsContent = std::ranges::any_of(requestActions, [](const PendingRequestAction& action) {
-            return action.value == "accept" && action.requiresInput;
-        });
-        if (acceptsContent && raw.contains("requestedSchema")) {
+        if (mcpForm) {
+            const auto& schema = raw.at("requestedSchema");
+            auto properties = schema.value("properties", nlohmann::json::object());
+            const auto required = schema.value("required", nlohmann::json::array());
+            if (required.is_array()) {
+                for (const auto& name : required) {
+                    if (name.is_string() && !properties.contains(name.get<std::string>())) {
+                        properties[name.get<std::string>()] = nlohmann::json::object();
+                    }
+                }
+            }
+            for (auto property = properties.begin(); property != properties.end(); ++property) {
+                McpFieldEditor field;
+                field.name = property.key();
+                const auto definition = property.value().is_object() ? property.value() : nlohmann::json::object();
+                const auto type = stringValue(definition, "type");
+                const auto title = stringValue(definition, "title");
+                const bool mandatory = required.is_array() && std::ranges::find(required, nlohmann::json(field.name)) != required.end();
+                const auto initial =
+                    initialInput.contains(field.name) ? initialInput[field.name] : definition.value("default", nlohmann::json());
+                auto* label = wrapped(text(title.empty() ? field.name : title) + (mandatory ? QStringLiteral(" *") : QString{}), "title");
+                contentLayout->addWidget(label);
+                const auto description = stringValue(definition, "description");
+                if (!description.empty()) {
+                    contentLayout->addWidget(wrapped(text(description), "meta"));
+                }
+                QStringList limits;
+                if (type == "integer") {
+                    limits.push_back(QStringLiteral("Whole number"));
+                }
+                for (const auto& [key, caption] : std::array{std::pair{"minLength", "Minimum length"},
+                                                             std::pair{"maxLength", "Maximum length"},
+                                                             std::pair{"minimum", "Minimum"},
+                                                             std::pair{"maximum", "Maximum"},
+                                                             std::pair{"minItems", "Minimum selections"},
+                                                             std::pair{"maxItems", "Maximum selections"}}) {
+                    const auto value = definition.find(key);
+                    if (value != definition.end() && value->is_number()) {
+                        limits.push_back(QString::fromLatin1(caption) + ": " + text(value->dump()));
+                    }
+                }
+                if (!limits.empty()) {
+                    contentLayout->addWidget(wrapped(limits.join(QStringLiteral(" · ")), "meta"));
+                }
+                const auto optionsSchema = type == "array" ? definition.value("items", nlohmann::json::object()) : definition;
+                const auto options =
+                    optionsSchema.value("enum", optionsSchema.value("oneOf", optionsSchema.value("anyOf", nlohmann::json::array())));
+                if (!options.empty()) {
+                    if (type == "array") {
+                        field.multiple = new QListWidget;
+                        field.control = field.multiple;
+                    } else {
+                        field.choice = new UiStyle::ChevronComboBox;
+                        field.choice->addItem(QStringLiteral("Choose a value"), QString{});
+                        field.control = field.choice;
+                    }
+                    std::size_t optionIndex = 0;
+                    const auto enumNames = optionsSchema.value("enumNames", nlohmann::json::array());
+                    for (const auto& option : options) {
+                        const auto value = option.is_string() ? option.get<std::string>() : stringValue(option, "const");
+                        auto optionTitle = option.is_object() ? stringValue(option, "title") : std::string{};
+                        if (enumNames.is_array() && optionIndex < enumNames.size() && enumNames[optionIndex].is_string()) {
+                            optionTitle = enumNames[optionIndex].get<std::string>();
+                        }
+                        ++optionIndex;
+                        if (field.multiple) {
+                            auto* item = new QListWidgetItem(text(optionTitle.empty() ? value : optionTitle), field.multiple);
+                            item->setData(Qt::UserRole, text(value));
+                            item->setCheckState(initial.is_array() && std::ranges::find(initial, nlohmann::json(value)) != initial.end()
+                                                    ? Qt::Checked
+                                                    : Qt::Unchecked);
+                        } else {
+                            field.choice->addItem(text(optionTitle.empty() ? value : optionTitle), text(value));
+                        }
+                    }
+                    if (field.choice && initial.is_string()) {
+                        field.choice->setCurrentIndex(field.choice->findData(text(initial.get<std::string>())));
+                    }
+                } else if (type == "boolean") {
+                    field.boolean = new QCheckBox(QStringLiteral("Yes"));
+                    field.boolean->setChecked(initial.is_boolean() && initial.get<bool>());
+                    field.control = field.boolean;
+                } else {
+                    field.text = new QLineEdit;
+                    field.numeric = type == "number" || type == "integer";
+                    if (!initial.is_null()) {
+                        field.text->setText(initial.is_string() ? text(initial.get<std::string>()) : text(initial.dump()));
+                    }
+                    field.control = field.text;
+                }
+                field.control->setObjectName(QStringLiteral("mcpField:") + text(field.name));
+                field.control->setAccessibleName(label->text());
+                label->setBuddy(field.control);
+                if (!mandatory) {
+                    field.included = new QCheckBox(QStringLiteral("Include %1").arg(text(title.empty() ? field.name : title)));
+                    field.included->setChecked(!initial.is_null());
+                    field.control->setEnabled(field.included->isChecked());
+                    QObject::connect(field.included, &QCheckBox::toggled, field.control, &QWidget::setEnabled);
+                    contentLayout->addWidget(field.included);
+                }
+                contentLayout->addWidget(field.control);
+                mcpFields.push_back(std::move(field));
+            }
+        } else if (acceptsMcpInput && raw.contains("requestedSchema")) {
             auto* structuredLabel = wrapped(QStringLiteral("Structured response (JSON)"), "title");
             structuredContent = new UiStyle::DialogTextEdit;
             QObject::connect(structuredContent, &QPlainTextEdit::cursorPositionChanged, &dialog, [&dialog, structuredContent] {
@@ -364,18 +508,43 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                 answers[question.id] = {{"answers", std::move(values)}};
             }
             acceptedAnswers = std::move(answers);
-        } else if (request.kind == PendingRequestKind::McpElicitation && structuredContent &&
+        } else if (request.kind == PendingRequestKind::McpElicitation && raw.contains("requestedSchema") &&
                    decision->currentData().toString() == QStringLiteral("accept")) {
-            nlohmann::json content = nlohmann::json::parse(structuredContent->toPlainText().toStdString(), nullptr, false);
+            nlohmann::json content = nlohmann::json::object();
+            if (structuredContent) {
+                content = nlohmann::json::parse(structuredContent->toPlainText().toStdString(), nullptr, false);
+            } else {
+                for (const auto& field : mcpFields) {
+                    if (!field.included || field.included->isChecked()) {
+                        content[field.name] = field.value();
+                    }
+                }
+            }
             PendingRequestSubmission candidate = authoredSubmission();
             candidate.input = content;
-            if (content.is_discarded() || !PendingRequestPolicy::responseForSubmission(request.kind, raw, std::move(candidate))) {
-                scroll->ensureWidgetVisible(structuredContent);
-                structuredContent->setFocus();
-                showValidationWarning(&dialog,
-                                      QStringLiteral("Invalid response"),
-                                      QStringLiteral("The MCP response must be valid JSON and include every required field."));
-                structuredContent->setFocus();
+            std::string validationError;
+            if (content.is_discarded() ||
+                !PendingRequestPolicy::responseForSubmission(request.kind, raw, std::move(candidate), &validationError)) {
+                QWidget* invalid = structuredContent   ? static_cast<QWidget*>(structuredContent)
+                                   : mcpFields.empty() ? nullptr
+                                                       : mcpFields.front().control;
+                for (const auto& field : mcpFields) {
+                    if (validationError.starts_with((nlohmann::json::json_pointer{} / field.name).to_string() + ":")) {
+                        invalid = field.control;
+                    }
+                }
+                if (invalid) {
+                    scroll->ensureWidgetVisible(invalid);
+                    invalid->setFocus();
+                }
+                showValidationWarning(
+                    &dialog,
+                    QStringLiteral("Invalid response"),
+                    QStringLiteral(
+                        "The MCP response must satisfy the requested schema, including required fields, types and value limits."));
+                if (invalid) {
+                    invalid->setFocus();
+                }
                 return;
             }
             acceptedStructuredContent = std::move(content);
@@ -388,7 +557,15 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                                   QStringLiteral("Check connection, controller access and the original question, then try again."));
         }
     });
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, [&] {
+        if (request.kind == PendingRequestKind::McpElicitation && request.availability == PendingRequestAvailability::Actionable &&
+            std::ranges::any_of(requestActions, [](const auto& action) {
+                return action.value == "cancel";
+            })) {
+            submission = PendingRequestSubmission{"cancel"};
+        }
+        dialog.reject();
+    });
     root->addWidget(buttons);
     if (dialog.exec() == QDialog::Accepted) {
         submission = authoredSubmission();

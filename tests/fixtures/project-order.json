@@ -1,0 +1,76 @@
+{
+  "projects": [
+    {
+      "id": "project-a",
+      "name": "Zulu project",
+      "recencyAt": 900,
+      "createdAt": 1,
+      "updatedAt": 1,
+      "metadata": {},
+      "roots": []
+    },
+    {
+      "id": "project-b",
+      "name": "Alpha project",
+      "recencyAt": 100,
+      "createdAt": 2,
+      "updatedAt": 2,
+      "metadata": {},
+      "roots": []
+    },
+    {
+      "id": "project-c",
+      "name": "Middle project",
+      "recencyAt": 500,
+      "createdAt": 3,
+      "updatedAt": 3,
+      "metadata": {},
+      "roots": []
+    },
+    {
+      "id": "project-d",
+      "name": "Additional project",
+      "recencyAt": 700,
+      "createdAt": 4,
+      "updatedAt": 4,
+      "metadata": {},
+      "roots": []
+    }
+  ],
+  "steps": [
+    {
+      "label": "Initial server order differs from IDs, names, and recency",
+      "ids": [
+        "project-c",
+        "project-a",
+        "project-b"
+      ],
+      "cursor": "next"
+    },
+    {
+      "label": "Additional page appends server order",
+      "ids": [
+        "project-d"
+      ],
+      "append": true
+    },
+    {
+      "label": "A move refresh reorders known projects",
+      "ids": [
+        "project-b",
+        "project-d",
+        "project-c",
+        "project-a"
+      ]
+    },
+    {
+      "label": "Move to end uses the new returned order",
+      "ids": [
+        "project-d",
+        "project-c",
+        "project-a",
+        "project-b"
+      ]
+    }
+  ]
+}

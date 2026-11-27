@@ -1550,6 +1550,14 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
                  QStringLiteral("App-server protocol messages"));
   protocolChoice->setObjectName(QStringLiteral("protocolInfoChoice"));
   choicesLayout->addWidget(stateChoice);
+  auto* catalogRefresh = new QPushButton(QStringLiteral("Refresh catalogs"));
+  catalogRefresh->setObjectName(QStringLiteral("inspectorRefreshCatalogs"));
+  connect(catalogRefresh, &QPushButton::clicked, this, [this] {
+      if (refreshCatalogs) {
+          refreshCatalogs();
+      }
+  });
+  choicesLayout->addWidget(catalogRefresh);
   choicesLayout->addWidget(protocolChoice);
   auto *timingChoice =
       infoChoice(QStringLiteral("Timing"),
@@ -1631,6 +1639,10 @@ void InspectorPane::showTiming(nodegraph::NodeRef target) {
 
 void InspectorPane::setRefreshRequestedAction(std::function<void()> refresh) {
   refreshRequested = std::move(refresh);
+}
+
+void InspectorPane::setCatalogRefreshAction(std::function<void()> refresh) {
+    refreshCatalogs = std::move(refresh);
 }
 
 void InspectorPane::setRequestActions(RequestAction review,

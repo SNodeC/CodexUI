@@ -1,0 +1,22 @@
+{
+    "cases": [
+        {
+            "name": "ordered messages survive completion",
+            "messages": ["first", "second", "third"],
+            "count": 3,
+            "expected": ["first", "second", "third"]
+        },
+        {
+            "name": "empty messages retain their place",
+            "messages": ["started", "", "finished"],
+            "count": 3,
+            "expected": ["started", "", "finished"]
+        },
+        {
+            "name": "progress history stays bounded",
+            "messages": ["tick"],
+            "count": 4100,
+            "expectedCount": 4096
+        }
+    ]
+}

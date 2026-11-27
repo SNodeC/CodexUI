@@ -1,3 +1,6 @@
+import Ajv from "ajv/dist/2020.js";
+import AjvDraft7 from "ajv";
+import type {ValidateFunction} from "ajv";
 import type {PendingRequestPresentation} from "../presentation/PresentationModel.js";
 import {isObject, jsonEqual} from "../presentation/PresentationProtocol.js";
 
@@ -379,10 +382,20 @@ function privilegedMcpApproval(raw: unknown): boolean {
     return isObject(raw) && raw.mode === "form" && mcpMessageOnly(raw);
 }
 
+function mcpFormValidator(raw: Record<string, unknown>): ValidateFunction | undefined {
+    let result: ValidateFunction | undefined;
+    try {
+        const schema = raw.requestedSchema;
+        if (isObject(schema) && new TextEncoder().encode(JSON.stringify(schema)).length <= 16384) {
+            const Validator = typeof schema.$schema === "string" && schema.$schema.includes("draft-07") ? AjvDraft7 : Ajv;
+            result = new Validator({strict: false, validateFormats: false, ownProperties: true}).compile(schema);
+        }
+    } catch { /* Invalid or unsupported schemas cannot produce acceptance. */ }
+    return result;
+}
+
 function validMcpContent(raw: Record<string, unknown>, content: unknown): boolean {
-    const schema = raw.requestedSchema;
-    return isObject(content) && isObject(schema) && (schema.required === undefined
-        || (Array.isArray(schema.required) && schema.required.every(key => typeof key === "string" && Object.hasOwn(content, key))));
+    return isObject(content) && mcpFormValidator(raw)?.(content) === true;
 }
 
 function mcpPersistence(raw: unknown, mode: "session" | "always"): boolean {
@@ -429,7 +442,7 @@ const disclosureFields: Readonly<Record<string, readonly [readonly string[], rea
         "startedAtMs", "threadId", "turnId"], ["availableDecisions"]],
     "file-change-approval": [["grantRoot", "itemId", "reason", "startedAtMs", "threadId", "turnId"], []],
     "user-input": [["autoResolutionMs", "isBlocking", "itemId", "threadId", "turnId"], ["questions"]],
-    "mcp-elicitation": [["serverName", "threadId", "turnId", "message", "mode", "requestedSchema", "elicitationId", "url"],
+    "mcp-elicitation": [["serverName", "threadId", "turnId", "environmentId", "message", "mode", "requestedSchema", "elicitationId", "url"],
         ["_meta", "meta"]],
     "permissions-approval": [["cwd", "environmentId", "itemId", "permissions", "reason", "startedAtMs", "threadId", "turnId"], []],
     "dynamic-tool-call": [["callId", "namespace", "threadId", "tool", "turnId"], ["arguments"]],
@@ -542,11 +555,12 @@ function approvalContextComplete(request: PendingRequestPresentation): boolean {
     if (request.kind === "user-input") return true;
     if (request.kind === "mcp-elicitation") {
         if (!nonEmptyString(raw, "serverName") || !nonEmptyString(raw, "threadId") || !nonEmptyString(raw, "message")
-            || !validMcpApprovalMetadata(raw))
+            || !validMcpApprovalMetadata(raw)
+            || (raw.environmentId !== undefined && raw.environmentId !== null && typeof raw.environmentId !== "string"))
             return false;
         if (raw.mode === "url") return nonEmptyString(raw, "elicitationId") && nonEmptyString(raw, "url");
         if (raw.mode === "openai/form") return Object.hasOwn(raw, "requestedSchema");
-        return raw.mode === "form" && isObject(raw.requestedSchema);
+        return raw.mode === "form" && mcpFormValidator(raw) !== undefined;
     }
     if (request.kind === "permissions-approval") return validPermissionProfile(raw.permissions);
     if (request.kind === "legacy-patch-approval")

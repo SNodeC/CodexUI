@@ -784,13 +784,21 @@ std::string catalogEntityId(const Value::Object &fields) {
 void appendDirectCatalogEntries(std::vector<CatalogEntitySeed> &entries,
                                 const Value::Array *values, NodeKind kind,
                                 std::string_view scope = {}) {
-  if (!values)
-    return;
-  entries.reserve(entries.size() + values->size());
-  for (const Value &value : *values) {
-    if (const Value::Object *object = value.asObject())
-      entries.push_back({kind, object, std::string(scope)});
-  }
+    if (values) {
+        entries.reserve(entries.size() + values->size());
+        for (const Value& value : *values) {
+            if (const Value::Object* object = value.asObject()) {
+                std::string entityScope(scope);
+                if (kind == NodeKind::McpServer) {
+                    const auto environment = scalarTextFromValue(valueMember(*object, "environmentId"));
+                    if (!environment.empty()) {
+                        entityScope = scopedCanonical(scope, environment);
+                    }
+                }
+                entries.push_back({kind, object, std::move(entityScope)});
+            }
+        }
+    }
 }
 
 // Catalog envelopes retain cursors/errors on their Catalog node. Concrete
@@ -909,7 +917,7 @@ bool applyNaturalCatalogSnapshot(NodeGraph::WriteAccess &write,
       owner += seed.scope;
     }
     NodeState state;
-    state.status = nodeStatusFromValue(valueMember(*seed.fields, "status"));
+    state.status = nodeStatusFromValue(valueMember(*seed.fields, seed.kind == NodeKind::McpServer ? "runtimeStatus" : "status"));
     state.fields = *seed.fields;
     state.fields.insert_or_assign("protocolId", Value(protocolId));
     state.fields.insert_or_assign("catalog", Value(std::string(catalogId)));
@@ -3185,8 +3193,14 @@ void ProtocolUpdater::applyGraphUpdate(
     return;
 
   NodeRef addressed = item ? item : (turn ? turn : thread);
-  if (addressed)
-    mergeObject(write, addressed, message.payload);
+  if (item && method == "item/mcpToolCall/progress") {
+      const auto* progress = arrayMember(write.state(item)->fields, "progress");
+      if (!progress || progress->size() < MaximumIndexedTextParts) {
+          appendArrayValue(write, item, "progress", Value(exactStringFromValue(valueMember(message.payload, "message"))));
+      }
+  } else if (addressed) {
+      mergeObject(write, addressed, message.payload);
+  }
 }
 
 void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,

@@ -49,6 +49,7 @@ public:
   void showTiming(nodegraph::NodeRef target = {});
   void clearTimingTarget() { timingTarget.reset(); }
   void setRefreshRequestedAction(std::function<void()> refresh);
+  void setCatalogRefreshAction(std::function<void()> refresh);
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
   void refresh(const ui::InspectorSnapshot &snapshot,
@@ -94,6 +95,7 @@ private:
   RequestAction rejectRequest;
   std::function<void()> hideAction;
   std::function<void()> refreshRequested;
+  std::function<void()> refreshCatalogs;
 
   QTabWidget *inspectorTabs = nullptr;
   QStackedWidget *infoStack = nullptr;

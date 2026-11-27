@@ -2057,6 +2057,9 @@ sdk.on##OperationName([&](codex::generated::server_notifications::OperationName:
                   current.loaded = true;
               }
               publishBrowserPage(key, current);
+              if (outcome.ok && current.method == "mcpServerStatus/list" && !current.cursor.empty()) {
+                  queueBrowserPage(key, false);
+              }
               // Preserve the existing one initial rollout-repair pass, never one per
               // project/section. The timer is the existing fast-list-before-repair
               // seam.
@@ -2098,12 +2101,15 @@ sdk.on##OperationName([&](codex::generated::server_notifications::OperationName:
           completed(std::move(outcome), std::move(ready));
       } else if (!lineageId.empty()) {
           dispatch.template operator()<ThreadRead>();
-      } else if (page.method == "project/list")
+      } else if (page.method == "project/list") {
           dispatch.template operator()<ProjectList>();
-      else if (page.method == "threadSection/list")
-        dispatch.template operator()<ThreadSectionList>();
-      else
-        dispatch.template operator()<ThreadList>();
+      } else if (page.method == "threadSection/list") {
+          dispatch.template operator()<ThreadSectionList>();
+      } else if (page.method == "mcpServerStatus/list") {
+          dispatch.template operator()<McpServerStatusList>();
+      } else {
+          dispatch.template operator()<ThreadList>();
+      }
     }
   };
 
@@ -2187,6 +2193,7 @@ sdk.on##OperationName([&](codex::generated::server_notifications::OperationName:
     refreshThreadGroups();
     requestModelList(nlohmann::json::object());
     requestPermissionProfiles(nlohmann::json::object());
+    requestBrowserPage("mcpServerStatus/list", {{"detail", "full"}}, true);
     requestAccountUsage();
     dispatchRequest<codex::generated::client_requests::ConfigRead>(sdk, {{"includeLayers", false}}, workerLogic, {}, [](RequestOutcome) {
     });
@@ -3413,7 +3420,8 @@ sdk.on##OperationName([&](codex::generated::server_notifications::OperationName:
                 // not crawl unopened groups after a mutation.
                 std::vector<std::string> keys;
                 for (const auto& [key, page] : browserPages) {
-                    if (!page.unsupported) {
+                    if (!page.unsupported && (page.method == "thread/list" || page.method == "project/list" ||
+                                              page.method == "threadSection/list")) {
                         keys.push_back(key);
                     }
                 }
@@ -3684,6 +3692,7 @@ sdk.on##OperationName([&](codex::generated::server_notifications::OperationName:
       nlohmann::json parameters = jsonObject(std::move(action.payload));
       requestModelList(parameters);
       requestPermissionProfiles(std::move(parameters));
+      requestBrowserPage("mcpServerStatus/list", {{"detail", "full"}}, true);
       return;
     }
     }
