@@ -2401,12 +2401,14 @@ namespace codexui::codex {
                     const QRect bodyOriginal = body->geometry();
                     const QRect lowerBodyOriginal = lowerBody->geometry();
                     const int widgetCount = pane.findChildren<QWidget*>().size();
-                    const auto pointer = [&](QEvent::Type type, QPoint global, Qt::MouseButton button, Qt::MouseButtons buttons) {
-                        const QPoint local = tree->viewport()->mapFromGlobal(global);
-                        QMouseEvent event(type, QPointF(local), QPointF(local), QPointF(global), button, buttons, Qt::NoModifier);
-                        QApplication::sendEvent(tree->viewport(), &event);
-                        QApplication::processEvents();
-                    };
+                    const auto pointer =
+                        [&](QEvent::Type type, QPoint global, Qt::MouseButton button, Qt::MouseButtons buttons, QWidget* target = nullptr) {
+                            auto* viewport = target ? target : tree->viewport();
+                            const QPoint local = viewport->mapFromGlobal(global);
+                            QMouseEvent event(type, QPointF(local), QPointF(local), QPointF(global), button, buttons, Qt::NoModifier);
+                            QApplication::sendEvent(viewport, &event);
+                            QApplication::processEvents();
+                        };
                     const auto capture = [&](const QString& state) {
                         const auto path = qEnvironmentVariable("CODEXUI_RESIZE_SCREENSHOT_DIR");
                         if (!path.isEmpty()) {
@@ -2421,6 +2423,12 @@ namespace codexui::codex {
                     passed &=
                         require(tree->viewport()->cursor().shape() == Qt::SizeVerCursor, "project gap offers a vertical resize cursor");
                     capture("hover");
+                    auto* rowViewport = lowerBody->viewport();
+                    const QPoint rowPoint = lowerBody->visualRect(tree->indexFromItem(current)).center();
+                    pointer(QEvent::MouseMove, rowViewport->mapToGlobal(rowPoint), Qt::NoButton, Qt::NoButton, rowViewport);
+                    passed &= require(lowerBody->indexAt(rowPoint) == tree->indexFromItem(current) &&
+                                          rowViewport->cursor().shape() == Qt::ArrowCursor,
+                                      "moving directly from a resize gap to a thread row restores the arrow cursor");
                     pointer(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
                     capture("pressed");
                     qint64 slowestMicros = 0;
