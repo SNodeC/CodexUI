@@ -1,0 +1,45 @@
+# Native metadata records the exact dependency selection frozen in the wave.
+if(DEFINED ENV{DEPENDENCIES_JSON})
+    set(dependencies "$ENV{DEPENDENCIES_JSON}")
+    string(JSON count LENGTH "${dependencies}")
+    if(NOT count EQUAL 2)
+        message(FATAL_ERROR "Expected two resolved dependencies")
+    endif()
+    if(CPACK_GENERATOR STREQUAL "DEB")
+        string(JSON suffix GET "$ENV{TARGET_JSON}" codename)
+        set(suffix "~${suffix}")
+        set(variable CPACK_DEBIAN_PACKAGE_DEPENDS)
+    else()
+        string(JSON suffix GET "$ENV{TARGET_JSON}" disttag)
+        set(suffix ".${suffix}")
+        set(variable CPACK_RPM_PACKAGE_REQUIRES)
+    endif()
+    foreach(index RANGE 0 1)
+        string(JSON package GET "${dependencies}" ${index} package)
+        string(JSON version GET "${dependencies}" ${index} version)
+        string(JSON revision GET "${dependencies}" ${index} revision)
+        if(CPACK_GENERATOR STREQUAL "DEB")
+            set(bound " (= ${version}-${revision}${suffix})")
+        else()
+            set(bound " = ${version}-${revision}${suffix}")
+        endif()
+        if(package STREQUAL "aisuite")
+            string(REPLACE "aisuite" "aisuite${bound}" ${variable}
+                           "${${variable}}"
+            )
+        elseif(package STREQUAL "snodec")
+            foreach(name
+                    snodec-net-un-stream-legacy snodec-net-in-stream-legacy
+                    snodec-net-in6-stream-legacy
+            )
+                string(APPEND ${variable} ", ${name}${bound}")
+            endforeach()
+        else()
+            message(FATAL_ERROR "Unexpected resolved dependency: ${package}")
+        endif()
+    endforeach()
+endif()
+file(MAKE_DIRECTORY "${CPACK_OUTPUT_FILE_PREFIX}")
+file(WRITE "${CPACK_OUTPUT_FILE_PREFIX}/codexui.packages"
+     "${CPACK_PACKAGE_NAME}\n"
+)

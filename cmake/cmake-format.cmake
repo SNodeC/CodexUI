@@ -48,6 +48,7 @@ if(CMAKE_FORMAT)
         ${CMAKE_SOURCE_DIR}/src/CMakeLists.txt
         ${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt
         ${CMAKE_SOURCE_DIR}/cmake/*.cmake
+        ${CMAKE_SOURCE_DIR}/ci/*.cmake
         ${CMAKE_SOURCE_DIR}/cmake/*.cmake.in
     )
     list(APPEND CMAKELISTS_TXT_FILES ${CMAKE_SOURCE_DIR}/CMakeLists.txt

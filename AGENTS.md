@@ -155,7 +155,7 @@ Before accepting a change:
 - The accepted remediation must converge on one authoritative visible-card renderer
   and must materially reduce production Qt code.
 
-The copied CMake formatting modules adapt discovery to `src/`, `tests/`, root and browser CMake files, excluding build, checkout, third-party and generated directories. Formatting stays explicit through `format`, `format-check-cxx` and `format-check-cmake`; ordinary compilation never rewrites sources. `src/codex/main.cpp` and `tests/codex/ShellIntegrationTest.cpp` retain include-order formatting exclusions because SNode.C declares `emit()` before Qt defines the `emit` macro.
+The copied CMake formatting modules adapt discovery to `src/`, `tests/`, root, browser and repository-owned `ci/` CMake files, excluding build, checkout, third-party and generated directories. Formatting stays explicit through `format`, `format-check-cxx` and `format-check-cmake`; ordinary compilation never rewrites sources. `src/codex/main.cpp` and `tests/codex/ShellIntegrationTest.cpp` retain include-order formatting exclusions because SNode.C declares `emit()` before Qt defines the `emit` macro.
 
 ## Manager web interface
 
