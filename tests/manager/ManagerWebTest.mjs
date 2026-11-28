@@ -163,12 +163,15 @@ try {
         await page.click('#new');
         await until(() => page.evaluate(`document.querySelector('#editor').open && document.querySelectorAll('#fields input').length > 10`));
         await page.fill('[name="Identity.name"]', 'Browser-created profile');
+        const description = 'First paragraph\n\nSecond paragraph';
+        await page.fill('textarea[name="Identity.description"]', description);
         await page.fill('[name="Identity.codexHome"]', join(root, 'home-one'));
         await page.fill('[name="Identity.probeExecutable"]', join(root, 'probe'));
         await page.click('#profile-form button[type=submit]');
         await until(() => page.evaluate(`!document.querySelector('#editor').open && document.querySelector('.card h2')?.textContent === 'Browser-created profile'`));
         let state = await snapshot();
         assert.equal(state.profiles.length, 1);
+        assert.equal(state.profiles[0].description, description);
         const id = state.profiles[0].id;
         await page.click('.card .footer button:last-child');
         await until(() => page.evaluate(`document.querySelector('#details').open && document.querySelector('#detail-name').textContent === 'Browser-created profile'`));

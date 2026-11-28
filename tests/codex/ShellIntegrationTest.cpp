@@ -7202,20 +7202,22 @@ void openRequestTracksAuthorityAndRetirement(Configuration &configuration) {
   QTimer::singleShot(0, [&] {
     auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
     auto *buttons = dialog ? dialog->findChild<QDialogButtonBox *>() : nullptr;
-    auto *answer = dialog ? dialog->findChild<QLineEdit *>() : nullptr;
+    auto* answer = dialog ? dialog->findChild<QPlainTextEdit*>() : nullptr;
     require(buttons && answer, "review exposes native submission and answer controls");
     if (!buttons || !answer) {
       if (dialog) dialog->reject();
       return;
     }
-    answer->setText(QStringLiteral("Preserve α🙂"));
+    answer->setPlainText(QStringLiteral("Preserve α🙂\n\nSecond paragraph"));
     auto *submit = buttons->button(QDialogButtonBox::Ok);
     static_cast<void>(worker.bridgeState("test-controller", "observer", "other", 1, "ready"));
     require(spinUntil([&] { return !submit->isEnabled(); }),
             "open review disables submission when control is lost");
     static_cast<void>(worker.bridgeState("test-controller", "controller", "test-controller", 1, "ready"));
-    require(spinUntil([&] { return submit->isEnabled(); }) &&
-                answer->text() == QStringLiteral("Preserve α🙂"),
+    require(spinUntil([&] {
+                return submit->isEnabled();
+            }) &&
+                answer->toPlainText() == QStringLiteral("Preserve α🙂\n\nSecond paragraph"),
             "restored authority preserves the exact editor and authored answer");
     static_cast<void>(worker.resolveInteraction(request.primary));
     require(spinUntil([&] { return !dialog->isVisible() && !submit->isEnabled(); }),
@@ -7466,12 +7468,12 @@ void mcpReviewClosesWithItsAuthoritativeRequest(Configuration& configuration) {
         });
         QTimer::singleShot(0, [&] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
-            opened = dialog && dialog->findChild<QLineEdit*>("mcpField:label");
+            opened = dialog && dialog->findChild<QPlainTextEdit*>("mcpField:label");
             if (disconnect) {
                 static_cast<void>(worker.transportEvent("disconnected", "connection closed"));
             } else if (validating && opened) {
-                auto* editor = dialog->findChild<QLineEdit*>("mcpField:label");
-                editor->setText("too long");
+                auto* editor = dialog->findChild<QPlainTextEdit*>("mcpField:label");
+                editor->setPlainText("too long");
                 QTimer::singleShot(0, [&] {
                     auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
                     warningShown = warning && warning->windowTitle() == "Invalid response";
@@ -7550,7 +7552,7 @@ void mcpReviewLabelFormPreservesProtocolActions() {
                 auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
                 require(dialog, "review.label opens CodexUI's actual MCP dialog");
                 if (dialog) {
-                    auto* editor = dialog->findChild<QLineEdit*>("mcpField:label");
+                    auto* editor = dialog->findChild<QPlainTextEdit*>("mcpField:label");
                     auto* decision = dialog->findChild<QComboBox*>();
                     auto* buttons = dialog->findChild<QDialogButtonBox*>();
                     require(editor && decision && buttons && decision->findData("accept") >= 0,
@@ -7618,7 +7620,7 @@ void mcpPrimitiveFormCollectsTypedValues() {
                 auto* ratio = dialog->findChild<QLineEdit*>("mcpField:ratio");
                 auto* priority = dialog->findChild<QComboBox*>("mcpField:priority");
                 auto* tags = dialog->findChild<QListWidget*>("mcpField:tags");
-                auto* comment = dialog->findChild<QLineEdit*>("mcpField:comment");
+                auto* comment = dialog->findChild<QPlainTextEdit*>("mcpField:comment");
                 auto* buttons = dialog->findChild<QDialogButtonBox*>();
                 require(active && count && ratio && priority && tags && comment && buttons,
                         "each primitive uses a labelled editable control");
@@ -7710,13 +7712,15 @@ void pendingRequestValidationRetainsInput() {
     auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
     if (!dialog)
       return;
-    const auto edits = dialog->findChildren<QLineEdit *>();
+    const auto edits = dialog->findChildren<QPlainTextEdit*>();
     auto *buttons = dialog->findChild<QDialogButtonBox *>();
     auto *submitButton =
         buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
-    if (edits.size() != 2 || !submitButton)
-      return;
-    edits.front()->setText(QStringLiteral("Retained first answer"));
+    if (edits.size() != 2 || !submitButton) {
+        dialog->reject();
+        return;
+    }
+    edits.front()->setPlainText(QStringLiteral("Retained first answer\n\nSecond paragraph"));
     QTimer::singleShot(0, [&] {
       auto *warning =
           qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
@@ -7727,9 +7731,8 @@ void pendingRequestValidationRetainsInput() {
     });
     submitButton->click();
     questionDialogRetained =
-        dialog->isVisible() &&
-        edits.front()->text() == QStringLiteral("Retained first answer");
-    edits.back()->setText(QStringLiteral("Second answer"));
+        dialog->isVisible() && edits.front()->toPlainText() == QStringLiteral("Retained first answer\n\nSecond paragraph");
+    edits.back()->setPlainText(QStringLiteral("Second answer"));
     submitButton->click();
   });
   const PendingRequestDescriptor questions = dialogRequest(
@@ -7745,10 +7748,8 @@ void pendingRequestValidationRetainsInput() {
       PendingRequestDialog::present(questions, nullptr);
   const bool answersPreserved =
       questionResponse && questionResponse->choice == "submit" &&
-      questionResponse->input["first"]["answers"] ==
-          nlohmann::json::array({"Retained first answer"}) &&
-      questionResponse->input["second"]["answers"] ==
-          nlohmann::json::array({"Second answer"});
+      questionResponse->input["first"]["answers"] == nlohmann::json::array({"Retained first answer\n\nSecond paragraph"}) &&
+      questionResponse->input["second"]["answers"] == nlohmann::json::array({"Second answer"});
 
   bool invalidSchemaWarning = false;
   bool mcpDialogRetained = false;
@@ -7756,14 +7757,14 @@ void pendingRequestValidationRetainsInput() {
       auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
       require(dialog, "MCP form opens the actual request dialog");
       if (dialog) {
-          auto* editor = dialog->findChild<QLineEdit*>("mcpField:label");
+          auto* editor = dialog->findChild<QPlainTextEdit*>("mcpField:label");
           auto* accepted = dialog->findChild<QCheckBox*>("mcpField:accepted");
           auto* buttons = dialog->findChild<QDialogButtonBox*>();
           require(editor && accepted && buttons, "MCP schema produces editable string and boolean controls");
           if (editor && accepted && buttons) {
               dialog->activateWindow();
               editor->setFocus();
-              editor->setText(QString(129, 'x'));
+              editor->setPlainText(QString(129, 'x'));
               QTimer::singleShot(0, [&] {
                   auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
                   invalidSchemaWarning = warning && warning->windowTitle() == "Invalid response";
@@ -7773,8 +7774,8 @@ void pendingRequestValidationRetainsInput() {
               });
               buttons->button(QDialogButtonBox::Ok)->click();
               spin();
-              mcpDialogRetained = dialog->isVisible() && editor->text() == QString(129, 'x') && editor->hasFocus();
-              editor->setText("review");
+              mcpDialogRetained = dialog->isVisible() && editor->toPlainText() == QString(129, 'x') && editor->hasFocus();
+              editor->setPlainText("review\n\nSecond paragraph");
               accepted->setChecked(true);
               buttons->button(QDialogButtonBox::Ok)->click();
           } else {
@@ -7797,7 +7798,7 @@ void pendingRequestValidationRetainsInput() {
   require(incompleteWarning && questionDialogRetained && answersPreserved,
           "incomplete questions retain the modal and prior authored answers");
   require(invalidSchemaWarning && mcpDialogRetained && mcpResponse && mcpResponse->choice == "accept" &&
-              mcpResponse->input == nlohmann::json({{"label", "review"}, {"accepted", true}}),
+              mcpResponse->input == nlohmann::json({{"label", "review\n\nSecond paragraph"}, {"accepted", true}}),
           "invalid MCP values remain editable until schema-valid authored input exists");
 }
 

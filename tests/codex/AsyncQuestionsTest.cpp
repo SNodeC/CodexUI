@@ -30,8 +30,10 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollBar>
@@ -506,6 +508,32 @@ namespace {
             return attempts == 2;
         });
         check(result.has_value() && held && attempts == 2, "failed admission retains the form and selected answer for deliberate retry");
+        const QString prose = QStringLiteral("First paragraph\n\nSecond paragraph");
+        const auto singleQuestion = nlohmann::json::array({entry["questions"][0]});
+        request.raw = PendingRequestPolicy::asyncQuestionRequest(singleQuestion);
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (dialog) {
+                auto* editor = dialog->findChild<QPlainTextEdit*>();
+                auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                check(editor && buttons, "Other answer has a multiline editor");
+                if (editor && buttons) {
+                    editor->setFocus();
+                    editor->insertPlainText(QStringLiteral("First paragraph"));
+                    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, QStringLiteral("\r"));
+                    QApplication::sendEvent(editor, &enter);
+                    QApplication::sendEvent(editor, &enter);
+                    editor->insertPlainText(QStringLiteral("Second paragraph"));
+                    check(dialog->isVisible(), "Enter inserts a paragraph while the question remains open");
+                    buttons->button(QDialogButtonBox::Ok)->click();
+                } else {
+                    dialog->reject();
+                }
+            }
+        });
+        const auto multiline = PendingRequestDialog::present(request, nullptr);
+        check(multiline && multiline->input["0"]["answers"] == nlohmann::json::array({prose.toStdString()}),
+              "typing Other answer replaces the default choice and preserves paragraphs");
     }
 
     void shell(Configuration& configuration, const nlohmann::json& questions, const std::string& fixtureAnswer, int scenario) {
@@ -752,18 +780,20 @@ int main(int argc, char** argv) {
     std::ifstream input(CODEXUI_ASYNC_QUESTIONS_FIXTURE);
     nlohmann::json fixture;
     input >> fixture;
-    corpus(fixture);
-    replyCorpus(fixture);
-    history(fixture);
-    persistedReplies(fixture);
-    duplicateReplyHistory(fixture);
-    visibility(fixture);
     form(fixture["cases"][0]);
     form(fixture["cases"][2]);
-    for (int scenario = 0; scenario < 4; ++scenario) {
-        shell(*configuration, fixture["cases"][0]["questions"], fixture["cases"][0]["wire"], scenario);
+    if (!qEnvironmentVariableIsSet("CODEXUI_TEST_ASYNC_FORMS_ONLY")) {
+        corpus(fixture);
+        replyCorpus(fixture);
+        history(fixture);
+        persistedReplies(fixture);
+        duplicateReplyHistory(fixture);
+        visibility(fixture);
+        for (int scenario = 0; scenario < 4; ++scenario) {
+            shell(*configuration, fixture["cases"][0]["questions"], fixture["cases"][0]["wire"], scenario);
+        }
+        shell(*configuration, fixture["cases"][2]["questions"], fixture["cases"][2]["wire"], 0);
     }
-    shell(*configuration, fixture["cases"][2]["questions"], fixture["cases"][2]["wire"], 0);
     std::cout << failures << " async question failure(s)\n";
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

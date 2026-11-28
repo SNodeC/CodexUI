@@ -1760,6 +1760,7 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
         {request.kind === "user-input" && questions.map((question, questionIndex) => {
             const id = typeof question.id === "string" ? question.id : "";
             const options = Array.isArray(question.options) ? question.options as Record<string, unknown>[] : [];
+            const AnswerEditor = question.isSecret ? "input" : "textarea";
             const showOther = options.length === 0 || question.isOther === true;
             return <fieldset className="request-question" key={id || questionIndex}><legend>{String((question.header ?? question.question ?? id) || `Question ${questionIndex + 1}`)}</legend>
                 {question.header !== undefined && question.question !== undefined && <span>{String(question.question)}</span>}
@@ -1769,13 +1770,14 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
                         else { toggleAnswer(id, label, event.target.checked); }
                     }} />
                     <span>{label}{typeof choice.description === "string" && choice.description !== "" && <small>{choice.description}</small>}</span></label>; })}
-                {showOther && <input aria-label={`${question.question ?? id}: Other answer`} type={question.isSecret ? "password" : "text"} value={otherAnswers[id] ?? ""}
+                {showOther && <AnswerEditor aria-label={`${question.question ?? id}: Other answer`} {...(question.isSecret ? {type: "password"} : {rows: 3})} value={otherAnswers[id] ?? ""}
                     placeholder={options.length > 0 ? "Other answer" : "Type your answer"}
                     onChange={event => { setOtherAnswers(current => ({...current, [id]: event.target.value})); if (onSubmit) { setAnswers(current => ({...current, [id]: []})); } }} />}
             </fieldset>;
         })}
         {form && properties.map(([name, schema]) => {
             const mandatory = required.includes(name);
+            const StringEditor = schema.type === "string" && !(typeof schema.format === "string" && schema.format) ? "textarea" : "input";
             const included = Object.hasOwn(formValues, name);
             const optionsSchema = schema.type === "array" && isObject(schema.items) ? schema.items : schema;
             const options = [optionsSchema.enum, optionsSchema.oneOf, optionsSchema.anyOf].find(Array.isArray) ?? [];
@@ -1803,8 +1805,9 @@ function RequestCard({request, session, onSubmit}: {request: PendingRequestPrese
                     {choices.map(choice => <option key={choice.value} value={choice.value}>{choice.title}</option>)}
                 </select> : schema.type === "boolean" ? <input id={fieldId} name={name} aria-label={title} type="checkbox"
                     disabled={!included} checked={formValues[name] === true} onChange={event => update(event.target.checked)} />
-                    : <input id={fieldId} name={name} aria-label={title} type={schema.type === "number" || schema.type === "integer" ? "number" : "text"}
-                        disabled={!included} step={schema.type === "integer" ? "1" : "any"}
+                    : <StringEditor id={fieldId} name={name} aria-label={title}
+                        {...(StringEditor === "textarea" ? {rows: 3} : {type: schema.type === "number" || schema.type === "integer" ? "number" : "text",
+                            step: schema.type === "integer" ? "1" : "any"})} disabled={!included}
                         value={formValues[name] === undefined ? "" : String(formValues[name])}
                         onChange={event => update(schema.type === "number" || schema.type === "integer" ? event.target.value === "" ? "" : Number(event.target.value) : event.target.value)} />}
             </div>;

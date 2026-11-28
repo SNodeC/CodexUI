@@ -198,10 +198,10 @@ async function edit(configuration, revision) {
                 const transports = state.transports[group === 'Provider' ? 'provider' : group === 'Additional browser listener' ? 'browser' : 'frontend'];
                 choices = transports.map((x) => [x, x]);
             }
-            const input = document.createElement(choices ? 'select' : key === 'environment' ? 'textarea' : 'input');
+            const input = document.createElement(choices ? 'select' : key === 'environment' || key === 'description' ? 'textarea' : 'input');
             if (choices) {
                 for (const [id, text] of choices) { input.add(new Option(text, id)); }
-            } else if (key !== 'environment') { input.type = typeof value === 'boolean' ? 'checkbox' : typeof value === 'number' ? 'number' : 'text'; }
+            } else if (input instanceof HTMLInputElement) { input.type = typeof value === 'boolean' ? 'checkbox' : typeof value === 'number' ? 'number' : 'text'; }
             input.name = `${group}.${key}`;
             input.value = key === 'environment' ? Object.entries(value).map(([k, v]) => `${k}=${v}`).join('\n') : value;
             input.checked = value === true;

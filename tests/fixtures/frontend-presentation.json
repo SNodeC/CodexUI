@@ -1863,6 +1863,7 @@
             "count": 3,
             "ratio": 0.5,
             "priority": "normal",
+            "comment": "First paragraph\n\nSecond paragraph",
             "tags": [
               "web"
             ]
@@ -1875,6 +1876,7 @@
                 "count": 3,
                 "ratio": 0.5,
                 "priority": "normal",
+                "comment": "First paragraph\n\nSecond paragraph",
                 "tags": [
                   "web"
                 ]

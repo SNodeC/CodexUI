@@ -80,13 +80,13 @@ export async function qualifyAsyncQuestions(devTools) {
         const pendingAnswerLabel=pendingReply?.querySelector('.card-phase')?.textContent==='Answer';
         const answerSurface=!!pendingReply&&matches(getComputedStyle(pendingReply).backgroundColor,'--steering-message-surface');
         answer().focus();answer().click();await waitFor(()=>dialog()?.open);
-        const other=dialog().querySelector('input[placeholder="Other answer"]');
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(other,'My own answer');other.dispatchEvent(new Event('input',{bubbles:true}));await frame();
+        const other=dialog().querySelector('textarea[placeholder="Other answer"]');
+        setter.call(other,'My own answer\\n\\nSecond paragraph');other.dispatchEvent(new Event('input',{bubbles:true}));await frame();
         const freeTextClearsChoice=[...dialog().querySelectorAll('input[type="radio"]')].every(input=>!input.checked);
         notify('item/completed',{threadId:metadata.id,turnId:'question-turn',item:{...item,questions:[{title:'Changed question'}]}});await frame();
         const beforeStale=submits().length;
         [...dialog().querySelectorAll('button')].find(button=>button.textContent==='Submit').click();await frame();
-        const staleRetained=dialog()?.open&&other.value==='My own answer'&&submits().length===beforeStale&&!!dialog().querySelector('[role="alert"]');
+        const staleRetained=dialog()?.open&&other.value==='My own answer\\n\\nSecond paragraph'&&submits().length===beforeStale&&!!dialog().querySelector('[role="alert"]');
         cancel();await frame();
         notify('item/completed',{threadId:metadata.id,turnId:'question-turn',item:{...item,phase:'final_answer',questions:[]}});await frame();
         const finalRestored=card.querySelector('.card-phase')?.textContent==='final answer'&&!answer()

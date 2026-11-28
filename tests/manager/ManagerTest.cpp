@@ -27,6 +27,7 @@
 #include <QLineEdit>
 #include <QLocalSocket>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QProcess>
 #include <QPushButton>
@@ -1219,12 +1220,19 @@ private slots:
         });
         QVERIFY(name != fields.cend());
         (*name)->setText("After & independent");
+        const auto descriptions = editor.findChildren<QPlainTextEdit*>();
+        const auto description = std::find_if(descriptions.cbegin(), descriptions.cend(), [](const auto* field) {
+            return field->accessibleName() == "Description";
+        });
+        QVERIFY(description != descriptions.cend());
+        (*description)->setPlainText("First paragraph\n\nSecond paragraph");
         (*frontend)->setCurrentIndex((*frontend)->findData("websocket-ipv6"));
         auto* buttons = editor.findChild<QDialogButtonBox*>();
         QVERIFY(buttons);
         QTest::mouseClick(buttons->button(QDialogButtonBox::Save), Qt::LeftButton);
         QCOMPARE(editor.result(), int(QDialog::Accepted));
         QCOMPARE(editor.profile().name, QString("After & independent"));
+        QCOMPARE(editor.profile().description, QString("First paragraph\n\nSecond paragraph"));
         QCOMPARE(editor.profile().frontend.transport, QString("websocket-ipv6"));
     }
     void editorLocalPathSelection() {
