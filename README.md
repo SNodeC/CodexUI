@@ -175,6 +175,21 @@ For bug reports, include the revision, Qt version, connection type and the small
 
 The documented native platform is Linux with Qt 6.6+ Widgets. Browser frontend scope, coverage and limitations are defined by the [browser contract](docs/web/contract-1.0.md#banner); they are not a promise of native/browser feature parity. Review the [known limitations](docs/guides/interaction-guide.md#known-limitations) before relying on approval handling or native performance.
 
+### Declared package targets
+
+CodexUI requires Qt6 Widgets/Network ≥ 6.6, KF6Sonnet ≥ 6.13, and libgit2 from standard repositories.
+
+The package declaration excludes Debian riscv64. Thirteen functional tests failed under emulation. [CodexUI issue #121](https://github.com/SNodeC/CodexUI/issues/121)
+
+| Distribution | Releases | Architectures | Repository evidence |
+| --- | --- | --- | --- |
+| Debian | trixie, forky, sid | amd64, arm64, armhf | [Qt6](https://packages.debian.org/trixie/qt6-base-dev), [Sonnet](https://packages.debian.org/trixie/libkf6sonnet-dev), [libgit2](https://packages.debian.org/trixie/libgit2-dev) |
+| Ubuntu | resolute | amd64, arm64 | [Qt6](https://packages.ubuntu.com/resolute/qt6-base-dev), [Sonnet](https://packages.ubuntu.com/resolute/libkf6sonnet-dev), [libgit2](https://packages.ubuntu.com/resolute/libgit2-dev) |
+| Fedora | 43, 44 | x86_64, aarch64 | [Qt6](https://packages.fedoraproject.org/pkgs/qt6-qtbase/qt6-qtbase-devel/), [Sonnet](https://packages.fedoraproject.org/pkgs/kf6-sonnet/kf6-sonnet-devel/), [libgit2](https://packages.fedoraproject.org/pkgs/libgit2/libgit2-devel/) |
+| Raspberry Pi OS | trixie | arm64 | Debian trixie base repositories |
+
+Ubuntu noble and Raspberry Pi OS bookworm have older Qt/KF versions; Rocky's standard repositories lack the required KF6Sonnet.
+
 ## Releases
 
 No GitHub release or shared binary-package distribution is published yet; the documented installation routes build from source. Future release notes belong on the [releases page](https://github.com/SNodeC/CodexUI/releases). The [web release process](docs/web/release-process.md#banner) describes development qualification, not a downloadable product release.
