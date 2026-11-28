@@ -2,6 +2,7 @@
   "schema": 2,
   "package": "codexui",
   "title": "CodexUI",
+  "releases": ">=0.3.0",
   "depends_on": [
     {
       "package": "aisuite",
