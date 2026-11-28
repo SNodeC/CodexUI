@@ -3,11 +3,16 @@
 #ifndef CODEXUI_CODEX_NODEGRAPH_WORKERLOGIC_H
 #define CODEXUI_CODEX_NODEGRAPH_WORKERLOGIC_H
 
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/ThreadChannels.h"
+#include "codex/nodegraph/Value.h"
 
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>

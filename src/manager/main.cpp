@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
+#include "manager/ManagerController.h"
 #include "manager/ManagerWebServer.h"
 #include "manager/ManagerWindow.h"
 
@@ -11,6 +12,17 @@
 #include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QtCore/qobjectdefs.h>
+#include <cstddef>
+#include <qbytearray.h>
+#include <qguiapplication.h>
+#include <qjsonobject.h>
+#include <qjsonvalue.h>
+#include <qobject.h>
+#include <qpixmap.h>
+#include <qstring.h>
+#include <qtmetamacros.h>
+#include <string>
 
 int main(int argc, char* argv[]) {
     codexui::manager::prepareManagerSignals();

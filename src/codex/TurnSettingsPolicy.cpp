@@ -3,7 +3,10 @@
 #include "codex/TurnSettingsPolicy.h"
 
 #include <algorithm>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
 #include <ranges>
+#include <utility>
 
 namespace codexui::codex {
 namespace {

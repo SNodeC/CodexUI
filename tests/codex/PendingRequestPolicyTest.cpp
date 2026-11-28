@@ -3,9 +3,16 @@
 #include "codex/PendingRequestPolicy.h"
 
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>

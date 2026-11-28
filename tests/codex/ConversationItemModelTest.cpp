@@ -1,20 +1,37 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationItemModel.h"
+
+#include "codex/UiStatus.h"
 #include "codex/middle/ConversationHeightIndex.h"
+#include "codex/middle/MiddleTypes.h"
 #include "codex/nodegraph/NodeGraph.h"
 
 #include <QCoreApplication>
 #include <QPersistentModelIndex>
-
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
-#include <cmath>
+#include <cstddef>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
-#include <numeric>
+#include <memory>
 #include <optional>
+#include <qdebug.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace codexui::codex::middle {

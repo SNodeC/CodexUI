@@ -8,8 +8,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <initializer_list>
 #include <limits>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <ranges>
 #include <unordered_set>
 #include <utility>
 

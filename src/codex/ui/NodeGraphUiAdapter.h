@@ -3,18 +3,22 @@
 #ifndef CODEXUI_CODEX_UI_NODEGRAPHUIADAPTER_H
 #define CODEXUI_CODEX_UI_NODEGRAPHUIADAPTER_H
 
+#include "codex/PendingRequestPolicy.h"
 #include "codex/TurnSettingsPolicy.h"
 #include "codex/middle/MiddleTypes.h"
-#include "codex/nodegraph/Messages.h"
 #include "codex/nodegraph/NodeGraph.h"
 #include "codex/ui/UiViewState.h"
 
-#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace codexui::nodegraph {
+    struct GraphChanged;
+}
 
 namespace codexui::codex::ui {
 

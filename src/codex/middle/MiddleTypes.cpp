@@ -2,8 +2,8 @@
 
 #include "codex/middle/MiddleTypes.h"
 
-#include <cstdint>
 #include <string_view>
+#include <utility>
 
 namespace codexui::codex::middle {
 namespace {

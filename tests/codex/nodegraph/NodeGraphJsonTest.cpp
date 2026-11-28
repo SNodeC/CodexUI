@@ -2,14 +2,24 @@
 
 #include "codex/NodeGraphJson.h"
 
+#include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/Value.h"
+
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/detail/value_t.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace {
 

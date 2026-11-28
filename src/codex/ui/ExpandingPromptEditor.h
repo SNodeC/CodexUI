@@ -6,14 +6,11 @@
 #include <QPlainTextEdit>
 #include <memory>
 #include <optional>
+#include <qlist.h>
+#include <qtmetamacros.h>
 
-class QContextMenuEvent;
-class QFocusEvent;
-class QEvent;
-class QInputMethodEvent;
-class QKeyEvent;
-class QResizeEvent;
-class QWheelEvent;
+class QMimeData;
+class QWidget;
 
 namespace Sonnet {
     class Speller;

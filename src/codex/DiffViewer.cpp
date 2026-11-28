@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/DiffViewer.h"
+
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
@@ -16,7 +17,6 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
-#include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -27,7 +27,6 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
-#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -36,11 +35,31 @@
 #include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTimer>
-#include <QVBoxLayout>
-
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
+#include <cstring>
 #include <functional>
+#include <qbrush.h>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qfont.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qnumeric.h>
+#include <qoverload.h>
+#include <qrect.h>
+#include <qsizepolicy.h>
+#include <qstyle.h>
+#include <qswap.h>
+#include <qtextcursor.h>
+#include <qtextdocument.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <ranges>
 #include <utility>
+#include <vector>
 
 namespace codexui::codex {
 namespace {

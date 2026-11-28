@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationCards.h"
+
 #include "codex/NodeGraphJson.h"
+#include "codex/UiStatus.h"
+#include "codex/middle/ConversationItemModel.h"
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/ConversationView.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/Value.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
-#include <QBuffer>
 #include <QClipboard>
 #include <QColor>
 #include <QCoreApplication>
@@ -23,12 +30,10 @@
 #include <QLabel>
 #include <QLayout>
 #include <QMimeData>
-#include <QMouseEvent>
 #include <QPersistentModelIndex>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProxyStyle>
-#include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -37,7 +42,6 @@
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
-#include <QTextDocumentWriter>
 #include <QTextLayout>
 #include <QThread>
 #include <QTimer>
@@ -45,18 +49,68 @@
 #include <QToolTip>
 #include <QUrl>
 #include <QVariantAnimation>
-#include <QWheelEvent>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
+#include <nlohmann/detail/iterators/iter_impl.hpp>
+#include <nlohmann/detail/iterators/iteration_proxy.hpp>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
+#include <qabstractanimation.h>
+#include <qabstractitemview.h>
+#include <qabstractslider.h>
+#include <qbrush.h>
+#include <qbytearray.h>
+#include <qbytearrayview.h>
+#include <qchar.h>
+#include <qcontainerfwd.h>
+#include <qcoreevent.h>
+#include <qeventloop.h>
+#include <qlist.h>
+#include <qmargins.h>
+#include <qmath.h>
+#include <qmetatype.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qnumeric.h>
+#include <qobject.h>
+#include <qobjectdefs.h>
+#include <qpalette.h>
+#include <qpixmap.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qregion.h>
+#include <qrgb.h>
+#include <qsize.h>
+#include <qstring.h>
+#include <qstyle.h>
+#include <qswap.h>
+#include <qtenvironmentvariables.h>
+#include <qtextcursor.h>
+#include <qtextedit.h>
+#include <qtextformat.h>
+#include <qtmetamacros.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <ranges>
+#include <span>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace codexui::codex::middle {

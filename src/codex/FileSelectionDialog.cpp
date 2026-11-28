@@ -17,8 +17,32 @@
 #include <QScrollArea>
 #include <QStyle>
 #include <QTreeWidget>
-#include <QVBoxLayout>
 #include <algorithm>
+#include <iterator>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <qabstractitemview.h>
+#include <qaction.h>
+#include <qchar.h>
+#include <qdialog.h>
+#include <qflags.h>
+#include <qicon.h>
+#include <qmetatype.h>
+#include <qmimetype.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobjectdefs.h>
+#include <qstringalgorithms.h>
+#include <qswap.h>
+#include <qtypeinfo.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <utility>
+#include <vector>
+
+class QPoint;
+
 namespace codexui::codex {
     FileSelectionDialog::FileSelectionDialog(
         QString initialDirectory, QWidget* parent, QString targetTitle, QStringList choices, Filesystem filesystem, bool files)

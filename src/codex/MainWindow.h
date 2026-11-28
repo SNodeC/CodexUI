@@ -5,6 +5,8 @@
 
 #include <QMainWindow>
 
+class QWidget;
+
 namespace codexui::codex {
 
 class FrontendSession;

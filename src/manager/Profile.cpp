@@ -17,6 +17,16 @@
 #include <QUrlQuery>
 #include <QUuid>
 #include <algorithm>
+#include <initializer_list>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qfiledevice.h>
+#include <qiodevice.h>
+#include <qjsonparseerror.h>
+#include <qjsonvalue.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qtypeinfo.h>
 
 namespace codexui::manager {
     namespace {

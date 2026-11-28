@@ -2,6 +2,8 @@
 
 #include "codex/AttachmentInput.h"
 
+#include "codex/AttachmentDraft.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -13,6 +15,17 @@
 #include <QTemporaryFile>
 #include <QUrl>
 #include <algorithm>
+#include <qbytearray.h>
+#include <qfiledevice.h>
+#include <qiodevice.h>
+#include <qlist.h>
+#include <qmimetype.h>
+#include <qminmax.h>
+#include <qswap.h>
+#include <qvariant.h>
+#include <ranges>
+#include <string>
+#include <utility>
 
 namespace codexui::codex {
 

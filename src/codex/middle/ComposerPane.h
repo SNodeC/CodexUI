@@ -10,7 +10,12 @@
 #include <QThreadPool>
 #include <QWidget>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <qstring.h>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 

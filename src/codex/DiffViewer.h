@@ -6,10 +6,12 @@
 #include "codex/GitDiffProvider.h"
 
 #include <QPointer>
-#include <QStringList>
 #include <QWidget>
-
 #include <optional>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qstring.h>
+#include <type_traits>
 
 class QComboBox;
 class QFileSystemWatcher;
@@ -18,8 +20,6 @@ class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
-class QHideEvent;
-class QShowEvent;
 class QTimer;
 
 namespace codexui::codex {

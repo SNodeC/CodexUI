@@ -5,10 +5,13 @@
 
 #include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/ProtocolCatalog.h"
+#include "codex/nodegraph/Value.h"
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <variant>
 
 namespace codexui::nodegraph {

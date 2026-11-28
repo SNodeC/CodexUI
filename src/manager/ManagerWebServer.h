@@ -4,6 +4,8 @@
 #include "codex/nodegraph/SpscQueue.h"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <thread>
 

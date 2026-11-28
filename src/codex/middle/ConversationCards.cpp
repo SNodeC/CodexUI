@@ -2,13 +2,12 @@
 
 #include "codex/middle/ConversationCards.h"
 
+#include "codex/UiStatus.h"
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/nodegraph/PromptText.h"
-
-#include "codex/UiStatus.h"
+#include "codex/ui/TimingPresentation.h"
 #include "codex/ui/UiStyle.h"
 
-#include "codex/ui/TimingPresentation.h"
 #include <QAbstractTextDocumentLayout>
 #include <QColor>
 #include <QCoreApplication>
@@ -17,28 +16,24 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLinearGradient>
-#include <QMouseEvent>
-#include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPixmapCache>
 #include <QPointer>
 #include <QPushButton>
-#include <QResizeEvent>
 #include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionFocusRect>
-#include <QStyleOptionToolButton>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextCursor>
@@ -48,19 +43,72 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
-#include <QGridLayout>
-#include <QVBoxLayout>
 #include <QVariant>
-#include <QWheelEvent>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <limits>
+#include <nlohmann/json.hpp>
+#include <qabstractscrollarea.h>
+#include <qassert.h>
+#include <qbytearrayview.h>
+#include <qchar.h>
+#include <qcontainerfwd.h>
+#include <qcoreevent.h>
+#include <qflags.h>
+#include <qfont.h>
+#include <qfontmetrics.h>
+#include <qimage.h>
+#include <qlatin1stringview.h>
+#include <qlayoutitem.h>
+#include <qlist.h>
+#include <qmargins.h>
+#include <qmath.h>
+#include <qmetatype.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qnumeric.h>
+#include <qobjectdefs.h>
+#include <qpen.h>
+#include <qplaintextedit.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qsizepolicy.h>
+#include <qstringfwd.h>
+#include <qstringview.h>
+#include <qswap.h>
+#include <qtextformat.h>
+#include <qtextoption.h>
+#include <qwidget.h>
+#include <ranges>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
+
+// IWYU counts rejected Qt QFlags overload candidates in dependent arithmetic expressions.
+// IWYU pragma: no_include <qabstractitemmodel.h>
+// IWYU pragma: no_include <qabstractspinbox.h>
+// IWYU pragma: no_include <qarraydata.h>
+// IWYU pragma: no_include <qcborvalue.h>
+// IWYU pragma: no_include <qdirlisting.h>
+// IWYU pragma: no_include <qeventloop.h>
+// IWYU pragma: no_include <qfiledevice.h>
+// IWYU pragma: no_include <qimageiohandler.h>
+// IWYU pragma: no_include <qinputdevice.h>
+// IWYU pragma: no_include <qiodevice.h>
+// IWYU pragma: no_include <qlocale.h>
+// IWYU pragma: no_include <qpointingdevice.h>
+// IWYU pragma: no_include <qrawfont.h>
+// IWYU pragma: no_include <qregularexpression.h>
+// IWYU pragma: no_include <qstringconverter_base.h>
+// IWYU pragma: no_include <qtextstream.h>
 
 namespace codexui::codex::middle {
 namespace {

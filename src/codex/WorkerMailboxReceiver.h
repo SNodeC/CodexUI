@@ -4,14 +4,16 @@
 #define CODEXUI_CODEX_WORKERMAILBOXRECEIVER_H
 
 #include "codex/nodegraph/Messages.h"
-#include "codex/nodegraph/ThreadChannels.h"
 
 #include <core/eventreceiver/ReadEventReceiver.h>
-
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
+
+namespace codexui::nodegraph {
+    class ThreadChannels;
+}
 
 namespace codexui::codex {
 

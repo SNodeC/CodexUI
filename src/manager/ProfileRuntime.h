@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #pragma once
 #include "manager/DeletionPlan.h"
+#include "manager/LaunchPlan.h"
+#include "manager/Profile.h"
 
 #include <QDeadlineTimer>
 #include <QObject>
@@ -9,6 +11,14 @@
 #include <QTimer>
 #include <functional>
 #include <optional>
+#include <qbytearray.h>
+#include <qcontainerfwd.h>
+#include <qjsonobject.h>
+#include <qmap.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtmetamacros.h>
+#include <qtypes.h>
 
 namespace codexui::manager {
     class ProfileRuntime final : public QObject {

@@ -3,20 +3,24 @@
 #ifndef CODEXUI_CODEX_MIDDLE_CONVERSATIONPRESENTATION_H
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONPRESENTATION_H
 
-#include "codex/middle/MiddleTypes.h"
+#include "codex/UiStatus.h"
 
-#include <QRect>
 #include <QString>
 #include <QStringView>
 #include <QTextBrowser>
 #include <QToolButton>
-
+#include <qtmetamacros.h>
+#include <qtypes.h>
 #include <string_view>
 
-class QFocusEvent;
-class QEvent;
+namespace codexui::codex::middle {
+    struct AgentActivityData;
+    struct FileChangesData;
+    struct GenericActivityData;
+    struct PlanData;
+}
+
 class QLabel;
-class QPaintEvent;
 class QTextDocument;
 class QTimer;
 class QVariantAnimation;

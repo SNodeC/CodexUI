@@ -15,9 +15,20 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidgetAction>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
 #include <array>
 #include <initializer_list>
+#include <qlayoutitem.h>
+#include <qmargins.h>
+#include <qnamespace.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qsizepolicy.h>
+#include <qstring.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <string>
 #include <utility>
 #include <vector>
 

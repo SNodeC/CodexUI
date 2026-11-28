@@ -8,13 +8,17 @@
 #include "codex/nodegraph/ThreadChannels.h"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <span>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class QSocketNotifier;
@@ -24,7 +28,6 @@ class QObject;
 namespace codexui::codex {
 
 class Configuration;
-class FrontendSessionTestPeer;
 
 // Owns the one SNode.C worker and the two typed eventfd-backed mailboxes. This
 // object lives on Qt-main; only the worker passed to runClientRuntime writes

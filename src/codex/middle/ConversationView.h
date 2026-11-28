@@ -6,24 +6,35 @@
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationHeightIndex.h"
 #include "codex/middle/ConversationItemModel.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/NodeGraph.h"
 
 #include <QAbstractItemView>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <qitemselectionmodel.h>
+#include <qnamespace.h>
+#include <qrect.h>
+#include <qstring.h>
+#include <qtmetamacros.h>
+#include <qtypes.h>
+#include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+class QModelIndex;
+class QPoint;
+class QWidget;
+
 class QLabel;
-class QEvent;
-class QMouseEvent;
-class QPaintEvent;
 class QPushButton;
-class QResizeEvent;
 class QTimer;
 class QVariantAnimation;
-class QWheelEvent;
 
 namespace codexui::codex::middle {
 

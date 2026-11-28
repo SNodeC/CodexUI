@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/InspectorPane.h"
-#include "codex/ui/TimingPresentation.h"
 
 #include "codex/DiffViewer.h"
 #include "codex/PendingRequestPolicy.h"
 #include "codex/UiStatus.h"
 #include "codex/middle/ConversationHeightIndex.h"
 #include "codex/middle/ConversationPresentation.h"
-#include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/ui/TimingPresentation.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractScrollArea>
@@ -16,6 +15,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QEvent>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QLabel>
@@ -25,7 +25,6 @@
 #include <QPushButton>
 #include <QScopedValueRollback>
 #include <QScrollBar>
-#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStyleOptionButton>
 #include <QTabBar>
@@ -33,20 +32,57 @@
 #include <QTextBlock>
 #include <QTimer>
 #include <QToolButton>
-#include <QGridLayout>
-#include <QVBoxLayout>
-#include <QWheelEvent>
 
 #if QT_CONFIG(accessibility)
 #include <QAccessibleWidget>
 #endif
 
+#include "codex/ProtocolTiming.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/Value.h"
+
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <climits>
+#include <initializer_list>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <qaccessible.h>
+#include <qaccessible_base.h>
+#include <qchar.h>
+#include <qcontainerfwd.h>
+#include <qflags.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qsizepolicy.h>
+#include <qstringtokenizer.h>
+#include <qstringview.h>
+#include <qstyle.h>
+#include <qswap.h>
+#include <qtconfigmacros.h>
+#include <qtextcursor.h>
+#include <qtextdocument.h>
+#include <qtgui-config.h>
+#include <qtversionchecks.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
 #include <ranges>
+#include <span>
+#include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace codexui::codex::middle {

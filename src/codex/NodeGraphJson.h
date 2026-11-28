@@ -6,7 +6,7 @@
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/Value.h"
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 namespace codexui::codex {
 

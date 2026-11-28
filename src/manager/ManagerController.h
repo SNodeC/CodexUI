@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #pragma once
-#include "manager/ProfileRuntime.h"
+
+#include "manager/Profile.h"
+
+#include <qcontainerfwd.h>
+#include <qjsonobject.h>
+#include <qlist.h>
+#include <qmap.h>
+#include <qobject.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtmetamacros.h>
+
+namespace codexui::manager {
+    class ProfileRuntime;
+}
 
 namespace codexui::manager {
     // Qt-thread authority shared by the window and the HTTP adapter.

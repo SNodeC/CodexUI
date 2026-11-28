@@ -14,6 +14,8 @@ For profile-manager planning or implementation, follow [Codex Profile Manager re
 
 The canonical source checkout is `/home/voc/projects/snodec/CodexUI/`. Persistent manual/Qt Creator builds belong in `/home/voc/projects/snodec/build/qtcreator/CodexUI/<configuration>/`; persistent agent builds belong in `/home/voc/projects/snodec/build/codex/CodexUI/<configuration>/`. Never place a build tree inside the repository. Temporary builds belong in `/tmp/codex/build/CodexUI/<task>/`, and other temporary task artifacts belong in `/tmp/codex/artifacts/CodexUI/<task>/`. Additional checkouts require explicit approval and use `/tmp/codex/checkouts/CodexUI/<task>/` unless another location is explicitly approved. Do not reuse the historical `build-qualification` directory for new work. The repository copies the shared formatting and analysis baseline; use explicit formatting targets or format only files changed by the current task.
 
+The GCC Release IWYU verification build is `/home/voc/projects/snodec/build/codex/CodexUI/iwyu-gcc-release/`; it matches Qt Creator Release with installed AISuite/SNode.C packages, `CHECK_INCLUDES=ON`, `BUILD_TESTING=ON`, and `CODEXUI_INSTALL_WEB=ON`. The `all` target includes test compilation; test execution remains a separate action.
+
 ## Native packages
 
 `VERSION` supplies the CMake project version. The existing install rules cover both desktop applications, icons, desktop files and manager web assets. Native-only validation uses `CODEXUI_INSTALL_WEB=OFF`; the separate CodexWebUI production artifact retains its local build and release commands. GUI checks use Xvfb with `QT_QPA_PLATFORM=offscreen`. CPack DEB/RPM configuration is under `cmake/`; never install verification packages on this host.

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "ProtocolTiming.h"
+
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -7,8 +8,12 @@
 #include <type_traits>
 
 namespace codexui::codex {
-namespace {
+    namespace {
 #include "ProtocolTimingPaths.inc"
+
+#include <cstddef>
+#include <functional>
+#include <utility>
 constexpr std::size_t MaximumTimes = 128;
 constexpr std::size_t MaximumVisits = 2048;
 

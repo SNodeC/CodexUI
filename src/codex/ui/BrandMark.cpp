@@ -10,10 +10,21 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
-#include <QResizeEvent>
 #include <QSizePolicy>
-
 #include <algorithm>
+#include <initializer_list>
+#include <qbrush.h>
+#include <qcolor.h>
+#include <qfont.h>
+#include <qnamespace.h>
+#include <qpen.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qstring.h>
+#include <qtpreprocessorsupport.h>
+#include <qtypes.h>
+#include <qvariant.h>
 
 namespace codexui {
 namespace {

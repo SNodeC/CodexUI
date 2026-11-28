@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <initializer_list>
 #include <ranges>
+#include <span>
 #include <unordered_set>
 #include <utility>
 

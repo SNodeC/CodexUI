@@ -3,12 +3,13 @@
 #include "codex/middle/MiddleRegionWidget.h"
 
 #include "codex/middle/ComposerPane.h"
-#include "codex/middle/ConversationCards.h"
+#include "codex/middle/ConversationItemModel.h"
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/UiStyle.h"
+#include "codex/ui/UiViewState.h"
 
 #include <QAbstractScrollArea>
 #include <QApplication>
@@ -33,11 +34,36 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
-#include <QVBoxLayout>
-#include <QWheelEvent>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
 #include <array>
+#include <initializer_list>
+#include <qabstractitemmodel.h>
+#include <qabstractitemview.h>
+#include <qbrush.h>
+#include <qbytearrayview.h>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qfont.h>
+#include <qfontmetrics.h>
+#include <qicon.h>
+#include <qkeysequence.h>
+#include <qlayout.h>
+#include <qlist.h>
+#include <qmargins.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qpen.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qsizepolicy.h>
+#include <qstyle.h>
+#include <qswap.h>
+#include <qvariant.h>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace codexui::codex::middle {
 namespace {

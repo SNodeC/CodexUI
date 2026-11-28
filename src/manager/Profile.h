@@ -3,8 +3,12 @@
 
 #include <QJsonObject>
 #include <QMap>
-#include <QStringList>
-#include <QVector>
+#include <QtCore/qcompare.h>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <utility>
 
 namespace codexui::manager {
 

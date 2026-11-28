@@ -3,11 +3,17 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLEREGIONWIDGET_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLEREGIONWIDGET_H
 
-#include "codex/ui/UiViewState.h"
 #include <QPointer>
 #include <QWidget>
-
 #include <functional>
+#include <qstring.h>
+#include <type_traits>
+
+class QObject;
+
+namespace codexui::codex::ui {
+    struct TokenUsageText;
+}
 
 class QEvent;
 class QAbstractScrollArea;

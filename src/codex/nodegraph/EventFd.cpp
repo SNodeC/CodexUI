@@ -3,9 +3,9 @@
 #include "codex/nodegraph/EventFd.h"
 
 #include <cerrno>
-#include <cstddef>
 #include <cstdint>
 #include <sys/eventfd.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <utility>
 

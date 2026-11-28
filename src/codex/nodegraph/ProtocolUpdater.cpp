@@ -5,13 +5,20 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <memory>
+#include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace codexui::nodegraph {
 

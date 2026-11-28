@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "codex/NodeGraphJson.h"
+#include "codex/ProtocolTiming.h"
+#include "codex/UiStatus.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/MiddleRegionWidget.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/TimingPresentation.h"
 #include "codex/ui/UiStyle.h"
+#include "codex/ui/UiViewState.h"
 
 #include <QAccessible>
 #include <QApplication>
@@ -16,16 +23,48 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPlainTextEdit>
-#include <QScrollBar>
 #include <QThread>
 #include <QTimeZone>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
+#include <functional>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
+#include <qaccessible_base.h>
+#include <qbytearrayview.h>
+#include <qcoreevent.h>
+#include <qfont.h>
+#include <qfontmetrics.h>
+#include <qlist.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qpixmap.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qstring.h>
+#include <qstringalgorithms.h>
+#include <qtenvironmentvariables.h>
+#include <qtypes.h>
+#include <qwidget.h>
+#include <ranges>
+#include <string>
+#include <string_view>
+#include <time.h>
+#include <utility>
+#include <vector>
 
 using namespace codexui;
 using namespace codexui::codex;

@@ -2,8 +2,11 @@
 
 #include "codex/nodegraph/ThreadChannels.h"
 
+#include "codex/nodegraph/NodeGraph.h"
+
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace codexui::nodegraph {
 

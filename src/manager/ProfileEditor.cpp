@@ -19,8 +19,31 @@
 #include <QStandardItemModel>
 #include <QTabWidget>
 #include <QTimer>
-#include <QVBoxLayout>
+#include <QtCore/qcompare.h>
+#include <QtCore/qobjectdefs.h>
+#include <initializer_list>
 #include <optional>
+#include <qabstractitemmodel.h>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qdebug.h>
+#include <qdialog.h>
+#include <qflags.h>
+#include <qframe.h>
+#include <qlabel.h>
+#include <qlayout.h>
+#include <qlayoutitem.h>
+#include <qmap.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtpreprocessorsupport.h>
+#include <qtypeinfo.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <utility>
 
 namespace codexui::manager {
     namespace {

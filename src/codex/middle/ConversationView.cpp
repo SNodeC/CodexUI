@@ -2,6 +2,7 @@
 
 #include "codex/middle/ConversationView.h"
 
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/nodegraph/PromptText.h"
 #include "codex/ui/UiStyle.h"
 
@@ -12,25 +13,53 @@
 #include <QEasingCurve>
 #include <QElapsedTimer>
 #include <QEvent>
-#include <QItemSelectionModel>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QPaintEvent>
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
-#include <QResizeEvent>
 #include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVariantAnimation>
-#include <QWheelEvent>
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <initializer_list>
+#include <iterator>
+#include <limits.h>
+#include <map>
+#include <nlohmann/json.hpp>
+#include <qabstractanimation.h>
+#include <qabstractitemmodel.h>
+#include <qabstractscrollarea.h>
+#include <qaccessible_base.h>
+#include <qbrush.h>
+#include <qcolor.h>
+#include <qcontainerfwd.h>
+#include <qdebug.h>
+#include <qframe.h>
+#include <qlist.h>
+#include <qmetatype.h>
+#include <qminmax.h>
+#include <qobjectdefs.h>
+#include <qpen.h>
+#include <qpoint.h>
+#include <qregion.h>
+#include <qsize.h>
+#include <qsizepolicy.h>
+#include <qswap.h>
+#include <qtconfigmacros.h>
+#include <qtgui-config.h>
+#include <qtypeinfo.h>
+#include <qvariant.h>
+#include <qwidget.h>
 #include <ranges>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace codexui::codex::middle {
 

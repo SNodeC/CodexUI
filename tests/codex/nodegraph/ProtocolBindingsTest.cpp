@@ -4,19 +4,25 @@
 #include "codex/nodegraph/ProtocolCatalog.h"
 
 #include <ai/openai/codex/frontend/CodexBridge.h>
-
+#include <ai/openai/codex/protocol/generated/ProtocolTypes.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <concepts>
+#include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
-
-#include <nlohmann/json.hpp>
 
 namespace {
 

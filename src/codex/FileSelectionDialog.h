@@ -3,10 +3,18 @@
 #define CODEXUI_CODEX_FILESELECTIONDIALOG_H
 #include "codex/ui/UiStyle.h"
 
-#include <QStringList>
 #include <QThreadPool>
+#include <cstdint>
 #include <functional>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qobject.h>
+#include <qstring.h>
+#include <string>
+
+class QWidget;
+
 class QComboBox;
 class QLabel;
 class QLineEdit;

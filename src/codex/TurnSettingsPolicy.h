@@ -3,12 +3,11 @@
 #ifndef CODEXUI_CODEX_TURNSETTINGSPOLICY_H
 #define CODEXUI_CODEX_TURNSETTINGSPOLICY_H
 
-#include <nlohmann/json.hpp>
-
 #include <array>
 #include <bitset>
 #include <cstddef>
 #include <cstdint>
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <string_view>
 #include <unordered_map>

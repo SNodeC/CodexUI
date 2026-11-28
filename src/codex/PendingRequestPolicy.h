@@ -5,9 +5,10 @@
 
 #include "codex/nodegraph/NodeGraph.h"
 
-#include <nlohmann/json.hpp>
-
+#include <cstddef>
 #include <cstdint>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <string>
 #include <string_view>

@@ -2,7 +2,13 @@
 #pragma once
 
 #include "codex/nodegraph/Value.h"
+
+#include <cstdint>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace codexui::codex {
 

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/ClientRuntime.h"
-#include "codex/ThreadBrowser.h"
 
 #include "codex/Configuration.h"
 #include "codex/InternalProtocolOperations.h"
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
+#include "codex/ThreadBrowser.h"
 #include "codex/WorkerMailboxReceiver.h"
 #include "codex/nodegraph/PromptText.h"
 #include "codex/nodegraph/WorkerLogic.h"
@@ -18,10 +18,7 @@
 #include <ai/openai/codex/frontend/client/WebSocketClient.h>
 #endif
 #include <ai/openai/codex/protocol/RuntimePaths.h>
-#include <core/EventReceiver.h>
 #include <core/SNodeC.h>
-#include <core/socket/State.h>
-#include <core/socket/stream/ClientFlowController.h>
 #include <core/timer/Timer.h>
 #include <net/in/stream/legacy/SocketClient.h>
 #include <net/in6/stream/legacy/SocketClient.h>
@@ -34,31 +31,44 @@
 #include <net/rc/stream/legacy/SocketClient.h>
 #include <net/rc/stream/tls/SocketClient.h>
 #endif
-#if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
-#include <web/http/client/Request.h>
-#endif
-#include <utils/Timeval.h>
 
 #include "codex/ProtocolTiming.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ProtocolCatalog.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/ThreadChannels.h"
+#include "codex/nodegraph/Value.h"
+
+#include <ai/openai/codex/protocol/Envelope.h>
+#include <ai/openai/codex/protocol/generated/ProtocolTypes.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <functional>
+#include <initializer_list>
 #include <map>
-#include <memory>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <ranges>
-#include <string>
+#include <span>
 #include <string_view>
-#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
+#include <vector>
+
+namespace web::http::client {
+    class MasterRequest;
+}
 
 namespace codexui::codex {
 namespace {

@@ -12,7 +12,19 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
-#include <QVBoxLayout>
+#include <QtCore/qobjectdefs.h>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <qchar.h>
+#include <qcombobox.h>
+#include <qlist.h>
+#include <qnamespace.h>
+#include <qstring.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <string>
+#include <utility>
 
 namespace codexui::codex {
 namespace {

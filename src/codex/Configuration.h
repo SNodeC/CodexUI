@@ -3,15 +3,10 @@
 #ifndef CODEXUI_CODEX_CONFIGURATION_H
 #define CODEXUI_CODEX_CONFIGURATION_H
 
-#include <utils/SubCommand.h>
-
 #include <cstddef>
 #include <string>
 #include <string_view>
-
-namespace CLI {
-class Option;
-}
+#include <utils/SubCommand.h>
 
 namespace codexui::codex {
 

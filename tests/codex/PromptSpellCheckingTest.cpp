@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
+#include "codex/AttachmentDraft.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 #include "codex/ui/UiStyle.h"
@@ -11,8 +12,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
-#include <QInputMethodEvent>
-#include <QKeyEvent>
 #include <QMenu>
 #include <QMimeData>
 #include <QPluginLoader>
@@ -23,10 +22,42 @@
 #include <QTextBlock>
 #include <QTextBoundaryFinder>
 #include <QTextLayout>
+#include <QtCore/qobjectdefs.h>
 #include <Sonnet/Speller>
 #include <algorithm>
 #include <dlfcn.h>
+#include <functional>
+#include <initializer_list>
 #include <iostream>
+#include <qaction.h>
+#include <qbytearray.h>
+#include <qbytearrayview.h>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qcontainerfwd.h>
+#include <qcoreevent.h>
+#include <qiodevice.h>
+#include <qlist.h>
+#include <qmap.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qplaintextedit.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtenvironmentvariables.h>
+#include <qtextcursor.h>
+#include <qtextdocument.h>
+#include <qtextformat.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace {
     qint64 lookups = 0;

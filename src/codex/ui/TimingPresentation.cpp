@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "TimingPresentation.h"
+
 #include <QDateTime>
-#include <QStringList>
 #include <QTimeZone>
 #include <algorithm>
+#include <optional>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qswap.h>
+#include <qtypes.h>
+#include <string>
+#include <vector>
 
 namespace codexui::codex::ui {
 namespace {

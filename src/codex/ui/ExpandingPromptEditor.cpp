@@ -8,14 +8,8 @@
 #include <QAbstractTextDocumentLayout>
 #include <QActionGroup>
 #include <QContextMenuEvent>
-#include <QDragLeaveEvent>
-#include <QDropEvent>
 #include <QEvent>
-#include <QFocusEvent>
-#include <QInputMethodEvent>
-#include <QKeyEvent>
 #include <QMenu>
-#include <QResizeEvent>
 #include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSyntaxHighlighter>
@@ -24,10 +18,28 @@
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTimer>
-#include <QWheelEvent>
+#include <QtCore/qobjectdefs.h>
 #include <Sonnet/Speller>
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <qaction.h>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qfontmetrics.h>
+#include <qmap.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qstring.h>
+#include <qstringview.h>
+#include <qswap.h>
+#include <qtextcursor.h>
+#include <qtextformat.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qwidget.h>
 #include <utility>
 
 namespace codexui {

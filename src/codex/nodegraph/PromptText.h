@@ -3,11 +3,16 @@
 #ifndef CODEXUI_CODEX_NODEGRAPH_PROMPTTEXT_H
 #define CODEXUI_CODEX_NODEGRAPH_PROMPTTEXT_H
 
-#include "codex/nodegraph/Messages.h"
-
+#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
+
+namespace codexui::nodegraph {
+    struct Attachment;
+    struct NodeState;
+}
 
 namespace codexui::nodegraph {
 

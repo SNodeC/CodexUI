@@ -3,6 +3,8 @@
 #include "codex/middle/ConversationPresentation.h"
 
 #include "codex/UiStatus.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/PromptText.h"
 #include "codex/ui/UiStyle.h"
 
@@ -20,19 +22,50 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QRegularExpression>
-#include <QStringList>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
-#include <QTextFrame>
 #include <QTextOption>
 #include <QTimer>
 #include <QToolTip>
 #include <QVariantAnimation>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
+#include <compare>
+#include <optional>
+#include <qabstractanimation.h>
+#include <qaccessible_base.h>
+#include <qbrush.h>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qcontainerfwd.h>
+#include <qeasingcurve.h>
+#include <qflags.h>
+#include <qlatin1stringview.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qpen.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qsizepolicy.h>
+#include <qstringfwd.h>
+#include <qswap.h>
+#include <qtconfigmacros.h>
+#include <qtextedit.h>
+#include <qtextformat.h>
+#include <qtgui-config.h>
+#include <qtversionchecks.h>
+#include <qurl.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace codexui::codex::middle {

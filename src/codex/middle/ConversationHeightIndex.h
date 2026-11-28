@@ -3,11 +3,10 @@
 #ifndef CODEXUI_CODEX_MIDDLE_CONVERSATIONHEIGHTINDEX_H
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONHEIGHTINDEX_H
 
-#include <QtGlobal>
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <qtypes.h>
 #include <span>
 #include <utility>
 

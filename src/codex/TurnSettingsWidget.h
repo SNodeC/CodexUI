@@ -6,11 +6,10 @@
 #include "codex/TurnSettingsPolicy.h"
 
 #include <QWidget>
-
 #include <array>
+#include <cstddef>
 
 class QComboBox;
-class QLineEdit;
 class QToolButton;
 
 namespace codexui::codex {

@@ -1,17 +1,26 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #pragma once
-#include "manager/ManagerController.h"
 
 #include <QMainWindow>
+#include <qjsonobject.h>
+#include <qmap.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtmetamacros.h>
 
-class QCloseEvent;
+class QWidget;
+
+namespace codexui::manager {
+    class ManagerController;
+    class ProfileRuntime;
+}
+
 class QGridLayout;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QStackedWidget;
 class QSystemTrayIcon;
-class QTabWidget;
 class QToolButton;
 
 namespace codexui::manager {

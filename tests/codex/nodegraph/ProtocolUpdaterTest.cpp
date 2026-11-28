@@ -1,18 +1,32 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/nodegraph/ProtocolUpdater.h"
+
 #include "../TimingPolicy.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/ProtocolCatalog.h"
+#include "codex/nodegraph/Value.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <compare>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
+#include <functional>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <ranges>
+#include <ratio>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {

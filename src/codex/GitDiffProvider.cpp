@@ -10,13 +10,33 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QThreadPool>
-
-#include <git2.h>
-
 #include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <git2/buffer.h>
+#include <git2/diff.h>
+#include <git2/errors.h>
+#include <git2/global.h>
+#include <git2/index.h>
+#include <git2/patch.h>
+#include <git2/refs.h>
+#include <git2/repository.h>
+#include <git2/status.h>
+#include <git2/tree.h>
+#include <git2/types.h>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qmetatype.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qswap.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <type_traits>
+#include <utility>
 
 namespace codexui::codex {
 namespace {

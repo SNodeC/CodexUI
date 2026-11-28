@@ -3,25 +3,37 @@
 #include "codex/ClientRuntime.h"
 #include "codex/Configuration.h"
 #include "codex/NodeGraphJson.h"
+#include "codex/nodegraph/EventFd.h"
 #include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ProtocolCatalog.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/ThreadChannels.h"
+#include "codex/nodegraph/Value.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
+#include "codex/ui/UiViewState.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
+#include <compare>
 #include <core/SNodeC.h>
-#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <functional>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <nlohmann/detail/json_ref.hpp>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <poll.h>
 #include <pthread.h>
@@ -29,12 +41,15 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <thread>
+#include <time.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <utils/Config.h>
+#include <variant>
 #include <vector>
 
 namespace codexui::codex {

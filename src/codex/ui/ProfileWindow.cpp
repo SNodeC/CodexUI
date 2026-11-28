@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "codex/ui/ProfileWindow.h"
 
-#include <QApplication>
 #include <QColor>
 #include <QFileInfo>
 #include <QLocalSocket>
 #include <QSettings>
 #include <QWindow>
+#include <QtCore/qobjectdefs.h>
+#include <qtenvironmentvariables.h>
+#include <qwidget.h>
 
 namespace codexui {
     ProfileWindow::ProfileWindow(QObject* parent)

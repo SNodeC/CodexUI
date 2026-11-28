@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "manager/LaunchPlan.h"
 
-#include <QProcessEnvironment>
+#include <initializer_list>
+#include <qchar.h>
+#include <qminmax.h>
+#include <qtenvironmentvariables.h>
+#include <qtypeinfo.h>
 
 namespace codexui::manager {
     namespace {

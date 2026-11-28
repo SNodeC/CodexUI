@@ -2,9 +2,17 @@
 
 #include "codex/nodegraph/PromptText.h"
 
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/Value.h"
+
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <sstream>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace codexui::nodegraph {

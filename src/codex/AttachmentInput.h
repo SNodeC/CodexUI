@@ -3,9 +3,14 @@
 #ifndef CODEXUI_CODEX_ATTACHMENTINPUT_H
 #define CODEXUI_CODEX_ATTACHMENTINPUT_H
 
-#include "codex/AttachmentDraft.h"
-#include <QStringList>
+#include <cstddef>
+#include <qcontainerfwd.h>
+#include <qstring.h>
 #include <vector>
+
+namespace codexui::codex {
+    struct AttachmentDraft;
+}
 
 class QMimeData;
 

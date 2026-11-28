@@ -3,26 +3,28 @@
 #ifndef CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 #define CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 
-#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/ui/UiViewState.h"
 
 #include <QByteArray>
 #include <QFrame>
 #include <QString>
-
-#include <nlohmann/json.hpp>
-
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <string>
 
+class QWidget;
+
+namespace codexui::nodegraph {
+    struct ProtocolDiagnostic;
+}
+
 class QLabel;
-class QHideEvent;
 class QPlainTextEdit;
-class QShowEvent;
 class QStackedWidget;
 class QTabWidget;
 
@@ -32,7 +34,6 @@ class DiffViewer;
 
 namespace middle {
 
-class MarkdownTextView;
 
 // The inspector owns only presentation snapshots.  It never clears a visible
 // tab in response to an unrelated frame and never participates in app-server

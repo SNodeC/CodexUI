@@ -2,8 +2,11 @@
 #pragma once
 #include <QLocalServer>
 #include <QLockFile>
-#include <QWidget>
 #include <memory>
+#include <qobject.h>
+#include <qstring.h>
+
+class QWidget;
 
 namespace codexui {
     // A manager-launched window exposes only activation, never conversation operations.

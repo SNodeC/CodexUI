@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/nodegraph/ThreadChannels.h"
-#include "codex/nodegraph/EventFd.h"
 
-#include <algorithm>
+#include "codex/nodegraph/EventFd.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/Value.h"
+
 #include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>

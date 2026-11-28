@@ -2,14 +2,21 @@
 
 #include "AccessibilityEventProbe.h"
 #include "TimingPolicy.h"
+#include "codex/PendingRequestPolicy.h"
+#include "codex/ProtocolTiming.h"
+#include "codex/UiStatus.h"
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/InspectorPane.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/Messages.h"
 #include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/Value.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
+#include "codex/ui/UiViewState.h"
 
-#include <QAbstractTextDocumentLayout>
 #include <QAbstractScrollArea>
+#include <QAbstractTextDocumentLayout>
 #include <QAccessibleInterface>
 #include <QApplication>
 #include <QChildEvent>
@@ -21,7 +28,6 @@
 #include <QFrame>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMimeData>
@@ -36,17 +42,58 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
-#include <QWheelEvent>
-
-#include <git2.h>
-
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <git2/repository.h>
+#include <git2/types.h>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
+#include <memory>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <qabstractslider.h>
+#include <qaccessible_base.h>
+#include <qbytearray.h>
+#include <qbytearrayview.h>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qeventloop.h>
+#include <qfont.h>
+#include <qiodevice.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qpalette.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qstring.h>
+#include <qstringalgorithms.h>
+#include <qswap.h>
+#include <qtconfigmacros.h>
+#include <qtgui-config.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <ranges>
+#include <span>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace codexui::codex {
 namespace {

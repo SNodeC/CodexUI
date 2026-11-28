@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/nodegraph/WorkerLogic.h"
+
 #include "../TimingPolicy.h"
+#include "codex/nodegraph/EventFd.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/ThreadChannels.h"
+#include "codex/nodegraph/Value.h"
 
 #include <algorithm>
 #include <chrono>
+#include <compare>
 #include <cstdint>
 #include <cstdlib>
+#include <initializer_list>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
+#include <ratio>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>

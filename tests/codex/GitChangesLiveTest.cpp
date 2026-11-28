@@ -4,16 +4,16 @@
 #include "codex/GitDiffProvider.h"
 #include "codex/ui/UiStyle.h"
 
-#include <QApplication>
 #include <QAccessible>
+#include <QApplication>
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
-#include <QLabel>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
@@ -22,11 +22,39 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
-
-#include <git2.h>
-
+#include <QtCore/qobjectdefs.h>
 #include <functional>
+#include <git2/commit.h>
+#include <git2/global.h>
+#include <git2/index.h>
+#include <git2/oid.h>
+#include <git2/repository.h>
+#include <git2/signature.h>
+#include <git2/tree.h>
+#include <git2/types.h>
+#include <initializer_list>
 #include <iostream>
+#include <qaccessible_base.h>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qcontainerfwd.h>
+#include <qcoreevent.h>
+#include <qeventloop.h>
+#include <qfont.h>
+#include <qiodevice.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtconfigmacros.h>
+#include <qtgui-config.h>
+#include <qwidget.h>
+#include <utility>
+#include <vector>
 
 namespace {
 

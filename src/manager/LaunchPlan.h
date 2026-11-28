@@ -2,6 +2,14 @@
 #pragma once
 #include "manager/Profile.h"
 
+#include <QtCore/qcompare.h>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qmap.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <utility>
+
 namespace codexui::manager {
     struct Command {
         QString program;

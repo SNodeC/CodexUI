@@ -5,22 +5,20 @@
 
 #include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/NodeGraph.h"
 
 #include <QByteArray>
 #include <QFrame>
-#include <QPlainTextEdit>
 #include <QTextEdit>
-
 #include <memory>
 #include <optional>
+#include <qstring.h>
+#include <qtmetamacros.h>
+#include <qtypes.h>
 #include <vector>
 
-class QLabel;
-class QPaintEvent;
-class QShowEvent;
-class QTimer;
-class QVBoxLayout;
-class QWheelEvent;
+class QPoint;
+class QWidget;
 
 namespace codexui::codex::middle {
 

@@ -2,7 +2,12 @@
 #include "manager/ManagerWindow.h"
 
 #include "codex/ui/UiStyle.h"
+#include "manager/DeletionPlan.h"
+#include "manager/LaunchPlan.h"
+#include "manager/ManagerController.h"
+#include "manager/Profile.h"
 #include "manager/ProfileEditor.h"
+#include "manager/ProfileRuntime.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -38,8 +43,30 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QUuid>
-#include <QVBoxLayout>
+#include <QtCore/qcompare.h>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
+#include <functional>
+#include <iterator>
+#include <qchar.h>
+#include <qcolor.h>
+#include <qcontainerfwd.h>
+#include <qicon.h>
+#include <qiodevice.h>
+#include <qjsonvalue.h>
+#include <qlayoutitem.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qsizepolicy.h>
+#include <qstringalgorithms.h>
+#include <qtimer.h>
+#include <qtypeinfo.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <type_traits>
+#include <utility>
 
 namespace codexui::manager {
     namespace {

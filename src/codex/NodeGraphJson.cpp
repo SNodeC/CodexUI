@@ -4,9 +4,13 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace codexui::codex {
 namespace {

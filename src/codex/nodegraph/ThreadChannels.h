@@ -12,6 +12,10 @@
 #include <cstdint>
 
 namespace codexui::nodegraph {
+    struct GraphChange;
+}
+
+namespace codexui::nodegraph {
 
 enum class ChannelSendStatus : std::uint8_t {
   Accepted,

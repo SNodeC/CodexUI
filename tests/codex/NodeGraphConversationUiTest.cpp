@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationCards.h"
+#include "codex/middle/ConversationItemModel.h"
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/ConversationView.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/ThreadChannels.h"
+#include "codex/nodegraph/Value.h"
 #include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/NodeGraphUiAdapter.h"
 
 #include <QApplication>
-#include <QAccessible>
 #include <QColor>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -18,14 +24,37 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
+#include <initializer_list>
 #include <iostream>
-#include <limits>
+#include <memory>
+#include <optional>
+#include <qabstractslider.h>
+#include <qaccessible_base.h>
+#include <qeventloop.h>
+#include <qitemselectionmodel.h>
+#include <qlist.h>
+#include <qnamespace.h>
+#include <qpixmap.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qstring.h>
+#include <qtextdocument.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <ranges>
+#include <span>
 #include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+class QAccessibleInterface;
 
 namespace codexui::codex {
 namespace {

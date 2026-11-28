@@ -8,8 +8,19 @@
 #include <QJsonDocument>
 #include <QLocalSocket>
 #include <QRegularExpression>
-#include <QStandardPaths>
+#include <QtCore/qcompare.h>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
+#include <qchar.h>
+#include <qdebug.h>
+#include <qfiledevice.h>
+#include <qflags.h>
+#include <qiodevice.h>
+#include <qjsonvalue.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qtypeinfo.h>
+#include <utility>
 
 namespace codexui::manager {
     namespace {

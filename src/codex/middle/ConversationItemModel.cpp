@@ -2,15 +2,33 @@
 
 #include "codex/middle/ConversationItemModel.h"
 
+#include "codex/UiStatus.h"
 #include "codex/ui/TimingPresentation.h"
 
 #include <QString>
 #include <algorithm>
+#include <iterator>
 #include <limits>
+#include <nlohmann/json.hpp>
+#include <qassert.h>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qhash.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qswap.h>
+#include <qtypeinfo.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <ranges>
+#include <string.h>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
+
+class QObject;
 
 namespace codexui::codex::middle {
     namespace {

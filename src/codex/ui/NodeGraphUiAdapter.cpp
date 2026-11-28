@@ -4,27 +4,50 @@
 
 #include "codex/NodeGraphJson.h"
 #include "codex/PendingRequestPolicy.h"
+#include "codex/ProtocolTiming.h"
 #include "codex/ThreadBrowser.h"
 #include "codex/UiStatus.h"
+#include "codex/nodegraph/Messages.h"
 #include "codex/nodegraph/PromptText.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/Value.h"
 #include "codex/nodegraph/WorkerLogic.h"
 
 #include <QLocale>
-#include <QStringList>
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <compare>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <qchar.h>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtypes.h>
+#include <ranges>
+#include <set>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace codexui::codex::ui {

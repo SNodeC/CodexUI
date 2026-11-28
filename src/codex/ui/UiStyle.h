@@ -3,15 +3,15 @@
 #ifndef CODEXUI_UI_UISTYLE_H
 #define CODEXUI_UI_UISTYLE_H
 
-#include <QColor>
 #include <QComboBox>
 #include <QDialog>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QString>
 #include <QToolButton>
+#include <qrgb.h>
+#include <qvariant.h>
 
-class QPaintEvent;
 class QPainter;
 class QRect;
 class QScrollArea;

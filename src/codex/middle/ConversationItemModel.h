@@ -4,16 +4,22 @@
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONITEMMODEL_H
 
 #include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/NodeGraph.h"
 
 #include <QAbstractListModel>
-
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <qnamespace.h>
+#include <qtmetamacros.h>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+class QObject;
 
 namespace codexui::codex::middle {
 

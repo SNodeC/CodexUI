@@ -10,6 +10,11 @@
 #include "codex/ui/ProfileWindow.h"
 #include <QApplication>
 #include <string_view>
+
+#include <qcoreapplication.h>
+#include <qguiapplication.h>
+#include <qstring.h>
+#include <string>
 // clang-format on
 
 namespace {

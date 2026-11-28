@@ -3,9 +3,11 @@
 #ifndef CODEXUI_CODEX_CONNECTIONDIALOG_H
 #define CODEXUI_CODEX_CONNECTIONDIALOG_H
 
-#include <nlohmann/json.hpp>
-
 #include <QDialog>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+
+class QWidget;
 
 class QComboBox;
 class QLabel;

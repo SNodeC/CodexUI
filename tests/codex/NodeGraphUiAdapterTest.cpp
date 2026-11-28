@@ -8,20 +8,44 @@
 #include "codex/ProtocolTiming.h"
 #include "codex/TurnSettingsPolicy.h"
 #include "codex/UiStatus.h"
+#include "codex/middle/MiddleTypes.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/Value.h"
+#include "codex/ui/UiViewState.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <compare>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <map>
+#include <memory>
+#include <nlohmann/detail/iterators/iter_impl.hpp>
+#include <nlohmann/detail/iterators/iteration_proxy.hpp>
+#include <nlohmann/detail/json_ref.hpp>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
+#include <ranges>
+#include <ratio>
+#include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace codexui::codex::ui {
 namespace {

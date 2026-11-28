@@ -18,8 +18,32 @@
 #include <QRadioButton>
 #include <QScrollArea>
 #include <QVBoxLayout>
+#include <QtCore/qobjectdefs.h>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <map>
+#include <nlohmann/detail/json_pointer.hpp>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <qabstractbutton.h>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qsizepolicy.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
 #include <ranges>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace codexui::codex {

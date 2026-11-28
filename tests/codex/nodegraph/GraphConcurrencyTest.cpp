@@ -2,6 +2,7 @@
 
 #include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/SpscQueue.h"
+#include "codex/nodegraph/Value.h"
 
 #include <array>
 #include <atomic>
@@ -9,10 +10,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 

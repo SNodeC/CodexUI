@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
+#include "manager/ManagerController.h"
 #include "manager/ManagerWebServer.h"
 #include "manager/ManagerWindow.h"
 
@@ -15,7 +16,6 @@
 #include <QMenu>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QScopeGuard>
@@ -29,7 +29,42 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolButton>
-#include <QtTest>
+#include <QtCore/qobjectdefs.h>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <qaction.h>
+#include <qbytearray.h>
+#include <qbytearrayview.h>
+#include <qcoreapplication.h>
+#include <qelapsedtimer.h>
+#include <qfiledevice.h>
+#include <qhostaddress.h>
+#include <qiodevice.h>
+#include <qjsonobject.h>
+#include <qjsonvalue.h>
+#include <qlist.h>
+#include <qlogging.h>
+#include <qnamespace.h>
+#include <qnetworkrequest.h>
+#include <qobject.h>
+#include <qpixmap.h>
+#include <qpoint.h>
+#include <qrect.h>
+#include <qregion.h>
+#include <qsize.h>
+#include <qstring.h>
+#include <qstringalgorithms.h>
+#include <qtenvironmentvariables.h>
+#include <qtestcase.h>
+#include <qtestmouse.h>
+#include <qtestsupport_core.h>
+#include <qtmetamacros.h>
+#include <qtypes.h>
+#include <qurl.h>
+#include <qvariant.h>
+#include <string>
+#include <utility>
 
 using namespace codexui::manager;
 class ManagerSettingsTest final : public QObject {

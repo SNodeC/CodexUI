@@ -4,15 +4,27 @@
 #define CODEXUI_CODEX_MIDDLE_THREADPANE_H
 
 #include "codex/FileSelectionDialog.h"
-#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/ui/UiViewState.h"
 
 #include <QFrame>
 #include <array>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
+#include <qstring.h>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+class QPoint;
+class QWidget;
+
+namespace codexui::nodegraph {
+    enum class RuntimeActionKind : std::uint8_t;
+}
 
 class QAbstractScrollArea;
 class QMenu;

@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
+#include "codex/nodegraph/Value.h"
 
 #include <cstddef>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {

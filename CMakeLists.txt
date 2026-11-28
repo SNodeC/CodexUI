@@ -11,6 +11,7 @@ project(
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(format)
+include(iwyu)
 
 include(GNUInstallDirs)
 include(CTest)

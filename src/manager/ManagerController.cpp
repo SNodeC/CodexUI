@@ -1,9 +1,21 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 #include "manager/ManagerController.h"
 
+#include "manager/DeletionPlan.h"
+#include "manager/LaunchPlan.h"
+#include "manager/ProfileRuntime.h"
+
 #include <QJsonArray>
 #include <QTimer>
+#include <QtCore/qcompare.h>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
+#include <functional>
+#include <qjsonvalue.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qtypeinfo.h>
+#include <utility>
 
 namespace codexui::manager {
     ManagerController::ManagerController(QString path, QObject* parent)

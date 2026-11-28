@@ -4,6 +4,16 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QtCore/qcompare.h>
+#include <qbytearray.h>
+#include <qchar.h>
+#include <qiodevice.h>
+#include <qjsonvalue.h>
+#include <qmap.h>
+#include <qswap.h>
+#include <qtresource.h>
+#include <qtypeinfo.h>
+#include <utility>
 
 static QString deletionScript() {
     Q_INIT_RESOURCE(deletion);

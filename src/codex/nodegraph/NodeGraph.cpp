@@ -8,6 +8,7 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <ranges>
 #include <stdexcept>
 #include <unordered_set>
 

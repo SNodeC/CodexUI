@@ -5,7 +5,6 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QCheckBox>
-#include <QComboBox>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -15,8 +14,16 @@
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
-#include <QVBoxLayout>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
+#include <initializer_list>
+#include <qdialog.h>
+#include <qnamespace.h>
+#include <qrect.h>
+#include <qsize.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <utility>
 
 namespace codexui::codex {
 namespace {

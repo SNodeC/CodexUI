@@ -2,10 +2,13 @@
 
 #include "codex/WorkerMailboxReceiver.h"
 
-#include <Log.h>
-#include <core/EventReceiver.h>
+#include "codex/nodegraph/EventFd.h"
+#include "codex/nodegraph/ThreadChannels.h"
 
+#include <Log.h>
+#include <optional>
 #include <utility>
+#include <utils/Timeval.h>
 
 namespace codexui::codex {
 namespace {

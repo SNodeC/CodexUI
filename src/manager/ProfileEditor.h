@@ -4,9 +4,10 @@
 #include "manager/Profile.h"
 
 #include <functional>
+#include <qcontainerfwd.h>
+#include <qlist.h>
 
-class QLineEdit;
-class QCheckBox;
+class QWidget;
 
 namespace codexui::manager {
     class ProfileEditor final : public UiStyle::ScrollFormDialog {

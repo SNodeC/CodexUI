@@ -27,7 +27,6 @@
 #include <QTimer>
 #include <QWheelEvent>
 #include <QWindow>
-
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -43,8 +42,42 @@
 #include <vector>
 
 #if defined(__linux__)
+#include "codex/UiStatus.h"
+#include "codex/middle/ConversationItemModel.h"
+#include "codex/middle/ConversationPresentation.h"
+#include "codex/middle/MiddleTypes.h"
+
+#include <functional>
+#include <initializer_list>
+#include <qabstractitemview.h>
+#include <qabstractslider.h>
+#include <qbytearray.h>
+#include <qcontainerfwd.h>
+#include <qcoreevent.h>
+#include <qguiapplication.h>
+#include <qitemselectionmodel.h>
+#include <qjsonvalue.h>
+#include <qlist.h>
+#include <qminmax.h>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qobjectdefs.h>
+#include <qpixmap.h>
+#include <qpoint.h>
+#include <qpointingdevice.h>
+#include <qrect.h>
+#include <qstring.h>
+#include <qswap.h>
+#include <qtypes.h>
+#include <qvariant.h>
+#include <qwidget.h>
+#include <source_location>
+#include <span>
+#include <string_view>
 #include <sys/resource.h>
 #include <unistd.h>
+#include <utility>
+#include <variant>
 #endif
 
 class BenchmarkApplication final : public QApplication {

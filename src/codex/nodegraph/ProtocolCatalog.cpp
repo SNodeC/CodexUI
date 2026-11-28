@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
+#include <string>
 
 namespace codexui::nodegraph {
 namespace {

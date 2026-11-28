@@ -7,9 +7,12 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QString>
-#include <QStringList>
 #include <optional>
+#include <qcontainerfwd.h>
+#include <qlist.h>
 #include <string>
+
+class QWidget;
 
 class QCheckBox;
 class QLabel;

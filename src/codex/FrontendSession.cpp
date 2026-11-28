@@ -4,13 +4,23 @@
 
 #include "codex/ClientRuntime.h"
 #include "codex/NodeGraphJson.h"
+#include "codex/nodegraph/EventFd.h"
+#include "codex/nodegraph/Value.h"
 
 #include <QElapsedTimer>
 #include <QPointer>
 #include <QSocketNotifier>
 #include <QTimer>
+#include <QtCore/qobjectdefs.h>
 #include <algorithm>
 #include <cerrno>
+#include <map>
+#include <nlohmann/detail/json_ref.hpp>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <qnamespace.h>
+#include <qobject.h>
+#include <qtypes.h>
 #include <system_error>
 #include <type_traits>
 #include <utility>

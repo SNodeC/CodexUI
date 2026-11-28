@@ -5,11 +5,11 @@
 
 #include <QObject>
 #include <QString>
-#include <QStringList>
-
-#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <qcontainerfwd.h>
+#include <qlist.h>
+#include <qtmetamacros.h>
 #include <vector>
 
 namespace codexui::codex {

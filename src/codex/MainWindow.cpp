@@ -7,6 +7,10 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <qicon.h>
+#include <qstring.h>
+
+class QWidget;
 
 namespace codexui::codex {
 
