@@ -233,9 +233,11 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
     } else if (type === "agentMessage") {
         status = UnknownStatus;
         kind = "agentMessage";
+        const phase = stringMember(item, "phase");
+        const asynchronous = stringMember(item, "delivery") === "async";
         payload = {text: withTruncationNotice(messageText(item), omittedTextBytes(presentation, "text"), "Codex response", true),
-            phase: stringMember(item, "phase"), ...(stringMember(item, "delivery") === "async"
-                ? {questionRequest: asyncQuestionRequest(member(item, "questions"))} : {})} satisfies AgentMessageData;
+            phase: asynchronous && phase === "final_answer" ? "partial_answer" : phase,
+            ...(asynchronous ? {questionRequest: asyncQuestionRequest(member(item, "questions"))} : {})} satisfies AgentMessageData;
     } else if (type === "commandExecution") {
         kind = "commandExecution";
         const outputField = stringMember(item, "aggregatedOutput") !== "" ? "aggregatedOutput" : "output";

@@ -410,14 +410,14 @@ for (const entry of contract.pendingRequestBoundaryCases) {
     });
 }
 
-for (const entry of contract.agentMessageCases) test(`agent message phase contract: ${entry.phase}`, () => {
+for (const entry of contract.agentMessageCases) test(`agent message phase contract: ${entry.phase} ${entry.delivery ?? ""}`, () => {
     const {model, normalizer} = pipeline();
     normalizer.serverNotification("thread/started", {thread: {id: "phase"}});
     normalizer.serverNotification("turn/started", {threadId: "phase", turn: {id: "turn"}});
     normalizer.serverNotification("item/completed", {threadId: "phase", turnId: "turn",
-        item: {id: "item", type: "agentMessage", phase: entry.phase, text: "Phase fixture"}});
+        item: {id: "item", type: "agentMessage", phase: entry.phase, delivery: entry.delivery ?? null, text: "Phase fixture"}});
     const card = projectConversation(model.thread("phase"), [], 80, 0).sections[0].cards[0];
-    assert.equal(card.payload.phase, entry.phase);
+    assert.equal(card.payload.phase, entry.expectedPhase ?? entry.phase);
     const markup = renderToStaticMarkup(createElement(Card, {card, active: false, collapsed: false, onToggle() {}}));
     assert.ok(markup.includes(`>${entry.label}</span>`));
     assert.deepEqual(cardCopyContent(card), {text: "Phase fixture", markdown: true});

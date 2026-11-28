@@ -560,14 +560,16 @@ namespace codexui::codex::ui {
                     result.payload = UserMessageData{nodegraph::messageText(state), graphImagePaths(state)};
                     break;
                 }
-                case CardKind::AgentMessage:
+                case CardKind::AgentMessage: {
+                    const std::string phase = scalarTextFromValue(valueMember(state, "phase"));
+                    const bool asynchronous = exactStringFromValue(valueMember(state, "delivery")) == "async";
+                    const auto* questions = valueMember(state, "questions");
                     result.payload = AgentMessageData{
                         withTruncationNotice(nodegraph::messageText(state), graphOmittedTextBytes(state, "text"), "Codex response", true),
-                        scalarTextFromValue(valueMember(state, "phase")),
-                        scalarTextFromValue(valueMember(state, "delivery")) == "async" && valueMember(state, "questions")
-                            ? PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*valueMember(state, "questions")))
-                            : nlohmann::json(nullptr)};
+                        asynchronous && phase == "final_answer" ? "partial_answer" : phase,
+                        asynchronous && questions ? PendingRequestPolicy::asyncQuestionRequest(jsonFromValue(*questions)) : nullptr};
                     break;
+                }
                 case CardKind::CommandExecution: {
                     std::string outputField = "aggregatedOutput";
                     std::string output = scalarTextFromValue(valueMember(state, "aggregatedOutput"));

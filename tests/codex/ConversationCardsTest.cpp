@@ -5323,30 +5323,35 @@ bool testSharedPresentationContract() {
         "shared contract: real native Copy preserves projected text");
   };
   for (const auto &entry : contract.at("agentMessageCases")) {
-    context = "agentMessageCases[" + entry.at("phase").get<std::string>() + "]";
-    const auto data = projectedGenericCard({{"id", "phase"}, {"type", "agentMessage"},
-                                           {"phase", entry.at("phase")}, {"text", "Phase fixture"}});
-    passed &= check(data.has_value(), "agent message projects from protocol state");
-    if (!data)
-      continue;
-    const auto *message = std::get_if<AgentMessageData>(&data->payload);
-    passed &= check(message && message->phase == entry.at("phase").get<std::string>(), "phase survives projection");
-    ConversationCard card(*data, true);
-    const auto *label = card.findChild<QLabel *>(QStringLiteral("agentMessagePhase"));
-    passed &= check(label && label->text().toStdString() == entry.at("label").get<std::string>(), "visible phase label");
-    checkCopy(*data, "Phase fixture");
-    ConversationItemModel model;
-    ConversationSnapshot snapshot;
-    snapshot.threadId = "detail";
-    TurnSection section;
-    section.key = "phase-section";
-    section.turnId = "turn";
-    section.cards.push_back(*data);
-    snapshot.sections.push_back(std::move(section));
-    static_cast<void>(model.replaceConversation(std::move(snapshot)));
-    static_cast<void>(model.setVisibility({false, false}));
-    passed &= check(model.data(model.index(0, 0), ConversationItemModel::PresentedRole).toBool() ==
-                        entry.at("visibleWithoutUpdates").get<bool>(), "partial and final answers survive hidden updates");
+      context = "agentMessageCases[" + entry.at("phase").get<std::string>() + " " + entry.value("delivery", "") + "]";
+      const auto data = projectedGenericCard({{"id", "phase"},
+                                              {"type", "agentMessage"},
+                                              {"phase", entry.at("phase")},
+                                              {"delivery", entry.value("delivery", nlohmann::json(nullptr))},
+                                              {"text", "Phase fixture"}});
+      passed &= check(data.has_value(), "agent message projects from protocol state");
+      if (data) {
+          const auto* message = std::get_if<AgentMessageData>(&data->payload);
+          passed &= check(message && message->phase == entry.value("expectedPhase", entry.at("phase").get<std::string>()),
+                          "projected message phase");
+          ConversationCard card(*data, true);
+          const auto* label = card.findChild<QLabel*>(QStringLiteral("agentMessagePhase"));
+          passed &= check(label && label->text().toStdString() == entry.at("label").get<std::string>(), "visible phase label");
+          checkCopy(*data, "Phase fixture");
+          ConversationItemModel model;
+          ConversationSnapshot snapshot;
+          snapshot.threadId = "detail";
+          TurnSection section;
+          section.key = "phase-section";
+          section.turnId = "turn";
+          section.cards.push_back(*data);
+          snapshot.sections.push_back(std::move(section));
+          static_cast<void>(model.replaceConversation(std::move(snapshot)));
+          static_cast<void>(model.setVisibility({false, false}));
+          passed &= check(model.data(model.index(0, 0), ConversationItemModel::PresentedRole).toBool() ==
+                              entry.at("visibleWithoutUpdates").get<bool>(),
+                          "partial and final answers survive hidden updates");
+      }
   }
   for (const auto &[index, entry] : contract.at("labelCases").items()) {
     context = "labelCases[" + index + "]";

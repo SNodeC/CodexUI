@@ -2626,6 +2626,128 @@ void completedLiveAgentAppearsWithoutThreadReselection(
           "reselection");
 }
 
+void completedAnswerSurvivesAnOlderConversationSnapshot(Configuration& configuration) {
+    for (const std::string scenario : {"commentary", "final_answer", "rescan"}) {
+        const std::string initialPhase = scenario == "rescan" ? "commentary" : scenario;
+        FrontendSession session(configuration);
+        auto& graph = FrontendSessionTestPeer::graph(session);
+        auto& channels = FrontendSessionTestPeer::channels(session);
+        WorkerLogic worker(graph, channels);
+        ShellWidget shell(session);
+        shell.resize(1500, 850);
+        shell.show();
+        makeReady(worker);
+        applyThread(worker, "snapshot-answer", "Snapshot answer");
+        static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                        "turn/started",
+                                        {},
+                                        {{"threadId", "snapshot-answer"},
+                                         {"turn", Value::Object{{"id", "answer-turn"},
+                                                                {"status", "inProgress"},
+                                                                {"items",
+                                                                 Value::Array{Value::Object{
+                                                                     {"id", "prompt"}, {"type", "userMessage"}, {"text", "Prompt"}}}}}}}}));
+        const auto publishAnswer = [&](std::string method, std::string phase, std::string text) {
+            static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                            std::move(method),
+                                            {},
+                                            {{"threadId", "snapshot-answer"},
+                                             {"turnId", "answer-turn"},
+                                             {"item", Value::Object{{"id", "answer"},
+                                                                    {"type", "agentMessage"},
+                                                                    {"phase", std::move(phase)},
+                                                                    {"text", std::move(text)}}}}}));
+        };
+        publishAnswer("item/started", initialPhase, "");
+        markThreadReady(session, worker, "snapshot-answer");
+        auto* list = shell.findChild<QTreeWidget*>("threadList");
+        auto* view = dynamic_cast<middle::ConversationView*>(shell.findChild<QWidget*>("conversationScroll"));
+        const bool initialReady = view && spinUntil([&] { return threadItem(list, "snapshot-answer"); }) &&
+                                  selectThread(list, "snapshot-answer") && spinUntil([&] {
+                                      return view->presentedThreadId() == "snapshot-answer" && !view->structuralStagingActive() &&
+                                             view->conversationModel()->rowCount() == 2;
+                                  });
+        require(initialReady, "the conversation already contains the unfinished message");
+        if (initialReady) {
+            auto options = view->presentationOptions();
+            options.showCodexUpdates = false;
+            view->setPresentationOptions(options);
+            spin();
+            NodeRef thread;
+            if (auto read = graph.tryRead()) {
+                thread = read->find({NodeKind::Thread, "snapshot-answer"});
+            }
+            if (scenario == "rescan") {
+                {
+                    auto write = graph.write();
+                    const auto answer = write.find(scopedItemNodeId(scopedTurnNodeId("snapshot-answer", "answer-turn"), "answer"));
+                    write.setField(answer, "phase", "final_answer");
+                    write.setField(answer, "text", "Final text survives the snapshot");
+                    static_cast<void>(write.finish());
+                }
+                FrontendSessionTestPeer::deliverGraphChanged(session, {graph.publishedRevision(), {}, {}, true, {}, 0});
+                static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                                "item/completed",
+                                                {},
+                                                {{"threadId", "snapshot-answer"},
+                                                 {"turnId", "answer-turn"},
+                                                 {"item", Value::Object{{"id", "prompt"},
+                                                                        {"type", "userMessage"},
+                                                                        {"text", "A newer prompt update"}}}}}));
+                FrontendSessionTestPeer::drainWorkerMessages(session);
+            } else {
+                class CompleteWhileSnapshotIsQueued final : public QObject {
+                public:
+                    std::function<void()> complete;
+                    bool intercepted = false;
+
+                protected:
+                    bool eventFilter(QObject* watched, QEvent* event) override {
+                        if (watched == qApp && event->type() == QEvent::MetaCall && !intercepted) {
+                            intercepted = true;
+                            complete();
+                        }
+                        return false;
+                    }
+                } completion;
+                completion.complete = [&] {
+                    publishAnswer("item/completed", "final_answer", "Final text survives the snapshot");
+                    FrontendSessionTestPeer::drainWorkerMessages(session);
+                };
+                static_cast<void>(worker.threadHydration(thread, "loading"));
+                static_cast<void>(worker.threadHydration(thread, "ready"));
+                FrontendSessionTestPeer::drainWorkerMessages(session);
+                qApp->installEventFilter(&completion);
+                const bool snapshotQueued = spinUntil([&] { return completion.intercepted; });
+                qApp->removeEventFilter(&completion);
+                require(snapshotQueued, "item completion overtakes the queued snapshot callback");
+            }
+            const auto answerVisible = [&] {
+                NodeRef answer;
+                if (auto read = graph.tryRead()) {
+                    answer = read->find(scopedItemNodeId(scopedTurnNodeId("snapshot-answer", "answer-turn"), "answer"));
+                }
+                const auto index = view->conversationModel()->indexForTarget(answer);
+                const auto* card = index.isValid() ? view->conversationModel()->card(index.row()) : nullptr;
+                const auto* message = card ? std::get_if<middle::AgentMessageData>(&card->payload) : nullptr;
+                return message && message->phase == "final_answer" && message->text == "Final text survives the snapshot" &&
+                       view->isCardContentVisible(answer);
+            };
+            require(spinUntil(answerVisible), scenario + " displays the final text without another event");
+            static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                            "turn/completed",
+                                            {},
+                                            {{"threadId", "snapshot-answer"},
+                                             {"turn", Value::Object{{"id", "answer-turn"}, {"status", "completed"}}}}}));
+            require(spinUntil([&] {
+                        const auto row = ui::NodeGraphUiAdapter(graph).threadRow(thread);
+                        return row && row->resultAttention == ui::ResultAttention::FinalAnswer;
+                    }),
+                    "the " + initialPhase + " placeholder becomes the visible final answer while attention is pending");
+        }
+    }
+}
+
 void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -4905,7 +5027,8 @@ void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configur
         }
     };
     const auto finish =
-        [&](const std::string& turnId, const std::string& outcome = "completed", bool finalAnswer = true, bool command = false) {
+        [&](const std::string& turnId, const std::string& outcome = "completed", bool finalAnswer = true, bool command = false,
+            std::string delivery = {}) {
             static_cast<void>(
                 worker.apply({DecodedMessageKind::ServerNotification,
                               "turn/started",
@@ -4935,6 +5058,7 @@ void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configur
                                                       : Value::Object{{"id", "answer"},
                                                                       {"type", "agentMessage"},
                                                                       {"phase", finalAnswer ? "final_answer" : "commentary"},
+                                                                      {"delivery", std::move(delivery)},
                                                                       {"text", "Final result " + turnId}}}}}));
             static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
                                             "turn/completed",
@@ -5160,6 +5284,15 @@ void inspectionAcknowledgementsRequireVisibleResultInput(Configuration& configur
                 return !pending();
             }),
             "composer typing acknowledges visible failed final content");
+    answer = finish("async-delivery", "completed", true, false, "async");
+    view->followLatest();
+    require(spinUntil([&] {
+                return pending() && view->isCardContentVisible(answer);
+            }),
+            "async text remains visible on a completed turn");
+    QApplication::sendEvent(editor, &key);
+    acknowledge();
+    require(pending(), "reading an interim answer does not acknowledge the turn's final result");
     qApp->setStyleSheet(originalStyle);
 }
 
@@ -8145,6 +8278,7 @@ int main(int argc, char **argv) {
       conversationProjectionRetriesWithoutAnotherGraphNotification(*configuration);
       initialHydrationRetainsAllLoadedRowsWithBoundedResidency(*configuration);
       completedLiveAgentAppearsWithoutThreadReselection(*configuration);
+      completedAnswerSurvivesAnOlderConversationSnapshot(*configuration);
       threadSwitchStagesTheCompleteReplacement(*configuration);
       cachedThreadSwitchCompletesWithoutProviderTraffic(*configuration);
       cachedSelectionSurvivesAQueuedProjectionRetry(*configuration);
