@@ -176,6 +176,8 @@ struct McpFieldEditor {
         if (text) {
             result =
                 numeric ? nlohmann::json::parse(text->text().toStdString(), nullptr, false) : nlohmann::json(text->text().toStdString());
+        } else if (const auto* prose = qobject_cast<QPlainTextEdit*>(control)) {
+            result = prose->toPlainText().toStdString();
         } else if (boolean) {
             result = boolean->isChecked();
         } else if (choice) {
@@ -197,7 +199,7 @@ struct QuestionEditor {
   std::string id;
   std::vector<std::pair<std::string, QAbstractButton*>> choices;
   QRadioButton* otherChoice = nullptr;
-  QLineEdit *other = nullptr;
+  QWidget* other = nullptr;
 };
 
 } // namespace
@@ -228,6 +230,16 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
 
     QComboBox* decision = nullptr;
     QPlainTextEdit* structuredContent = nullptr;
+    const auto proseEditor = [&dialog] {
+        auto* editor = new UiStyle::DialogTextEdit;
+        editor->setProperty("kind", "dialogEditor");
+        editor->setMinimumHeight(80);
+        editor->setTabChangesFocus(true);
+        QObject::connect(editor, &QPlainTextEdit::cursorPositionChanged, &dialog, [&dialog, editor] {
+            dialog.revealFormFocus(editor);
+        });
+        return editor;
+    };
     std::vector<QuestionEditor> questions;
     std::vector<McpFieldEditor> mcpFields;
     const nlohmann::json& raw = request.raw;
@@ -294,18 +306,29 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                     }
                 }
                 if (options.empty() || question.value("isOther", false)) {
-                    editor.other = new QLineEdit;
-                    editor.other->setPlaceholderText(options.empty() ? QStringLiteral("Type your answer") : QStringLiteral("Other answer"));
-                    editor.other->setAccessibleName(questionText);
-                    if (question.value("isSecret", false))
-                        editor.other->setEchoMode(QLineEdit::Password);
+                    const auto placeholder = options.empty() ? QStringLiteral("Type your answer") : QStringLiteral("Other answer");
                     if (request.method == "agentMessage" && !options.empty()) {
                         editor.otherChoice = new QRadioButton(QStringLiteral("Other answer"), section);
                         sectionLayout->addWidget(editor.otherChoice);
-                        QObject::connect(editor.other, &QLineEdit::textEdited, editor.otherChoice, [choice = editor.otherChoice] {
-                            choice->setChecked(true);
-                        });
                     }
+                    const auto selectOther = [choice = editor.otherChoice] {
+                        if (choice) {
+                            choice->setChecked(true);
+                        }
+                    };
+                    if (question.value("isSecret", false)) {
+                        auto* secret = new QLineEdit;
+                        secret->setEchoMode(QLineEdit::Password);
+                        secret->setPlaceholderText(placeholder);
+                        QObject::connect(secret, &QLineEdit::textChanged, secret, selectOther);
+                        editor.other = secret;
+                    } else {
+                        auto* prose = proseEditor();
+                        prose->setPlaceholderText(placeholder);
+                        QObject::connect(prose, &QPlainTextEdit::textChanged, prose, selectOther);
+                        editor.other = prose;
+                    }
+                    editor.other->setAccessibleName(questionText);
                     sectionLayout->addWidget(editor.other);
                 }
                 if (initialInput.is_object()) {
@@ -322,8 +345,11 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                                 });
                                 if (known != editor.choices.end())
                                     known->second->setChecked(true);
-                                else if (editor.other)
-                                    editor.other->setText(text(saved));
+                                else if (auto* secret = qobject_cast<QLineEdit*>(editor.other)) {
+                                    secret->setText(text(saved));
+                                } else if (auto* prose = qobject_cast<QPlainTextEdit*>(editor.other)) {
+                                    prose->setPlainText(text(saved));
+                                }
                             }
                         }
                     }
@@ -422,6 +448,12 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                     field.boolean = new QCheckBox(QStringLiteral("Yes"));
                     field.boolean->setChecked(initial.is_boolean() && initial.get<bool>());
                     field.control = field.boolean;
+                } else if (type == "string" && stringValue(definition, "format").empty()) {
+                    auto* prose = proseEditor();
+                    if (initial.is_string()) {
+                        prose->setPlainText(text(initial.get<std::string>()));
+                    }
+                    field.control = prose;
                 } else {
                     field.text = new QLineEdit;
                     field.numeric = type == "number" || type == "integer";
@@ -445,17 +477,14 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
             }
         } else if (acceptsMcpInput && raw.contains("requestedSchema")) {
             auto* structuredLabel = wrapped(QStringLiteral("Structured response (JSON)"), "title");
-            structuredContent = new UiStyle::DialogTextEdit;
-            QObject::connect(structuredContent, &QPlainTextEdit::cursorPositionChanged, &dialog, [&dialog, structuredContent] {
-                dialog.revealFormFocus(structuredContent);
-            });
+            structuredContent = proseEditor();
+            structuredContent->setTabChangesFocus(false);
             structuredContent->setPlainText(QStringLiteral("{}"));
             structuredLabel->setBuddy(structuredContent);
             contentLayout->addWidget(structuredLabel);
             structuredContent->setMinimumHeight(150);
             structuredContent->setLineWrapMode(QPlainTextEdit::WidgetWidth);
             structuredContent->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            structuredContent->setProperty("kind", "dialogEditor");
             if (initialSubmission)
                 structuredContent->setPlainText(text(initialInput.dump(2)));
             contentLayout->addWidget(structuredContent);
@@ -512,9 +541,12 @@ PendingRequestDialog::present(const PendingRequestDescriptor& request,
                     if (choice->isChecked())
                         values.push_back(label);
                 }
-                if (question.other && (!question.otherChoice || question.otherChoice->isChecked()) &&
-                    !question.other->text().trimmed().isEmpty())
-                    values.push_back(question.other->text().toStdString());
+                const auto* prose = qobject_cast<QPlainTextEdit*>(question.other);
+                const auto* secret = qobject_cast<QLineEdit*>(question.other);
+                const auto answer = prose ? prose->toPlainText() : secret ? secret->text() : QString{};
+                if ((!question.otherChoice || question.otherChoice->isChecked()) && !answer.trimmed().isEmpty()) {
+                    values.push_back(answer.toStdString());
+                }
                 if (values.empty()) {
                     QWidget* invalid = question.other;
                     if (!invalid && !question.choices.empty())

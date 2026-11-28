@@ -17,8 +17,8 @@ export async function qualifyMcpApprovals(devTools, fixture) {
             }
             await waitFor(() => document.querySelector(".requests-indicator"), "parallel form attention missing");
             document.querySelector(".requests-indicator").click(); await frame();
-            await waitFor(() => document.querySelectorAll('.request-card input[name="label"]').length === 2, "parallel fields missing");
-            const fields = [...document.querySelectorAll('.request-card input[name="label"]')];
+            await waitFor(() => document.querySelectorAll('.request-card textarea[name="label"]').length === 2, "parallel fields missing");
+            const fields = [...document.querySelectorAll('.request-card textarea[name="label"]')];
             if (new Set(fields.map(field => field.id)).size !== 2 || fields.some(field =>
                 !field.closest(".request-card").querySelector('label[for="' + field.id + '"]'))) {
                 throw new Error("Concurrent MCP forms must keep independent control identities and labels");
@@ -57,7 +57,7 @@ export async function qualifyMcpApprovals(devTools, fixture) {
                     } else if (field.type === "checkbox") {
                         if (field.checked !== value) { field.click(); }
                     } else {
-                        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(field, String(value));
+                        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), "value").set.call(field, String(value));
                         field.dispatchEvent(new Event("input", {bubbles: true}));
                     }
                     await frame();

@@ -125,7 +125,15 @@ namespace codexui::manager {
         form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
         content->addLayout(form);
         line(form, "Name", profile_.name, readers_);
-        line(form, "Description", profile_.description, readers_);
+        auto* description = new UiStyle::DialogTextEdit(identity);
+        description->setPlainText(profile_.description);
+        description->setAccessibleName("Description");
+        description->setMaximumHeight(110);
+        description->setTabChangesFocus(true);
+        form->addRow("Description", description);
+        readers_.push_back([this, description](Profile&) {
+            profile_.description = description->toPlainText().trimmed();
+        });
         line(form, "CODEX_HOME", profile_.codexHome, readers_, "Absolute path on the app-server host", QFileDialog::Directory, &appPaths);
         auto* accent = new QComboBox(identity);
         for (const auto& key : {"blue", "green", "purple", "teal", "amber", "orange"}) {
