@@ -586,7 +586,9 @@ namespace codexui::codex {
         std::uint64_t nextCreationDraftSerial = 1;
         std::uint64_t observedProviderAuthorityRevision = 0;
         std::uint64_t routedThreadRevision = 0;
+        // A rescan starts from committed presentation, even when newer graph revisions have been routed.
         std::uint64_t routedConversationRevision = 0;
+        std::uint64_t appliedConversationRevision = 0;
         std::string selectedGraphThreadId;
         nodegraph::NodeRef boundGraphThread;
         std::map<const nodegraph::Node*, std::pair<nodegraph::NodeRef, QString>> retainedRenames;
@@ -602,10 +604,8 @@ namespace codexui::codex {
         bool pendingConversation = false;
         bool pendingConversationAuthorityReplacement = false;
         bool conversationProjectionInFlight = false;
-        bool conversationFullProjectionInFlight = false;
         bool conversationProjectionRequested = false;
         bool conversationFullProjectionRequested = false;
-        bool conversationProjectionStartScheduled = false;
         std::uint64_t conversationProjectionScheduleGeneration = 0;
         std::optional<middle::ConversationDelta> pendingStructuralConversationDelta;
         std::deque<nodegraph::NodeRef> pendingConversationItems;
@@ -803,7 +803,7 @@ namespace codexui::codex {
                             (read->state(completedTurn)->status == nodegraph::NodeStatus::Failed ||
                              (exactStringFromValue(valueMember(*state, "type")) == "agentMessage" &&
                               exactStringFromValue(valueMember(*state, "phase")) == "final_answer" &&
-                              (exactStringFromValue(valueMember(*state, "delivery")) != "async" || !valueMember(*state, "questions"))))) {
+                              exactStringFromValue(valueMember(*state, "delivery")) != "async"))) {
                             answer = item;
                         }
                     }
@@ -1022,20 +1022,15 @@ namespace codexui::codex {
                 if (!boundGraphThread || boundGraphThread->id().canonical != threadId)
                     return;
                 if (result == middle::ConversationView::ReconciliationResult::Rejected) {
-                    showNotice(QStringLiteral("Conversation data could not be presented; select Reload to "
-                                              "retry."));
-                    if (pendingConversation || !pendingConversationItems.empty())
-                        schedulePaneCommit(true);
-                    return;
+                    appliedConversationRevision = 0;
+                    routedConversationRevision = 0;
+                    showNotice(QStringLiteral("Conversation data could not be presented; select Reload to retry."));
+                } else if (selectionCommitted) {
+                    renderedChrome.reset();
+                    pendingInspector = true;
+                    pendingChrome = true;
                 }
-                if (pendingConversation || !pendingConversationItems.empty())
-                    schedulePaneCommit(true);
-                if (!selectionCommitted)
-                    return;
-                renderedChrome.reset();
-                pendingInspector = true;
-                pendingChrome = true;
-                schedulePaneCommit();
+                schedulePaneCommit(true);
             });
         middleRegion->inspector().setRequestActions(
             [this](const nodegraph::NodeRef& target) {
@@ -1145,6 +1140,7 @@ namespace codexui::codex {
         middleRegion->inspector().clearTimingTarget();
         routedThreadRevision = 0;
         routedConversationRevision = 0;
+        appliedConversationRevision = 0;
         graphPanesBound = true;
         pendingConversation = false;
         clearPendingConversationItems();
@@ -1176,7 +1172,6 @@ namespace codexui::codex {
     bool ShellWidget::Impl::refreshConversation() {
         if (!boundGraphThread) {
             static_cast<void>(middleRegion->conversation().reconcile({}));
-            routedConversationRevision = 0;
             return true;
         }
 
@@ -1210,7 +1205,7 @@ namespace codexui::codex {
     void ShellWidget::Impl::requestConversationRescan() {
         const bool needsSnapshot = !boundGraphThread ||
                                    middleRegion->conversation().presentedThreadId() != boundGraphThread->id().canonical ||
-                                   routedConversationRevision == 0;
+                                   appliedConversationRevision == 0;
         requestConversationProjection(needsSnapshot);
     }
 
@@ -1220,7 +1215,6 @@ namespace codexui::codex {
         ++conversationProjectionScheduleGeneration;
         if (conversationProjectionInFlight)
             return;
-        conversationProjectionStartScheduled = true;
         const auto token = alive;
         const std::uint64_t generation = conversationProjectionScheduleGeneration;
         QTimer::singleShot(fullSnapshot ? 0 : ConversationProjectionQuietMilliseconds, Qt::PreciseTimer, owner, [this, token, generation] {
@@ -1228,7 +1222,6 @@ namespace codexui::codex {
                 return;
             if (generation != conversationProjectionScheduleGeneration)
                 return;
-            conversationProjectionStartScheduled = false;
             startConversationSnapshot();
         });
     }
@@ -1254,8 +1247,7 @@ namespace codexui::codex {
         conversationProjectionRequested = false;
         const bool fullSnapshot = conversationFullProjectionRequested;
         conversationFullProjectionRequested = false;
-        conversationFullProjectionInFlight = fullSnapshot;
-        const std::uint64_t afterRevision = routedConversationRevision;
+        const std::uint64_t afterRevision = appliedConversationRevision;
         const nodegraph::NodeRef requestedThread = boundGraphThread;
         const ui::NodeGraphUiAdapter adapter = uiAdapter;
         const auto token = alive;
@@ -1277,7 +1269,6 @@ namespace codexui::codex {
                     if (!token->load(std::memory_order_acquire))
                         return;
                     conversationProjectionInFlight = false;
-                    conversationFullProjectionInFlight = false;
                     if (requestedThread != boundGraphThread) {
                         if (conversationProjectionRequested)
                             requestConversationSnapshot();
@@ -1293,36 +1284,29 @@ namespace codexui::codex {
                         });
                         return;
                     }
-                    if (conversationProjectionRequested) {
+                    if (conversationProjectionRequested || graphRevision < routedConversationRevision ||
+                        (!fullSnapshot && pendingStructuralConversationDelta)) {
                         requestConversationProjection(fullSnapshot);
-                        return;
-                    }
-
-                    // A complete snapshot initializes or replaces authority. A
-                    // rescan uses graph revision stamps to project only changed
-                    // rows, keeping the full graph scan off the QWidget thread.
-                    pendingConversation = false;
-                    pendingConversationAuthorityReplacement = false;
-                    pendingStructuralConversationDelta.reset();
-                    clearPendingConversationItems();
-                    if (fullSnapshot) {
+                    } else if (fullSnapshot) {
                         const auto disposition = middleRegion->conversation().reconcileStaged(std::move(*snapshot));
-                        if (disposition != middle::ConversationView::SnapshotDisposition::Retryable) {
+                        if (disposition == middle::ConversationView::SnapshotDisposition::Admitted) {
                             routedConversationRevision = graphRevision;
-                        } else {
-                            conversationProjectionRequested = true;
-                            conversationFullProjectionRequested = true;
+                            pendingConversation = false;
+                            pendingConversationAuthorityReplacement = false;
+                            pendingStructuralConversationDelta.reset();
+                            clearPendingConversationItems();
+                        } else if (disposition == middle::ConversationView::SnapshotDisposition::Retryable) {
+                            requestConversationSnapshot();
                         }
                     } else {
+                        routedConversationRevision = graphRevision;
                         middleRegion->conversation().setProviderHasMore(requestedThread->id().canonical, delta->providerHasMore);
                         if (!delta->rows.empty() || !delta->removals.empty()) {
                             pendingStructuralConversationDelta = std::move(*delta);
                             pendingConversation = true;
-                            schedulePaneCommit();
                         }
+                        schedulePaneCommit();
                     }
-                    if (conversationProjectionRequested)
-                        requestConversationProjection(false);
                 },
                 Qt::QueuedConnection);
         });
@@ -1422,22 +1406,11 @@ namespace codexui::codex {
             requestConversationSnapshot();
             return;
         }
-        const bool snapshotNeedsFull =
-            boundGraphThread && (middleRegion->conversation().presentedThreadId() != boundGraphThread->id().canonical ||
-                                 middleRegion->conversation().structuralStagingActive() || conversationFullProjectionInFlight ||
-                                 conversationFullProjectionRequested);
-        const bool snapshotOwnsStructure = boundGraphThread && (snapshotNeedsFull || conversationProjectionRequested ||
-                                                                conversationProjectionInFlight || conversationProjectionStartScheduled);
-        if (snapshotOwnsStructure && route.affected && route.structural) {
-            pendingStructuralConversationDelta.reset();
-            clearPendingConversationItems();
-            requestConversationProjection(snapshotNeedsFull);
-            return;
+        if (route.affected) {
+            routedConversationRevision = std::max(routedConversationRevision, route.graphRevision);
         }
-        routedConversationRevision = std::max(routedConversationRevision, route.graphRevision);
         if (route.structural && !route.items.empty()) {
             pendingConversation = true;
-            pendingConversationAuthorityReplacement = false;
         }
         if (route.affected && !pendingConversationAuthorityReplacement) {
             for (const nodegraph::NodeRef& item : route.items) {
@@ -1521,7 +1494,6 @@ namespace codexui::codex {
         owner->setProperty("paneCommitInvocations", owner->property("paneCommitInvocations").toULongLong() + 1);
         owner->setProperty("conversationPresentationRowsInLastPass", qulonglong{0});
         bool retry = false;
-        bool waitingForConversationStage = false;
         middleRegion->inspector().flushProtocolPresentation();
         if (hasFrameBudget() && !pendingThreadPane && !pendingThreadRows.empty()) {
             while (!pendingThreadRows.empty() && hasFrameBudget()) {
@@ -1636,8 +1608,11 @@ namespace codexui::codex {
                 retry = true;
             }
         }
-        waitingForConversationStage = middleRegion->conversation().structuralStagingActive() &&
-                                      (pendingConversation || pendingStructuralConversationDelta || !pendingConversationItems.empty());
+        const bool conversationWorkPending = pendingConversation || pendingStructuralConversationDelta || !pendingConversationItems.empty();
+        const bool staging = middleRegion->conversation().structuralStagingActive();
+        if (!conversationWorkPending && !staging && !conversationProjectionRequested && !conversationProjectionInFlight) {
+            appliedConversationRevision = routedConversationRevision;
+        }
         if (hasFrameBudget() && pendingInspector) {
             pendingInspector = false;
             if (refreshInspector()) {
@@ -1658,11 +1633,10 @@ namespace codexui::codex {
             }
         }
         acknowledgeDetachedTargets();
-        if (retry || pendingThreadPane || !pendingThreadRows.empty() ||
-            (!waitingForConversationStage &&
-             (pendingConversation || pendingStructuralConversationDelta || !pendingConversationItems.empty())) ||
-            pendingInspector || pendingChrome)
+        if (retry || pendingThreadPane || !pendingThreadRows.empty() || (conversationWorkPending && !staging) || pendingInspector ||
+            pendingChrome) {
             schedulePaneCommit();
+        }
     }
 
     bool ShellWidget::Impl::handleGraphChanged(const nodegraph::GraphChanged& change) {

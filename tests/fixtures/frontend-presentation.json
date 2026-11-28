@@ -242,6 +242,13 @@
       "visibleWithoutUpdates": true
     },
     {
+      "phase": "final_answer",
+      "delivery": "async",
+      "expectedPhase": "partial_answer",
+      "label": "partial answer",
+      "visibleWithoutUpdates": true
+    },
+    {
       "phase": "future_phase",
       "label": "update",
       "visibleWithoutUpdates": false
